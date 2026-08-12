@@ -296,6 +296,7 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
     for (const auto& pod : podTokens) {
         auto type = static_cast<CSSParserTokenType>(pod.type);
 
+
         // Comments are not kept, matching the C++ path, but the inspector wants
         // their extent and where they sat in the token stream.
         if (type == CommentToken) {
@@ -320,25 +321,27 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
         };
         auto blockType = static_cast<CSSParserToken::BlockType>(pod.blockType);
 
-        std::optional<CSSParserToken> token;
+        // Constructed straight into m_tokens rather than staged in a local and
+        // copied: this loop runs once per token, and a CSSParserToken is 32 bytes.
+        bool appended;
         switch (type) {
         case IdentToken:
         case AtKeywordToken:
         case UrlToken:
         case StringToken:
-            token = CSSParserToken(type, value());
+            appended = m_tokens.tryConstructAndAppend(type, value());
             break;
         case FunctionToken:
-            token = CSSParserToken(type, value(), blockType);
+            appended = m_tokens.tryConstructAndAppend(type, value(), blockType);
             break;
         case HashToken:
-            token = CSSParserToken(pod.flags & SwiftFlagHashTokenId ? HashTokenId : HashTokenUnrestricted, value());
+            appended = m_tokens.tryConstructAndAppend(pod.flags & SwiftFlagHashTokenId ? HashTokenId : HashTokenUnrestricted, value());
             break;
         case DelimiterToken:
-            token = CSSParserToken(DelimiterToken, static_cast<char16_t>(pod.extra));
+            appended = m_tokens.tryConstructAndAppend(DelimiterToken, static_cast<char16_t>(pod.extra));
             break;
         case NonNewlineWhitespaceToken:
-            token = CSSParserToken(pod.extra);
+            appended = m_tokens.tryConstructAndAppend(pod.extra);
             break;
         case NumberToken:
         case PercentageToken:
@@ -353,23 +356,25 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
             auto numericValueType = pod.flags & SwiftFlagNonInteger ? NumberValueType : IntegerValueType;
             auto sign = pod.flags & SwiftFlagPlusSign ? PlusSign
                 : pod.flags & SwiftFlagMinusSign ? MinusSign : NoSign;
-            auto number = CSSParserToken(numericValue, numericValueType, sign, numberText);
-            if (type == PercentageToken)
-                number.convertToPercentage();
-            else if (type == DimensionToken)
-                number.convertToDimensionWithUnit(value());
-            token = number;
+            appended = m_tokens.tryConstructAndAppend(numericValue, numericValueType, sign, numberText);
+            // The conversions mutate, so they happen in place after appending.
+            if (appended) [[likely]] {
+                if (type == PercentageToken)
+                    m_tokens.last().convertToPercentage();
+                else if (type == DimensionToken)
+                    m_tokens.last().convertToDimensionWithUnit(value());
+            }
             break;
         }
         default:
             // Everything else carries no value: the punctuation, the match
             // tokens, CDO/CDC, newline, the bad-token types, and the block
             // delimiters, whose block type the island already decided.
-            token = CSSParserToken(type, blockType);
+            appended = m_tokens.tryConstructAndAppend(type, blockType);
             break;
         }
 
-        if (!m_tokens.tryAppend(*token)) [[unlikely]]
+        if (!appended) [[unlikely]]
             return false;
         if (wrapper) {
             wrapper->addToken(pod.start);
