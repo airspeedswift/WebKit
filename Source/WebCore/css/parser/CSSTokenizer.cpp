@@ -34,7 +34,11 @@
 #include "CSSParserObserverWrapper.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
+#include "WebCoreSwift-Generated.h"
+#include <cstdlib>
+#include <limits>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/dtoa.h>
 #include <wtf/text/StringBuilder.h>
 #include <wtf/unicode/CharacterNames.h>
 
@@ -93,6 +97,16 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapp
     if (string.isEmpty())
         return;
 
+    // The Swift tokenizer path, when enabled and when it accepts this input.
+    // Falls through to the C++ state machine otherwise, including on allocation
+    // failure, so this cannot make a previously-working parse fail.
+    if (shouldUseSwiftTokenizer() && !wrapper) {
+        if (tokenizeWithSwiftIsland(constructionSuccessPtr))
+            return;
+        m_tokens.shrink(0);
+        m_input.seek(0);
+    }
+
     // To avoid resizing we err on the side of reserving too much space.
     // Most strings we tokenize have about 3.5 to 5 characters per token.
     if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]] {
@@ -134,6 +148,163 @@ CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
     return m_tokens;
 }
 
+// MARK: - Swift tokenizer path
+//
+// See CSSTokenizerSwift.swift and ~/Documents/webkit-swift-adoption-notes.md §11.
+// The island decides token types, extents and block structure; everything below
+// is the materialisation the island deliberately leaves in C++ — StringViews over
+// the input, double conversion, and the escaped-value string pool.
+
+static std::optional<bool> s_useSwiftTokenizerForTesting;
+
+void CSSTokenizer::setUseSwiftTokenizerForTesting(std::optional<bool> value)
+{
+    s_useSwiftTokenizerForTesting = value;
+}
+
+bool CSSTokenizer::shouldUseSwiftTokenizer()
+{
+    if (s_useSwiftTokenizerForTesting) [[unlikely]]
+        return *s_useSwiftTokenizerForTesting;
+
+    // Experiment gate, not a shipping mechanism: the Swift path is off unless
+    // asked for, so landing this changes nothing by default.
+    static const bool enabled = [] {
+        const char* value = std::getenv("WEBKIT_CSS_TOKENIZER_SWIFT");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+// Must match CSSTokenFlag in CSSTokenizerSwift.swift.
+enum SwiftTokenFlag : uint8_t {
+    SwiftFlagNonInteger = 1 << 0,
+    SwiftFlagPlusSign = 1 << 1,
+    SwiftFlagMinusSign = 1 << 2,
+    SwiftFlagHashTokenId = 1 << 3,
+    SwiftFlagNeedsUnescape = 1 << 4,
+};
+
+bool CSSTokenizer::tokenizeWithSwiftIsland(bool* constructionSuccessPtr)
+{
+    // The island's element type is Latin1Character, and the observer wrapper
+    // (inspector only) wants per-token source offsets that this path does not
+    // report yet, so decline both.
+    auto string = m_input.currentString();
+    if (!string.is8Bit())
+        return false;
+    auto span = string.span8();
+
+    // Same estimate the C++ path uses: about 3.5 to 5 characters per token, so
+    // length / 3 over-reserves. When it is not enough the island reports that it
+    // stopped early and we start over with a bigger buffer.
+    //
+    // Same reservation the C++ path uses.
+    if (!m_tokens.tryReserveInitialCapacity(span.size() / 3)) [[unlikely]]
+        return false;
+
+    // Tokens come back a chunk at a time, into a buffer small enough to stay in
+    // cache. One entry per token for the whole document would be tens of
+    // megabytes, and writing that and reading it back costs more than the scan.
+    constexpr size_t chunkCapacity = 1024;
+    std::array<CSSSwiftToken, chunkCapacity> chunk;
+    CSSSwiftTokenizerState state { 0, 0, { }, false, false };
+
+    while (!state.reachedEnd) {
+        size_t count = static_cast<size_t>(cssTokenizeSwiftFillChunk(span, &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity)));
+        if (state.blockStackOverflowed) [[unlikely]]
+            return false;
+        auto podTokens = std::span<const CSSSwiftToken> { chunk }.first(count);
+        if (!appendTokensFromSwiftIsland(podTokens)) [[unlikely]]
+            return false;
+    }
+
+    if (constructionSuccessPtr)
+        *constructionSuccessPtr = true;
+    return true;
+}
+
+// Converts one chunk of the island's tokens into CSSParserTokens.
+bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> podTokens)
+{
+    for (const auto& pod : podTokens) {
+        auto type = static_cast<CSSParserTokenType>(pod.type);
+
+        // Comments are not kept, matching the C++ path.
+        if (type == CommentToken)
+            continue;
+
+        // A value containing escapes has to become a real String in m_stringPool.
+        // Rather than reimplement the unescaping rules, reposition the input
+        // stream and let the C++ tokenizer produce this one token: it is the same
+        // code that would have produced it anyway, and escapes are rare.
+        if (pod.flags & SwiftFlagNeedsUnescape) {
+            m_input.seek(pod.start);
+            auto token = nextToken();
+            ASSERT(m_input.offset() == pod.end);
+            ASSERT(token.type() == type);
+            if (!m_tokens.tryAppend(token)) [[unlikely]]
+                return false;
+            continue;
+        }
+
+        auto value = [&](void) -> StringView {
+            return m_input.rangeAt(pod.valueStart, pod.valueLength);
+        };
+        auto blockType = static_cast<CSSParserToken::BlockType>(pod.blockType);
+
+        std::optional<CSSParserToken> token;
+        switch (type) {
+        case IdentToken:
+        case AtKeywordToken:
+        case UrlToken:
+        case StringToken:
+            token = CSSParserToken(type, value());
+            break;
+        case FunctionToken:
+            token = CSSParserToken(type, value(), blockType);
+            break;
+        case HashToken:
+            token = CSSParserToken(pod.flags & SwiftFlagHashTokenId ? HashTokenId : HashTokenUnrestricted, value());
+            break;
+        case DelimiterToken:
+            token = CSSParserToken(DelimiterToken, static_cast<char16_t>(pod.extra));
+            break;
+        case NonNewlineWhitespaceToken:
+            token = CSSParserToken(pod.extra);
+            break;
+        case NumberToken:
+        case PercentageToken:
+        case DimensionToken: {
+            auto numberText = m_input.rangeAt(pod.numberStart, pod.numberLength);
+            bool isResultOK = false;
+            double numericValue = charactersToDouble(numberText.span8(), &isResultOK);
+            if (!isResultOK)
+                numericValue = 0;
+            auto numericValueType = pod.flags & SwiftFlagNonInteger ? NumberValueType : IntegerValueType;
+            auto sign = pod.flags & SwiftFlagPlusSign ? PlusSign
+                : pod.flags & SwiftFlagMinusSign ? MinusSign : NoSign;
+            auto number = CSSParserToken(numericValue, numericValueType, sign, numberText);
+            if (type == PercentageToken)
+                number.convertToPercentage();
+            else if (type == DimensionToken)
+                number.convertToDimensionWithUnit(value());
+            token = number;
+            break;
+        }
+        default:
+            // Everything else carries no value: the punctuation, the match
+            // tokens, CDO/CDC, newline, the bad-token types, and the block
+            // delimiters, whose block type the island already decided.
+            token = CSSParserToken(type, blockType);
+            break;
+        }
+
+        if (!m_tokens.tryAppend(*token)) [[unlikely]]
+            return false;
+    }
+    return true;
+}
 unsigned CSSTokenizer::tokenCount()
 {
     return m_tokens.size();
