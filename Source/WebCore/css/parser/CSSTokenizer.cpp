@@ -88,7 +88,17 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper& wrapp
 {
 }
 
-CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
+CSSTokenizer::CSSTokenizer(const String& string, Scanner scanner)
+    : CSSTokenizer(string, nullptr, nullptr, scanner)
+{
+}
+
+CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper& wrapper, Scanner scanner)
+    : CSSTokenizer(string, &wrapper, nullptr, scanner)
+{
+}
+
+CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr, Scanner scanner)
     : m_input(preprocessString(string))
 {
     if (constructionSuccessPtr)
@@ -97,10 +107,10 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapp
     if (string.isEmpty())
         return;
 
-    // The Swift tokenizer path, when enabled and when it accepts this input.
-    // Falls through to the C++ state machine otherwise, including on allocation
-    // failure, so this cannot make a previously-working parse fail.
-    if (shouldUseSwiftTokenizer()) {
+    // The Swift scanner, when selected and when it accepts this input. Falls through
+    // to the C++ state machine otherwise, including on allocation failure, so this
+    // cannot make a previously-working parse fail.
+    if (scanner == Scanner::Swift) {
         if (tokenizeWithSwiftIsland(wrapper, constructionSuccessPtr))
             return;
         m_tokens.shrink(0);
@@ -154,27 +164,6 @@ CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
 // The island decides token types, extents and block structure; everything below
 // is the materialisation the island deliberately leaves in C++ — StringViews over
 // the input, double conversion, and the escaped-value string pool.
-
-static std::optional<bool> s_useSwiftTokenizerForTesting;
-
-void CSSTokenizer::setUseSwiftTokenizerForTesting(std::optional<bool> value)
-{
-    s_useSwiftTokenizerForTesting = value;
-}
-
-bool CSSTokenizer::shouldUseSwiftTokenizer()
-{
-    if (s_useSwiftTokenizerForTesting) [[unlikely]]
-        return *s_useSwiftTokenizerForTesting;
-
-    // Experiment gate, not a shipping mechanism: the Swift path is off unless
-    // asked for, so landing this changes nothing by default.
-    static const bool enabled = [] {
-        const char* value = std::getenv("WEBKIT_CSS_TOKENIZER_SWIFT");
-        return value && value[0] == '1';
-    }();
-    return enabled;
-}
 
 // Must match CSSTokenFlag in CSSTokenizerSwift.swift.
 enum SwiftTokenFlag : uint8_t {
