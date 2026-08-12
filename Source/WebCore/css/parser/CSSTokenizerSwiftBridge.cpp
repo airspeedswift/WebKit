@@ -65,9 +65,9 @@ enum SwiftTokenFlag : uint8_t {
 
 // The island reports comments; CSSTokenizer drops them from m_tokens. The
 // validation walk therefore skips them on the Swift side.
-bool isComment(const CSSTokenSwift& token)
+bool isComment(const CSSSwiftToken& token)
 {
-    return token.getType() == static_cast<uint8_t>(CommentToken);
+    return token.type == static_cast<uint8_t>(CommentToken);
 }
 
 } // namespace
@@ -92,6 +92,8 @@ struct CSSTokenizerSwiftValidationResult {
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerSwiftValidate(const char*, size_t);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchSwift(const uint8_t*, size_t, size_t*, uint64_t*);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchReal(const char*, size_t, size_t*, uint64_t*);
+WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths(const char*, size_t);
+WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 
 // Walks the real CSSTokenizer and the Swift island over the same stylesheet.
 //
@@ -129,16 +131,16 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerSwiftValidat
         const CSSParserToken& real = cursor.peek();
 
         // Advance the island past any comments, which the real stream omits.
-        WebCore::CSSTokenSwift mine = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
+        WebCore::CSSSwiftToken mine = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
         while (WebCore::isComment(mine)) {
             ++swiftIndex;
             mine = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
         }
 
-        if (static_cast<uint8_t>(real.type()) != mine.getType()) {
+        if (static_cast<uint8_t>(real.type()) != mine.type) {
             result.divergenceIndex = static_cast<int64_t>(compared);
             result.expectedType = static_cast<uint32_t>(real.type());
-            result.actualType = mine.getType();
+            result.actualType = mine.type;
             result.reason = 0;
             result.swiftTokenCount = swiftIndex;
             return result;
@@ -173,30 +175,30 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerSwiftValidat
         case HashToken:
         case UrlToken:
         case StringToken:
-            expectedRange = { { mine.getValueStart(), mine.getValueLength() } };
+            expectedRange = { { mine.valueStart, mine.valueLength } };
             break;
         case NumberToken:
         case PercentageToken:
-            expectedRange = { { mine.getNumberStart(), mine.getNumberLength() } };
+            expectedRange = { { mine.numberStart, mine.numberLength } };
             break;
         case DimensionToken: {
-            uint32_t numberLength = mine.getNumberLength();
+            uint32_t numberLength = mine.numberLength;
             if (numberLength && numberLength < 16) {
-                uint32_t end = mine.getValueStart() + mine.getValueLength();
-                expectedRange = { { mine.getNumberStart(), end - mine.getNumberStart() } };
+                uint32_t end = mine.valueStart + mine.valueLength;
+                expectedRange = { { mine.numberStart, end - mine.numberStart } };
             } else
-                expectedRange = { { mine.getValueStart(), mine.getValueLength() } };
+                expectedRange = { { mine.valueStart, mine.valueLength } };
             break;
         }
         default:
             break;
         }
-        if (expectedRange && !(mine.getFlags() & FlagNeedsUnescape)) {
+        if (expectedRange && !(mine.flags & FlagNeedsUnescape)) {
             auto mineValue = StringView { span.subspan(expectedRange->first, expectedRange->second) };
             if (real.value() != mineValue) {
                 result.divergenceIndex = static_cast<int64_t>(compared);
                 result.expectedType = static_cast<uint32_t>(real.type());
-                result.actualType = mine.getType();
+                result.actualType = mine.type;
                 result.reason = 1;
                 result.swiftTokenCount = swiftIndex;
                 return result;
@@ -207,13 +209,13 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerSwiftValidat
     }
 
     // Whatever the island has left must be comments and then EOF.
-    WebCore::CSSTokenSwift tail = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
+    WebCore::CSSSwiftToken tail = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
     while (WebCore::isComment(tail)) {
         ++swiftIndex;
         tail = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
     }
     result.swiftTokenCount = swiftIndex;
-    if (tail.getType() != static_cast<uint8_t>(EOFToken)) {
+    if (tail.type != static_cast<uint8_t>(EOFToken)) {
         result.divergenceIndex = static_cast<int64_t>(compared);
         result.reason = 2;
     }
@@ -239,6 +241,77 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchReal(const char* text, size_t length
     size_t count = 0;
     uint64_t fold = 0;
     for (; !range.atEnd(); range.consume()) {
+        ++count;
+        fold = fold * 1000003 + static_cast<uint64_t>(range.peek().type());
+    }
+    *outTokens = count;
+    *outFold = fold;
+}
+
+// The integration gate: builds the whole CSSParserToken stream both ways, in one
+// process, and compares the tokens themselves rather than the island's POD output.
+// This is what has to hold before the Swift path could ever be turned on by
+// default, because it is comparing what the rest of the CSS parser will actually
+// see: values, numeric values, units, hash types and block types.
+//
+// The whitespace run length is not compared, because CSSParserToken keeps it in a
+// private union member with no accessor. The POD-level comparison in the
+// standalone probe covers it.
+WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths(const char* text, size_t length)
+{
+    CSSTokenizerSwiftValidationResult result { -1, 0, 0, 0, 0, 0 };
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    // Both tokenizers stay alive for the comparison: each token's value is a view
+    // into its own tokenizer's input or string pool.
+    CSSTokenizer::setUseSwiftTokenizerForTesting(false);
+    WebCore::CSSTokenizer cppTokenizer(source);
+    CSSTokenizer::setUseSwiftTokenizerForTesting(true);
+    WebCore::CSSTokenizer swiftTokenizer(source);
+    CSSTokenizer::setUseSwiftTokenizerForTesting(std::nullopt);
+
+    auto cppRange = cppTokenizer.tokenRange();
+    auto swiftRange = swiftTokenizer.tokenRange();
+    result.realTokenCount = cppRange.size();
+    result.swiftTokenCount = swiftRange.size();
+
+    size_t index = 0;
+    for (; !cppRange.atEnd() && !swiftRange.atEnd(); cppRange.consume(), swiftRange.consume(), ++index) {
+        const CSSParserToken& expected = cppRange.peek();
+        const CSSParserToken& actual = swiftRange.peek();
+        if (!(expected == actual)) {
+            result.divergenceIndex = static_cast<int64_t>(index);
+            result.expectedType = static_cast<uint32_t>(expected.type());
+            result.actualType = static_cast<uint32_t>(actual.type());
+            result.reason = 0;
+            return result;
+        }
+        if (expected.getBlockType() != actual.getBlockType()) {
+            result.divergenceIndex = static_cast<int64_t>(index);
+            result.expectedType = static_cast<uint32_t>(expected.getBlockType());
+            result.actualType = static_cast<uint32_t>(actual.getBlockType());
+            result.reason = 1;
+            return result;
+        }
+    }
+    if (cppRange.size() != swiftRange.size()) {
+        result.divergenceIndex = static_cast<int64_t>(index);
+        result.reason = 2;
+    }
+    return result;
+}
+
+// Times a whole CSSTokenizer construction on one path or the other. Same work on
+// both sides at last: same tokens, same string pool, same double conversions.
+WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char* text, size_t length, bool useSwift, size_t* outTokens, uint64_t* outFold)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    CSSTokenizer::setUseSwiftTokenizerForTesting(useSwift);
+    WebCore::CSSTokenizer tokenizer(source);
+    CSSTokenizer::setUseSwiftTokenizerForTesting(std::nullopt);
+    size_t count = 0;
+    uint64_t fold = 0;
+    for (auto range = tokenizer.tokenRange(); !range.atEnd(); range.consume()) {
         ++count;
         fold = fold * 1000003 + static_cast<uint64_t>(range.peek().type());
     }

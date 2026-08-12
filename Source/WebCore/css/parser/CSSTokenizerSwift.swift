@@ -103,7 +103,6 @@ public enum CSSBlockTypeSwift: UInt8 {
 
 /// A tokenizer result. POD by construction: no references, no allocation, no
 /// lifetime dependence on the input, so it crosses to C++ as a plain struct.
-@_expose(Cxx)
 public struct CSSTokenSwift {
     /// Input offset of the token's first character.
     public var start: UInt32 = 0
@@ -273,17 +272,43 @@ public struct CSSTokenizerSwift: ~Copyable {
     private var offset = 0
     /// Mirrors m_blockStack: the enclosing block token types.
     ///
-    /// C++ uses `Vector<CSSParserTokenType, 8>`, i.e. eight slots inline in the
-    /// tokenizer with heap spill beyond that. Swift has no growable container
-    /// with inline capacity — `InlineArray` is fixed-size and `UniqueArray` is
-    /// always heap — so this pays one malloc per tokenizer where C++ usually
-    /// pays none. Once per stylesheet, not per token; recorded as a stdlib gap
-    /// rather than worked around.
-    private var blockStack = UniqueArray<UInt8>()
+    /// Fixed inline storage, not `UniqueArray`. Two reasons: it removes the one
+    /// malloc per tokenizer (C++ uses `Vector<CSSParserTokenType, 8>`, whose
+    /// inline capacity Swift cannot express, so a growable Swift container would
+    /// always allocate), and it makes the stack cheap to hand back and forth
+    /// across the C++ boundary between chunks.
+    ///
+    /// Overflowing it is not a correctness problem: `blockStackOverflowed` is
+    /// reported to the caller, which falls back to the C++ tokenizer.
+    static let blockStackCapacity = 64
+    private var blockStack = InlineArray<64, UInt8>(repeating: 0)
+    private var blockDepth = 0
+    private var blockStackOverflowed = false
 
     public init() {}
 
     public var consumedOffset: Int { offset }
+
+    /// Restores the cursor and block stack saved by `saveState`, so C++ can drive
+    /// tokenization in cache-sized chunks without holding a Swift value across
+    /// calls (it cannot: this type is `~Copyable`).
+    mutating func restore(from state: WebCore.CSSSwiftTokenizerState) {
+        offset = Int(state.offset)
+        let depth = Int(state.blockDepth)
+        blockDepth = depth < Self.blockStackCapacity ? depth : Self.blockStackCapacity
+        for i in 0 ..< blockDepth {
+            blockStack[i] = state.blockStack[i]
+        }
+    }
+
+    func save(into state: inout WebCore.CSSSwiftTokenizerState) {
+        state.offset = UInt32(truncatingIfNeeded: offset)
+        state.blockDepth = UInt32(truncatingIfNeeded: blockDepth)
+        for i in 0 ..< blockDepth {
+            state.blockStack[i] = blockStack[i]
+        }
+        state.blockStackOverflowed = blockStackOverflowed
+    }
 
     // MARK: Input stream — CSSTokenizerInputStream
     //
@@ -382,24 +407,30 @@ public struct CSSTokenizerSwift: ~Copyable {
         return t
     }
 
+    @inline(__always) private mutating func pushBlock(_ type: CSSTokenTypeSwift) {
+        if blockDepth < Self.blockStackCapacity {
+            blockStack[blockDepth] = type.rawValue
+            blockDepth &+= 1
+        } else {
+            blockStackOverflowed = true
+        }
+    }
+
     private mutating func blockStart(
         _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<UInt8>
     ) -> CSSTokenSwift {
-        blockStack.append(type.rawValue)
+        pushBlock(type)
         return token(type, start, data, block: .blockStart)
     }
 
     private mutating func blockEnd(
         _ type: CSSTokenTypeSwift, _ startType: CSSTokenTypeSwift, _ start: Int, _ data: Span<UInt8>
     ) -> CSSTokenSwift {
-        // `blockStack.count &- 1` is in range whenever the stack is non-empty, but
-        // as with `byteAt` that fact is not provable to the optimizer through
-        // `isEmpty`, so `UniqueArray`'s subscript precondition survives. The same
-        // unsigned compare discharges it.
-        let top = blockStack.count &- 1
-        if UInt(bitPattern: top) < UInt(bitPattern: blockStack.count),
+        // The unsigned compare both bounds-checks and tests for an empty stack.
+        let top = blockDepth &- 1
+        if UInt(bitPattern: top) < UInt(bitPattern: Self.blockStackCapacity),
            blockStack[top] == startType.rawValue {
-            _ = blockStack.removeLast()
+            blockDepth = top
             return token(type, start, data, block: .blockEnd)
         }
         return token(type, start, data)
@@ -653,7 +684,7 @@ public struct CSSTokenizerSwift: ~Copyable {
                     return consumeURLToken(data, start)
                 }
             }
-            blockStack.append(CSSTokenTypeSwift.leftParenthesis.rawValue)
+            pushBlock(.leftParenthesis)
             return valueToken(.function, name, start, data, block: .blockStart)
         }
         return valueToken(.ident, name, start, data)
@@ -997,6 +1028,11 @@ public struct CSSTokenizerSwift: ~Copyable {
 // additive, reached only from the benchmark and the validation test.
 
 /// Result of tokenizing a whole stylesheet.
+/// `@frozen` matters here, not just as documentation. WebCore compiles Swift with
+/// -enable-library-evolution, and without `@frozen` an exposed struct is resilient:
+/// the generated C++ class wraps a heap-allocated opaque box, so every value
+/// returned to C++ costs a malloc/free pair and its C++ sizeof() is meaningless.
+@frozen
 @_expose(Cxx)
 public struct CSSTokenizeResultSwift {
     public var tokenCount: Int = 0
@@ -1038,6 +1074,82 @@ public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokeni
     return result
 }
 
+/// Copies one of the island's tokens into the C++ boundary struct.
+///
+/// The boundary type is defined in C++ (CSSTokenizerInputStream.h) rather than
+/// here, because WebCore compiles Swift with -enable-library-evolution: a Swift
+/// struct exposed with @_expose(Cxx) is resilient, so the generated C++ class is
+/// a heap-allocated opaque box with no default constructor and a sizeof() that is
+/// not the struct's size. Usable for a single returned value, unusable as the
+/// element type of a shared buffer.
+@inline(__always) private func exported(_ token: CSSTokenSwift) -> WebCore.CSSSwiftToken {
+    var out = WebCore.CSSSwiftToken()
+    out.start = token.start
+    out.end = token.end
+    out.valueStart = token.valueStart
+    out.valueLength = token.valueLength
+    out.numberStart = token.numberStart
+    out.numberLength = token.numberLength
+    out.extra = token.extra
+    out.type = token.type
+    out.blockType = token.blockType
+    out.flags = token.flags
+    return out
+}
+
+/// Tokenizes up to `capacity` tokens starting from the cursor in `state`, writing
+/// them to the caller's buffer and updating `state`. Returns the number written.
+///
+/// Chunked rather than whole-stylesheet on purpose. A single call needs a buffer
+/// with one entry per token in the document — tens of megabytes for a large
+/// stylesheet — and writing it and reading it back costs more than the scan
+/// itself. A few hundred entries stay in cache. The price is that the cursor and
+/// block stack have to cross the boundary each call, which is what
+/// CSSSwiftTokenizerState is for.
+///
+/// When `state.reachedEnd` comes back true the input is exhausted. When
+/// `state.blockStackOverflowed` comes back true the caller must fall back to the
+/// C++ tokenizer: nesting exceeded the fixed block stack.
+///
+/// TODO(unsafe): the `unsafe` uses here are the output half of the boundary,
+/// mirroring `Span(_unsafeCxxSpan:)` on the input half. There is no safe way to
+/// receive a writable buffer or an out-parameter from C++ — WTF has
+/// `BorrowedBytes` for reading and no mutable equivalent. Per the project rule
+/// this is a to-file item, not an accepted cost.
+@_expose(Cxx)
+public func cssTokenizeSwiftFillChunk(
+    _ data: WebCore.CSSTokenizerSpan8,
+    _ statePointer: UnsafeMutablePointer<WebCore.CSSSwiftTokenizerState>,
+    _ outBase: UnsafeMutableRawPointer,
+    _ capacity: Int
+) -> Int {
+    let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
+    let out = unsafe UnsafeMutableBufferPointer<WebCore.CSSSwiftToken>(
+        start: outBase.bindMemory(to: WebCore.CSSSwiftToken.self, capacity: capacity),
+        count: capacity)
+
+    var state = unsafe statePointer.pointee
+    var tokenizer = CSSTokenizerSwift()
+    tokenizer.restore(from: state)
+
+    var written = 0
+    var reachedEnd = false
+    while written < capacity {
+        let token = tokenizer.nextToken(span)
+        if token.type == CSSTokenTypeSwift.endOfFile.rawValue {
+            reachedEnd = true
+            break
+        }
+        unsafe out[written] = exported(token)
+        written &+= 1
+    }
+
+    tokenizer.save(into: &state)
+    state.reachedEnd = reachedEnd
+    unsafe statePointer.pointee = state
+    return written
+}
+
 /// The `index`-th token, for the validation test to walk the stream alongside
 /// the real `CSSTokenizer`.
 ///
@@ -1048,13 +1160,13 @@ public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokeni
 /// a test over a few thousand tokens, and the shape of the workaround is itself
 /// worth recording.
 @_expose(Cxx)
-public func cssTokenizeSwiftNth(_ data: WebCore.CSSTokenizerSpan8, _ index: Int) -> CSSTokenSwift {
+public func cssTokenizeSwiftNth(_ data: WebCore.CSSTokenizerSpan8, _ index: Int) -> WebCore.CSSSwiftToken {
     let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
     var tokenizer = CSSTokenizerSwift()
     var i = 0
     while true {
         let t = tokenizer.nextToken(span)
-        if i == index || t.type == CSSTokenTypeSwift.endOfFile.rawValue { return t }
+        if i == index || t.type == CSSTokenTypeSwift.endOfFile.rawValue { return exported(t) }
         i &+= 1
     }
 }
