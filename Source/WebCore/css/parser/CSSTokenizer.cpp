@@ -185,7 +185,24 @@ enum SwiftTokenFlag : uint8_t {
     SwiftFlagUnescaped = 1 << 4,
 };
 
+static unsigned s_swiftIslandDeclineCount;
+
+unsigned CSSTokenizer::swiftIslandDeclineCountForTesting()
+{
+    return s_swiftIslandDeclineCount;
+}
+
+// Counts declines, so a test comparing the two paths cannot pass by accident
+// because the Swift path quietly fell back.
 bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
+{
+    if (tokenizeWithSwiftIslandOrDecline(wrapper, constructionSuccessPtr))
+        return true;
+    ++s_swiftIslandDeclineCount;
+    return false;
+}
+
+bool CSSTokenizer::tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
 {
     auto string = m_input.currentString();
 
@@ -211,7 +228,16 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bo
     Vector<char16_t> grownUnescapeBuffer;
     std::span<char16_t> unescapeBuffer { inlineUnescapeBuffer };
 
-    CSSSwiftTokenizerState state { 0, 0, { }, 0, false, false, false };
+    // The island's block stack. Held here rather than in the island so it can grow
+    // for arbitrarily nested input without the island allocating, and without being
+    // copied across the boundary once per chunk. Same shape as the unescape buffer:
+    // inline until something needs more.
+    constexpr size_t inlineBlockStackCapacity = 64;
+    std::array<uint8_t, inlineBlockStackCapacity> inlineBlockStack;
+    Vector<uint8_t> grownBlockStack;
+    std::span<uint8_t> blockStack { inlineBlockStack };
+
+    CSSSwiftTokenizerState state { 0, 0, 0, false, false, false };
 
     // Mirrors the C++ loop's `offset`: where the next token starts, which is where
     // the previous one ended, and 0 before the first.
@@ -222,21 +248,39 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bo
     // through StringImpl::operator[], paying an is8Bit() branch per character.
     while (!state.reachedEnd) {
         size_t count = string.is8Bit()
-            ? static_cast<size_t>(cssTokenizeSwiftFillChunk8(string.span8(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity), unescapeBuffer.data(), static_cast<ptrdiff_t>(unescapeBuffer.size())))
-            : static_cast<size_t>(cssTokenizeSwiftFillChunk16(string.span16(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity), unescapeBuffer.data(), static_cast<ptrdiff_t>(unescapeBuffer.size())));
-        if (state.blockStackOverflowed) [[unlikely]]
-            return false;
+            ? static_cast<size_t>(cssTokenizeSwiftFillChunk8(string.span8(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity), unescapeBuffer.data(), static_cast<ptrdiff_t>(unescapeBuffer.size()), blockStack.data(), static_cast<ptrdiff_t>(blockStack.size())))
+            : static_cast<size_t>(cssTokenizeSwiftFillChunk16(string.span16(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity), unescapeBuffer.data(), static_cast<ptrdiff_t>(unescapeBuffer.size()), blockStack.data(), static_cast<ptrdiff_t>(blockStack.size())));
 
-        if (state.needsMoreUnescapeCapacity) [[unlikely]] {
-            // One value wants more room than the whole buffer. Double and retry;
-            // the tokenizer rewound, so nothing has been consumed.
-            size_t grown = unescapeBuffer.size() * 2;
-            if (grown > std::numeric_limits<uint32_t>::max()) [[unlikely]]
-                return false;
-            if (!grownUnescapeBuffer.tryReserveCapacity(grown)) [[unlikely]]
-                return false;
-            grownUnescapeBuffer.grow(grown);
-            unescapeBuffer = grownUnescapeBuffer.mutableSpan();
+        // A buffer was too small for even one token. Double it and call again; the
+        // tokenizer rewound, so nothing has been consumed and no token was emitted.
+        if (state.needsMoreUnescapeCapacity || state.needsMoreBlockCapacity) [[unlikely]] {
+            if (state.needsMoreUnescapeCapacity) {
+                // Nothing to preserve: the unescape buffer only holds what the
+                // rewound chunk produced, which will be produced again.
+                size_t grown = unescapeBuffer.size() * 2;
+                if (grown > std::numeric_limits<uint32_t>::max()) [[unlikely]]
+                    return false;
+                if (!grownUnescapeBuffer.tryReserveCapacity(grown)) [[unlikely]]
+                    return false;
+                grownUnescapeBuffer.grow(grown);
+                unescapeBuffer = grownUnescapeBuffer.mutableSpan();
+            }
+            if (state.needsMoreBlockCapacity) {
+                // The block stack *does* have to be preserved: it spans chunks, and
+                // the enclosing blocks recorded in it are what later closing tokens
+                // are matched against. Moving off the inline array is the only case
+                // that needs a copy; Vector::grow keeps what is already there.
+                size_t grown = blockStack.size() * 2;
+                if (grown > std::numeric_limits<uint32_t>::max()) [[unlikely]]
+                    return false;
+                bool movingOffInlineStorage = grownBlockStack.isEmpty();
+                if (!grownBlockStack.tryReserveCapacity(grown)) [[unlikely]]
+                    return false;
+                grownBlockStack.grow(grown);
+                if (movingOffInlineStorage)
+                    memcpySpan(grownBlockStack.mutableSpan().first(state.blockDepth), blockStack.first(state.blockDepth));
+                blockStack = grownBlockStack.mutableSpan();
+            }
             continue;
         }
 

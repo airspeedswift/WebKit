@@ -89,18 +89,18 @@ struct CSSSwiftToken {
 // than spilling — Swift has no growable container with inline capacity, and a
 // heap-allocated stack here would reintroduce the allocation this is avoiding.
 struct CSSSwiftTokenizerState {
-    static constexpr unsigned blockStackCapacity = 64;
-
     uint32_t offset;
+    // Depth only: the stack's storage is a buffer the caller owns across chunks, so
+    // it never has to be copied in and out, and it can grow without bound.
     uint32_t blockDepth;
-    std::array<uint8_t, blockStackCapacity> blockStack;
     // Code units written to the caller's unescape buffer by this chunk.
     uint32_t unescapedLength;
     bool reachedEnd;
-    bool blockStackOverflowed;
-    // One value needed more room than the whole unescape buffer: grow it and call
-    // again. Only ever set when the chunk produced no tokens at all.
+    // One token needed more room than the whole of the relevant buffer: grow it and
+    // call again. Only ever set when the chunk produced no tokens at all, and the
+    // tokenizer has rewound, so nothing has been consumed.
     bool needsMoreUnescapeCapacity;
+    bool needsMoreBlockCapacity;
 };
 
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSTokenizerInputStream);

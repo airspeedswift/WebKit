@@ -112,6 +112,7 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchReal(const char*, size_t, size_t*, u
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths(const char*, size_t);
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(const char*, size_t);
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char*, size_t);
+WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 
 // Walks the real CSSTokenizer and the Swift island over the same stylesheet.
@@ -415,6 +416,11 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObser
         result.reason = 4;
     }
     return result;
+}
+
+WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void)
+{
+    return CSSTokenizer::swiftIslandDeclineCountForTesting();
 }
 
 // Times a whole CSSTokenizer construction on one path or the other. Same work on
