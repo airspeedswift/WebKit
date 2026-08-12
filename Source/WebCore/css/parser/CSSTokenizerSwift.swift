@@ -20,9 +20,11 @@ public import WebCore_Private
 //    C++ calls charactersToDouble as it does today, so double rounding is
 //    bit-identical for free, and the island needs no C++ call in its interior
 //    (which is where an `unsafe` std::span construction would otherwise land).
-//  * Values needing unescaping set `needsUnescape`; C++ materialises those
-//    (rare) strings into its existing m_stringPool. Extent, type and block
-//    structure are always decided here, so the stream never has to be re-driven.
+//  * Values containing escapes are unescaped *here*, into a buffer the caller
+//    provides alongside the token buffer, and the token's range then indexes that
+//    buffer rather than the input. The caller only has to turn code units into
+//    whatever string type it wants — it never has to re-tokenize, so no part of
+//    this component's logic is left in C++.
 //
 //
 // Runtime-check scrub (notes §10 discipline). Enumerated from the emitted arm64,
@@ -135,9 +137,11 @@ enum CSSTokenFlag {
     static let plusSign: UInt8 = 1 << 1 // NumericSign
     static let minusSign: UInt8 = 1 << 2
     static let hashTokenId: UInt8 = 1 << 3 // HashTokenId, else HashTokenUnrestricted
-    /// The value range contains escapes: C++ must unescape it into its string
-    /// pool. Type, extent and block structure are still authoritative here.
-    static let needsUnescape: UInt8 = 1 << 4
+    /// The value's range indexes the unescape buffer handed back alongside the
+    /// tokens, rather than the input. Set when the value contained escapes, which
+    /// this tokenizer resolves itself; the caller only has to turn the code units
+    /// into whatever string type it wants.
+    static let unescaped: UInt8 = 1 << 4
 }
 
 /// The tokenizer is generic over the code unit so one implementation serves both
@@ -272,10 +276,15 @@ private enum Dispatch {
 
 /// The result of scanning a name or a quoted value: a range of the input plus
 /// whether it contained escapes (in which case C++ unescapes the range).
+/// The result of scanning a name or a quoted value.
+///
+/// Normally a range of the *input*. When the value contained escapes it is instead
+/// a range of the tokenizer's unescape buffer, which the caller receives alongside
+/// the tokens; `unescaped` says which.
 private struct ScannedValue {
     var start: UInt32 = 0
     var length: UInt32 = 0
-    var needsUnescape = false
+    var unescaped = false
 }
 
 struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
@@ -302,6 +311,56 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     private var blockDepth = 0
     private var blockStackOverflowed = false
 
+    /// Code units of values that contained escapes, in the order the tokens
+    /// referring to them were produced. Owned here and copied out once per chunk:
+    /// the alternative, writing straight into the caller's buffer, would put an
+    /// `unsafe` pointer in the interior of the tokenizer rather than at its
+    /// boundary (§4b').
+    ///
+    /// UTF-16 rather than the input's code unit, because an escape can name any
+    /// code point: `\1F3A8` unescapes to a surrogate pair even in 8-bit input.
+    private var unescaped = UniqueArray<UInt16>()
+    /// How much the caller's buffer can take. Reaching it sets `unescapeOverflowed`
+    /// and the chunk stops one token early so the caller can grow and resume.
+    ///
+    /// Unbounded unless a caller says otherwise: only the chunked boundary has a
+    /// fixed buffer to fit into. Entry points that never hand the units back leave
+    /// this alone and let the `UniqueArray` grow.
+    private var unescapeCapacity = Int.max
+    private var unescapeOverflowed = false
+
+    /// Appends one code point, UTF-16 encoded.
+    @inline(__always) private mutating func appendUnescaped(_ codePoint: UInt32) {
+        if codePoint > 0xFFFF {
+            guard unescaped.count &+ 2 <= unescapeCapacity else {
+                unescapeOverflowed = true
+                return
+            }
+            let value = codePoint &- 0x10000
+            unescaped.append(UInt16(truncatingIfNeeded: 0xD800 &+ (value >> 10)))
+            unescaped.append(UInt16(truncatingIfNeeded: 0xDC00 &+ (value & 0x3FF)))
+            return
+        }
+        guard unescaped.count < unescapeCapacity else {
+            unescapeOverflowed = true
+            return
+        }
+        unescaped.append(UInt16(truncatingIfNeeded: codePoint))
+    }
+
+    @inline(__always) private mutating func appendUnescaped(unit: Unit) {
+        appendUnescaped(UInt32(truncatingIfNeeded: unit))
+    }
+
+    /// Range of the unescape buffer filled since `mark`, for a value that has just
+    /// been unescaped into it.
+    @inline(__always) private func unescapedValue(since mark: Int) -> ScannedValue {
+        ScannedValue(
+            start: UInt32(truncatingIfNeeded: mark),
+            length: UInt32(truncatingIfNeeded: unescaped.count &- mark),
+            unescaped: true)
+    }
+
     public init() {}
 
     public var consumedOffset: Int { offset }
@@ -309,7 +368,8 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// Restores the cursor and block stack saved by `saveState`, so C++ can drive
     /// tokenization in cache-sized chunks without holding a Swift value across
     /// calls (it cannot: this type is `~Copyable`).
-    mutating func restore(from state: WebCore.CSSSwiftTokenizerState) {
+    mutating func restore(from state: WebCore.CSSSwiftTokenizerState, unescapeCapacity: Int) {
+        self.unescapeCapacity = unescapeCapacity
         offset = Int(state.offset)
         let depth = Int(state.blockDepth)
         blockDepth = depth < Self.blockStackCapacity ? depth : Self.blockStackCapacity
@@ -326,6 +386,32 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         }
         state.blockStackOverflowed = blockStackOverflowed
     }
+
+    /// Everything needed to undo one token: the chunk loop produces a token, and if
+    /// it did not fit in the caller's unescape buffer, rewinds and stops so the
+    /// caller can grow the buffer and resume from exactly there.
+    struct Rewind {
+        var offset: Int
+        var blockDepth: Int
+        var unescapedCount: Int
+    }
+
+    var rewindPoint: Rewind {
+        Rewind(offset: offset, blockDepth: blockDepth, unescapedCount: unescaped.count)
+    }
+
+    var overflowedUnescapeBuffer: Bool { unescapeOverflowed }
+
+    mutating func rewind(to point: Rewind) {
+        offset = point.offset
+        blockDepth = point.blockDepth
+        unescaped.removeLast(unescaped.count &- point.unescapedCount)
+        unescapeOverflowed = false
+    }
+
+    /// The unescaped code units produced for this chunk, for the boundary to copy
+    /// into the caller's buffer.
+    var unescapedUnits: Span<UInt16> { unescaped.span }
 
     // MARK: Input stream — CSSTokenizerInputStream
     //
@@ -420,7 +506,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         var t = token(type, start, data, block: block)
         t.valueStart = value.start
         t.valueLength = value.length
-        if value.needsUnescape { t.flags |= CSSTokenFlag.needsUnescape }
+        if value.unescaped { t.flags |= CSSTokenFlag.unescaped }
         return t
     }
 
@@ -677,7 +763,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             t.type = CSSTokenTypeSwift.dimension.rawValue
             t.valueStart = unit.start
             t.valueLength = unit.length
-            if unit.needsUnescape { t.flags |= CSSTokenFlag.needsUnescape }
+            if unit.unescaped { t.flags |= CSSTokenFlag.unescaped }
         } else if consumeIfNext(data, 0x25) {
             t.type = CSSTokenTypeSwift.percentage.rawValue
         }
@@ -707,40 +793,27 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         return valueToken(.ident, name, start, data)
     }
 
-    /// equalLettersIgnoringASCIICase(name, "url"). Escapes are handled without
-    /// materialising a string: `\75 rl` must still be recognised as `url`, so
-    /// the comparison unescapes on the fly into three bytes.
+    /// equalLettersIgnoringASCIICase(name, "url"), against either the input or the
+    /// unescaped units, so `\75 rl(` is still recognised as a url token.
     private func nameIsURL(_ data: Span<Unit>, _ name: ScannedValue) -> Bool {
-        if !name.needsUnescape {
-            guard name.length == 3 else { return false }
+        guard name.length == 3 else { return false }
+        if name.unescaped {
             let base = Int(name.start)
-            guard base &+ 3 <= data.count else { return false }
-            return (byteAt(data, base) | 0x20) == 0x75 // u
-                && (byteAt(data, base &+ 1) | 0x20) == 0x72 // r
-                && (byteAt(data, base &+ 2) | 0x20) == 0x6C // l
+            guard base &+ 3 <= unescaped.count else { return false }
+            return (unescaped[base] | 0x20) == 0x75 // u
+                && (unescaped[base &+ 1] | 0x20) == 0x72 // r
+                && (unescaped[base &+ 2] | 0x20) == 0x6C // l
         }
-        var matched = 0
-        var i = Int(name.start)
-        let end = min(Int(name.start) &+ Int(name.length), data.count)
-        while i < end {
-            var c = UInt32(truncatingIfNeeded: byteAt(data, i))
-            i &+= 1
-            if c == 0x5C, i < end {
-                let (value, next) = unescapeCodePoint(data, at: i, limit: end)
-                c = value
-                i = next
-            }
-            if matched >= 3 { return false }
-            let expected: UInt32 = matched == 0 ? 0x75 : (matched == 1 ? 0x72 : 0x6C)
-            if (c | 0x20) != expected { return false }
-            matched &+= 1
-        }
-        return matched == 3
+        let base = Int(name.start)
+        guard base &+ 3 <= data.count else { return false }
+        return (byteAt(data, base) | 0x20) == 0x75 // u
+            && (byteAt(data, base &+ 1) | 0x20) == 0x72 // r
+            && (byteAt(data, base &+ 2) | 0x20) == 0x6C // l
     }
 
     /// Mirrors CSSTokenizer::consumeName. The fast path returns a range of the
-    /// input; escapes force the `needsUnescape` flag, and the range then spans
-    /// the raw (still-escaped) text for C++ to unescape.
+    /// input; the slow path unescapes into the unescape buffer and returns a range
+    /// of that.
     private mutating func consumeName(_ data: Span<Unit>) -> ScannedValue {
         let count = data.count
         var i = offset
@@ -759,25 +832,24 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return ScannedValue(
                 start: UInt32(truncatingIfNeeded: start),
                 length: UInt32(truncatingIfNeeded: i &- start),
-                needsUnescape: false)
+                unescaped: false)
         }
 
-        // Slow path: the name contains an escape or an embedded NUL. Consume it
-        // exactly as the C++ does so the cursor lands in the same place; the
-        // unescaped text is C++'s to build.
-        let rawStart = clampedOffset(data)
+        // Slow path: the name contains an escape or an embedded NUL. Mirrors the
+        // C++ StringBuilder loop, appending to the unescape buffer instead.
+        let mark = unescaped.count
         while true {
             let cc = consume(data)
-            if isNameByte(cc) { continue }
+            if isNameByte(cc) {
+                appendUnescaped(unit: cc)
+                continue
+            }
             if twoCharsAreValidEscape(cc, peek(data, 0)) {
-                consumeEscape(data)
+                appendUnescaped(consumeEscape(data))
                 continue
             }
             reconsume()
-            return ScannedValue(
-                start: UInt32(truncatingIfNeeded: rawStart),
-                length: UInt32(truncatingIfNeeded: clampedOffset(data) &- rawStart),
-                needsUnescape: true)
+            return unescapedValue(since: mark)
         }
     }
 
@@ -807,18 +879,14 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             size &+= 1
         }
 
-        let rawStart = clampedOffset(data)
+        // Slow path: unescape into the buffer, exactly as the C++ builds its
+        // StringBuilder. A backslash before a newline is a line continuation and
+        // contributes nothing; a backslash at EOF likewise.
+        let mark = unescaped.count
         while true {
-            // See consumeURLToken: `ccOffset` is where the value stops if `cc`
-            // terminates it, which is what the C++ StringBuilder would hold.
-            let ccOffset = clampedOffset(data)
             let cc = consume(data)
             if cc == endingCodePoint || cc == 0 {
-                var value = ScannedValue()
-                value.start = UInt32(truncatingIfNeeded: rawStart)
-                value.length = UInt32(truncatingIfNeeded: ccOffset &- rawStart)
-                value.needsUnescape = true
-                return valueToken(.string, value, start, data)
+                return valueToken(.string, unescapedValue(since: mark), start, data)
             }
             if isCSSNewlineByte(cc) {
                 reconsume()
@@ -829,8 +897,10 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
                 if isCSSNewlineByte(peek(data, 0)) {
                     consumeSingleWhitespaceIfNext(data) // handles \r\n
                 } else {
-                    consumeEscape(data)
+                    appendUnescaped(consumeEscape(data))
                 }
+            } else {
+                appendUnescaped(unit: cc)
             }
         }
     }
@@ -858,47 +928,36 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             size &+= 1
         }
 
-        let rawStart = clampedOffset(data)
+        // Slow path: unescape into the buffer. Nothing is appended for the
+        // terminating character, so a trailing whitespace run before the closing
+        // paren does not end up in the value — matching the C++, which simply
+        // stops appending to its StringBuilder.
+        let mark = unescaped.count
         while true {
-            // The offset of `cc` itself: where the accumulated value would stop
-            // if `cc` turns out to terminate it. The C++ builds the value in a
-            // StringBuilder and simply stops appending, so the raw range handed
-            // to C++ has to stop in the same place — in particular it must not
-            // include the trailing whitespace run before a closing paren.
-            let ccOffset = clampedOffset(data)
             let cc = consume(data)
             if cc == 0x29 || cc == 0 {
-                return unescapedURL(data, rawStart, ccOffset, start, data)
+                return valueToken(.url, unescapedValue(since: mark), start, data)
             }
             if isASCIIWhitespaceByte(cc) {
                 advanceUntilNonWhitespace(data)
                 if consumeIfNext(data, 0x29) || peek(data, 0) == 0 {
-                    return unescapedURL(data, rawStart, ccOffset, start, data)
+                    return valueToken(.url, unescapedValue(since: mark), start, data)
                 }
                 break
             }
             if cc == 0x22 || cc == 0x27 || cc == 0x28 || isNonPrintableByte(cc) { break }
             if cc == 0x5C {
                 if twoCharsAreValidEscape(cc, peek(data, 0)) {
-                    consumeEscape(data)
+                    appendUnescaped(consumeEscape(data))
                     continue
                 }
                 break
             }
+            appendUnescaped(unit: cc)
         }
 
         consumeBadUrlRemnants(data)
         return token(.badUrl, start, data)
-    }
-
-    private func unescapedURL(
-        _ data: Span<Unit>, _ rawStart: Int, _ rawEnd: Int, _ start: Int, _ input: Span<Unit>
-    ) -> CSSTokenSwift {
-        var value = ScannedValue()
-        value.start = UInt32(truncatingIfNeeded: rawStart)
-        value.length = UInt32(truncatingIfNeeded: rawEnd &- rawStart)
-        value.needsUnescape = true
-        return valueToken(.url, value, start, input)
     }
 
     /// Mirrors CSSTokenizer::consumeBadUrlRemnants.
@@ -943,36 +1002,6 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         }
         if cc == 0 { return 0xFFFD }
         return UInt32(truncatingIfNeeded: cc)
-    }
-
-    /// Non-mutating escape decode used by `nameIsURL` to compare an escaped
-    /// name without consuming input. Returns the code point and the index just
-    /// past the escape.
-    private func unescapeCodePoint(
-        _ data: Span<Unit>, at index: Int, limit: Int
-    ) -> (UInt32, Int) {
-        var i = index
-        let first = byteAt(data, i)
-        if !isASCIIHexDigitByte(first) {
-            return (UInt32(truncatingIfNeeded: first), i &+ 1)
-        }
-        var codePoint = hexValue(first)
-        i &+= 1
-        var digits = 1
-        while digits < 6, i < limit, isASCIIHexDigitByte(data[i]) {
-            codePoint = codePoint &* 16 &+ hexValue(data[i])
-            i &+= 1
-            digits &+= 1
-        }
-        if i < limit, byteAt(data, i) == 0x0D, i &+ 1 < limit, byteAt(data, i &+ 1) == 0x0A {
-            i &+= 2
-        } else if i < limit, isASCIIWhitespaceByte(byteAt(data, i)) {
-            i &+= 1
-        }
-        if codePoint == 0 || (codePoint >= 0xD800 && codePoint <= 0xDFFF) || codePoint > 0x10FFFF {
-            return (0xFFFD, i)
-        }
-        return (codePoint, i)
     }
 
     /// Mirrors CSSTokenizer::consumeUntilCommentEndFound.
@@ -1132,7 +1161,9 @@ private func fillChunk<Unit: CSSCodeUnit>(
     _ span: Span<Unit>,
     _ statePointer: UnsafeMutablePointer<WebCore.CSSSwiftTokenizerState>,
     _ outBase: UnsafeMutableRawPointer,
-    _ capacity: Int
+    _ capacity: Int,
+    _ unescapeBase: UnsafeMutableRawPointer,
+    _ unescapeCapacity: Int
 ) -> Int {
     let out = unsafe UnsafeMutableBufferPointer<WebCore.CSSSwiftToken>(
         start: outBase.bindMemory(to: WebCore.CSSSwiftToken.self, capacity: capacity),
@@ -1140,12 +1171,20 @@ private func fillChunk<Unit: CSSCodeUnit>(
 
     var state = unsafe statePointer.pointee
     var tokenizer = CSSTokenizerSwift<Unit>()
-    tokenizer.restore(from: state)
+    tokenizer.restore(from: state, unescapeCapacity: unescapeCapacity)
 
     var written = 0
     var reachedEnd = false
     while written < capacity {
+        // Where to go back to if this token's value does not fit in the caller's
+        // unescape buffer. Tokens are all-or-nothing: a partially written value
+        // would be worse than stopping short.
+        let rewind = tokenizer.rewindPoint
         let token = tokenizer.nextToken(span)
+        if tokenizer.overflowedUnescapeBuffer {
+            tokenizer.rewind(to: rewind)
+            break
+        }
         if token.type == CSSTokenTypeSwift.endOfFile.rawValue {
             reachedEnd = true
             break
@@ -1154,8 +1193,24 @@ private func fillChunk<Unit: CSSCodeUnit>(
         written &+= 1
     }
 
+    // Hand the unescaped units over. Usually there are none: a stylesheet with no
+    // escapes never touches this.
+    let units = tokenizer.unescapedUnits
+    if !units.isEmpty {
+        let unescapeOut = unsafe UnsafeMutableBufferPointer<UInt16>(
+            start: unescapeBase.bindMemory(to: UInt16.self, capacity: unescapeCapacity),
+            count: unescapeCapacity)
+        for i in 0 ..< units.count {
+            unsafe unescapeOut[i] = units[i]
+        }
+    }
+
     tokenizer.save(into: &state)
     state.reachedEnd = reachedEnd
+    state.unescapedLength = UInt32(truncatingIfNeeded: units.count)
+    // No progress and nothing emitted means one value needs more room than the
+    // caller's whole buffer: it must grow and call again.
+    state.needsMoreUnescapeCapacity = written == 0 && !reachedEnd
     unsafe statePointer.pointee = state
     return written
 }
@@ -1173,9 +1228,12 @@ public func cssTokenizeSwiftFillChunk8(
     _ data: WebCore.CSSTokenizerSpan8,
     _ statePointer: UnsafeMutablePointer<WebCore.CSSSwiftTokenizerState>,
     _ outBase: UnsafeMutableRawPointer,
-    _ capacity: Int
+    _ capacity: Int,
+    _ unescapeBase: UnsafeMutableRawPointer,
+    _ unescapeCapacity: Int
 ) -> Int {
-    unsafe fillChunk(Span<UInt8>(_unsafeCxxSpan: data), statePointer, outBase, capacity)
+    unsafe fillChunk(Span<UInt8>(_unsafeCxxSpan: data), statePointer, outBase, capacity,
+        unescapeBase, unescapeCapacity)
 }
 
 /// 16-bit input. The C++ tokenizer reads every character through
@@ -1187,9 +1245,12 @@ public func cssTokenizeSwiftFillChunk16(
     _ data: WebCore.CSSTokenizerSpan16,
     _ statePointer: UnsafeMutablePointer<WebCore.CSSSwiftTokenizerState>,
     _ outBase: UnsafeMutableRawPointer,
-    _ capacity: Int
+    _ capacity: Int,
+    _ unescapeBase: UnsafeMutableRawPointer,
+    _ unescapeCapacity: Int
 ) -> Int {
-    unsafe fillChunk(Span<UInt16>(_unsafeCxxSpan: data), statePointer, outBase, capacity)
+    unsafe fillChunk(Span<UInt16>(_unsafeCxxSpan: data), statePointer, outBase, capacity,
+        unescapeBase, unescapeCapacity)
 }
 
 /// The `index`-th token, for the validation test to walk the stream alongside

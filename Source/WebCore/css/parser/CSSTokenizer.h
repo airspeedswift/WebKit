@@ -79,7 +79,7 @@ private:
     // WEBKIT_CSS_TOKENIZER_SWIFT=1 is set in the environment.
     static bool shouldUseSwiftTokenizer();
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
-    bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, CSSParserObserverWrapper*, unsigned& observerOffset);
+    bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);
