@@ -841,6 +841,7 @@
 				WebCore/TestPlatformStrategies.cpp,
 				WebCore/TextBoundaries.cpp,
 				WebCore/TextCodec.cpp,
+				WebCore/TextCodecUTF8Bench.cpp,
 				WebCore/TextIterator.cpp,
 				WebCore/TimeRanges.cpp,
 				WebCore/TransformationMatrix.cpp,

@@ -28,6 +28,7 @@
 
 #include "TextCodecASCIIFastPath.h"
 #include <wtf/StdLibExtras.h>
+#include <wtf/UnalignedAccess.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/ParsingUtilities.h>
@@ -334,19 +335,32 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
         while (!source.empty()) {
             if (isASCII(source[0])) {
                 // Fast path for ASCII. Most UTF-8 text will be ASCII.
-                if (WTF::isAlignedToMachineWord(source.data())) {
-                    while (source.data() < alignedEnd) {
-                        auto chunk = reinterpretCastSpanStartTo<const WTF::MachineWord>(source);
-                        if (!WTF::containsOnlyASCII<Latin1Character>(chunk))
-                            break;
-                        copyASCIIMachineWord(destination, source);
-                        skip(source, sizeof(WTF::MachineWord));
-                        skip(destination, sizeof(WTF::MachineWord));
-                    }
-                    if (source.empty())
+                //
+                // Measure the length of the ASCII run first (a machine word at a
+                // time, no stores), then copy the whole run with a single
+                // memcpySpan rather than copying one word per iteration. memcpy
+                // can use wider stores than a hand-rolled word loop.
+                // No alignment precondition: WTF::unalignedLoad handles any
+                // offset. The previous code gated this whole path on
+                // isAlignedToMachineWord(source.data()), which for mixed-script
+                // text is usually false after a multi-byte sequence — with a
+                // 66-byte period, alignment recurs only every 4th run — so most
+                // runs fell back to the byte-at-a-time path below.
+                size_t limit = std::min(source.size(), destination.size());
+                size_t run = 0;
+                while (run + sizeof(WTF::MachineWord) <= limit) {
+                    auto chunk = WTF::unalignedLoad<WTF::MachineWord>(std::next(source.data(), run));
+                    if (!WTF::containsOnlyASCII<Latin1Character>(chunk))
                         break;
-                    if (!isASCII(source[0]))
-                        continue;
+                    run += sizeof(WTF::MachineWord);
+                }
+                while (run < limit && isASCII(source[run]))
+                    ++run;
+                if (run) {
+                    memcpySpan(destination.first(run), source.first(run));
+                    skip(source, run);
+                    skip(destination, run);
+                    continue;
                 }
                 consume(destination) = consume(source);
                 continue;
