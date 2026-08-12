@@ -62,6 +62,11 @@ public:
     // Pass nullopt to go back to the gate.
     WEBCORE_EXPORT static void setUseSwiftTokenizerForTesting(std::optional<bool>);
 
+    // How many times the Swift path has declined an input and fallen back to the
+    // C++ one. A test that compares the two paths passes trivially if the Swift
+    // path silently declined, so tests assert on this.
+    WEBCORE_EXPORT static unsigned swiftIslandDeclineCountForTesting();
+
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
@@ -79,6 +84,7 @@ private:
     // WEBKIT_CSS_TOKENIZER_SWIFT=1 is set in the environment.
     static bool shouldUseSwiftTokenizer();
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
+    bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
 
     char16_t NODELETE consume();
