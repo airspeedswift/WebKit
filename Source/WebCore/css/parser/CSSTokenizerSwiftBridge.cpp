@@ -40,6 +40,8 @@
 
 #include "config.h"
 
+#include "CSSParserObserver.h"
+#include "CSSParserObserverWrapper.h"
 #include "CSSParserToken.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizer.h"
@@ -61,6 +63,21 @@ enum SwiftTokenFlag : uint8_t {
     FlagMinusSign = 1 << 2,
     FlagHashTokenId = 1 << 3,
     FlagNeedsUnescape = 1 << 4,
+};
+
+// A do-nothing observer, so a CSSParserObserverWrapper can be constructed and the
+// offsets the tokenizer feeds it compared between the two paths. The parser is
+// what would normally call these; the tokenizer only supplies offsets.
+class NullCSSParserObserver final : public CSSParserObserver {
+public:
+    void startRuleHeader(StyleRuleType, unsigned) final { }
+    void endRuleHeader(unsigned) final { }
+    void observeSelector(unsigned, unsigned) final { }
+    void startRuleBody(unsigned) final { }
+    void endRuleBody(unsigned) final { }
+    void markRuleBodyContainsImplicitlyNestedProperties() final { }
+    void observeProperty(unsigned, unsigned, bool, bool) final { }
+    void observeComment(unsigned, unsigned) final { }
 };
 
 // The island reports comments; CSSTokenizer drops them from m_tokens. The
@@ -93,6 +110,8 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerSwiftValidat
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchSwift(const uint8_t*, size_t, size_t*, uint64_t*);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchReal(const char*, size_t, size_t*, uint64_t*);
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths(const char*, size_t);
+WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(const char*, size_t);
+WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char*, size_t);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 
 // Walks the real CSSTokenizer and the Swift island over the same stylesheet.
@@ -297,6 +316,103 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths
     if (cppRange.size() != swiftRange.size()) {
         result.divergenceIndex = static_cast<int64_t>(index);
         result.reason = 2;
+    }
+    return result;
+}
+
+// Same comparison, but the source is built from UTF-8 so that any non-ASCII text
+// makes StringImpl choose its 16-bit representation. That is the only way to
+// exercise the island's UInt16 specialization: a String built from Latin-1 bytes is
+// always 8-bit. `expectedType` comes back as 8 or 16 so the caller can confirm
+// which representation was actually tested rather than assuming.
+WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char* text, size_t length)
+{
+    CSSTokenizerSwiftValidationResult result { -1, 0, 0, 0, 0, 0 };
+    String source = String::fromUTF8(unsafeMakeSpan(byteCast<char8_t>(text), length));
+    if (source.isNull()) {
+        result.divergenceIndex = 0;
+        result.reason = 6;
+        return result;
+    }
+
+    CSSTokenizer::setUseSwiftTokenizerForTesting(false);
+    WebCore::CSSTokenizer cppTokenizer(source);
+    CSSTokenizer::setUseSwiftTokenizerForTesting(true);
+    WebCore::CSSTokenizer swiftTokenizer(source);
+    CSSTokenizer::setUseSwiftTokenizerForTesting(std::nullopt);
+
+    auto cppRange = cppTokenizer.tokenRange();
+    auto swiftRange = swiftTokenizer.tokenRange();
+    result.realTokenCount = cppRange.size();
+    result.swiftTokenCount = swiftRange.size();
+    result.expectedType = source.is8Bit() ? 8 : 16;
+
+    size_t index = 0;
+    for (; !cppRange.atEnd() && !swiftRange.atEnd(); cppRange.consume(), swiftRange.consume(), ++index) {
+        if (!(cppRange.peek() == swiftRange.peek())) {
+            result.divergenceIndex = static_cast<int64_t>(index);
+            result.actualType = static_cast<uint32_t>(cppRange.peek().type());
+            result.reason = 0;
+            return result;
+        }
+        if (cppRange.peek().getBlockType() != swiftRange.peek().getBlockType()) {
+            result.divergenceIndex = static_cast<int64_t>(index);
+            result.actualType = static_cast<uint32_t>(cppRange.peek().getBlockType());
+            result.reason = 1;
+            return result;
+        }
+    }
+    if (cppRange.size() != swiftRange.size()) {
+        result.divergenceIndex = static_cast<int64_t>(index);
+        result.reason = 2;
+    }
+    return result;
+}
+
+// The inspector path: both tokenizers built with an observer wrapper attached, then
+// every source offset the wrapper was fed compared. A wrapper records one offset
+// per token plus one per comment, and startOffset()/endOffset() read them back, so
+// walking the range position by position checks all of them.
+WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(const char* text, size_t length)
+{
+    CSSTokenizerSwiftValidationResult result { -1, 0, 0, 0, 0, 0 };
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    NullCSSParserObserver observer;
+    auto cppWrapper = CSSParserObserverWrapper::create(observer);
+    auto swiftWrapper = CSSParserObserverWrapper::create(observer);
+
+    CSSTokenizer::setUseSwiftTokenizerForTesting(false);
+    WebCore::CSSTokenizer cppTokenizer(source, cppWrapper.get());
+    CSSTokenizer::setUseSwiftTokenizerForTesting(true);
+    WebCore::CSSTokenizer swiftTokenizer(source, swiftWrapper.get());
+    CSSTokenizer::setUseSwiftTokenizerForTesting(std::nullopt);
+
+    auto cppRange = cppTokenizer.tokenRange();
+    auto swiftRange = swiftTokenizer.tokenRange();
+    result.realTokenCount = cppRange.size();
+    result.swiftTokenCount = swiftRange.size();
+    if (cppRange.size() != swiftRange.size()) {
+        result.divergenceIndex = 0;
+        result.reason = 2;
+        return result;
+    }
+
+    size_t index = 0;
+    for (; !cppRange.atEnd(); cppRange.consume(), swiftRange.consume(), ++index) {
+        if (cppWrapper->startOffset(cppRange) != swiftWrapper->startOffset(swiftRange)) {
+            result.divergenceIndex = static_cast<int64_t>(index);
+            result.expectedType = cppWrapper->startOffset(cppRange);
+            result.actualType = swiftWrapper->startOffset(swiftRange);
+            result.reason = 3;
+            return result;
+        }
+    }
+    if (cppWrapper->endOffset(cppRange) != swiftWrapper->endOffset(swiftRange)) {
+        result.divergenceIndex = static_cast<int64_t>(index);
+        result.expectedType = cppWrapper->endOffset(cppRange);
+        result.actualType = swiftWrapper->endOffset(swiftRange);
+        result.reason = 4;
     }
     return result;
 }

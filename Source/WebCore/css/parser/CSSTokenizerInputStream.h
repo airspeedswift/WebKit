@@ -41,6 +41,7 @@ constexpr Latin1Character kEndOfFileMarker = 0;
 // a token carrying offsets into this span is all CSSParserToken needs — see
 // CSSTokenizerSwift.swift.
 using CSSTokenizerSpan8 = std::span<const Latin1Character>;
+using CSSTokenizerSpan16 = std::span<const char16_t>;
 
 // One token as the Swift tokenizer reports it: offsets into the span above, plus
 // the small amount of classification CSSParserToken needs. Everything here is

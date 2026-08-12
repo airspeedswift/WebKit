@@ -71,15 +71,15 @@ private:
 
     // Swift tokenizer path (CSSTokenizerSwift.swift, notes §11). Fills m_tokens
     // by driving the Swift island and converting its POD tokens, instead of
-    // running the C++ state machine below. Returns false if it declined the
-    // input (16-bit, or an observer wrapper is attached) or ran out of memory,
-    // in which case the caller falls back to the C++ path.
+    // running the C++ state machine below. Returns false if it declined the input
+    // (16-bit, or nesting deeper than the island's fixed block stack) or ran out
+    // of memory, in which case the caller falls back to the C++ path.
     //
     // Gated by shouldUseSwiftTokenizer(), which is off unless
     // WEBKIT_CSS_TOKENIZER_SWIFT=1 is set in the environment.
     static bool shouldUseSwiftTokenizer();
-    bool tokenizeWithSwiftIsland(bool* constructionSuccess);
-    bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>);
+    bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
+    bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, CSSParserObserverWrapper*, unsigned& observerOffset);
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);

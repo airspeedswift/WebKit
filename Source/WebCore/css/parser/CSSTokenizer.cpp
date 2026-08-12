@@ -100,8 +100,8 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapp
     // The Swift tokenizer path, when enabled and when it accepts this input.
     // Falls through to the C++ state machine otherwise, including on allocation
     // failure, so this cannot make a previously-working parse fail.
-    if (shouldUseSwiftTokenizer() && !wrapper) {
-        if (tokenizeWithSwiftIsland(constructionSuccessPtr))
+    if (shouldUseSwiftTokenizer()) {
+        if (tokenizeWithSwiftIsland(wrapper, constructionSuccessPtr))
             return;
         m_tokens.shrink(0);
         m_input.seek(0);
@@ -185,22 +185,16 @@ enum SwiftTokenFlag : uint8_t {
     SwiftFlagNeedsUnescape = 1 << 4,
 };
 
-bool CSSTokenizer::tokenizeWithSwiftIsland(bool* constructionSuccessPtr)
+bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
 {
-    // The island's element type is Latin1Character, and the observer wrapper
-    // (inspector only) wants per-token source offsets that this path does not
-    // report yet, so decline both.
     auto string = m_input.currentString();
-    if (!string.is8Bit())
-        return false;
-    auto span = string.span8();
 
     // Same estimate the C++ path uses: about 3.5 to 5 characters per token, so
     // length / 3 over-reserves. When it is not enough the island reports that it
     // stopped early and we start over with a bigger buffer.
     //
     // Same reservation the C++ path uses.
-    if (!m_tokens.tryReserveInitialCapacity(span.size() / 3)) [[unlikely]]
+    if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]]
         return false;
 
     // Tokens come back a chunk at a time, into a buffer small enough to stay in
@@ -210,13 +204,27 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(bool* constructionSuccessPtr)
     std::array<CSSSwiftToken, chunkCapacity> chunk;
     CSSSwiftTokenizerState state { 0, 0, { }, false, false };
 
+    // Mirrors the C++ loop's `offset`: where the next token starts, which is where
+    // the previous one ended, and 0 before the first.
+    unsigned observerOffset = 0;
+
+    // Both of StringImpl's representations are handled, by two specializations of
+    // one Swift implementation. The C++ scanner below instead reads everything
+    // through StringImpl::operator[], paying an is8Bit() branch per character.
     while (!state.reachedEnd) {
-        size_t count = static_cast<size_t>(cssTokenizeSwiftFillChunk(span, &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity)));
+        size_t count = string.is8Bit()
+            ? static_cast<size_t>(cssTokenizeSwiftFillChunk8(string.span8(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity)))
+            : static_cast<size_t>(cssTokenizeSwiftFillChunk16(string.span16(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity)));
         if (state.blockStackOverflowed) [[unlikely]]
             return false;
         auto podTokens = std::span<const CSSSwiftToken> { chunk }.first(count);
-        if (!appendTokensFromSwiftIsland(podTokens)) [[unlikely]]
+        if (!appendTokensFromSwiftIsland(podTokens, wrapper, observerOffset)) [[unlikely]]
             return false;
+    }
+
+    if (wrapper) {
+        wrapper->addToken(observerOffset);
+        wrapper->finalizeConstruction(m_tokens.begin());
     }
 
     if (constructionSuccessPtr)
@@ -224,15 +232,22 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(bool* constructionSuccessPtr)
     return true;
 }
 
-// Converts one chunk of the island's tokens into CSSParserTokens.
-bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> podTokens)
+// Converts one chunk of the island's tokens into CSSParserTokens, and feeds the
+// inspector's observer wrapper the same offsets the C++ loop would have.
+bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> podTokens, CSSParserObserverWrapper* wrapper, unsigned& observerOffset)
 {
     for (const auto& pod : podTokens) {
         auto type = static_cast<CSSParserTokenType>(pod.type);
 
-        // Comments are not kept, matching the C++ path.
-        if (type == CommentToken)
+        // Comments are not kept, matching the C++ path, but the inspector wants
+        // their extent and where they sat in the token stream.
+        if (type == CommentToken) {
+            if (wrapper) {
+                wrapper->addComment(pod.start, pod.end, m_tokens.size());
+                observerOffset = pod.end;
+            }
             continue;
+        }
 
         // A value containing escapes has to become a real String in m_stringPool.
         // Rather than reimplement the unescaping rules, reposition the input
@@ -245,6 +260,10 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
             ASSERT(token.type() == type);
             if (!m_tokens.tryAppend(token)) [[unlikely]]
                 return false;
+            if (wrapper) {
+                wrapper->addToken(pod.start);
+                observerOffset = pod.end;
+            }
             continue;
         }
 
@@ -278,7 +297,9 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
         case DimensionToken: {
             auto numberText = m_input.rangeAt(pod.numberStart, pod.numberLength);
             bool isResultOK = false;
-            double numericValue = charactersToDouble(numberText.span8(), &isResultOK);
+            double numericValue = numberText.is8Bit()
+                ? charactersToDouble(numberText.span8(), &isResultOK)
+                : charactersToDouble(numberText.span16(), &isResultOK);
             if (!isResultOK)
                 numericValue = 0;
             auto numericValueType = pod.flags & SwiftFlagNonInteger ? NumberValueType : IntegerValueType;
@@ -302,6 +323,10 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
 
         if (!m_tokens.tryAppend(*token)) [[unlikely]]
             return false;
+        if (wrapper) {
+            wrapper->addToken(pod.start);
+            observerOffset = pod.end;
+        }
     }
     return true;
 }
