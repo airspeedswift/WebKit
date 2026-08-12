@@ -64,7 +64,8 @@ struct CSSSwiftToken {
     uint32_t start;
     uint32_t end;
     // The token's value text: an ident/at-keyword/hash/string/url name, or the
-    // unit of a dimension.
+    // unit of a dimension. Normally a range of the input; a range of the chunk's
+    // unescape buffer when `flags` has the unescaped bit set.
     uint32_t valueStart;
     uint32_t valueLength;
     // For numeric tokens, the number's text, which is CSSParserToken's
@@ -93,8 +94,13 @@ struct CSSSwiftTokenizerState {
     uint32_t offset;
     uint32_t blockDepth;
     std::array<uint8_t, blockStackCapacity> blockStack;
+    // Code units written to the caller's unescape buffer by this chunk.
+    uint32_t unescapedLength;
     bool reachedEnd;
     bool blockStackOverflowed;
+    // One value needed more room than the whole unescape buffer: grow it and call
+    // again. Only ever set when the chunk produced no tokens at all.
+    bool needsMoreUnescapeCapacity;
 };
 
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSTokenizerInputStream);
