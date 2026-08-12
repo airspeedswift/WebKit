@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <array>
 #include <wtf/text/StringView.h>
 
 namespace WebCore {
@@ -39,6 +40,53 @@ constexpr Latin1Character kEndOfFileMarker = 0;
 // Swift tokenizer instead of the input stream itself: a token carrying offsets
 // into this span is all CSSParserToken needs. See CSSTokenizerSwift.swift.
 using CSSTokenizerSpan8 = std::span<const Latin1Character>;
+
+// One token as the Swift tokenizer reports it: offsets into the span above, plus
+// the small amount of classification CSSParserToken needs, resolved against the
+// input by CSSTokenizer::tokenizeWithSwiftIsland.
+//
+// Defined in C++, not Swift: WebCore compiles Swift with -enable-library-evolution,
+// so a Swift struct exposed with @_expose(Cxx) is resilient — the generated C++
+// class wraps a heap-allocated opaque box, has no default constructor, and its
+// sizeof() isn't the Swift struct's size. That's fine for a value returned once,
+// but such a type can't be an element of a buffer the two languages share; a
+// plain C++ aggregate can, and Swift imports it directly.
+// No default member initializers: with them the type isn't trivially default
+// constructible, so WTF::Vector zero-initializes the whole buffer
+// (VectorTypeOperations::initializeIfNonPOD) before Swift overwrites every byte —
+// pointless on a large stylesheet.
+struct CSSSwiftToken {
+    // Extent of the token in the input.
+    uint32_t start;
+    uint32_t end;
+    // The token's value text: an ident/at-keyword/hash/string/url name, or the
+    // unit of a dimension.
+    uint32_t valueStart;
+    uint32_t valueLength;
+    // For numeric tokens, the number's text, which is CSSParserToken's
+    // originalText and the range converted to a double.
+    uint32_t numberStart;
+    uint32_t numberLength;
+    // Delimiter code point, or the whitespace run length.
+    uint32_t extra;
+
+    uint8_t type;
+    uint8_t blockType;
+    uint8_t flags;
+};
+
+// Tokenizer state carried across chunked calls into the Swift tokenizer, keeping
+// the shared token buffer small enough to stay in cache rather than streaming one
+// entry per token through memory.
+struct CSSSwiftTokenizerState {
+    static constexpr unsigned blockStackCapacity = 64;
+
+    uint32_t offset;
+    uint32_t blockDepth;
+    std::array<uint8_t, blockStackCapacity> blockStack;
+    bool reachedEnd;
+    bool blockStackOverflowed;
+};
 
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSTokenizerInputStream);
 class CSSTokenizerInputStream {
@@ -66,6 +114,12 @@ public:
     }
 
     void advance(unsigned offset = 1) { m_offset += offset; }
+
+    // Repositions the cursor. Used by the Swift tokenizer path to re-tokenize a
+    // single token whose value contains escapes, with the C++ code below, rather
+    // than duplicating the unescaping rules.
+    void seek(size_t offset) { m_offset = offset; }
+
     void pushBack(char16_t cc)
     {
         --m_offset;
@@ -94,6 +148,10 @@ public:
 
     unsigned length() const { return m_stringLength; }
     unsigned offset() const { return std::min(m_offset, m_stringLength); }
+
+    // The whole preprocessed input, for the Swift tokenizer path, which takes a
+    // contiguous span rather than driving this stream.
+    StringView currentString() const LIFETIME_BOUND { return m_string.get(); }
 
     StringView rangeAt(unsigned start, unsigned length) const
     {

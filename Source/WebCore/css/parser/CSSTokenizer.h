@@ -57,12 +57,25 @@ public:
 
     static bool NODELETE isWhitespace(CSSParserTokenType);
 
+    WEBCORE_EXPORT static void setUseSwiftTokenizerForTesting(std::optional<bool>);
+
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
     CSSTokenizer(const String&, CSSParserObserverWrapper*, bool* constructionSuccess);
 
     CSSParserToken nextToken();
+
+    // Fills m_tokens by driving the Swift tokenizer (CSSTokenizerSwift.swift) and
+    // converting its POD tokens, instead of running the C++ state machine below.
+    // Returns false — falling back to the C++ path — for 16-bit input, an attached
+    // observer wrapper, or an allocation failure.
+    //
+    // Gated by shouldUseSwiftTokenizer(), off unless WEBKIT_CSS_TOKENIZER_SWIFT=1 is
+    // set in the environment.
+    static bool shouldUseSwiftTokenizer();
+    bool tokenizeWithSwiftIsland(bool* constructionSuccess);
+    bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>);
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);
