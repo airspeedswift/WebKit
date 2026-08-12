@@ -58,6 +58,8 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		DEADBEEF00000000000000D2 /* CSSTokenizerSwiftBridge.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000D1 /* CSSTokenizerSwiftBridge.cpp */; };
+		DEADBEEF00000000000000C2 /* CSSTokenizerSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000C1 /* CSSTokenizerSwift.swift */; };
 		0014628B103CD1DE000B20DB /* OriginAccessEntry.h in Headers */ = {isa = PBXBuildFile; fileRef = 00146289103CD1DE000B20DB /* OriginAccessEntry.h */; };
 		003F1FEA11E6AB43008258D9 /* UserContentTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 003F1FE911E6AB43008258D9 /* UserContentTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		00B9318813BA8DBA0035A948 /* XMLDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = 00B9318213BA867F0035A948 /* XMLDocumentParser.h */; };
@@ -7762,6 +7764,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		DEADBEEF00000000000000D1 /* CSSTokenizerSwiftBridge.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = css/parser/CSSTokenizerSwiftBridge.cpp; sourceTree = "<group>"; };
+		DEADBEEF00000000000000C1 /* CSSTokenizerSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSTokenizerSwift.swift; sourceTree = "<group>"; };
 		00146288103CD1DE000B20DB /* OriginAccessEntry.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = OriginAccessEntry.cpp; sourceTree = "<group>"; };
 		00146289103CD1DE000B20DB /* OriginAccessEntry.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = OriginAccessEntry.h; sourceTree = "<group>"; };
 		003F1FE911E6AB43008258D9 /* UserContentTypes.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UserContentTypes.h; sourceTree = "<group>"; };
@@ -51076,6 +51080,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DEADBEEF00000000000000D2 /* CSSTokenizerSwiftBridge.cpp in Sources */,
+				DEADBEEF00000000000000C2 /* CSSTokenizerSwift.swift in Sources */,
 				71BF4C3229B098A8008344FC /* AcceleratedEffectStack.cpp in Sources */,
 				A9787CB41F5F5C6600C551C6 /* AccessibilityMediaHelpers.cpp in Sources */,
 				7BE37F7D27BB86CD007A6CD3 /* ANGLEUtilities.cpp in Sources */,
