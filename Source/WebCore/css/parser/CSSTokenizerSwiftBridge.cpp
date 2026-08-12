@@ -109,6 +109,7 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(const char*, size_t);
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char*, size_t);
 WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void);
+WEBCORE_EXPORT bool webCoreCSSTokenizerDefaultScannerIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 
 // Walks the real CSSTokenizer and the Swift tokenizer over the same stylesheet.
@@ -277,11 +278,8 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths
 
     // Both tokenizers stay alive for the comparison: each token's value is a view
     // into its own tokenizer's input or string pool.
-    CSSTokenizer::setUseSwiftTokenizerForTesting(false);
-    WebCore::CSSTokenizer cppTokenizer(source);
-    CSSTokenizer::setUseSwiftTokenizerForTesting(true);
-    WebCore::CSSTokenizer swiftTokenizer(source);
-    CSSTokenizer::setUseSwiftTokenizerForTesting(std::nullopt);
+    WebCore::CSSTokenizer cppTokenizer(source, CSSTokenizer::Scanner::Cpp);
+    WebCore::CSSTokenizer swiftTokenizer(source, CSSTokenizer::Scanner::Swift);
 
     auto cppRange = cppTokenizer.tokenRange();
     auto swiftRange = swiftTokenizer.tokenRange();
@@ -330,11 +328,8 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths
         return result;
     }
 
-    CSSTokenizer::setUseSwiftTokenizerForTesting(false);
-    WebCore::CSSTokenizer cppTokenizer(source);
-    CSSTokenizer::setUseSwiftTokenizerForTesting(true);
-    WebCore::CSSTokenizer swiftTokenizer(source);
-    CSSTokenizer::setUseSwiftTokenizerForTesting(std::nullopt);
+    WebCore::CSSTokenizer cppTokenizer(source, CSSTokenizer::Scanner::Cpp);
+    WebCore::CSSTokenizer swiftTokenizer(source, CSSTokenizer::Scanner::Swift);
 
     auto cppRange = cppTokenizer.tokenRange();
     auto swiftRange = swiftTokenizer.tokenRange();
@@ -377,11 +372,8 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObser
     auto cppWrapper = CSSParserObserverWrapper::create(observer);
     auto swiftWrapper = CSSParserObserverWrapper::create(observer);
 
-    CSSTokenizer::setUseSwiftTokenizerForTesting(false);
-    WebCore::CSSTokenizer cppTokenizer(source, cppWrapper.get());
-    CSSTokenizer::setUseSwiftTokenizerForTesting(true);
-    WebCore::CSSTokenizer swiftTokenizer(source, swiftWrapper.get());
-    CSSTokenizer::setUseSwiftTokenizerForTesting(std::nullopt);
+    WebCore::CSSTokenizer cppTokenizer(source, cppWrapper.get(), CSSTokenizer::Scanner::Cpp);
+    WebCore::CSSTokenizer swiftTokenizer(source, swiftWrapper.get(), CSSTokenizer::Scanner::Swift);
 
     auto cppRange = cppTokenizer.tokenRange();
     auto swiftRange = swiftTokenizer.tokenRange();
@@ -417,14 +409,20 @@ WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void)
     return CSSTokenizer::swiftIslandDeclineCountForTesting();
 }
 
+// Reports the compile-time choice, so a test can confirm that
+// -DUSE_SWIFT_CSS_TOKENIZER=1 actually selects the Swift scanner rather than being
+// silently ignored.
+WEBCORE_EXPORT bool webCoreCSSTokenizerDefaultScannerIsSwift(void)
+{
+    return CSSTokenizer::defaultScanner == CSSTokenizer::Scanner::Swift;
+}
+
 // Times a whole CSSTokenizer construction on one path or the other. Same work on
 // both sides at last: same tokens, same string pool, same double conversions.
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char* text, size_t length, bool useSwift, size_t* outTokens, uint64_t* outFold)
 {
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
-    CSSTokenizer::setUseSwiftTokenizerForTesting(useSwift);
-    WebCore::CSSTokenizer tokenizer(source);
-    CSSTokenizer::setUseSwiftTokenizerForTesting(std::nullopt);
+    WebCore::CSSTokenizer tokenizer(source, useSwift ? CSSTokenizer::Scanner::Swift : CSSTokenizer::Scanner::Cpp);
     size_t count = 0;
     uint64_t fold = 0;
     for (auto range = tokenizer.tokenRange(); !range.atEnd(); range.consume()) {

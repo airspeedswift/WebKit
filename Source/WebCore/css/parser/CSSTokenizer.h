@@ -35,6 +35,16 @@
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
+// Which scanner CSSTokenizer uses, chosen at compile time. Both are compiled in
+// either way — the comparison tests need both — but only one is reachable from the
+// constructors the rest of WebCore calls.
+//
+// Off by default. Build with -DUSE_SWIFT_CSS_TOKENIZER=1 to select the Swift
+// scanner, which is also how to run the layout tests against it.
+#if !defined(USE_SWIFT_CSS_TOKENIZER)
+#define USE_SWIFT_CSS_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
 class CSSTokenizerInputStream;
@@ -49,25 +59,39 @@ public:
     static std::unique_ptr<CSSTokenizer> tryCreate(const String&);
     static std::unique_ptr<CSSTokenizer> tryCreate(const String&, CSSParserObserverWrapper&); // For the inspector
 
+    // Which scanner builds the token stream. Both are compiled in; this chooses
+    // which one CSSTokenizer uses, and the choice is made at compile time.
+    enum class Scanner : bool { Cpp, Swift };
+
+    static constexpr Scanner defaultScanner =
+#if USE_SWIFT_CSS_TOKENIZER
+        Scanner::Swift;
+#else
+        Scanner::Cpp;
+#endif
+
     WEBCORE_EXPORT explicit CSSTokenizer(const String&);
     CSSTokenizer(const String&, CSSParserObserverWrapper&); // For the inspector
+
+    // Builds with a named scanner regardless of `defaultScanner`, so a test can
+    // build both token streams from one source and compare them.
+    WEBCORE_EXPORT CSSTokenizer(const String&, Scanner);
+    CSSTokenizer(const String&, CSSParserObserverWrapper&, Scanner);
 
     WEBCORE_EXPORT CSSParserTokenRange NODELETE tokenRange() const LIFETIME_BOUND;
     unsigned NODELETE tokenCount();
 
     static bool NODELETE isWhitespace(CSSParserTokenType);
 
-    WEBCORE_EXPORT static void setUseSwiftTokenizerForTesting(std::optional<bool>);
-
-    // Number of times the Swift path has fallen back to C++, so a test comparing
-    // both paths can assert real coverage instead of passing trivially on a silent
-    // fallback.
+    // Number of times the Swift scanner has fallen back to C++, so a test
+    // comparing both can assert real coverage instead of passing trivially on a
+    // silent fallback.
     WEBCORE_EXPORT static unsigned swiftIslandDeclineCountForTesting();
 
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
-    CSSTokenizer(const String&, CSSParserObserverWrapper*, bool* constructionSuccess);
+    CSSTokenizer(const String&, CSSParserObserverWrapper*, bool* constructionSuccess, Scanner = defaultScanner);
 
     CSSParserToken nextToken();
 
@@ -75,10 +99,6 @@ private:
     // converting its POD tokens, instead of running the C++ state machine below.
     // Returns false — falling back to the C++ path — for 16-bit input, nesting
     // deeper than the fixed block stack, or an allocation failure.
-    //
-    // Gated by shouldUseSwiftTokenizer(), off unless WEBKIT_CSS_TOKENIZER_SWIFT=1 is
-    // set in the environment.
-    static bool shouldUseSwiftTokenizer();
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
