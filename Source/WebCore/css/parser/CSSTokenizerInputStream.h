@@ -35,6 +35,12 @@ namespace WebCore {
 
 constexpr Latin1Character kEndOfFileMarker = 0;
 
+// A contiguous 8-bit view of an already-preprocessed stylesheet. This is what
+// the Swift tokenizer island takes instead of the input stream itself, because
+// a token carrying offsets into this span is all CSSParserToken needs — see
+// CSSTokenizerSwift.swift.
+using CSSTokenizerSpan8 = std::span<const Latin1Character>;
+
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSTokenizerInputStream);
 class CSSTokenizerInputStream {
     WTF_MAKE_NONCOPYABLE(CSSTokenizerInputStream);
