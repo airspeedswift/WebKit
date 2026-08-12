@@ -182,7 +182,7 @@ enum SwiftTokenFlag : uint8_t {
     SwiftFlagPlusSign = 1 << 1,
     SwiftFlagMinusSign = 1 << 2,
     SwiftFlagHashTokenId = 1 << 3,
-    SwiftFlagNeedsUnescape = 1 << 4,
+    SwiftFlagUnescaped = 1 << 4,
 };
 
 bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
@@ -202,7 +202,16 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bo
     // megabytes, and writing that and reading it back costs more than the scan.
     constexpr size_t chunkCapacity = 1024;
     std::array<CSSSwiftToken, chunkCapacity> chunk;
-    CSSSwiftTokenizerState state { 0, 0, { }, false, false };
+
+    // Values containing escapes come back unescaped, in UTF-16, in this buffer.
+    // Most stylesheets have no escapes at all and never use it, so it starts as a
+    // small stack array and only grows onto the heap if something overflows it.
+    constexpr size_t inlineUnescapeCapacity = 256;
+    std::array<char16_t, inlineUnescapeCapacity> inlineUnescapeBuffer;
+    Vector<char16_t> grownUnescapeBuffer;
+    std::span<char16_t> unescapeBuffer { inlineUnescapeBuffer };
+
+    CSSSwiftTokenizerState state { 0, 0, { }, 0, false, false, false };
 
     // Mirrors the C++ loop's `offset`: where the next token starts, which is where
     // the previous one ended, and 0 before the first.
@@ -213,12 +222,27 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bo
     // through StringImpl::operator[], paying an is8Bit() branch per character.
     while (!state.reachedEnd) {
         size_t count = string.is8Bit()
-            ? static_cast<size_t>(cssTokenizeSwiftFillChunk8(string.span8(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity)))
-            : static_cast<size_t>(cssTokenizeSwiftFillChunk16(string.span16(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity)));
+            ? static_cast<size_t>(cssTokenizeSwiftFillChunk8(string.span8(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity), unescapeBuffer.data(), static_cast<ptrdiff_t>(unescapeBuffer.size())))
+            : static_cast<size_t>(cssTokenizeSwiftFillChunk16(string.span16(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity), unescapeBuffer.data(), static_cast<ptrdiff_t>(unescapeBuffer.size())));
         if (state.blockStackOverflowed) [[unlikely]]
             return false;
+
+        if (state.needsMoreUnescapeCapacity) [[unlikely]] {
+            // One value wants more room than the whole buffer. Double and retry;
+            // the tokenizer rewound, so nothing has been consumed.
+            size_t grown = unescapeBuffer.size() * 2;
+            if (grown > std::numeric_limits<uint32_t>::max()) [[unlikely]]
+                return false;
+            if (!grownUnescapeBuffer.tryReserveCapacity(grown)) [[unlikely]]
+                return false;
+            grownUnescapeBuffer.grow(grown);
+            unescapeBuffer = grownUnescapeBuffer.mutableSpan();
+            continue;
+        }
+
         auto podTokens = std::span<const CSSSwiftToken> { chunk }.first(count);
-        if (!appendTokensFromSwiftIsland(podTokens, wrapper, observerOffset)) [[unlikely]]
+        auto unescapedUnits = std::span<const char16_t> { unescapeBuffer }.first(state.unescapedLength);
+        if (!appendTokensFromSwiftIsland(podTokens, unescapedUnits, wrapper, observerOffset)) [[unlikely]]
             return false;
     }
 
@@ -234,7 +258,7 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bo
 
 // Converts one chunk of the island's tokens into CSSParserTokens, and feeds the
 // inspector's observer wrapper the same offsets the C++ loop would have.
-bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> podTokens, CSSParserObserverWrapper* wrapper, unsigned& observerOffset)
+bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> podTokens, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper* wrapper, unsigned& observerOffset)
 {
     for (const auto& pod : podTokens) {
         auto type = static_cast<CSSParserTokenType>(pod.type);
@@ -249,25 +273,16 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
             continue;
         }
 
-        // A value containing escapes has to become a real String in m_stringPool.
-        // Rather than reimplement the unescaping rules, reposition the input
-        // stream and let the C++ tokenizer produce this one token: it is the same
-        // code that would have produced it anyway, and escapes are rare.
-        if (pod.flags & SwiftFlagNeedsUnescape) {
-            m_input.seek(pod.start);
-            auto token = nextToken();
-            ASSERT(m_input.offset() == pod.end);
-            ASSERT(token.type() == type);
-            if (!m_tokens.tryAppend(token)) [[unlikely]]
-                return false;
-            if (wrapper) {
-                wrapper->addToken(pod.start);
-                observerOffset = pod.end;
-            }
-            continue;
-        }
-
+        // A value the island unescaped: its range indexes the unescape buffer, not
+        // the input, and it has to become a real String in m_stringPool. Built with
+        // create8BitIfPossible to match what the C++ path's StringBuilder produces,
+        // so the two paths agree on the string's representation as well as its
+        // contents.
         auto value = [&](void) -> StringView {
+            if (pod.flags & SwiftFlagUnescaped) [[unlikely]] {
+                auto units = unescapedUnits.subspan(pod.valueStart, pod.valueLength);
+                return registerString(String { StringImpl::create8BitIfPossible(units) });
+            }
             return m_input.rangeAt(pod.valueStart, pod.valueLength);
         };
         auto blockType = static_cast<CSSParserToken::BlockType>(pod.blockType);
