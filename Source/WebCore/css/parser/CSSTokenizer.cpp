@@ -195,98 +195,50 @@ bool CSSTokenizer::tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper* wr
 {
     auto string = m_input.currentString();
 
-    // Same estimate the C++ path uses: about 3.5 to 5 characters per token, so
-    // length / 3 over-reserves. When it is not enough the island reports that it
-    // stopped early and we start over with a bigger buffer.
-    //
     // Same reservation the C++ path uses.
     if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]]
         return false;
 
-    // Tokens come back a chunk at a time, into a buffer small enough to stay in
-    // cache. One entry per token for the whole document would be tens of
-    // megabytes, and writing that and reading it back costs more than the scan.
-    constexpr size_t chunkCapacity = 1024;
-    std::array<CSSSwiftToken, chunkCapacity> chunk;
-
-    // Values containing escapes come back unescaped, in UTF-16, in this buffer.
-    // Most stylesheets have no escapes at all and never use it, so it starts as a
-    // small stack array and only grows onto the heap if something overflows it.
-    constexpr size_t inlineUnescapeCapacity = 256;
-    std::array<char16_t, inlineUnescapeCapacity> inlineUnescapeBuffer;
-    Vector<char16_t> grownUnescapeBuffer;
-    std::span<char16_t> unescapeBuffer { inlineUnescapeBuffer };
-
-    // The island's block stack. Held here rather than in the island so it can grow
-    // for arbitrarily nested input without the island allocating, and without being
-    // copied across the boundary once per chunk. Same shape as the unescape buffer:
-    // inline until something needs more.
-    constexpr size_t inlineBlockStackCapacity = 64;
-    std::array<uint8_t, inlineBlockStackCapacity> inlineBlockStack;
-    Vector<uint8_t> grownBlockStack;
-    std::span<uint8_t> blockStack { inlineBlockStack };
-
-    CSSSwiftTokenizerState state { 0, 0, 0, false, false, false };
-
-    // Mirrors the C++ loop's `offset`: where the next token starts, which is where
-    // the previous one ended, and 0 before the first.
-    unsigned observerOffset = 0;
-
-    // Both of StringImpl's representations are handled, by two specializations of
-    // one Swift implementation. The C++ scanner below instead reads everything
-    // through StringImpl::operator[], paying an is8Bit() branch per character.
-    while (!state.reachedEnd) {
-        size_t count = string.is8Bit()
-            ? static_cast<size_t>(cssTokenizeSwiftFillChunk8(string.span8(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity), unescapeBuffer.data(), static_cast<ptrdiff_t>(unescapeBuffer.size()), blockStack.data(), static_cast<ptrdiff_t>(blockStack.size())))
-            : static_cast<size_t>(cssTokenizeSwiftFillChunk16(string.span16(), &state, chunk.data(), static_cast<ptrdiff_t>(chunkCapacity), unescapeBuffer.data(), static_cast<ptrdiff_t>(unescapeBuffer.size()), blockStack.data(), static_cast<ptrdiff_t>(blockStack.size())));
-
-        // A buffer was too small for even one token. Double it and call again; the
-        // tokenizer rewound, so nothing has been consumed and no token was emitted.
-        if (state.needsMoreUnescapeCapacity || state.needsMoreBlockCapacity) [[unlikely]] {
-            if (state.needsMoreUnescapeCapacity) {
-                // Nothing to preserve: the unescape buffer only holds what the
-                // rewound chunk produced, which will be produced again.
-                size_t grown = unescapeBuffer.size() * 2;
-                if (grown > std::numeric_limits<uint32_t>::max()) [[unlikely]]
-                    return false;
-                if (!grownUnescapeBuffer.tryReserveCapacity(grown)) [[unlikely]]
-                    return false;
-                grownUnescapeBuffer.grow(grown);
-                unescapeBuffer = grownUnescapeBuffer.mutableSpan();
-            }
-            if (state.needsMoreBlockCapacity) {
-                // The block stack *does* have to be preserved: it spans chunks, and
-                // the enclosing blocks recorded in it are what later closing tokens
-                // are matched against. Moving off the inline array is the only case
-                // that needs a copy; Vector::grow keeps what is already there.
-                size_t grown = blockStack.size() * 2;
-                if (grown > std::numeric_limits<uint32_t>::max()) [[unlikely]]
-                    return false;
-                bool movingOffInlineStorage = grownBlockStack.isEmpty();
-                if (!grownBlockStack.tryReserveCapacity(grown)) [[unlikely]]
-                    return false;
-                grownBlockStack.grow(grown);
-                if (movingOffInlineStorage)
-                    memcpySpan(grownBlockStack.mutableSpan().first(state.blockDepth), blockStack.first(state.blockDepth));
-                blockStack = grownBlockStack.mutableSpan();
-            }
-            continue;
-        }
-
-        auto podTokens = std::span<const CSSSwiftToken> { chunk }.first(count);
-        auto unescapedUnits = std::span<const char16_t> { unescapeBuffer }.first(state.unescapedLength);
-        if (!appendTokensFromSwiftIsland(podTokens, unescapedUnits, wrapper, observerOffset)) [[unlikely]]
-            return false;
-    }
-
-    if (wrapper) {
-        wrapper->addToken(observerOffset);
-        wrapper->finalizeConstruction(m_tokens.begin());
-    }
+    // The island owns its buffers and hands each chunk to this sink, so there is
+    // nothing to allocate, size, grow or retry here. Both of StringImpl's
+    // representations are handled, by two specializations of one Swift implementation;
+    // the C++ scanner below instead reads every character through
+    // StringImpl::operator[], paying an is8Bit() branch per character.
+    Ref sink = adoptRef(*CSSSwiftTokenSink::create(*this, wrapper));
+    bool tokenized = string.is8Bit()
+        ? cssTokenizeSwiftAll8(string.span8(), sink.ptr())
+        : cssTokenizeSwiftAll16(string.span16(), sink.ptr());
+    if (!tokenized) [[unlikely]]
+        return false;
 
     if (constructionSuccessPtr)
         *constructionSuccessPtr = true;
     return true;
+}
+
+CSSSwiftTokenSink* CSSSwiftTokenSink::create(CSSTokenizer& tokenizer, CSSParserObserverWrapper* wrapper)
+{
+    return new CSSSwiftTokenSink(tokenizer, wrapper);
+}
+
+// The annotations have to be repeated here: an unannotated definition is a different
+// type in C++, and the mangled name differs (interop notes §67).
+bool CSSSwiftTokenSink::takeChunk(
+    const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
+    const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount)
+{
+    return m_tokenizer.appendTokensFromSwiftIsland(
+        unsafeMakeSpan(tokens, tokenCount),
+        unsafeMakeSpan(unescapedUnits, unitCount),
+        m_wrapper, m_observerOffset);
+}
+
+void CSSSwiftTokenSink::finish()
+{
+    if (m_wrapper) {
+        m_wrapper->addToken(m_observerOffset);
+        m_wrapper->finalizeConstruction(m_tokenizer.m_tokens.begin());
+    }
 }
 
 // Converts one chunk of the island's tokens into CSSParserTokens, and feeds the
