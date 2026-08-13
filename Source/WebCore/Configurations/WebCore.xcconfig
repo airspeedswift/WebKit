@@ -256,7 +256,13 @@ MODULE_VERIFIER_SUPPORTED_LANGUAGES = objective-c++;
 MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = c++23;
 MODULE_VERIFIER_KIND = builtin;
 
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal;
+// SafeInteropWrappers synthesizes safe overloads for imported C++ functions whose
+// pointer parameters carry __counted_by(n) plus noescape: const becomes Span, mutable
+// becomes inout MutableSpan. It is what lets a Swift island hand a buffer to C++ with
+// no `unsafe` at all (see swift-cpp-interop-notes.md §67). Enabled for WebCore only,
+// rather than in CommonBase.xcconfig, because it is still an experimental feature and
+// WebCore is the target that needs it.
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers;
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
