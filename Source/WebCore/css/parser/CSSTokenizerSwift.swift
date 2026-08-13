@@ -218,9 +218,12 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// every read clamps and every report goes through `clampedOffset`.
     private var offset = 0
     /// Mirrors m_blockStack. Owned here and growable, so nesting is unbounded and no
-    /// buffer has to cross the boundary for it: the tokenizer runs the whole document
-    /// in one call, so there is no per-chunk copy to avoid by taking a caller-provided
-    /// buffer instead.
+    /// buffer has to cross the boundary for it.
+    ///
+    /// C++ uses `Vector<CSSParserTokenType, 8>`, whose inline capacity keeps shallow
+    /// nesting out of the heap; Swift has no growable container with inline capacity.
+    /// A two-tier `InlineArray` + spill version of this measured no resolvable
+    /// improvement over plain heap storage, so it was not kept.
     private var blockStack = UniqueArray<UInt8>()
 
     /// Code units of values that contained escapes, in the order the tokens
