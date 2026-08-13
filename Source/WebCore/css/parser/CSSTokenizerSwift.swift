@@ -1173,8 +1173,12 @@ private func fillChunk<Unit: CSSCodeUnit>(
     _ blockStackBase: UnsafeMutableRawPointer,
     _ blockStackCapacity: Int
 ) -> Int {
-    let out = unsafe UnsafeMutableBufferPointer<WebCore.CSSSwiftToken>(
-        start: outBase.bindMemory(to: WebCore.CSSSwiftToken.self, capacity: capacity),
+    // `MutableSpan`, not `UnsafeMutableBufferPointer`: the pointer is unavoidable at
+    // the boundary, but wrapping it once here means every write below is an ordinary
+    // bounds-checked `span[i] = x` rather than an unsafe store. The unsafety is a
+    // property of one line instead of the loop.
+    var out = unsafe MutableSpan<WebCore.CSSSwiftToken>(
+        _unsafeStart: outBase.bindMemory(to: WebCore.CSSSwiftToken.self, capacity: capacity),
         count: capacity)
 
     // The block stack's storage is the caller's, and it persists across chunks. A
@@ -1209,7 +1213,7 @@ private func fillChunk<Unit: CSSCodeUnit>(
             reachedEnd = true
             break
         }
-        unsafe out[written] = exported(token)
+        out[written] = exported(token)
         written &+= 1
     }
 
@@ -1217,11 +1221,11 @@ private func fillChunk<Unit: CSSCodeUnit>(
     // escapes never touches this.
     let units = tokenizer.unescapedUnits
     if !units.isEmpty {
-        let unescapeOut = unsafe UnsafeMutableBufferPointer<UInt16>(
-            start: unescapeBase.bindMemory(to: UInt16.self, capacity: unescapeCapacity),
+        var unescapeOut = unsafe MutableSpan<UInt16>(
+            _unsafeStart: unescapeBase.bindMemory(to: UInt16.self, capacity: unescapeCapacity),
             count: unescapeCapacity)
         for i in 0 ..< units.count {
-            unsafe unescapeOut[i] = units[i]
+            unescapeOut[i] = units[i]
         }
     }
 
