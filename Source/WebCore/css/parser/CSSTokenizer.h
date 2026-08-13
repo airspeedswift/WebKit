@@ -32,6 +32,8 @@
 #include <WebCore/CSSParserToken.h>
 #include <WebCore/CSSTokenizerInputStream.h>
 #include <climits>
+#include <wtf/SwiftBridging.h>
+#include <wtf/ThreadSafeRefCounted.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
@@ -47,6 +49,7 @@
 
 namespace WebCore {
 
+class CSSTokenizer;
 class CSSTokenizerInputStream;
 class CSSParserObserverWrapper;
 class CSSParserTokenRange;
@@ -91,6 +94,8 @@ public:
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
+    friend class CSSSwiftTokenSink;
+
     CSSTokenizer(const String&, CSSParserObserverWrapper*, bool* constructionSuccess, Scanner = defaultScanner);
 
     CSSParserToken nextToken();
@@ -102,6 +107,7 @@ private:
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
+    Vector<String>& stringPool() { return m_stringPool; }
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);
@@ -172,5 +178,45 @@ private:
     Vector<String> m_stringPool;
     CSSTokenizerInputStream m_input;
 };
+
+// Receives each chunk of tokens the Swift tokenizer produces, and materialises them
+// into the CSSTokenizer that owns this sink.
+//
+// `__counted_by` plus `noescape` on these parameters import as Swift `Span`s, so
+// this method takes two spans with no pointers and no `unsafe`. The receiver is a
+// refcounted shared reference, which Swift imports as an ordinary class reference.
+class CSSSwiftTokenSink final : public ThreadSafeRefCounted<CSSSwiftTokenSink> {
+public:
+    WEBCORE_EXPORT static CSSSwiftTokenSink* create(CSSTokenizer&, CSSParserObserverWrapper*);
+
+    // Materialises one chunk. `tokens` index `unescapedUnits` for values that
+    // contained escapes, and index the input for everything else. Returns false on
+    // allocation failure, which stops the tokenizer.
+    WEBCORE_EXPORT bool takeChunk(
+        const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
+        const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount);
+
+    // Called after the last chunk, to give the observer wrapper its final offset.
+    WEBCORE_EXPORT void finish();
+
+#ifdef __swift__
+    // FIXME: rdar://165684636 means these have to be redeclared at this level of the
+    // hierarchy, as WTF::BorrowedBytes also has to.
+    void ref() const { ThreadSafeRefCounted<CSSSwiftTokenSink>::ref(); }
+    void deref() const { ThreadSafeRefCounted<CSSSwiftTokenSink>::deref(); }
+#endif
+
+private:
+    CSSSwiftTokenSink(CSSTokenizer& tokenizer, CSSParserObserverWrapper* wrapper)
+        : m_tokenizer(tokenizer)
+        , m_wrapper(wrapper)
+    {
+    }
+
+    CSSTokenizer& m_tokenizer;
+    CSSParserObserverWrapper* m_wrapper;
+    // Mirrors the C++ loop's `offset`: where the next token starts.
+    unsigned m_observerOffset { 0 };
+} SWIFT_SHARED_REFERENCE(.ref, .deref);
 
 } // namespace WebCore
