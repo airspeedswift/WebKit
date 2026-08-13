@@ -292,52 +292,27 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// on an exhausted input returns the EOF marker and still advances — so
     /// every read clamps and every report goes through `clampedOffset`.
     private var offset = 0
-    /// Depth of the block stack that mirrors m_blockStack. The *storage* belongs to
-    /// the caller and arrives as a `MutableSpan` per call, so it can grow without
-    /// bound and without this type allocating: a fixed inline array would cap the
-    /// nesting depth, and a `UniqueArray` here would have to be copied in and out
-    /// of the caller's buffer on every chunk, which is O(depth) per chunk and turns
-    /// adversarial input like `((((…` into quadratic work.
-    ///
-    /// The span is threaded as a parameter rather than stored for the same reason
-    /// the input is: a stored span goes back through memory on every access, which
-    /// measured 3% slower for the input. Only the handful of functions that push or
-    /// pop a block take it.
-    private var blockDepth = 0
-    private var blockStackOverflowed = false
+    /// Mirrors m_blockStack. Owned here and growable, so nesting is unbounded and no
+    /// buffer has to cross the boundary for it. It was briefly a caller-provided
+    /// `MutableSpan` (to escape a fixed 64-entry cap without copying per chunk); once
+    /// the tokenizer runs the whole document in one call there is no per-chunk copy to
+    /// avoid, so owning it is both simpler and safe.
+    private var blockStack = UniqueArray<UInt8>()
 
     /// Code units of values that contained escapes, in the order the tokens
-    /// referring to them were produced. Owned here and copied out once per chunk:
-    /// the alternative, writing straight into the caller's buffer, would put an
-    /// `unsafe` pointer in the interior of the tokenizer rather than at its
-    /// boundary (§4b').
+    /// referring to them were produced. Handed to the caller a chunk at a time as a
+    /// `Span`, which is the safe direction across the boundary.
     ///
     /// UTF-16 rather than the input's code unit, because an escape can name any
     /// code point: `\1F3A8` unescapes to a surrogate pair even in 8-bit input.
     private var unescaped = UniqueArray<UInt16>()
-    /// How much the caller's buffer can take. Reaching it sets `unescapeOverflowed`
-    /// and the chunk stops one token early so the caller can grow and resume.
-    ///
-    /// Unbounded unless a caller says otherwise: only the chunked boundary has a
-    /// fixed buffer to fit into. Entry points that never hand the units back leave
-    /// this alone and let the `UniqueArray` grow.
-    private var unescapeCapacity = Int.max
-    private var unescapeOverflowed = false
-
-    /// Appends one code point, UTF-16 encoded.
+    /// Appends one code point, UTF-16 encoded. The buffer is this type's own and
+    /// grows, so there is no capacity to overflow and no rewind protocol.
     @inline(__always) private mutating func appendUnescaped(_ codePoint: UInt32) {
         if codePoint > 0xFFFF {
-            guard unescaped.count &+ 2 <= unescapeCapacity else {
-                unescapeOverflowed = true
-                return
-            }
             let value = codePoint &- 0x10000
             unescaped.append(UInt16(truncatingIfNeeded: 0xD800 &+ (value >> 10)))
             unescaped.append(UInt16(truncatingIfNeeded: 0xDC00 &+ (value & 0x3FF)))
-            return
-        }
-        guard unescaped.count < unescapeCapacity else {
-            unescapeOverflowed = true
             return
         }
         unescaped.append(UInt16(truncatingIfNeeded: codePoint))
@@ -363,47 +338,12 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// Restores the cursor and block stack saved by `saveState`, so C++ can drive
     /// tokenization in cache-sized chunks without holding a Swift value across
     /// calls (it cannot: this type is `~Copyable`).
-    /// The caller's block-stack buffer persists across chunks, so only the depth
-    /// has to travel in the state.
-    mutating func restore(from state: WebCore.CSSSwiftTokenizerState, unescapeCapacity: Int) {
-        self.unescapeCapacity = unescapeCapacity
-        offset = Int(state.offset)
-        blockDepth = Int(state.blockDepth)
-    }
-
-    func save(into state: inout WebCore.CSSSwiftTokenizerState) {
-        state.offset = UInt32(truncatingIfNeeded: offset)
-        state.blockDepth = UInt32(truncatingIfNeeded: blockDepth)
-    }
-
-    var overflowedBlockStack: Bool { blockStackOverflowed }
-
-    /// Everything needed to undo one token: the chunk loop produces a token, and if
-    /// it did not fit in the caller's unescape buffer, rewinds and stops so the
-    /// caller can grow the buffer and resume from exactly there.
-    struct Rewind {
-        var offset: Int
-        var blockDepth: Int
-        var unescapedCount: Int
-    }
-
-    var rewindPoint: Rewind {
-        Rewind(offset: offset, blockDepth: blockDepth, unescapedCount: unescaped.count)
-    }
-
-    var overflowedUnescapeBuffer: Bool { unescapeOverflowed }
-
-    mutating func rewind(to point: Rewind) {
-        offset = point.offset
-        blockDepth = point.blockDepth
-        unescaped.removeLast(unescaped.count &- point.unescapedCount)
-        unescapeOverflowed = false
-        blockStackOverflowed = false
-    }
-
-    /// The unescaped code units produced for this chunk, for the boundary to copy
-    /// into the caller's buffer.
+    /// The unescaped code units produced since the last `startChunk()`.
     var unescapedUnits: Span<UInt16> { unescaped.span }
+
+    /// Drops the previous chunk's unescaped units, so token value ranges are always
+    /// offsets into the chunk currently being handed over.
+    mutating func startChunk() { unescaped.removeAll() }
 
     // MARK: Input stream — CSSTokenizerInputStream
     //
@@ -502,34 +442,25 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         return t
     }
 
-    @inline(__always) private mutating func pushBlock(
-        _ type: CSSTokenTypeSwift, _ blocks: inout MutableSpan<UInt8>
-    ) {
-        guard blockDepth < blocks.count else {
-            blockStackOverflowed = true
-            return
-        }
-        blocks[blockDepth] = type.rawValue
-        blockDepth &+= 1
+    @inline(__always) private mutating func pushBlock(_ type: CSSTokenTypeSwift) {
+        blockStack.append(type.rawValue)
     }
 
     private mutating func blockStart(
-        _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>,
-        _ blocks: inout MutableSpan<UInt8>
+        _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>
     ) -> CSSTokenSwift {
-        pushBlock(type, &blocks)
+        pushBlock(type)
         return token(type, start, data, block: .blockStart)
     }
 
     private mutating func blockEnd(
-        _ type: CSSTokenTypeSwift, _ startType: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>,
-        _ blocks: inout MutableSpan<UInt8>
+        _ type: CSSTokenTypeSwift, _ startType: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>
     ) -> CSSTokenSwift {
         // The unsigned compare both bounds-checks and tests for an empty stack.
-        let top = blockDepth &- 1
-        if UInt(bitPattern: top) < UInt(bitPattern: blocks.count),
-           blocks[top] == startType.rawValue {
-            blockDepth = top
+        let top = blockStack.count &- 1
+        if UInt(bitPattern: top) < UInt(bitPattern: blockStack.count),
+           blockStack[top] == startType.rawValue {
+            _ = blockStack.removeLast()
             return token(type, start, data, block: .blockEnd)
         }
         return token(type, start, data)
@@ -539,7 +470,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     /// Returns the next token; `.endOfFile` when the input is exhausted.
     /// Mirrors CSSTokenizer::nextToken.
-    mutating func nextToken(_ data: Span<Unit>, _ blocks: inout MutableSpan<UInt8>) -> CSSTokenSwift {
+    mutating func nextToken(_ data: Span<Unit>) -> CSSTokenSwift {
         let start = clampedOffset(data)
         let cc = consume(data)
 
@@ -578,10 +509,10 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return delimiter(cc, start, data)
 
         case .leftParenthesis:
-            return blockStart(.leftParenthesis, start, data, &blocks)
+            return blockStart(.leftParenthesis, start, data)
 
         case .rightParenthesis:
-            return blockEnd(.rightParenthesis, .leftParenthesis, start, data, &blocks)
+            return blockEnd(.rightParenthesis, .leftParenthesis, start, data)
 
         case .asterisk:
             if consumeIfNext(data, 0x3D) { return token(.substringMatch, start, data) }
@@ -608,7 +539,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             }
             if nextCharsAreIdentifier(data, cc) {
                 reconsume()
-                return consumeIdentLikeToken(data, start, &blocks)
+                return consumeIdentLikeToken(data, start)
             }
             return delimiter(cc, start, data)
 
@@ -645,27 +576,27 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
         case .nameStart:
             reconsume()
-            return consumeIdentLikeToken(data, start, &blocks)
+            return consumeIdentLikeToken(data, start)
 
         case .leftBracket:
-            return blockStart(.leftBracket, start, data, &blocks)
+            return blockStart(.leftBracket, start, data)
 
         case .reverseSolidus:
             if twoCharsAreValidEscape(cc, peek(data, 0)) {
                 reconsume()
-                return consumeIdentLikeToken(data, start, &blocks)
+                return consumeIdentLikeToken(data, start)
             }
             return delimiter(cc, start, data)
 
         case .rightBracket:
-            return blockEnd(.rightBracket, .leftBracket, start, data, &blocks)
+            return blockEnd(.rightBracket, .leftBracket, start, data)
 
         case .circumflexAccent:
             if consumeIfNext(data, 0x3D) { return token(.prefixMatch, start, data) }
             return delimiter(cc, start, data)
 
         case .leftBrace:
-            return blockStart(.leftBrace, start, data, &blocks)
+            return blockStart(.leftBrace, start, data)
 
         case .verticalLine:
             if consumeIfNext(data, 0x3D) { return token(.dashMatch, start, data) }
@@ -673,7 +604,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return delimiter(cc, start, data)
 
         case .rightBrace:
-            return blockEnd(.rightBrace, .leftBrace, start, data, &blocks)
+            return blockEnd(.rightBrace, .leftBrace, start, data)
 
         case .tilde:
             if consumeIfNext(data, 0x3D) { return token(.includeMatch, start, data) }
@@ -770,9 +701,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     // MARK: Identifiers
 
     /// Mirrors CSSTokenizer::consumeIdentLikeToken.
-    private mutating func consumeIdentLikeToken(
-        _ data: Span<Unit>, _ start: Int, _ blocks: inout MutableSpan<UInt8>
-    ) -> CSSTokenSwift {
+    private mutating func consumeIdentLikeToken(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
         let name = consumeName(data)
         if consumeIfNext(data, 0x28) { // (
             if nameIsURL(data, name) {
@@ -785,7 +714,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
                     return consumeURLToken(data, start)
                 }
             }
-            pushBlock(.leftParenthesis, &blocks)
+            pushBlock(.leftParenthesis)
             return valueToken(.function, name, start, data, block: .blockStart)
         }
         return valueToken(.ident, name, start, data)
@@ -1109,16 +1038,8 @@ public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokeni
     let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
     var tokenizer = CSSTokenizerSwift<UInt8>()
     var result = CSSTokenizeResultSwift()
-    // Block-stack storage for this test/benchmark entry point, deep enough for any
-    // of its inputs; the shipping path gets a growable one from the caller. The
-    // capacity is written out rather than named, because a file-scope `let` would be
-    // a global and cost a swift_once on first access.
-    var storage = UniqueArray<UInt8>()
-    storage.reserveCapacity(4096)
-    for _ in 0 ..< 4096 { storage.append(0) }
-    var blocks = storage.mutableSpan
     while true {
-        let t = tokenizer.nextToken(span, &blocks)
+        let t = tokenizer.nextToken(span)
         if t.type == CSSTokenTypeSwift.endOfFile.rawValue { break }
         result.tokenCount &+= 1
         result.fold = foldToken(result.fold, t)
@@ -1149,138 +1070,78 @@ public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokeni
     return out
 }
 
-/// Tokenizes up to `capacity` tokens starting from the cursor in `state`, writing
-/// them to the caller's buffer and updating `state`. Returns the number written.
+/// Tokenizes a whole stylesheet, handing the tokens to `sink` a chunk at a time.
 ///
-/// Chunked rather than whole-stylesheet on purpose. A single call needs a buffer
-/// with one entry per token in the document — tens of megabytes for a large
-/// stylesheet — and writing it and reading it back costs more than the scan
-/// itself. A few hundred entries stay in cache. The price is that the cursor and
-/// block stack have to cross the boundary each call, which is what
-/// CSSSwiftTokenizerState is for.
+/// Every buffer here belongs to Swift, and each chunk crosses to C++ as a pair of
+/// `Span`s. That is the direction a buffer handover can be made safe in
+/// (SafeInteropWrappers transforms *parameters*), and the receiver is a refcounted
+/// shared reference, which is how a directly-named callee reaches C++ state without a
+/// pointer parameter. The result is that this function contains exactly one `unsafe`:
+/// the input span, which has to arrive *from* C++ and so cannot be fixed by any
+/// annotation. See swift-cpp-interop-notes.md §67.
 ///
-/// When `state.reachedEnd` comes back true the input is exhausted. When
-/// `state.blockStackOverflowed` comes back true the caller must fall back to the
-/// C++ tokenizer: nesting exceeded the fixed block stack.
+/// The previous design was the mirror image — C++ owned the buffers and passed
+/// pointers in, the cursor and block stack travelled in a state struct, and buffers
+/// that filled up needed a rewind-and-grow protocol. Owning the buffers deletes all of
+/// that, along with the fixed nesting cap.
+///
+/// Returns false if the sink could not take a chunk, which means allocation failure;
+/// the caller then falls back to the C++ tokenizer.
 @inline(__always)
-private func fillChunk<Unit: CSSCodeUnit>(
+private func tokenizeAll<Unit: CSSCodeUnit>(
     _ span: Span<Unit>,
-    _ statePointer: UnsafeMutablePointer<WebCore.CSSSwiftTokenizerState>,
-    _ outBase: UnsafeMutableRawPointer,
-    _ capacity: Int,
-    _ unescapeBase: UnsafeMutableRawPointer,
-    _ unescapeCapacity: Int,
-    _ blockStackBase: UnsafeMutableRawPointer,
-    _ blockStackCapacity: Int
-) -> Int {
-    // `MutableSpan`, not `UnsafeMutableBufferPointer`: the pointer is unavoidable at
-    // the boundary, but wrapping it once here means every write below is an ordinary
-    // bounds-checked `span[i] = x` rather than an unsafe store. The unsafety is a
-    // property of one line instead of the loop.
-    var out = unsafe MutableSpan<WebCore.CSSSwiftToken>(
-        _unsafeStart: outBase.bindMemory(to: WebCore.CSSSwiftToken.self, capacity: capacity),
-        count: capacity)
+    _ sink: WebCore.CSSSwiftTokenSink
+) -> Bool {
+    // Chunked so the buffer stays cache-resident: one entry per token for a whole
+    // document is tens of megabytes, and writing that and reading it back costs more
+    // than the scan (notes §11i).
+    let chunkCapacity = 1024
 
-    // The block stack's storage is the caller's, and it persists across chunks. A
-    // `MutableSpan` over it is made here, at the boundary, so the tokenizer's
-    // interior never handles a pointer.
-    var blocks = unsafe MutableSpan<UInt8>(
-        _unsafeStart: blockStackBase.bindMemory(to: UInt8.self, capacity: blockStackCapacity),
-        count: blockStackCapacity)
-
-    var state = unsafe statePointer.pointee
     var tokenizer = CSSTokenizerSwift<Unit>()
-    tokenizer.restore(from: state, unescapeCapacity: unescapeCapacity)
+    var tokens = UniqueArray<WebCore.CSSSwiftToken>()
+    tokens.reserveCapacity(chunkCapacity)
 
-    var written = 0
-    var reachedEnd = false
-    var needsUnescapeRoom = false
-    var needsBlockRoom = false
-    while written < capacity {
-        // Where to go back to if this token does not fit in one of the caller's
-        // buffers. Tokens are all-or-nothing: a partially written value, or a block
-        // pushed for a token that was not emitted, would be worse than stopping
-        // short of the chunk's capacity.
-        let rewind = tokenizer.rewindPoint
-        let token = tokenizer.nextToken(span, &blocks)
-        if tokenizer.overflowedUnescapeBuffer || tokenizer.overflowedBlockStack {
-            needsUnescapeRoom = tokenizer.overflowedUnescapeBuffer
-            needsBlockRoom = tokenizer.overflowedBlockStack
-            tokenizer.rewind(to: rewind)
-            break
-        }
-        if token.type == CSSTokenTypeSwift.endOfFile.rawValue {
-            reachedEnd = true
-            break
-        }
-        out[written] = exported(token)
-        written &+= 1
-    }
-
-    // Hand the unescaped units over. Usually there are none: a stylesheet with no
-    // escapes never touches this.
-    let units = tokenizer.unescapedUnits
-    if !units.isEmpty {
-        var unescapeOut = unsafe MutableSpan<UInt16>(
-            _unsafeStart: unescapeBase.bindMemory(to: UInt16.self, capacity: unescapeCapacity),
-            count: unescapeCapacity)
-        for i in 0 ..< units.count {
-            unescapeOut[i] = units[i]
+    while true {
+        let token = tokenizer.nextToken(span)
+        if token.type == CSSTokenTypeSwift.endOfFile.rawValue { break }
+        tokens.append(exported(token))
+        if tokens.count == chunkCapacity {
+            guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits) else { return false }
+            tokens.removeAll()
+            tokenizer.startChunk()
         }
     }
 
-    tokenizer.save(into: &state)
-    state.reachedEnd = reachedEnd
-    state.unescapedLength = UInt32(truncatingIfNeeded: units.count)
-    // Nothing emitted, and an overflow is why: the relevant buffer is too small for
-    // even one token, so the caller must grow it and call again. When tokens *were*
-    // emitted the chunk simply ended early and the next call continues.
-    state.needsMoreUnescapeCapacity = needsUnescapeRoom && written == 0
-    state.needsMoreBlockCapacity = needsBlockRoom && written == 0
-    unsafe statePointer.pointee = state
-    return written
+    if !tokens.isEmpty {
+        guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits) else { return false }
+    }
+    sink.finish()
+    return true
 }
 
-/// 8-bit input: the common case, a stylesheet that survives preprocessing as
-/// Latin-1.
+/// 8-bit input: the common case, a stylesheet that survives preprocessing as Latin-1.
 ///
-/// TODO(unsafe): the `unsafe` uses at these two entry points are the boundary —
-/// the input span coming in, and the output buffer and state out-parameter going
-/// back. There is no safe way to receive a writable buffer or an out-parameter
-/// from C++: WTF has `BorrowedBytes` for reading and no mutable equivalent. Per
-/// the project rule these are to-file items, not accepted costs.
+/// TODO(unsafe): `Span(_unsafeCxxSpan:)` is the only `unsafe` left in this island, and
+/// unlike the ones it replaced it is not fixable by a WTF addition: this function's
+/// parameters have to be C++-representable, and Swift's `Span` is not, so the source
+/// text can only arrive as a C++ span. Filed as such rather than presented as a cost.
 @_expose(Cxx)
-public func cssTokenizeSwiftFillChunk8(
+public func cssTokenizeSwiftAll8(
     _ data: WebCore.CSSTokenizerSpan8,
-    _ statePointer: UnsafeMutablePointer<WebCore.CSSSwiftTokenizerState>,
-    _ outBase: UnsafeMutableRawPointer,
-    _ capacity: Int,
-    _ unescapeBase: UnsafeMutableRawPointer,
-    _ unescapeCapacity: Int,
-    _ blockStackBase: UnsafeMutableRawPointer,
-    _ blockStackCapacity: Int
-) -> Int {
-    unsafe fillChunk(Span<UInt8>(_unsafeCxxSpan: data), statePointer, outBase, capacity,
-        unescapeBase, unescapeCapacity, blockStackBase, blockStackCapacity)
+    _ sink: WebCore.CSSSwiftTokenSink
+) -> Bool {
+    tokenizeAll(unsafe Span<UInt8>(_unsafeCxxSpan: data), sink)
 }
 
 /// 16-bit input. The C++ tokenizer reads every character through
-/// `StringImpl::operator[]`, which branches on `is8Bit()` per read; here the two
-/// widths are separate specializations of one implementation, so neither pays for
-/// the other.
+/// `StringImpl::operator[]`, which branches on `is8Bit()` per read; here the two widths
+/// are separate specializations of one implementation, so neither pays for the other.
 @_expose(Cxx)
-public func cssTokenizeSwiftFillChunk16(
+public func cssTokenizeSwiftAll16(
     _ data: WebCore.CSSTokenizerSpan16,
-    _ statePointer: UnsafeMutablePointer<WebCore.CSSSwiftTokenizerState>,
-    _ outBase: UnsafeMutableRawPointer,
-    _ capacity: Int,
-    _ unescapeBase: UnsafeMutableRawPointer,
-    _ unescapeCapacity: Int,
-    _ blockStackBase: UnsafeMutableRawPointer,
-    _ blockStackCapacity: Int
-) -> Int {
-    unsafe fillChunk(Span<UInt16>(_unsafeCxxSpan: data), statePointer, outBase, capacity,
-        unescapeBase, unescapeCapacity, blockStackBase, blockStackCapacity)
+    _ sink: WebCore.CSSSwiftTokenSink
+) -> Bool {
+    tokenizeAll(unsafe Span<UInt16>(_unsafeCxxSpan: data), sink)
 }
 
 /// The `index`-th token, for the validation test to walk the stream alongside
@@ -1297,16 +1158,8 @@ public func cssTokenizeSwiftNth(_ data: WebCore.CSSTokenizerSpan8, _ index: Int)
     let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
     var tokenizer = CSSTokenizerSwift<UInt8>()
     var i = 0
-    // Block-stack storage for this test/benchmark entry point, deep enough for any
-    // of its inputs; the shipping path gets a growable one from the caller. The
-    // capacity is written out rather than named, because a file-scope `let` would be
-    // a global and cost a swift_once on first access.
-    var storage = UniqueArray<UInt8>()
-    storage.reserveCapacity(4096)
-    for _ in 0 ..< 4096 { storage.append(0) }
-    var blocks = storage.mutableSpan
     while true {
-        let t = tokenizer.nextToken(span, &blocks)
+        let t = tokenizer.nextToken(span)
         if i == index || t.type == CSSTokenTypeSwift.endOfFile.rawValue { return exported(t) }
         i &+= 1
     }
