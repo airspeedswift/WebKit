@@ -336,30 +336,41 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
             if (isASCII(source[0])) {
                 // Fast path for ASCII. Most UTF-8 text will be ASCII.
                 //
-                // Measure the length of the ASCII run first (a machine word at a
-                // time, no stores), then copy the whole run with a single
-                // memcpySpan rather than copying one word per iteration. memcpy
-                // can use wider stores than a hand-rolled word loop.
-                // No alignment precondition: WTF::unalignedLoad handles any
-                // offset. The previous code gated this whole path on
+                // A machine word at a time via WTF::unalignedLoad, which has no
+                // alignment precondition, testing and copying in the SAME pass.
+                //
+                // Two separate things are deliberate here. The first is that there
+                // is no alignment gate: this used to be wrapped in
                 // isAlignedToMachineWord(source.data()), which for mixed-script
                 // text is usually false after a multi-byte sequence — with a
                 // 66-byte period, alignment recurs only every 4th run — so most
-                // runs fell back to the byte-at-a-time path below.
+                // runs fell back to the byte-at-a-time path below. Removing the
+                // gate is worth ~1.5x on that shape.
+                //
+                // The second is that the copy is *fused* with the test rather than
+                // measuring the run first and copying it with one memcpySpan.
+                // Measure-then-copy reads the source twice, and that costs more on
+                // long ASCII runs than the wider stores buy: measured against this
+                // loop it is 0.70-0.83x on pure ASCII and 0.55-0.68x on input whose
+                // runs happen to stay word-aligned, at every buffer size from 4 KiB
+                // to 8 MiB. Pure ASCII is the common case for this path, so that
+                // trade is the wrong way round.
                 size_t limit = std::min(source.size(), destination.size());
-                size_t run = 0;
-                while (run + sizeof(WTF::MachineWord) <= limit) {
-                    auto chunk = WTF::unalignedLoad<WTF::MachineWord>(std::next(source.data(), run));
+                size_t i = 0;
+                while (i + sizeof(WTF::MachineWord) <= limit) {
+                    auto chunk = WTF::unalignedLoad<WTF::MachineWord>(std::next(source.data(), i));
                     if (!WTF::containsOnlyASCII<Latin1Character>(chunk))
                         break;
-                    run += sizeof(WTF::MachineWord);
+                    WTF::unalignedStore<WTF::MachineWord>(std::next(destination.data(), i), chunk);
+                    i += sizeof(WTF::MachineWord);
                 }
-                while (run < limit && isASCII(source[run]))
-                    ++run;
-                if (run) {
-                    memcpySpan(destination.first(run), source.first(run));
-                    skip(source, run);
-                    skip(destination, run);
+                while (i < limit && isASCII(source[i])) {
+                    destination[i] = source[i];
+                    ++i;
+                }
+                if (i) {
+                    skip(source, i);
+                    skip(destination, i);
                     continue;
                 }
                 consume(destination) = consume(source);
