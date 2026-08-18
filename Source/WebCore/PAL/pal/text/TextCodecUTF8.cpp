@@ -315,7 +315,6 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
     StringBuffer<Latin1Character> buffer(bufferSize);
 
     auto source = bytes;
-    auto* alignedEnd = WTF::alignToMachineWord(std::to_address(source.end()));
     auto destination = buffer.span();
 
     do {
@@ -444,20 +443,25 @@ upConvertTo16Bit:
         while (!source.empty()) {
             if (isASCII(source[0])) {
                 // Fast path for ASCII. Most UTF-8 text will be ASCII.
-                if (WTF::isAlignedToMachineWord(source.data())) {
-                    while (source.data() < alignedEnd) {
-                        auto chunk = reinterpretCastSpanStartTo<const WTF::MachineWord>(source);
-                        if (!WTF::containsOnlyASCII<Latin1Character>(chunk))
-                            break;
-                        copyASCIIMachineWord(destination16, source);
-                        skip(source, sizeof(WTF::MachineWord));
-                        skip(destination16, sizeof(WTF::MachineWord));
-                    }
-                    if (source.empty())
+                //
+                // No alignment gate, and the copy stays fused with the test, both
+                // for the reasons given on the 8-bit path above. The copy here is a
+                // *widening* one -- eight bytes become eight char16_t -- so it stays
+                // copyASCIIMachineWord rather than becoming a memcpy, which is also
+                // why measure-then-copy was never on the table for this path.
+                while (source.size() >= sizeof(WTF::MachineWord)
+                    && destination16.size() >= sizeof(WTF::MachineWord)) {
+                    auto chunk = WTF::unalignedLoad<WTF::MachineWord>(source.data());
+                    if (!WTF::containsOnlyASCII<Latin1Character>(chunk))
                         break;
-                    if (!isASCII(source[0]))
-                        continue;
+                    copyASCIIMachineWord(destination16, source);
+                    skip(source, sizeof(WTF::MachineWord));
+                    skip(destination16, sizeof(WTF::MachineWord));
                 }
+                if (source.empty())
+                    break;
+                if (!isASCII(source[0]))
+                    continue;
                 consume(destination16) = consume(source);
                 continue;
             }
