@@ -102,8 +102,8 @@ private:
 
     // Fills m_tokens by driving the Swift tokenizer (CSSTokenizerSwift.swift) and
     // converting its POD tokens, instead of running the C++ state machine below.
-    // Returns false — falling back to the C++ path — for 16-bit input, nesting
-    // deeper than the fixed block stack, or an allocation failure.
+    // Both of StringImpl's widths are handled and the block stack grows to fit,
+    // so the only fallback left is an allocation failure.
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);

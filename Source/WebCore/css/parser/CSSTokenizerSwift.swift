@@ -262,9 +262,6 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     public var consumedOffset: Int { offset }
 
-    /// Restores the cursor and block stack saved by `saveState`, so C++ can drive
-    /// tokenization in cache-sized chunks without holding a Swift value across
-    /// calls (it cannot: this type is `~Copyable`).
     /// The unescaped code units produced since the last `startChunk()`.
     var unescapedUnits: Span<UInt16> { unescaped.span }
 
@@ -922,8 +919,9 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 // MARK: - C++ entry points
 //
 // POD in, POD out, so the C++ side needs no Swift type beyond the token struct
-// itself. Nothing in the shipping parser calls these yet; they are reached only
-// from the benchmark and the validation test.
+// itself. `cssTokenizeSwiftAll8`/`16` are what CSSTokenizer's constructor drives
+// when `Scanner::Swift` is selected; `cssTokenizeSwiftSpan` and
+// `cssTokenizeSwiftNth` exist only for the benchmark and the validation test.
 
 /// Result of tokenizing a whole stylesheet.
 /// `@frozen` matters here, not just as documentation. WebCore compiles Swift with
