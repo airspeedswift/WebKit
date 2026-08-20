@@ -80,29 +80,6 @@ struct CSSSwiftToken {
     uint8_t flags;
 };
 
-// Tokenizer state carried across chunked calls into the Swift island, so the
-// shared token buffer can stay small enough to sit in cache instead of streaming
-// one entry per token through memory.
-//
-// The block stack is a fixed 64 entries. CSS nesting deeper than that sets
-// `blockStackOverflowed`, and the caller falls back to the C++ tokenizer rather
-// than spilling — Swift has no growable container with inline capacity, and a
-// heap-allocated stack here would reintroduce the allocation this is avoiding.
-struct CSSSwiftTokenizerState {
-    uint32_t offset;
-    // Depth only: the stack's storage is a buffer the caller owns across chunks, so
-    // it never has to be copied in and out, and it can grow without bound.
-    uint32_t blockDepth;
-    // Code units written to the caller's unescape buffer by this chunk.
-    uint32_t unescapedLength;
-    bool reachedEnd;
-    // One token needed more room than the whole of the relevant buffer: grow it and
-    // call again. Only ever set when the chunk produced no tokens at all, and the
-    // tokenizer has rewound, so nothing has been consumed.
-    bool needsMoreUnescapeCapacity;
-    bool needsMoreBlockCapacity;
-};
-
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSTokenizerInputStream);
 class CSSTokenizerInputStream {
     WTF_MAKE_NONCOPYABLE(CSSTokenizerInputStream);
