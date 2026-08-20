@@ -92,9 +92,6 @@ public:
 
     static bool NODELETE isWhitespace(CSSParserTokenType);
 
-    // Forces the Swift or C++ tokenizer path regardless of the environment gate,
-    // so a test can build both token streams in one process and compare them.
-    // Pass nullopt to go back to the gate.
     // How many times the Swift scanner has declined an input and fallen back to the
     // C++ one. A test that compares the two passes trivially if the Swift scanner
     // silently declined, so tests assert on this.
@@ -111,10 +108,9 @@ private:
 
     // Swift tokenizer path (CSSTokenizerSwift.swift, notes §11). Fills m_tokens
     // by driving the Swift island and converting its POD tokens, instead of
-    // running the C++ state machine below. Returns false if it declined the input
-    // (16-bit, or nesting deeper than the island's fixed block stack) or ran out
-    // of memory, in which case the caller falls back to the C++ path.
-    //
+    // running the C++ state machine below. Both of StringImpl's widths are
+    // handled and the island's block stack grows, so the only decline left is
+    // running out of memory, in which case the caller falls back to the C++ path.
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
