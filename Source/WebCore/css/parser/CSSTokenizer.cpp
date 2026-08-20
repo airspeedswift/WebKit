@@ -35,8 +35,6 @@
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
 #include "WebCoreSwift-Generated.h"
-#include <cstdlib>
-#include <limits>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/dtoa.h>
 #include <wtf/text/StringBuilder.h>
@@ -109,11 +107,17 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapp
 
     // The Swift scanner, when selected and when it accepts this input. Falls through
     // to the C++ state machine otherwise, including on allocation failure, so this
-    // cannot make a previously-working parse fail.
+    // cannot make a previously-working parse fail. Everything the island appended has
+    // to be undone first: m_tokens, the cursor, and the strings a token with escapes
+    // registered in the pool -- but only back to where the island started, because
+    // preprocessString may itself have put the input string there and m_input holds a
+    // view into it.
     if (scanner == Scanner::Swift) {
+        size_t stringPoolSizeBeforeIsland = m_stringPool.size();
         if (tokenizeWithSwiftIsland(wrapper, constructionSuccessPtr))
             return;
         m_tokens.shrink(0);
+        m_stringPool.shrink(stringPoolSizeBeforeIsland);
         m_input.seek(0);
     }
 
@@ -248,7 +252,6 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
     for (const auto& pod : podTokens) {
         auto type = static_cast<CSSParserTokenType>(pod.type);
 
-
         // Comments are not kept, matching the C++ path, but the inspector wants
         // their extent and where they sat in the token stream.
         if (type == CommentToken) {
@@ -264,7 +267,7 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
         // create8BitIfPossible to match what the C++ path's StringBuilder produces,
         // so the two paths agree on the string's representation as well as its
         // contents.
-        auto value = [&](void) -> StringView {
+        auto value = [&]() -> StringView {
             if (pod.flags & SwiftFlagUnescaped) [[unlikely]] {
                 auto units = unescapedUnits.subspan(pod.valueStart, pod.valueLength);
                 return registerString(String { StringImpl::create8BitIfPossible(units) });
@@ -335,6 +338,7 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
     }
     return true;
 }
+
 unsigned CSSTokenizer::tokenCount()
 {
     return m_tokens.size();
