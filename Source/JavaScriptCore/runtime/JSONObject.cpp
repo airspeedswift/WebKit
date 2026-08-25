@@ -2168,11 +2168,38 @@ static NEVER_INLINE JSValue jsonParseSlow(JSGlobalObject* globalObject, JSString
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
 
+    // Without source-text access there are no ranges to record, so the parse a reviver
+    // needs is exactly the strict parse `JSON.parse(text)` does — the reviver is the
+    // `Walker`'s business and not the parser's. Route it through the same entry, which
+    // means the island covers this path too with no new boundary: it produces the value and
+    // the walk consumes it. `parseStrictJSON` falls back to
+    // `LiteralParser<CharType, Disabled>::tryLiteralParse` when the island declines, which
+    // is `parseRecursivelyEntry` rather than the iterative `parse()`. Those two are already
+    // interchangeable inside JSC — `parseRecursively` falls back to
+    // `parse(vm, StartParseExpression, nullptr)` at the soft stack limit, and
+    // `useRecursiveJSONParse` switches between them wholesale — and they produce
+    // byte-identical output, error messages included.
+    if (!Options::useJSONSourceTextAccess()) {
+        String errorMessage;
+        JSValue unfiltered = view.is8Bit()
+            ? parseStrictJSON(globalObject, view.span8(), &errorMessage)
+            : parseStrictJSON(globalObject, view.span16(), &errorMessage);
+        EXCEPTION_ASSERT(!scope.exception() || !unfiltered);
+        if (!unfiltered) {
+            RETURN_IF_EXCEPTION(scope, { });
+            throwSyntaxError(globalObject, scope, errorMessage);
+            return { };
+        }
+        scope.release();
+        Walker walker(globalObject, string, function, callData, nullptr);
+        return walker.walk(unfiltered);
+    }
+
     JSONRanges ranges;
     JSValue unfiltered;
     if (view.is8Bit()) {
         LiteralParser<Latin1Character, JSONReviverMode::Enabled> jsonParser(globalObject, view.span8(), StrictJSON);
-        unfiltered = jsonParser.tryLiteralParse(Options::useJSONSourceTextAccess() ? &ranges : nullptr);
+        unfiltered = jsonParser.tryLiteralParse(&ranges);
         EXCEPTION_ASSERT(!scope.exception() || !unfiltered);
         if (!unfiltered) {
             RETURN_IF_EXCEPTION(scope, { });
@@ -2181,7 +2208,7 @@ static NEVER_INLINE JSValue jsonParseSlow(JSGlobalObject* globalObject, JSString
         }
     } else {
         LiteralParser<char16_t, JSONReviverMode::Enabled> jsonParser(globalObject, view.span16(), StrictJSON);
-        unfiltered = jsonParser.tryLiteralParse(Options::useJSONSourceTextAccess() ? &ranges : nullptr);
+        unfiltered = jsonParser.tryLiteralParse(&ranges);
         EXCEPTION_ASSERT(!scope.exception() || !unfiltered);
         if (!unfiltered) {
             RETURN_IF_EXCEPTION(scope, { });
@@ -2191,7 +2218,7 @@ static NEVER_INLINE JSValue jsonParseSlow(JSGlobalObject* globalObject, JSString
     }
 
     scope.release();
-    Walker walker(globalObject, string, function, callData, Options::useJSONSourceTextAccess() ? &ranges : nullptr);
+    Walker walker(globalObject, string, function, callData, &ranges);
     return walker.walk(unfiltered);
 }
 
