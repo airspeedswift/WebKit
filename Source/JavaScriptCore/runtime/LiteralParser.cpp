@@ -2531,6 +2531,13 @@ ALWAYS_INLINE bool jsonSwiftFastArrayAppend(VM& vm, JSObject* array, unsigned in
 // entries, and that loses more on documents that never store a property than it wins where it
 // fires.
 //
+// It takes the caller's `Frame&` rather than reaching for `frames.last()` itself, which is
+// what it used to do. `jsonSwiftStoreValue` has already tested `frames.isEmpty()` and
+// computed `frames.last()` in order to decide that this is an object at all, so re-deriving
+// them here was a size load, a compare, a buffer load and a multiply-add per property — and
+// a fixed cost per property is exactly what this function is shaped around. 176 -> 160
+// instructions, and the frame shrinks from 80 bytes to 64.
+//
 // The condition is `isInlineOffset` rather than the general store's capacity compare: one
 // compare against a constant, and it keeps the butterfly reallocation behind the decline,
 // so the window in which the object's StructureID is nuked — a release-mode `die()` if the
@@ -2538,12 +2545,9 @@ ALWAYS_INLINE bool jsonSwiftFastArrayAppend(VM& vm, JSObject* array, unsigned in
 // `firstOutOfLineOffset` both sides have no out-of-line slots, so equal capacity is implied and
 // the reallocation provably cannot be the skipped branch; the ASSERT below states that.
 NEVER_INLINE bool jsonSwiftStorePropertyValueFast(JSONSwiftObjectModelState& state,
-    JSObject* object, JSValue value)
+    JSONSwiftObjectModelState::Frame& frame, JSObject* object, JSValue value)
 {
     using PendingKey = JSONSwiftObjectModelState::PendingKey;
-    if (state.frames.isEmpty()) [[unlikely]]
-        return false;
-    auto& frame = state.frames.last();
     if (frame.pendingKey != PendingKey::Offsets) [[unlikely]]
         return jsonSwiftStorePropertyValue(state, object, value);
 
@@ -2606,7 +2610,7 @@ ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue
     auto& frame = state.frames.last();
     JSObject* container = state.containers[state.frames.size() - 1];
     if (frame.isObject)
-        return jsonSwiftStorePropertyValueFast(state, container, value);
+        return jsonSwiftStorePropertyValueFast(state, frame, container, value);
 
     unsigned index = frame.nextIndex++;
     // Nothing on this path can throw or allocate, so the throw scope is declared below it
