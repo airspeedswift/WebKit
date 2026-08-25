@@ -234,6 +234,11 @@ SWIFT_LIBRARY_LEVEL = spi;
 _SWIFT_EXPLICIT_MODULES_ALLOW_CXX_INTEROP = YES;
 SWIFT_OBJC_INTEROP_MODE = objcxx;
 
+// Swift-in-WebCore (see webkit-swift-adoption-notes.md §8f). WebCore inherited
+// the common Swift settings but was never wired to compile Swift: it had no
+// module name, no generated-header name, and none of the @_expose(Cxx) flags.
+SWIFT_OBJC_INTERFACE_HEADER_NAME = WebCoreSwift-Generated.h;
+
 MODULEMAP_FILE = $(SRCROOT)/WebCore.modulemap;
 MODULEMAP_PRIVATE_FILE = $(SRCROOT)/WebCore_Private.modulemap;
 
@@ -251,7 +256,7 @@ MODULE_VERIFIER_SUPPORTED_LANGUAGES = objective-c++;
 MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = c++23;
 MODULE_VERIFIER_KIND = builtin;
 
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b;
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal;
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
