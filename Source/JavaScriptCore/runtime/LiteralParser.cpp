@@ -2785,8 +2785,10 @@ JSONSwiftColdResult JSONSwiftObjectModel::slowNumberValue(uint32_t initial)
     double value = 0;
     ptrdiff_t endOffset = 0;
     ASSERT(state.isValidRange(initial, 0));
-    // No lexNumberError call: a malformed number makes the island decline, and the C++
-    // parse that then runs from the top builds the message.
+    // No lexNumberError call here: the island's grammar reads this status, runs
+    // `lexNumberError`'s own analysis over the same cursor (`diagnoseNumberError`) and reports
+    // the message itself. So `Declined` from here means one thing to it —
+    // `parseJSONDouble` refused the text — and nothing else here may return it.
     bool parsed = state.is8Bit
         ? state.parseDouble<Latin1Character>(initial, value, endOffset)
         : state.parseDouble<char16_t>(initial, value, endOffset);
