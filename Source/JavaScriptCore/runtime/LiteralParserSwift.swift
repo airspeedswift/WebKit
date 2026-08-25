@@ -1023,6 +1023,12 @@ func jsonParseDocument16(
     _ model: JSC.JSONSwiftObjectModel
 ) -> UInt8 {
     let units = unsafe Span<UInt16>(_unsafeCxxSpan: data)
+    // Fewer than 2^31 units, which `JSString::MaxLength` already guarantees. Stating
+    // it licenses the wrapping `UInt32` conversions and discharges the overflow branches
+    // in this width's byte-offset arithmetic. Deliberately absent from the 8-bit entry,
+    // where the same fact re-lowers the SIMD reduce and is a large loss on short strings;
+    // do not add it there without measuring.
+    precondition(units.count <= Int(Int32.max))
     let raw = RawSpan(elements: units)
     var grammar = JSONSwiftGrammar<WideUnits>()
     return grammar.parse(raw, model)
