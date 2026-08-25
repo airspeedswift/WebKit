@@ -697,12 +697,9 @@ JSValueRef JSValueMakeFromJSONString(JSContextRef ctx, JSStringRef string)
     JSGlobalObject* globalObject = toJS(ctx);
     JSLockHolder locker(globalObject);
     String str = string->string();
-    if (str.is8Bit()) {
-        LiteralParser<Latin1Character, JSONReviverMode::Disabled> parser(globalObject, str.span8(), StrictJSON);
-        return toRef(globalObject, parser.tryLiteralParse());
-    }
-    LiteralParser<char16_t, JSONReviverMode::Disabled> parser(globalObject, str.span16(), StrictJSON);
-    return toRef(globalObject, parser.tryLiteralParse());
+    if (str.is8Bit())
+        return toRef(globalObject, parseStrictJSON(globalObject, str.span8()));
+    return toRef(globalObject, parseStrictJSON(globalObject, str.span16()));
 }
 
 JSStringRef JSValueCreateJSONString(JSContextRef ctx, JSValueRef apiValue, unsigned indent, JSValueRef* exception)

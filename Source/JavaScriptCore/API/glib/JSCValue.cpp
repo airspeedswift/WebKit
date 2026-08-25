@@ -2083,19 +2083,13 @@ JSCValue* jsc_value_new_from_json(JSCContext* context, const char* json)
     JSC::JSLockHolder locker(globalObject);
 
     JSValueRef exception = nullptr;
-    JSC::JSValue jsValue;
     String jsonString = String::fromUTF8(json);
-    if (jsonString.is8Bit()) {
-        JSC::LiteralParser<Latin1Character, JSC::JSONReviverMode::Disabled> jsonParser(globalObject, jsonString.span8(), JSC::StrictJSON);
-        jsValue = jsonParser.tryLiteralParse();
-        if (!jsValue)
-            exception = toRef(JSC::createSyntaxError(globalObject, jsonParser.getErrorMessage()));
-    } else {
-        JSC::LiteralParser<char16_t, JSC::JSONReviverMode::Disabled> jsonParser(globalObject, jsonString.span16(), JSC::StrictJSON);
-        jsValue = jsonParser.tryLiteralParse();
-        if (!jsValue)
-            exception = toRef(JSC::createSyntaxError(globalObject, jsonParser.getErrorMessage()));
-    }
+    String errorMessage;
+    JSC::JSValue jsValue = jsonString.is8Bit()
+        ? JSC::parseStrictJSON(globalObject, jsonString.span8(), &errorMessage)
+        : JSC::parseStrictJSON(globalObject, jsonString.span16(), &errorMessage);
+    if (!jsValue)
+        exception = toRef(JSC::createSyntaxError(globalObject, errorMessage));
 
     if (exception) {
         jscContextHandleExceptionIfNeeded(context, exception);
