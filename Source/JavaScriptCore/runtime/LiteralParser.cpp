@@ -2328,6 +2328,31 @@ ALWAYS_INLINE bool jsonSwiftEqualIdentifier(UniquedStringImpl* rep, std::span<co
     return WTF::equal(rep, name);
 }
 
+// The same comparison with nothing out of line in it, for the one caller that is entered
+// once per property. `WTF::equal(const StringImpl*, span)` is defined in StringImpl.cpp, so
+// the version above is a call — and the call is what gives its caller a stack frame, on the
+// path a run of same-shaped objects takes. `parseRecursively` pays that once per container,
+// because its store is inlined into a frame spanning the whole object loop; the island would
+// pay it once per property.
+//
+// This is `equalInternal` (StringImpl.cpp:1464) spelled out of the ALWAYS_INLINE span
+// overloads, which exist for all four width pairs. The null checks there are dropped, not
+// forgotten: `rep` is a transition's property name and `name` is a subspan of the document,
+// so neither can have a null data pointer, and the empty case is the length compare's.
+template<typename CharType>
+ALWAYS_INLINE bool jsonSwiftEqualIdentifierLeaf(UniquedStringImpl* rep, std::span<const CharType> name)
+{
+    if (rep->isSymbol())
+        return false;
+    if (rep->length() != name.size())
+        return false;
+    if (name.empty())
+        return true;
+    if (rep->is8Bit())
+        return WTF::equal(rep->span8().data(), name);
+    return WTF::equal(rep->span16().data(), name);
+}
+
 // `parseRecursively`'s four-operation store (:1644), and the reason the facade is shaped
 // this way rather than as primitives Swift drives: between `nukeStructureAndSetButterfly`
 // and `setStructure` the object's StructureID is nuked, and a conservatively-scanned cell
@@ -2529,14 +2554,9 @@ ALWAYS_INLINE bool jsonSwiftFastArrayAppend(VM& vm, JSObject* array, unsigned in
 // container, while the island pays one function entry per property, which is why this fast
 // half exists at all; marking it ALWAYS_INLINE would put a copy of it in each of five facade
 // entries, and that loses more on documents that never store a property than it wins where it
-// fires.
-//
-// It takes the caller's `Frame&` rather than reaching for `frames.last()` itself, which is
-// what it used to do. `jsonSwiftStoreValue` has already tested `frames.isEmpty()` and
-// computed `frames.last()` in order to decide that this is an object at all, so re-deriving
-// them here was a size load, a compare, a buffer load and a multiply-add per property — and
-// a fixed cost per property is exactly what this function is shaped around. 176 -> 160
-// instructions, and the frame shrinks from 80 bytes to 64.
+// fires. It takes the caller's `Frame&` for the same reason: `jsonSwiftStoreValue` has already
+// tested `frames.isEmpty()` and computed `frames.last()` to decide this is an object at all,
+// and a fixed cost per property is exactly what this function is shaped around.
 //
 // The condition is `isInlineOffset` rather than the general store's capacity compare: one
 // compare against a constant, and it keeps the butterfly reallocation behind the decline,
@@ -2566,9 +2586,9 @@ NEVER_INLINE bool jsonSwiftStorePropertyValueFast(JSONSwiftObjectModelState& sta
     // The one width-dependent step: the name is offsets into the input, so comparing it
     // names a character. The branch is on a flag that is constant for the whole document.
     SUPPRESS_UNCOUNTED_ARG bool nameMatches = state.is8Bit
-        ? jsonSwiftEqualIdentifier(transition->transitionPropertyName(),
+        ? jsonSwiftEqualIdentifierLeaf(transition->transitionPropertyName(),
             state.input8.subspan(frame.keyStart, frame.keyLength))
-        : jsonSwiftEqualIdentifier(transition->transitionPropertyName(),
+        : jsonSwiftEqualIdentifierLeaf(transition->transitionPropertyName(),
             state.input16.subspan(frame.keyStart, frame.keyLength));
     if (!nameMatches)
         return jsonSwiftStorePropertyValue(state, object, value);
