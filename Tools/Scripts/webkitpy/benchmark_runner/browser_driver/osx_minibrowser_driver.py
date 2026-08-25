@@ -74,6 +74,64 @@ class OSXMiniDriver(OSXBrowserDriver):
             process = subprocess.Popen([binary_path, '--url', url], env=env)
         except Exception as error:
             _log.error('Popen failed: {error}'.format(error=error))
+            return
+
+        self._process = process
+        self._assert_loaded_from(process.pid, browser_build_absolute_path)
+        self._activate(process.pid, app_path)
+
+    # Fail loudly if the browser is not actually running this build's frameworks. Without
+    # this the run silently measures system WebKit -- the window looks identical and the
+    # benchmark completes normally, so the numbers look fine and mean nothing. The Safari
+    # driver has had this check; MiniBrowser's had not.
+    @staticmethod
+    def _assert_loaded_from(pid, browser_build_absolute_path):
+        for _ in range(20):
+            # `lsof +D` exits non-zero when some files under the directory are not open,
+            # so read its output rather than trusting the status, as the Safari driver does.
+            output = subprocess.Popen(
+                ['/usr/sbin/lsof', '-a', '-p', str(pid), '+D', browser_build_absolute_path],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, encoding='utf-8',
+            ).communicate()[0]
+            if '.framework' in output:
+                _log.info('Verified MiniBrowser loaded frameworks from "{}"'.format(browser_build_absolute_path))
+                return
+            time.sleep(0.5)
+        raise Exception(
+            'MiniBrowser (pid {}) has loaded no framework from "{}" -- it is running system WebKit, '
+            'so this run would measure nothing about the build under test.'.format(pid, browser_build_absolute_path))
+
+    # Bring the window to the front, which Popen alone does not do: a process launched
+    # this way starts behind whatever is already on screen. The Safari driver gets this
+    # for free because it finishes by launching the URL with `open -a`.
+    #
+    # `NSRunningApplication.activateWithOptions_` is not enough on its own -- called from
+    # a plain Python process it is usually refused, and it logged exactly that here. Going
+    # through Launch Services with `open -a` is permitted, so do that first and use the
+    # AppKit call only to confirm.
+    #
+    # Deliberately no retry loop: an earlier version retried for ten seconds and stole
+    # focus back on every attempt, which made the run impossible to interrupt from the
+    # terminal. Being behind another window is in any case no longer harmful, because
+    # MiniBrowser disables window occlusion detection for itself (see
+    # Tools/MiniBrowser/mac/WK2BrowserWindowController.m).
+    @staticmethod
+    def _activate(pid, app_path):
+        try:
+            subprocess.call(['/usr/bin/open', '-a', app_path])
+        except Exception as error:
+            _log.error('Could not open MiniBrowser to the front: {error}'.format(error=error))
+        try:
+            from webkitpy.autoinstalled.pyobjc_frameworks import AppKit
+            app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if app:
+                app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+                if app.isActive():
+                    _log.info('Activated MiniBrowser (pid {})'.format(pid))
+                    return
+        except Exception as error:
+            _log.error('Could not activate MiniBrowser: {error}'.format(error=error))
+        _log.info('MiniBrowser may not be frontmost; it has occlusion detection disabled, so the page is not throttled.')
 
     def close_browsers(self):
         super(OSXMiniDriver, self).close_browsers()
