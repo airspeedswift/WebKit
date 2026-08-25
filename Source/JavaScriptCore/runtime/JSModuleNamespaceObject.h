@@ -82,9 +82,17 @@ private:
         WriteBarrier<AbstractModuleRecord> moduleRecord;
     };
 
+#if !defined(__swift__)
     using ExportMap = OrderedHashMap<RefPtr<UniquedStringImpl>, ExportEntry, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>>;
 
     ExportMap m_exports;
+
+    static_assert(sizeof(ExportMap) == 4 * sizeof(void*) && alignof(ExportMap) == alignof(void*));
+#else
+    // Hidden from the Clang importer for the reason AbstractModuleRecord::ImportEntries is,
+    // with storage of the same size and alignment in its place.
+    alignas(void*) unsigned char m_exports[4 * sizeof(void*)];
+#endif
     WriteBarrier<AbstractModuleRecord> m_moduleRecord;
     const bool m_isDeferred;
 
