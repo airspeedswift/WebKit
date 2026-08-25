@@ -358,8 +358,8 @@ private:
     friend struct JSONSwiftObjectModelState;
 
     // The gate: StrictJSON and no reviver, read once per parse. Unlike the two
-    // conditions, a document *inside* them that the island cannot finish — a top-level
-    // primitive, nesting past its stack, anything malformed — is not excluded here but
+    // conditions, a document *inside* them that the island cannot finish — nesting past
+    // its stack, anything malformed — is not excluded here but
     // declined mid-parse, and the C++ parse then runs from the top.
     bool swiftParserUsable() const
     {

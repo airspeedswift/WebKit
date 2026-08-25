@@ -2178,9 +2178,9 @@ public:
     // out, leaving the slot empty.
     Vector<Identifier, 4> resolvedKeys;
 
-    // The completed document, once the outermost container closes. Rooted the same way
-    // `containers` is: this state is a local of `parseWithSwiftIsland`, so the collector
-    // scans it as it scans any frame.
+    // The completed document, once the outermost container closes — or the single value, for
+    // a document that is a bare primitive. Rooted the same way `containers` is: this state is
+    // a local of `parseWithSwiftIsland`, so the collector scans it as it scans any frame.
     JSValue result;
     bool hasResult { false };
 
@@ -2534,10 +2534,20 @@ NEVER_INLINE bool jsonSwiftStorePropertyValueFast(JSONSwiftObjectModelState& sta
 ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue value)
 {
     if (state.frames.isEmpty()) [[unlikely]] {
-        // A bare top-level value: the island's grammar reaches this once, for a document
-        // that is a primitive rather than a container. Not an error, just not the
-        // island's job — `parsePrimitiveValue` handles it and this declines.
-        return false;
+        // A document that is a bare primitive — `1`, `"x"`, `true` — which the grammar
+        // reaches here exactly once, before any container has opened. Recorded as the
+        // result rather than declined, because a decline costs the document twice: the
+        // island lexes the number, gives up, and the C++ lexes it again from offset zero.
+        //
+        // Trailing content is still rejected, by the grammar rather than here: at depth 0
+        // the position after a value is `.documentEnd`, which accepts nothing but the end
+        // token. A second value therefore cannot reach this, and the guard below is for
+        // the invariant rather than for a reachable input.
+        if (state.hasResult) [[unlikely]]
+            return false;
+        state.result = value;
+        state.hasResult = true;
+        return true;
     }
 
     auto& frame = state.frames.last();
@@ -2829,9 +2839,10 @@ JSValue LiteralParser<CharType, reviverMode>::parseWithSwiftIsland(VM& vm, bool&
         return state.result;
     }
     // `OK` without a result cannot happen: the grammar reaches `.documentEnd` only after a
-    // container closed, and closing the outermost one is what sets this. But `result` would
-    // then be the empty JSValue and `handled` would say it was a real answer, so it declines
-    // rather than being asserted away, at one compare per document.
+    // value was stored, which is either the outermost container closing or the bare
+    // primitive case in `jsonSwiftStoreValue`, and both set this. But `result` would then be
+    // the empty JSValue and `handled` would say it was a real answer, so it declines rather
+    // than being asserted away, at one compare per document.
     ASSERT(status != JSONSwiftParseOK || state.hasResult);
     if (status == JSONSwiftParseStopped && state.sawException) {
         handled = true;
