@@ -573,6 +573,13 @@ extension WebGPU.CommandEncoder {
         setExistingEncoder(nil)
     }
 
+    // Metal declares `#define MTLCounterDontSample ((NSUInteger)-1)`. Swift maps
+    // NSUInteger to Int, so the macro imports as an Int-typed constant whose
+    // value (UInt.max) does not fit in Int; every reference to it is therefore
+    // an "integer literal overflows when stored into 'Int'" error. Spell the
+    // same bit pattern directly instead.
+    private static let counterDontSample = Int(bitPattern: UInt.max)
+
     private func timestampWriteIndex(writeIndex: UInt32) -> Int {
         writeIndex == WGPU_QUERY_SET_INDEX_UNDEFINED ? 0 : Int(UInt(writeIndex))
     }
@@ -1071,12 +1078,12 @@ extension WebGPU.CommandEncoder {
                 mtlDescriptor.sampleBufferAttachments[0].sampleBuffer = buffer
                 mtlDescriptor.sampleBufferAttachments[0].startOfVertexSampleIndex = timestampWriteIndex(
                     writeIndex: timestampWrites.beginningOfPassWriteIndex,
-                    defaultValue: MTLCounterDontSample,
+                    defaultValue: Self.counterDontSample,
                     offset: counterSampleBuffer.offset
                 )
                 mtlDescriptor.sampleBufferAttachments[0].endOfVertexSampleIndex = timestampWriteIndex(
                     writeIndex: timestampWrites.endOfPassWriteIndex,
-                    defaultValue: MTLCounterDontSample,
+                    defaultValue: Self.counterDontSample,
                     offset: counterSampleBuffer.offset
                 )
                 mtlDescriptor.sampleBufferAttachments[0].startOfFragmentSampleIndex =
@@ -2592,13 +2599,13 @@ extension WebGPU.CommandEncoder {
 
             computePassDescriptor.sampleBufferAttachments[0].startOfEncoderSampleIndex = timestampWriteIndex(
                 writeIndex: timestampWrites.beginningOfPassWriteIndex,
-                defaultValue: MTLCounterDontSample,
+                defaultValue: Self.counterDontSample,
                 offset: counterSampleBuffer.offset
             )
 
             computePassDescriptor.sampleBufferAttachments[0].endOfEncoderSampleIndex = timestampWriteIndex(
                 writeIndex: timestampWrites.endOfPassWriteIndex,
-                defaultValue: MTLCounterDontSample,
+                defaultValue: Self.counterDontSample,
                 offset: counterSampleBuffer.offset
             )
 
