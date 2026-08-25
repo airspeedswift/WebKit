@@ -160,39 +160,39 @@ extension UInt16: CSSCodeUnit { }
 // MARK: - Character predicates
 //
 // Direct ports of CSSParserIdioms.h and the ASCIICType.h helpers the tokenizer
-// uses. `@inline(__always)`: each is a handful of compares and every one is on
+// uses. `@inline(always)`: each is a handful of compares and every one is on
 // the per-character path.
 
-@inline(__always) private func isASCIIByte(_ c: some CSSCodeUnit) -> Bool { c <= 0x7F }
-@inline(__always) private func isASCIIDigitByte(_ c: some CSSCodeUnit) -> Bool { c >= 0x30 && c <= 0x39 }
-@inline(__always) private func isASCIIAlphaByte(_ c: some CSSCodeUnit) -> Bool {
+@inline(always) private func isASCIIByte(_ c: some CSSCodeUnit) -> Bool { c <= 0x7F }
+@inline(always) private func isASCIIDigitByte(_ c: some CSSCodeUnit) -> Bool { c >= 0x30 && c <= 0x39 }
+@inline(always) private func isASCIIAlphaByte(_ c: some CSSCodeUnit) -> Bool {
     ((c | 0x20) >= 0x61) && ((c | 0x20) <= 0x7A)
 }
-@inline(__always) private func isASCIIHexDigitByte(_ c: some CSSCodeUnit) -> Bool {
+@inline(always) private func isASCIIHexDigitByte(_ c: some CSSCodeUnit) -> Bool {
     isASCIIDigitByte(c) || ((c | 0x20) >= 0x61 && (c | 0x20) <= 0x66)
 }
-@inline(__always) private func hexValue(_ c: some CSSCodeUnit) -> UInt32 {
+@inline(always) private func hexValue(_ c: some CSSCodeUnit) -> UInt32 {
     // Callers guard with isASCIIHexDigitByte, so both subtractions are in range.
     isASCIIDigitByte(c) ? UInt32(c &- 0x30) : UInt32((c | 0x20) &- 0x61) &+ 10
 }
 /// isASCIIWhitespace: space, \n, \t, \r, \f — note \v is not included.
-@inline(__always) private func isASCIIWhitespaceByte(_ c: some CSSCodeUnit) -> Bool {
+@inline(always) private func isASCIIWhitespaceByte(_ c: some CSSCodeUnit) -> Bool {
     c == 0x20 || c == 0x0A || c == 0x09 || c == 0x0D || c == 0x0C
 }
 /// isCSSNewline: \n, \r, \f.
-@inline(__always) private func isCSSNewlineByte(_ c: some CSSCodeUnit) -> Bool {
+@inline(always) private func isCSSNewlineByte(_ c: some CSSCodeUnit) -> Bool {
     c == 0x0A || c == 0x0D || c == 0x0C
 }
 /// isNameStartCodePoint: ASCII alpha, '_', or any non-ASCII.
-@inline(__always) private func isNameStartByte(_ c: some CSSCodeUnit) -> Bool {
+@inline(always) private func isNameStartByte(_ c: some CSSCodeUnit) -> Bool {
     isASCIIAlphaByte(c) || c == 0x5F || !isASCIIByte(c)
 }
 /// isNameCodePoint: name-start, digit, or '-'.
-@inline(__always) private func isNameByte(_ c: some CSSCodeUnit) -> Bool {
+@inline(always) private func isNameByte(_ c: some CSSCodeUnit) -> Bool {
     isNameStartByte(c) || isASCIIDigitByte(c) || c == 0x2D
 }
 /// isNonPrintableCodePoint.
-@inline(__always) private func isNonPrintableByte(_ c: some CSSCodeUnit) -> Bool {
+@inline(always) private func isNonPrintableByte(_ c: some CSSCodeUnit) -> Bool {
     c <= 0x08 || c == 0x0B || (c >= 0x0E && c <= 0x1F) || c == 0x7F
 }
 
@@ -219,7 +219,7 @@ extension UInt16: CSSCodeUnit { }
 /// whose own condition already bounds the index (`while i < count`), the select
 /// this performs is pure overhead — measured at 28% on an all-whitespace input —
 /// so those loops index directly.
-@inline(__always) private func byteAt<Unit: CSSCodeUnit>(_ data: Span<Unit>, _ index: Int) -> Unit {
+@inline(always) private func byteAt<Unit: CSSCodeUnit>(_ data: Span<Unit>, _ index: Int) -> Unit {
     UInt(bitPattern: index) < UInt(bitPattern: data.count) ? data[index] : 0
 }
 
@@ -237,7 +237,7 @@ private enum Dispatch {
     case delimiter
 }
 
-@inline(__always) private func dispatchClass(_ c: some CSSCodeUnit) -> Dispatch {
+@inline(always) private func dispatchClass(_ c: some CSSCodeUnit) -> Dispatch {
     // Mirrors CSSTokenizer::codePoints exactly, including that a null entry
     // means DelimiterToken, and that every non-ASCII byte is a name start.
     switch c {
@@ -314,7 +314,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     private var unescaped = UniqueArray<UInt16>()
     /// Appends one code point, UTF-16 encoded. The buffer is this type's own and
     /// grows, so there is no capacity to overflow and no rewind protocol.
-    @inline(__always) private mutating func appendUnescaped(_ codePoint: UInt32) {
+    @inline(always) private mutating func appendUnescaped(_ codePoint: UInt32) {
         if codePoint > 0xFFFF {
             let value = codePoint &- 0x10000
             unescaped.append(UInt16(truncatingIfNeeded: 0xD800 &+ (value >> 10)))
@@ -324,13 +324,13 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         unescaped.append(UInt16(truncatingIfNeeded: codePoint))
     }
 
-    @inline(__always) private mutating func appendUnescaped(unit: Unit) {
+    @inline(always) private mutating func appendUnescaped(unit: Unit) {
         appendUnescaped(UInt32(truncatingIfNeeded: unit))
     }
 
     /// Range of the unescape buffer filled since `mark`, for a value that has just
     /// been unescaped into it.
-    @inline(__always) private func unescapedValue(since mark: Int) -> ScannedValue {
+    @inline(always) private func unescapedValue(since mark: Int) -> ScannedValue {
         ScannedValue(
             start: UInt32(truncatingIfNeeded: mark),
             length: UInt32(truncatingIfNeeded: unescaped.count &- mark),
@@ -359,7 +359,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     // The C++ control in the benchmark is monomorphic too, so the comparison
     // does not credit Swift for it; it is recorded separately as a C++ finding.
 
-    @inline(__always) private func peek(_ data: Span<Unit>, _ lookahead: Int) -> Unit {
+    @inline(always) private func peek(_ data: Span<Unit>, _ lookahead: Int) -> Unit {
         // Wrapping add: `offset` is at most `data.count + 1` and `lookahead` is a
         // small literal, so the sum cannot overflow for any span that exists.
         // This is the single most executed line in the island, so the check is
@@ -369,18 +369,18 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         return byteAt(data, offset &+ lookahead)
     }
 
-    @inline(__always) private mutating func consume(_ data: Span<Unit>) -> Unit {
+    @inline(always) private mutating func consume(_ data: Span<Unit>) -> Unit {
         let c = peek(data, 0)
         offset &+= 1
         return c
     }
 
-    @inline(__always) private mutating func advance(_ n: Int = 1) { offset &+= n }
-    @inline(__always) private mutating func reconsume() { offset &-= 1 }
+    @inline(always) private mutating func advance(_ n: Int = 1) { offset &+= n }
+    @inline(always) private mutating func reconsume() { offset &-= 1 }
 
     /// CSSTokenizerInputStream::offset() clamps: the cursor may be one past the
     /// end after consuming the EOF marker.
-    @inline(__always) private func clampedOffset(_ data: Span<Unit>) -> Int {
+    @inline(always) private func clampedOffset(_ data: Span<Unit>) -> Int {
         offset < data.count ? offset : data.count
     }
 
@@ -401,7 +401,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         offset = i
     }
 
-    @inline(__always) private mutating func consumeIfNext(_ data: Span<Unit>, _ c: Unit) -> Bool {
+    @inline(always) private mutating func consumeIfNext(_ data: Span<Unit>, _ c: Unit) -> Bool {
         if peek(data, 0) == c {
             advance()
             return true
@@ -409,7 +409,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         return false
     }
 
-    @inline(__always) private func twoCharsAreValidEscape(_ first: Unit, _ second: Unit) -> Bool {
+    @inline(always) private func twoCharsAreValidEscape(_ first: Unit, _ second: Unit) -> Bool {
         first == 0x5C && !isCSSNewlineByte(second)
     }
 
@@ -419,7 +419,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     // MARK: Token construction helpers
 
-    @inline(__always) private func token(
+    @inline(always) private func token(
         _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
     ) -> CSSTokenSwift {
@@ -431,13 +431,13 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         return t
     }
 
-    @inline(__always) private func delimiter(_ c: Unit, _ start: Int, _ data: Span<Unit>) -> CSSTokenSwift {
+    @inline(always) private func delimiter(_ c: Unit, _ start: Int, _ data: Span<Unit>) -> CSSTokenSwift {
         var t = token(.delimiter, start, data)
         t.extra = UInt32(truncatingIfNeeded: c)
         return t
     }
 
-    @inline(__always) private func valueToken(
+    @inline(always) private func valueToken(
         _ type: CSSTokenTypeSwift, _ value: ScannedValue, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
     ) -> CSSTokenSwift {
@@ -448,7 +448,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         return t
     }
 
-    @inline(__always) private mutating func pushBlock(_ type: CSSTokenTypeSwift) {
+    @inline(always) private mutating func pushBlock(_ type: CSSTokenTypeSwift) {
         blockStack.append(type.rawValue)
     }
 
@@ -678,7 +678,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     /// CSSTokenizerInputStream::skipWhilePredicate<isASCIIDigit>: `from` and the
     /// result are offsets relative to the cursor, not absolute.
-    @inline(__always) private func skipDigits(_ data: Span<Unit>, from: Int) -> Int {
+    @inline(always) private func skipDigits(_ data: Span<Unit>, from: Int) -> Int {
         var relative = from
         let count = data.count
         // Per-digit, so wrapping: `offset &+ relative` is bounded by the input.
@@ -1028,7 +1028,7 @@ public struct CSSTokenizeResultSwift {
 /// both sides it does not bias the ratio in either direction, but it compresses
 /// every real difference toward 1.0 and made an earlier round of numbers look
 /// far better than the tokenizers actually are.
-@inline(__always) private func foldToken(_ sum: UInt64, _ t: CSSTokenSwift) -> UInt64 {
+@inline(always) private func foldToken(_ sum: UInt64, _ t: CSSTokenSwift) -> UInt64 {
     sum &* 1000003 &+ UInt64(t.type)
 }
 
@@ -1061,7 +1061,7 @@ public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokeni
 /// a heap-allocated opaque box with no default constructor and a sizeof() that is
 /// not the struct's size. Usable for a single returned value, unusable as the
 /// element type of a shared buffer.
-@inline(__always) private func exported(_ token: CSSTokenSwift) -> WebCore.CSSSwiftToken {
+@inline(always) private func exported(_ token: CSSTokenSwift) -> WebCore.CSSSwiftToken {
     var out = WebCore.CSSSwiftToken()
     out.start = token.start
     out.end = token.end
@@ -1093,7 +1093,7 @@ public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokeni
 ///
 /// Returns false if the sink could not take a chunk, which means allocation failure;
 /// the caller then falls back to the C++ tokenizer.
-@inline(__always)
+@inline(always)
 private func tokenizeAll<Unit: CSSCodeUnit>(
     _ span: Span<Unit>,
     _ sink: WebCore.CSSSwiftTokenSink
