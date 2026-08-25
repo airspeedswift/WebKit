@@ -431,6 +431,33 @@ struct JSONLexer {
 
 @inline(always) func isASCIIDigit(_ c: UInt16) -> Bool { c >= 0x30 && c <= 0x39 }
 
+// Every `RawSpan` read in the SIMD scans and keyword compares below goes through this, and at
+// all ten sites the offset is in bounds by an invariant the caller has just tested and
+// states at the site. Those statements are the safety argument and each has to hold on its own.
+//
+// It is not simply a missed optimization: the loops establish facts about the element count
+// (`i + 2 * stride <= count`) while the check is against the byte count, and
+// `byteCount &- i >= 8` is the stronger predicate only where `i <= byteCount` is separately
+// established, unsigned-wrapping into a weaker one otherwise — which is why clang declines the
+// identical fold against a hardened `std::span`. Establishing both halves in the caller does
+// discharge the check, at the price of turning each trap into a live `else` the caller has to
+// supply a value for inside these hot loops. rdar://185372093 asks for the annotation that
+// discharges it from the invariant instead; delete the `@unsafe` and the markers at the call
+// sites when it lands.
+//
+// `-D JSON_ISLAND_CHECKED_LOADS` restores the check, and that build is the bounds audit: run
+// the JSON tests under it after touching any cursor or bound here.
+@unsafe
+@inline(always) func loadBytes<T: BitwiseCopyable & ConvertibleFromBytes>(
+    _ input: RawSpan, at byteOffset: Int, as type: T.Type
+) -> T {
+#if JSON_ISLAND_CHECKED_LOADS
+    input.load(fromByteOffset: byteOffset, as: T.self)
+#else
+    unsafe input.unsafeLoadUnaligned(fromUncheckedByteOffset: byteOffset, as: T.self)
+#endif
+}
+
 // MARK: - The SIMD string scans
 //
 // `SIMD::find` (SIMDHelpers.h:675) with `lexString`'s vector predicates (:947
@@ -445,17 +472,23 @@ struct JSONLexer {
     Int(SIMD8<UInt16>(repeating: .max).replacing(with: laneIndices8, where: mask).min())
 }
 
+// The cursor arithmetic in the scans below is deliberately *checked*, unlike the
+// lexer's: the checked `i * 2`'s no-overflow fact is what lets LLVM strength-reduce the
+// vector loop's addresses, so replacing these with the wrapping operators makes a pure
+// scan slower rather than faster.
+
 // MARK: - Keyword compares
 //
 // `COMPARE_3UCHARS` / `COMPARE_4UCHARS` (FastCharacterComparison.h:96): one
 // unaligned load against a folded constant, little-endian as WTF's macros assume.
+// In bounds unchecked, the caller having tested `count - offset >= 4`.
 
 @inline(always) func matches3(
     _ input: RawSpan, at index: Int, _ c0: UInt16, _ c1: UInt16, _ c2: UInt16,
     _ units: Span<UInt16>
 ) -> Bool {
     let pair = UInt32(c0) | (UInt32(c1) << 16)
-    return input.load(fromByteOffset: index * 2, as: UInt32.self) == pair
+    return unsafe loadBytes(input, at: index * 2, as: UInt32.self) == pair
         && units[index + 2] == c2
 }
 
@@ -463,7 +496,7 @@ struct JSONLexer {
     _ input: RawSpan, at index: Int, _ c0: UInt16, _ c1: UInt16, _ c2: UInt16, _ c3: UInt16
 ) -> Bool {
     let quad = UInt64(c0) | (UInt64(c1) << 16) | (UInt64(c2) << 32) | (UInt64(c3) << 48)
-    return input.load(fromByteOffset: index * 2, as: UInt64.self) == quad
+    return unsafe loadBytes(input, at: index * 2, as: UInt64.self) == quad
 }
 
 // MARK: The scans themselves
@@ -490,11 +523,14 @@ let simdStride = 8 // SIMD::stride<char16_t>
 @inline(always) func findUnsafeStrict(
     _ input: RawSpan, _ units: Span<UInt16>, from: Int, count: Int
 ) -> Int {
+    // Every load below is in bounds unchecked, and the loop conditions are the
+    // proof: `i + 2 * simdStride <= count` gives `i * 2 + 32 <= input.byteCount`, and
+    // the arithmetic is checked so it cannot have wrapped.
     if count - from >= simdStride {
         var i = from
         while i + 2 * simdStride <= count {
-            let m0 = strictMask(input.load(fromByteOffset: i * 2, as: SIMD8<UInt16>.self))
-            let m1 = strictMask(input.load(fromByteOffset: i * 2 + 16, as: SIMD8<UInt16>.self))
+            let m0 = strictMask(unsafe loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self))
+            let m1 = strictMask(unsafe loadBytes(input, at: i * 2 + 16, as: SIMD8<UInt16>.self))
             if any(m0 .| m1) {
                 if any(m0) { return i + rankFirstLane(m0) }
                 return i + simdStride + rankFirstLane(m1)
@@ -502,13 +538,15 @@ let simdStride = 8 // SIMD::stride<char16_t>
             i += 2 * simdStride
         }
         while i + simdStride <= count {
-            let m = strictMask(input.load(fromByteOffset: i * 2, as: SIMD8<UInt16>.self))
+            let m = strictMask(unsafe loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self))
             if any(m) { return i + rankFirstLane(m) }
             i += simdStride
         }
         if i < count {
+            // The overlapping last vector ends exactly at the end of the span,
+            // and `tail >= from >= 0` by the outer test.
             let tail = count - simdStride
-            let m = strictMask(input.load(fromByteOffset: tail * 2, as: SIMD8<UInt16>.self))
+            let m = strictMask(unsafe loadBytes(input, at: tail * 2, as: SIMD8<UInt16>.self))
             if any(m) { return tail + rankFirstLane(m) }
         }
         return count
@@ -529,9 +567,9 @@ let simdStride = 8 // SIMD::stride<char16_t>
         var i = from
         while i + 2 * simdStride <= count {
             let m0 = sloppyMask(
-                input.load(fromByteOffset: i * 2, as: SIMD8<UInt16>.self), terminator)
+                unsafe loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self), terminator)
             let m1 = sloppyMask(
-                input.load(fromByteOffset: i * 2 + 16, as: SIMD8<UInt16>.self), terminator)
+                unsafe loadBytes(input, at: i * 2 + 16, as: SIMD8<UInt16>.self), terminator)
             if any(m0 .| m1) {
                 if any(m0) { return i + rankFirstLane(m0) }
                 return i + simdStride + rankFirstLane(m1)
@@ -540,14 +578,14 @@ let simdStride = 8 // SIMD::stride<char16_t>
         }
         while i + simdStride <= count {
             let m = sloppyMask(
-                input.load(fromByteOffset: i * 2, as: SIMD8<UInt16>.self), terminator)
+                unsafe loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self), terminator)
             if any(m) { return i + rankFirstLane(m) }
             i += simdStride
         }
         if i < count {
             let tail = count - simdStride
             let m = sloppyMask(
-                input.load(fromByteOffset: tail * 2, as: SIMD8<UInt16>.self), terminator)
+                unsafe loadBytes(input, at: tail * 2, as: SIMD8<UInt16>.self), terminator)
             if any(m) { return tail + rankFirstLane(m) }
         }
         return count
