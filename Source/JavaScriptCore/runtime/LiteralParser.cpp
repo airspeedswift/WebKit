@@ -2831,16 +2831,20 @@ JSONSwiftColdResult JSONSwiftObjectModel::slowNumberValue(uint32_t initial)
 // MARK: - The escaped-string path the island decodes itself
 //
 // Declared in LiteralParserSwiftTypes.h, which has the reason the runs cross one at a time
-// rather than as a finished buffer. Each of these is a `StringBuilder` call and a range
-// assertion; the scan that produces the ranges is in Swift.
+// rather than as a finished buffer. Each of these is a `StringBuilder` call and a range check;
+// the scan that produces the ranges is in Swift. They carry `JSC_JSON_FACADE_ENTRY` for the
+// same reason the value entries do: a run and a unit cross once per escape, so on input that is
+// mostly escapes they are per-value crossings rather than a cold path. The only caller of all
+// five is `decodeEscapedString`, which is itself `@inline(never)` and cold, so what grows here
+// is a function no escape-free document ever executes.
 
-bool JSONSwiftObjectModel::escapeBegin()
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::escapeBegin()
 {
     m_state->escapeBegin();
     return true;
 }
 
-bool JSONSwiftObjectModel::escapeRun(uint32_t start, uint32_t length)
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::escapeRun(uint32_t start, uint32_t length)
 {
     auto& state = *m_state;
     StringBuilder* builder = state.escapeBuffer();
@@ -2858,7 +2862,7 @@ bool JSONSwiftObjectModel::escapeRun(uint32_t start, uint32_t length)
     return true;
 }
 
-bool JSONSwiftObjectModel::escapeUnit(uint16_t unit)
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::escapeUnit(uint16_t unit)
 {
     StringBuilder* builder = m_state->escapeBuffer();
     if (!builder) [[unlikely]]
@@ -2869,7 +2873,7 @@ bool JSONSwiftObjectModel::escapeUnit(uint16_t unit)
     return true;
 }
 
-JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishValue(ptrdiff_t endOffset)
+JSC_JSON_FACADE_ENTRY JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishValue(ptrdiff_t endOffset)
 {
     auto& state = *m_state;
     auto scope = DECLARE_THROW_SCOPE(state.vm);
@@ -2885,7 +2889,7 @@ JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishValue(ptrdiff_t endOffset)
     return { endOffset, JSONSwiftParseOK };
 }
 
-JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishKey(ptrdiff_t endOffset)
+JSC_JSON_FACADE_ENTRY JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishKey(ptrdiff_t endOffset)
 {
     auto& state = *m_state;
     auto scope = DECLARE_THROW_SCOPE(state.vm);

@@ -270,17 +270,17 @@ public:
     // The island scans and decodes the escapes and emits the result as alternating runs of
     // literal input and single decoded units; these hold them in a `StringBuilder` the
     // object-model state owns — built on the first escape, since most documents have none —
-    // and then make one cell out of it. There is no C++ fallback for an
-    // escaped string any more: the island decodes every one it accepts and declines the
-    // rest to the C++ re-parse, which is what keeps the error messages byte-identical for
-    // free — and what makes a wrong decoder show up instead of hiding behind a fallback
-    // that would produce the same answer.
+    // and then make one cell out of it. There is no C++ fallback: the island decodes every
+    // escaped string it accepts and declines the rest to the C++ re-parse, which is what keeps
+    // the error messages byte-identical for free — and what makes a wrong decoder show up
+    // instead of hiding behind a fallback that would produce the same answer.
     //
-    // A call per run rather than a decoded buffer handed across, because the buffer is
-    // where the 8-bit-to-16-bit upconversion policy lives and that policy decides the
-    // resulting string's representation. Chatty by design: escapes are 0% to 4% of the
-    // strings in real payloads, so this is a cold path and a crossing here costs nothing
-    // that matters.
+    // A call per run rather than a decoded buffer handed across, because the buffer is where
+    // the 8-bit-to-16-bit upconversion policy lives and that policy decides the resulting
+    // string's representation. Chatty by design, and cold per *document*: escapes are 0% to 4%
+    // of the strings in real payloads. On escape-dense input these become per-value crossings,
+    // so they are marked JSC_JSON_FACADE_ENTRY like the value entries; their only caller is
+    // the island's `decodeEscapedString`, which is itself out of line and cold.
     JSC_SWIFT_SAFE bool escapeBegin();
     JSC_SWIFT_SAFE bool escapeRun(uint32_t start, uint32_t length);
     JSC_SWIFT_SAFE bool escapeUnit(uint16_t unit);
