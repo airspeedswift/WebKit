@@ -240,6 +240,10 @@ public:
     JSC_SWIFT_SAFE bool beginObject();
     JSC_SWIFT_SAFE bool beginArray();
     JSC_SWIFT_SAFE bool endContainer();
+    // `[]`, which the grammar recognises as a token pair and so knows the length the
+    // general close has to derive. Its own entry because the C++ short-circuits the same
+    // shape before it ever pushes an element-stack base (:1479).
+    JSC_SWIFT_SAFE bool emptyArray();
 
     // The pending property name, as an offset into the input. Resolution happens at the
     // store rather than here, so no `Structure*` is held across the value's parse — which

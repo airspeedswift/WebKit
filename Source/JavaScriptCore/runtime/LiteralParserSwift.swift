@@ -1500,9 +1500,12 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     position = positionAfterValue
 
                 case JSONTokenType.rbracket.rawValue where position == .valueOrClose:
-                    // The empty array.
+                    // The empty array, which takes its own entry rather than the general
+                    // close: the length is known here, and the entry is out of line, so this
+                    // arm carries no inlined copy of `endContainer`. The C++ short-circuits
+                    // the same shape (:1479).
                     depth -= 1
-                    guard model.endContainer() else {
+                    guard model.emptyArray() else {
                         return JSONParseStatus.stopped.rawValue
                     }
                     position = positionAfterValue

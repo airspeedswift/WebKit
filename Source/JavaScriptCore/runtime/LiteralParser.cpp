@@ -2899,6 +2899,55 @@ JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::endContainer()
     return jsonSwiftStoreValue(state, finished);
 }
 
+// `[]`. The C++ never runs its array machinery for this shape at all: it sees the `]` one
+// token after the `[` and returns an empty array before it has taken an element-stack base
+// (:1479). The island's grammar knows the same thing at the same point, so what it needs is
+// an entry that says so. Against calling `endContainer` here: the length is known to be zero,
+// so the general close's arithmetic and its choice between materializing and constructing go
+// away; the store dispatch is known to be an array element or the result; and because this is
+// NEVER_INLINE where `endContainer` is always-inline, the grammar loop loses one of its three
+// inlined copies of that entry rather than gaining anything.
+//
+// Going further — deferring `beginArray`/`beginObject` to the container's first member, so
+// that an empty one pushes no frame at all, which is exactly the C++'s shape — is measurably
+// worse and was rejected: the test that says "this container is still unopened" lands on the
+// *value* path, and a per-value branch costs more everywhere than it wins on empty ones.
+NEVER_INLINE bool JSONSwiftObjectModel::emptyArray()
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+
+    // The grammar only reaches this straight after the `[` that pushed a deferred array
+    // frame, but that is an invariant of the *other* language, so it is checked rather than
+    // trusted: false without `sawException` re-parses the document in C++, which is what
+    // every other guard on this side does.
+    size_t depth = state.frames.size();
+    if (!depth) [[unlikely]]
+        return false;
+    auto& frame = state.frames.last();
+    if (frame.isObject || !frame.deferred) [[unlikely]]
+        return false;
+
+    JSArray* array = constructEmptyArray(state.globalObject, nullptr);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    if (!array) [[unlikely]] {
+        state.sawException = true;
+        return false;
+    }
+
+    // Read before the frame goes away, and assigned rather than left alone: nothing can
+    // have arrived since the `[`, so this restores the invariant `stackBase` stands for
+    // instead of relying on it.
+    state.elementStackSize = frame.stackBase;
+    state.frames.removeLast();
+    if (depth == 1) {
+        state.result = array;
+        state.hasResult = true;
+        return true;
+    }
+    return jsonSwiftStoreValue(state, array);
+}
+
 JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::key(uint32_t start, uint32_t length)
 {
     auto& state = *m_state;
