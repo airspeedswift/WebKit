@@ -29,6 +29,7 @@
 #include "GetVM.h"
 #include "Identifier.h"
 #include "JSCJSValue.h"
+#include "Options.h"
 #include "Strong.h"
 #include <array>
 #include <wtf/Range.h>
@@ -153,24 +154,14 @@ public:
         return "JSON Parse error: Unable to parse JSON string"_s;
     }
     
+    // The C++ parse of a strict JSON document. Where the Swift island is enabled this is
+    // the fallback rather than the entry: `parseStrictJSON` below tries the island first,
+    // and reaches here only when it declines — with nothing to undo, because this parser
+    // is constructed after the decline and so starts at offset zero anyway.
     JSValue tryLiteralParse()
         requires (reviverMode == JSONReviverMode::Disabled)
     {
         ASSERT(m_mode == StrictJSON);
-#if JSC_SUPPORTS_SWIFT
-        // The Swift island: the grammar as well as the lexer, building the object graph
-        // through JSONSwiftObjectModel as it goes.
-        //
-        // Attempted before the first m_lexer.next() because the island lexes the
-        // document itself from offset zero. `handled` is false for anything it declines,
-        // and then everything below runs unchanged on a rewound lexer.
-        if (swiftParserUsable()) [[unlikely]] {
-            bool handled = false;
-            JSValue result = parseWithSwiftIsland(getVM(m_globalObject), handled);
-            if (handled)
-                return result;
-        }
-#endif
         m_lexer.next();
         VM& vm = getVM(m_globalObject);
         JSValue result = parseRecursivelyEntry(vm);
@@ -235,57 +226,6 @@ private:
         
         TokenType next();
         TokenType nextMaybeIdentifier();
-
-#if JSC_SUPPORTS_SWIFT
-        // MARK: What the Swift parser island needs from this lexer
-        //
-        // The parser island owns the cursor for the whole document, so these are not on
-        // the token path at all: they are the handover points. All three are reached
-        // from JSONSwiftObjectModelState (LiteralParser.cpp), which is a friend of
-        // LiteralParser and so can name this class.
-
-        std::span<const CharType> islandInput() const LIFETIME_BOUND
-        {
-            return { m_start, static_cast<size_t>(m_end - m_start) };
-        }
-
-        // Where a cold path left the cursor, for the island to resume from.
-        ptrdiff_t islandOffset() const { return m_ptr - m_start; }
-
-        // MARK: The escape decoder's buffer half — the island owns the scan
-        //
-        // The island decodes escapes itself and emits the result as alternating runs of
-        // literal input and single decoded units; these hold them until the string is
-        // complete. `m_builder` is the same buffer `lexStringSlow` fills, which is the
-        // point: it owns the 8-bit-to-16-bit upconversion policy, so a string built this
-        // way is interned and represented exactly as the C++ path's would be.
-        //
-        // Splitting it this way is what lets the *scan* — 70-odd lines of unchecked
-        // pointer arithmetic, a hand-rolled five-unit lookahead for `\uNNNN`, and a `goto`
-        // into the middle of a do-while — move to Swift, where the input is a bounds-
-        // checked span. What stays here is a call into `StringBuilder`, which is not
-        // where the hazard was. All out-of-line: cold by construction.
-        void islandEscapeBegin();
-        void islandEscapeRun(uint32_t start, uint32_t length);
-        void islandEscapeUnit(char16_t);
-        JSString* islandEscapedJSString(VM&) const;
-        Identifier islandEscapedIdentifier(VM&) const;
-
-        // `parseJSONDouble` for a number outside the int32 fast path. No lexNumberError
-        // call: a malformed number makes the island decline, and the C++ parse that then
-        // runs from the top produces the message.
-        bool islandParseDouble(uint32_t initial, double& value, ptrdiff_t& endOffset);
-
-        // Back to the top, for the C++ parse to run as if the island had never been
-        // asked. Everything the island touched here is a cursor or a message; the
-        // half-built object graph it leaves behind is unobservable because StrictJSON
-        // runs no user code.
-        void islandRewind()
-        {
-            m_ptr = m_start;
-            m_lexErrorMessage = String();
-        }
-#endif
 
 #if !ASSERT_ENABLED
         using LiteralParserTokenPtr = const LiteralParserToken<CharType>*;
@@ -359,37 +299,6 @@ private:
     template<ParserMode> JSValue parseRecursively(VM&, uint8_t* stackLimit) requires (reviverMode == JSONReviverMode::Disabled);
     JSValue parse(VM&, ParserState, JSONRanges*);
 
-#if JSC_SUPPORTS_SWIFT
-    // The Swift parser island's object-model facade keeps its state here — a
-    // GC-rooted container stack, the pending property name, and a pointer to this
-    // parser's Lexer for the two cold paths. It is a friend because it has to name
-    // Lexer, which is private, and because a cold property name goes through
-    // makeIdentifier. It is defined in LiteralParser.cpp; no cell and no JSC type
-    // reaches Swift.
-    friend struct JSONSwiftObjectModelState;
-
-    // The gate: StrictJSON and no reviver, read once per parse. Unlike the two
-    // conditions, a document *inside* them that the island cannot finish — nesting past
-    // its stack, anything malformed — is not excluded here but
-    // declined mid-parse, and the C++ parse then runs from the top.
-    bool swiftParserUsable() const
-    {
-        // Both widths now, which is the point of the 8-bit instantiation: a `JSString`
-        // is 8-bit whenever every character is Latin1, so before it existed the island
-        // never ran on ASCII JSON — which is nearly all of it.
-        if constexpr (reviverMode != JSONReviverMode::Disabled)
-            return false;
-        else
-            return m_mode == StrictJSON && Options::useSwiftJSONParser();
-    }
-
-    // Runs the island over the whole document. `handled` is set when the island
-    // finished — with a result, or with an exception pending — and left false when it
-    // declined, in which case the lexer has been rewound and the C++ parse runs
-    // unchanged.
-    JSValue parseWithSwiftIsland(VM&, bool& handled) requires (reviverMode == JSONReviverMode::Disabled);
-#endif
-
     JSValue parsePrimitiveValue(VM&);
 
     JSArray* materializeArray(VM&, unsigned stackBase);
@@ -413,6 +322,57 @@ private:
     Vector<Identifier, 16, UnsafeVectorOverflow> m_identifierStack;
     Vector<JSONRanges::Entry, 8> m_rangesStack;
 };
+
+#if JSC_SUPPORTS_SWIFT
+// MARK: - The Swift parser island
+//
+// Runs the island over a whole strict-JSON document — the grammar as well as the lexer,
+// building the object graph through JSONSwiftObjectModel as it goes. It takes the input and
+// not a LiteralParser, which is the whole of what it needs.
+//
+// `handled` is set when the island finished, either with a result or with an exception
+// pending, and left false when it declined. A decline leaves nothing to undo: no cursor has
+// to be rewound because the C++ parser has not been built yet, and the half-built object
+// graph is unobservable because StrictJSON runs no user code.
+//
+// Defined in LiteralParser.cpp, where the object model's headers are available, and
+// instantiated there for the two code-unit widths. No cell and no JSC type reaches Swift.
+template<typename CharType>
+JSValue parseJSONWithSwiftIsland(JSGlobalObject*, std::span<const CharType>, bool& handled);
+#endif
+
+// MARK: - Strict JSON with no reviver: the one entry both parses go through
+//
+// The island is tried here rather than from inside `tryLiteralParse`, and that is the
+// difference between the island being a guest inside a C++ parser and owning the entry. A
+// `LiteralParser` is a lexer, an object stack, a state stack, an identifier stack, a ranges
+// stack, a visited-prototype hash set and an error message; the island wants none of them, so
+// constructing one before asking it is pure overhead, and a large fraction of the cost of a
+// tiny document such as `JSON.parse("{}")`.
+//
+// `errorMessage` is filled in only by a failed *C++* parse, which is the only thing that
+// produces one: the island builds no messages and declines instead, which is what keeps the
+// error text byte-identical for free. Callers that do not need it pass nothing.
+template<typename CharType>
+ALWAYS_INLINE JSValue parseStrictJSON(JSGlobalObject* globalObject, std::span<const CharType> characters, String* errorMessage = nullptr)
+{
+#if JSC_SUPPORTS_SWIFT
+    // The gate, read once per document. Both widths, which is the point of the 8-bit
+    // instantiation: a `JSString` is 8-bit whenever every character is Latin1, so before it
+    // existed the island never ran on ASCII JSON — which is nearly all of it.
+    if (Options::useSwiftJSONParser()) [[unlikely]] {
+        bool handled = false;
+        JSValue result = parseJSONWithSwiftIsland(globalObject, characters, handled);
+        if (handled)
+            return result;
+    }
+#endif
+    LiteralParser<CharType, JSONReviverMode::Disabled> jsonParser(globalObject, characters, StrictJSON);
+    JSValue result = jsonParser.tryLiteralParse();
+    if (!result && errorMessage) [[unlikely]]
+        *errorMessage = jsonParser.getErrorMessage();
+    return result;
+}
 
 } // namespace JSC
 
