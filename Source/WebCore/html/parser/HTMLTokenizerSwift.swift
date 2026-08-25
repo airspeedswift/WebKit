@@ -328,10 +328,17 @@ public struct HTMLTokenizerSwift: ~Copyable {
 // the token count and a checksum over token names, which is enough for a
 // benchmark and for cross-checking against the C++ tokenizer.
 
+/// `@frozen` for the same reason `CSSTokenizeResultSwift` carries it: WebCore
+/// compiles Swift with -enable-library-evolution, and without it an exposed struct
+/// is resilient, so the generated C++ class wraps a heap-allocated opaque box and
+/// its `sizeof()` is meaningless.
+@frozen
 @_expose(Cxx)
 public struct HTMLTokenizeResult {
     public var tokenCount: Int = 0
     public var nameChecksum: UInt64 = 0
+
+    public init() {}
 }
 
 /// C++ entry point. Takes the C++ span type directly, because Swift's `Span` is
