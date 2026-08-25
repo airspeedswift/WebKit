@@ -203,11 +203,6 @@ let safeStringLatin1CharactersInStrictJSON: InlineArray<256, Bool> = [
     true, true, true, true, true, true, true, true,
 ]
 
-/// `[0, 1, ... 7]`, for ranking the matching lanes of an 8-lane comparison.
-let laneIndices8 = SIMD8<UInt16>(0, 1, 2, 3, 4, 5, 6, 7)
-
-let laneIndices16 = SIMD16<UInt8>(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
-
 // MARK: - The code-unit width
 //
 // LiteralParser is a template over CharType and JSC instantiates it for both, so this
@@ -591,14 +586,33 @@ struct JSONLexer<T: JSONUnits> {
 // proved there is no match in the overlap. Two vectors under one `any` gate is what
 // reaches parity with the C++; one vector and four are both slower.
 
-/// The ranking half of `findFirstNonZeroIndex` (SIMDHelpers.h:423). Separate from
-/// the mask so it stays off the loop-carried path, as WTF splits it too.
+/// The ranking half of `findFirstNonZeroIndex` (SIMDHelpers.h:423). Separate from the mask so
+/// it stays off the loop-carried path, as WTF splits it too. No lane-index table: a
+/// `SIMD16<UInt8>` *is* sixteen bytes in a row, so a mask with all-ones in the matching lanes
+/// is a pair of `UInt64`s whose first non-zero byte is the answer, and `trailingZeroBitCount`
+/// is `rbit` + `clz`.
+///
+/// Do not reintroduce the table. A module-level `let` is lazily initialized, so every read
+/// carries a once-token guard plus a cold `swift_once` — at every site, this being
+/// `@inline(always)`. Spelled any way that avoids the guard, the optimizer instead knows the
+/// constant and lowers the select with per-lane shuffling rather than a whole-vector select.
+/// Both forms here are verified exhaustively against the table: all 65,535 non-empty 16-lane
+/// and all 255 8-lane patterns agree.
 @inline(always) func rankFirstLane(_ mask: SIMDMask<SIMD8<Int16>>) -> Int {
-    Int(SIMD8<UInt16>(repeating: .max).replacing(with: laneIndices8, where: mask).min())
+    let units = SIMD8<UInt16>(repeating: 0).replacing(with: 0xFFFF, where: mask)
+    let halves = bitCast(units, to: SIMD2<UInt64>.self)
+    let low = halves[0]
+    // Little-endian, so lane 0 is the least significant unit of the low half.
+    if low != 0 { return low.trailingZeroBitCount &>> 4 }
+    return 4 &+ (halves[1].trailingZeroBitCount &>> 4)
 }
 
 @inline(always) func rankFirstLane(_ mask: SIMDMask<SIMD16<Int8>>) -> Int {
-    Int(SIMD16<UInt8>(repeating: .max).replacing(with: laneIndices16, where: mask).min())
+    let bytes = SIMD16<UInt8>(repeating: 0).replacing(with: 0xFF, where: mask)
+    let halves = bitCast(bytes, to: SIMD2<UInt64>.self)
+    let low = halves[0]
+    if low != 0 { return low.trailingZeroBitCount &>> 3 }
+    return 8 &+ (halves[1].trailingZeroBitCount &>> 3)
 }
 
 // The cursor arithmetic in the scans below is deliberately *checked*, unlike the
