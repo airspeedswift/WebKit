@@ -93,11 +93,21 @@ private:
         unsigned numberOfCharactersConsumed() const;
         void appendTo(StringBuilder&) const;
 
-        unsigned length() const { return s.currentCharacter8.size(); }
-        void clear() { s.currentCharacter8 = { }; }
+        unsigned length() const { return remainingLength; }
+        void clear() { s.currentCharacter8 = { }; remainingLength = 0; }
 
         String underlyingString; // Optional, may be null.
         unsigned originalLength { 0 };
+        // Characters remaining in the active arm of `s`, tracked explicitly.
+        //
+        // This used to be derived as `s.currentCharacter8.size()` regardless of
+        // `is8Bit`, i.e. by reading the inactive union member. That gives the
+        // right answer only because both arms happen to store an element count
+        // in the same place, and reading an inactive union member is undefined
+        // behaviour. Tracking it costs nothing: the field lands in existing
+        // padding (sizeof(Substring) is unchanged), and length() becomes a plain
+        // load instead of a span size() call.
+        unsigned remainingLength { 0 };
         union CharactersSpan {
             CharactersSpan()
                 : currentCharacter8()
@@ -162,6 +172,7 @@ inline SegmentedString::Substring::Substring(StringView passedStringView)
             s.currentCharacter8 = passedStringView.span8();
         else
             s.currentCharacter16 = passedStringView.span16();
+        remainingLength = passedStringView.length();
     }
 }
 
@@ -175,6 +186,7 @@ inline SegmentedString::Substring::Substring(String&& passedString)
             s.currentCharacter8 = underlyingString.impl()->span8();
         else
             s.currentCharacter16 = underlyingString.impl()->span16();
+        remainingLength = underlyingString.length();
     }
 }
 
@@ -192,6 +204,7 @@ ALWAYS_INLINE char16_t SegmentedString::Substring::currentCharacter() const
 ALWAYS_INLINE char16_t SegmentedString::Substring::currentCharacterPreIncrement()
 {
     ASSERT(length());
+    --remainingLength;
     if (is8Bit) {
         skip(s.currentCharacter8, 1);
         return s.currentCharacter8[0];
@@ -235,6 +248,7 @@ ALWAYS_INLINE void SegmentedString::advanceWithoutUpdatingLineNumber()
 {
     if (m_fastPathFlags & Use8BitAdvance) [[likely]] {
         skip(m_currentSubstring.s.currentCharacter8, 1);
+        --m_currentSubstring.remainingLength;
         m_currentCharacter = m_currentSubstring.s.currentCharacter8[0];
         updateAdvanceFunctionPointersIfNecessary();
         return;
@@ -261,8 +275,9 @@ inline void SegmentedString::advance()
         ASSERT(m_currentSubstring.length() > 1);
         bool lastCharacterWasNewline = m_currentCharacter == '\n';
         skip(m_currentSubstring.s.currentCharacter8, 1);
+        --m_currentSubstring.remainingLength;
         m_currentCharacter = m_currentSubstring.s.currentCharacter8[0];
-        bool haveOneCharacterLeft = m_currentSubstring.s.currentCharacter8.size() == 1;
+        bool haveOneCharacterLeft = m_currentSubstring.length() == 1;
         if (!(lastCharacterWasNewline | haveOneCharacterLeft)) [[likely]]
             return;
         if (lastCharacterWasNewline & !!(m_fastPathFlags & Use8BitAdvanceAndUpdateLineNumbers))
@@ -311,21 +326,31 @@ inline std::span<const Latin1Character> SegmentedString::currentSubstringSpan8()
 inline void SegmentedString::advancePastMultiple8(unsigned count)
 {
     ASSERT(m_fastPathFlags & Use8BitAdvance);
-    ASSERT(count < m_currentSubstring.s.currentCharacter8.size());
+    ASSERT(count < m_currentSubstring.length());
 
     if (m_currentCharacter == '\n' && (m_fastPathFlags & Use8BitAdvanceAndUpdateLineNumbers)) {
         // Must skip past the newline before calling startNewLine(), so that
         // numberOfCharactersConsumed() reflects the position after the '\n'.
         // This matches the ordering in advance().
         skip(m_currentSubstring.s.currentCharacter8, 1);
+        // remainingLength must be updated BEFORE startNewLine(), because it
+        // calls numberOfCharactersConsumed() and must observe the position after
+        // the newline (see the comment above). Previously this fell out of
+        // deriving the length from the span, which the skip had already
+        // advanced; with an explicit field the ordering has to be written down.
+        --m_currentSubstring.remainingLength;
         startNewLine();
-        if (count > 1)
+        if (count > 1) {
             skip(m_currentSubstring.s.currentCharacter8, count - 1);
-    } else
+            m_currentSubstring.remainingLength -= count - 1;
+        }
+    } else {
         skip(m_currentSubstring.s.currentCharacter8, count);
+        m_currentSubstring.remainingLength -= count;
+    }
 
     m_currentCharacter = m_currentSubstring.s.currentCharacter8[0];
-    if (m_currentSubstring.s.currentCharacter8.size() == 1) [[unlikely]]
+    if (m_currentSubstring.length() == 1) [[unlikely]]
         updateAdvanceFunctionPointersForSingleCharacterSubstring();
 }
 
@@ -351,6 +376,7 @@ template<bool lettersIgnoringASCIICase> SegmentedString::AdvancePastResult Segme
                     return DidNotMatch;
             }
             skip(m_currentSubstring.s.currentCharacter8, length);
+            m_currentSubstring.remainingLength -= length;
             m_currentCharacter = m_currentSubstring.s.currentCharacter8[0];
         } else {
             for (unsigned i = 0; i < length; ++i) {
@@ -358,6 +384,7 @@ template<bool lettersIgnoringASCIICase> SegmentedString::AdvancePastResult Segme
                     return DidNotMatch;
             }
             skip(m_currentSubstring.s.currentCharacter16, length);
+            m_currentSubstring.remainingLength -= length;
             m_currentCharacter = m_currentSubstring.s.currentCharacter16[0];
         }
         return DidMatch;

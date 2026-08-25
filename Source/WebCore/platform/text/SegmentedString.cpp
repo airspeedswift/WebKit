@@ -169,6 +169,7 @@ String SegmentedString::toString() const
 void SegmentedString::advanceWithoutUpdatingLineNumber16()
 {
     skip(m_currentSubstring.s.currentCharacter16, 1);
+    --m_currentSubstring.remainingLength;
     m_currentCharacter = m_currentSubstring.s.currentCharacter16.front();
     updateAdvanceFunctionPointersIfNecessary();
 }
@@ -178,6 +179,7 @@ void SegmentedString::advanceAndUpdateLineNumber16()
     ASSERT(m_currentSubstring.doNotExcludeLineNumbers);
     processPossibleNewline();
     skip(m_currentSubstring.s.currentCharacter16, 1);
+    --m_currentSubstring.remainingLength;
     m_currentCharacter = m_currentSubstring.s.currentCharacter16.front();
     updateAdvanceFunctionPointersIfNecessary();
 }
