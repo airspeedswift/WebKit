@@ -2309,9 +2309,73 @@ NEVER_INLINE bool jsonSwiftStorePropertyValue(JSONSwiftObjectModelState& state,
     }
 }
 
-// What is left inline: the empty check, which container this is, and an array append —
-// `putDirectIndex`'s own fast path is an indexing-mode switch and a vector-length compare
-// before it hands off to an out-of-line slow path of its own, so this stays small.
+// The array append, written out rather than left to `putDirectIndex`, whose fast path
+// calls `JSObject::setIndexQuickly` — a function clang will not inline, because it also
+// carries the typed-array, array-storage, undecided and conversion arms. So going through
+// it costs a `bl setIndexQuickly` per array element where `parseRecursively` pays nothing,
+// its store being inlined into a frame spanning the whole array loop.
+//
+// This is `setIndexQuickly`'s fast case for the three writable contiguous-family shapes an
+// array of JSON values takes, and nothing else. Everything unusual declines to
+// `putDirectIndex` and reaches the same code as before: an index past the vector, the
+// undecided shape (every array's first element), copy-on-write, array storage, a
+// non-`JSArray` container, and a value the shape cannot hold, which is a conversion.
+ALWAYS_INLINE bool jsonSwiftFastArrayAppend(VM& vm, JSObject* array, unsigned index,
+    JSValue value)
+{
+    // `indexingMode()` masks in the copy-on-write bit and masks out the cell lock bits and
+    // the indexed-accessor history, which is exactly the set `putDirectIndex` switches on.
+    // The `IsArray` bit is in these constants and the island's array containers all come
+    // from `constructEmptyArray`, so a `NonArrayWith*` shape declining costs nothing.
+    switch (array->indexingMode()) {
+    case ArrayWithInt32: {
+        if (!value.isInt32()) [[unlikely]]
+            return false;
+        Butterfly* butterfly = array->butterfly();
+        if (index >= butterfly->vectorLength()) [[unlikely]]
+            return false;
+        butterfly->contiguous().at(array, index).setWithoutWriteBarrier(value);
+        if (index >= butterfly->publicLength())
+            butterfly->setPublicLength(index + 1);
+        // No write barrier, and that is not an omission: `setIndexQuickly` reaches its
+        // `vm.writeBarrier(this, v)` for an int32 array by falling through to the
+        // contiguous case, and the barrier returns immediately for a non-cell value.
+        return true;
+    }
+    case ArrayWithContiguous: {
+        Butterfly* butterfly = array->butterfly();
+        if (index >= butterfly->vectorLength()) [[unlikely]]
+            return false;
+        butterfly->contiguous().at(array, index).setWithoutWriteBarrier(value);
+        if (index >= butterfly->publicLength())
+            butterfly->setPublicLength(index + 1);
+        vm.writeBarrier(array, value);
+        return true;
+    }
+    case ArrayWithDouble: {
+        if (!value.isNumber()) [[unlikely]]
+            return false;
+        double number = value.asNumber();
+        // A NaN in a double array is how a hole reads, so `setIndexQuickly` converts to
+        // contiguous instead of storing it. JSON cannot spell NaN, but `jsNumber` is not
+        // told that, so the check stays where the original had it.
+        if (number != number) [[unlikely]]
+            return false;
+        Butterfly* butterfly = array->butterfly();
+        if (index >= butterfly->vectorLength()) [[unlikely]]
+            return false;
+        butterfly->contiguousDouble().at(array, index) = number;
+        if (index >= butterfly->publicLength())
+            butterfly->setPublicLength(index + 1);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+// What is left inline: the empty check, which container this is, and the array append
+// above.
 ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue value)
 {
     if (state.frames.isEmpty()) [[unlikely]] {
@@ -2326,8 +2390,13 @@ ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue
     if (frame.isObject)
         return jsonSwiftStorePropertyValue(state, container, value);
 
-    auto scope = DECLARE_THROW_SCOPE(state.vm);
     unsigned index = frame.nextIndex++;
+    // Nothing on this path can throw or allocate, so the throw scope is declared below it
+    // rather than around it.
+    if (jsonSwiftFastArrayAppend(state.vm, container, index, value)) [[likely]]
+        return true;
+
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
     container->putDirectIndex(state.globalObject, index, value);
     RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
     return true;
