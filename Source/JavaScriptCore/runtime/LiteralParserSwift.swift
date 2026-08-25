@@ -1105,10 +1105,11 @@ func diagnoseFailure<T: JSONUnits>(
         case JSONTokenType.semi.rawValue:
             return reportLexError(model, .unexpectedTokenSemi)
         default:
-            // `.identifier`, i.e. `Unexpected identifier "..."`, which declines here; and
-            // `.needsDoubleParse`, which reaches a decline only when `parseJSONDouble`
-            // failed, where the message is `lexNumberError`'s analysis of the digits rather
-            // than anything a token type says.
+            // `.needsDoubleParse` and nothing else: it reaches a decline only when
+            // `parseJSONDouble` failed, and the message is then `lexNumberError`'s analysis
+            // of the digits after the cursor rather than anything a token type says.
+            // (`.identifier` does not arrive here — the value arm reports it inline, with
+            // the extent it has in hand.)
             return JSONParseStatus.declined.rawValue
         }
 
@@ -1455,10 +1456,26 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     lexer.offset = r.endOffset
                     position = positionAfterValue
 
+                case JSONTokenType.identifier.rawValue:
+                    // `Unexpected identifier "..."` (:1320), which malformed input produces
+                    // more of than any other lexer-level diagnostic — nearly all of it
+                    // truncations of `true`, `false` and `null`. Reported here rather than from
+                    // the cold diagnosis, because the two things it quotes are
+                    // `currentToken.start` and `.length`, which `lexIdentifier` has just
+                    // written: at this arm they are values in hand, where reaching for them
+                    // from a callee is what the note on `diagnoseFailure` describes the cost of.
+                    // The 200-unit cap and the ellipsis are `formatError`'s; a `String` that
+                    // cannot be allocated is still the C++'s, by declining rather than by a
+                    // fallback here.
+                    return reportLexError(
+                        model, .unexpectedIdentifier,
+                        quoting: Int(lexer.currentToken.start),
+                        length: lexer.currentToken.length)
+
                 default:
                     // A value position cannot use this token: `Unexpected EOF` or the
-                    // `Unexpected token 'X'` family, one kind per token type, or a decline
-                    // for `Unexpected identifier "..."`.
+                    // `Unexpected token 'X'` family, one kind per token type. Not
+                    // `Unexpected identifier "..."`, which the value arm reports itself.
                     return failure(model, units, .fromTokenType, type)
                 }
 
