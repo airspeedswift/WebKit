@@ -32,13 +32,23 @@
 #include "JSCInlines.h"
 #include "JSONAtomStringCacheInlines.h"
 #include "Lexer.h"
+#include "MarkedVector.h"
 #include "ObjectConstructor.h"
 #include <wtf/ASCIICType.h>
+#include <wtf/ForbidHeapAllocation.h>
 #include <wtf/Range.h>
 #include <wtf/text/FastCharacterComparison.h>
 #include <wtf/text/MakeString.h>
 
 #include "KeywordLookup.h"
+
+// The island's boundary types. Included here rather than in LiteralParser.h because
+// nothing in that header names one: the facade and its state are defined in this file, and
+// so are the calls to the two Swift entry points this header declares. Nothing above this
+// point in the file knows the island exists.
+#if JSC_SUPPORTS_SWIFT
+#include "LiteralParserSwiftTypes.h"
+#endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -884,6 +894,40 @@ ALWAYS_INLINE TokenType LiteralParser<CharType, reviverMode>::Lexer::nextMaybeId
     ASSERT(m_currentToken.type == result);
     return result;
 }
+
+#if JSC_SUPPORTS_SWIFT
+
+// The island reports token types as its own Swift `JSONTokenType` and this file reads
+// them as `TokenType` with no conversion — `literalValue` below switches a raw value
+// that came out of Swift straight onto `TokTrue`/`TokFalse`/`TokNull` — so the two
+// numberings have to agree. Nothing in C++ can assert against a Swift enum, so
+// `JSONSwiftTokenType` (LiteralParserSwiftTypes.h) is transcribed from it by hand and
+// these assert *that* against `TokenType`. The enum is therefore not scaffolding to be
+// tidied away with the last C++ user of a `JSONSwiftTok*` constant: it is the only thing
+// keeping the Swift numbering, the C++ numbering and this file's casts in step.
+static_assert(static_cast<uint8_t>(TokLBracket) == JSONSwiftTokLBracket);
+static_assert(static_cast<uint8_t>(TokRBracket) == JSONSwiftTokRBracket);
+static_assert(static_cast<uint8_t>(TokLBrace) == JSONSwiftTokLBrace);
+static_assert(static_cast<uint8_t>(TokRBrace) == JSONSwiftTokRBrace);
+static_assert(static_cast<uint8_t>(TokString) == JSONSwiftTokString);
+static_assert(static_cast<uint8_t>(TokIdentifier) == JSONSwiftTokIdentifier);
+static_assert(static_cast<uint8_t>(TokNumber) == JSONSwiftTokNumber);
+static_assert(static_cast<uint8_t>(TokNumberInt32) == JSONSwiftTokNumberInt32);
+static_assert(static_cast<uint8_t>(TokColon) == JSONSwiftTokColon);
+static_assert(static_cast<uint8_t>(TokLParen) == JSONSwiftTokLParen);
+static_assert(static_cast<uint8_t>(TokRParen) == JSONSwiftTokRParen);
+static_assert(static_cast<uint8_t>(TokComma) == JSONSwiftTokComma);
+static_assert(static_cast<uint8_t>(TokTrue) == JSONSwiftTokTrue);
+static_assert(static_cast<uint8_t>(TokFalse) == JSONSwiftTokFalse);
+static_assert(static_cast<uint8_t>(TokNull) == JSONSwiftTokNull);
+static_assert(static_cast<uint8_t>(TokEnd) == JSONSwiftTokEnd);
+static_assert(static_cast<uint8_t>(TokDot) == JSONSwiftTokDot);
+static_assert(static_cast<uint8_t>(TokAssign) == JSONSwiftTokAssign);
+static_assert(static_cast<uint8_t>(TokSemi) == JSONSwiftTokSemi);
+static_assert(static_cast<uint8_t>(TokError) == JSONSwiftTokError);
+static_assert(static_cast<uint8_t>(TokErrorSpace) == JSONSwiftTokErrorSpace);
+
+#endif // JSC_SUPPORTS_SWIFT
 
 template <>
 ALWAYS_INLINE void setParserTokenString<Latin1Character>(LiteralParserToken<Latin1Character>& token, const Latin1Character* string)
@@ -2021,6 +2065,517 @@ JSValue LiteralParser<CharType, reviverMode>::parse(VM& vm, ParserState initialS
         continue;
     }
 }
+
+#if JSC_SUPPORTS_SWIFT
+
+// MARK: - The object-model facade the Swift grammar builds through
+//
+// Declared in LiteralParserSwiftTypes.h, which has the reasons the interface is not one
+// that hands `JSValue`s to Swift. The rule this file enforces: no cell ever leaves here.
+// Swift holds a `JSONSwiftObjectModel*` and nothing else, and every cell lives either in
+// the state below — whose container stack and element buffer the conservative stack scan
+// finds, the state itself being a local of `parseJSONWithSwiftIsland` — or in a local of
+// one of these functions.
+
+struct JSONSwiftObjectModelState {
+    // Every cell this holds is rooted by the conservative stack scan and nothing else, so
+    // it has to be on a stack. Machine-checked rather than left to the comment on
+    // `containers`, which is the argument that depends on it.
+    WTF_FORBID_HEAP_ALLOCATION;
+public:
+
+    // The one instantiation the island covers, StrictJSON with no reviver. Naming it here is
+    // what makes this a friend of LiteralParser, whose `Lexer` and `makeIdentifier` are
+    // private.
+    using Parser = LiteralParser<char16_t, JSONReviverMode::Disabled>;
+
+    JSONSwiftObjectModelState(VM& vm, JSGlobalObject* globalObject,
+        Parser::Lexer& lexer, std::span<const char16_t> input)
+        : vm(vm)
+        , globalObject(globalObject)
+        , lexer(&lexer)
+        , input(input)
+    {
+    }
+
+    VM& vm;
+    JSGlobalObject* globalObject { nullptr };
+    // Only for the two cold paths. The island owns the cursor for the whole document,
+    // so nothing else in here touches the lexer.
+    Parser::Lexer* lexer { nullptr };
+    std::span<const char16_t> input;
+
+    // The open containers, innermost last, with `frames.size()` as the depth: the two are
+    // pushed and popped together, so a second count would be the same number twice.
+    //
+    // Rooted rather than registered: this state is a local of `parseJSONWithSwiftIsland`, so
+    // the conservative stack scan finds every cell in here the way it finds any other frame's,
+    // and `WTF_FORBID_HEAP_ALLOCATION` above is what machine-checks that the state really is
+    // on a stack. A growable container would instead have to register itself in the mark set
+    // once it mallocs; the fixed 64 slots remove that case, because the grammar refuses to
+    // open a 65th container (`JSONSwiftGrammar.pushContainer`, whose mask is 64 bits wide) and
+    // `jsonSwiftPushContainer` bounds the write in release rather than trusting that across
+    // the language boundary.
+    //
+    // Uninitialised on purpose. Slots at or above the depth hold stale or garbage bits,
+    // which is what the conservative scanner exists to handle; a stale entry is a cell that
+    // was stored into its parent and so is live anyway.
+    static constexpr unsigned maxDepth = 64;
+    JSObject* containers[maxDepth];
+    // Per open container: the next array index, whether it is an object, and the property
+    // name waiting for a value. One vector because they are pushed and popped together.
+    //
+    // The pending key has to be per frame rather than one field on the state, or
+    // `{"a":{"b":1}}` loses the outer name to the inner object's `key()` and every object
+    // directly inside an object declines — which is invisible, since the C++ re-parse
+    // returns the same value.
+    //
+    // Trivially copyable on purpose, so push and pop stay a store and a decrement: a name
+    // is offsets, and the rare escaped one an index into `resolvedKeys`.
+    enum class PendingKey : uint8_t { None, Offsets, Resolved };
+    struct Frame {
+        unsigned nextIndex;
+        // PendingKey::Offsets: the name's position in the input.
+        uint32_t keyStart;
+        uint32_t keyLength;
+        // PendingKey::Resolved: one-based index into `resolvedKeys`, 0 for none.
+        uint32_t resolvedKeyIndex;
+        PendingKey pendingKey;
+        bool isObject;
+    };
+    Vector<Frame, 32> frames;
+
+    // The property names that had to be unescaped, which are not in the input at all and
+    // so cannot be offsets. Appended to rather than overwritten, because a cold key can be
+    // pending on any number of open frames at once; `takeResolvedKey` moves the entry out,
+    // leaving the slot empty.
+    Vector<Identifier, 4> resolvedKeys;
+
+    // The completed document, once the outermost container closes. Rooted the same way
+    // `containers` is: this state is a local of `parseWithSwiftIsland`, so the collector
+    // scans it as it scans any frame.
+    JSValue result;
+    bool hasResult { false };
+
+    // Whether the island stopped because an exception is pending, which is the one
+    // reason the C++ must propagate rather than re-parse.
+    bool sawException { false };
+
+    // The property name for a cold key, whose characters are not in the input. The fast
+    // path resolves the common case from `keyStart`/`keyLength` itself, inside the store,
+    // so this is only the unescaped case.
+    Identifier takeResolvedKey(Frame& frame)
+    {
+        ASSERT(frame.pendingKey == PendingKey::Resolved);
+        ASSERT(frame.resolvedKeyIndex);
+        frame.pendingKey = PendingKey::None;
+        return WTF::move(resolvedKeys[frame.resolvedKeyIndex - 1]);
+    }
+
+    // The two calls that need the token the cold path left in the lexer. Both are here
+    // rather than in the facade because they are what the friendship is for.
+    bool adoptColdKey()
+    {
+        if (frames.isEmpty()) [[unlikely]]
+            return false;
+        resolvedKeys.append(Parser::makeIdentifier(vm, lexer->currentToken()));
+        Frame& frame = frames.last();
+        frame.resolvedKeyIndex = resolvedKeys.size();
+        frame.pendingKey = PendingKey::Resolved;
+        return true;
+    }
+    JSString* adoptColdString() { return Parser::makeJSString(vm, lexer->currentToken()); }
+};
+
+namespace {
+
+// `LiteralParser::equalIdentifier` (:159) against a span rather than a token, since the
+// facade's property name is offsets into the input.
+ALWAYS_INLINE bool jsonSwiftEqualIdentifier(UniquedStringImpl* rep, std::span<const char16_t> name)
+{
+    // As there: a transition to a symbol-named property must not be followed.
+    if (rep->isSymbol())
+        return false;
+    return WTF::equal(rep, name);
+}
+
+// `parseRecursively`'s four-operation store (:1644), and the reason the facade is shaped
+// this way rather than as primitives Swift drives: between `nukeStructureAndSetButterfly`
+// and `setStructure` the object's StructureID is nuked, and a conservatively-scanned cell
+// in that state is a release-mode `die()` (heap/SlotVisitor.cpp:188). Here the whole
+// sequence is one C++ call with no Swift frame in it.
+ALWAYS_INLINE bool jsonSwiftStoreToExistingProperty(JSONSwiftObjectModelState& state,
+    JSObject* object, Structure* originalStructure, Structure* newStructure,
+    PropertyOffset offset, JSValue value)
+{
+    VM& vm = state.vm;
+    if (originalStructure->outOfLineCapacity() != newStructure->outOfLineCapacity()) {
+        ASSERT(newStructure != originalStructure);
+        Butterfly* newButterfly = object->allocateMoreOutOfLineStorage(vm,
+            originalStructure->outOfLineCapacity(), newStructure->outOfLineCapacity());
+        object->nukeStructureAndSetButterfly(vm, originalStructure->id(), newButterfly);
+    }
+
+    validateOffset(offset);
+    ASSERT(newStructure->isValidOffset(offset));
+    // As in parseRecursively: this is what says the concurrent GC cannot read garbage from
+    // a put that does not transition.
+    ASSERT(!object->getDirect(offset) || !JSValue::encode(object->getDirect(offset)));
+    object->putDirectOffset(vm, offset, value);
+    object->setStructure(vm, newStructure);
+    ASSERT(!newStructure->mayBePrototype()); // There is no way to make it prototype object.
+    return true;
+}
+
+// The general store, for a name that did not resolve to an existing transition. No
+// `__proto__` handling, and that is not an omission: `parseRecursively`'s
+// `m_visitedUnderscoreProto` path is guarded by `parserMode != StrictJSON`, and a strict
+// JSON value cannot run user code.
+ALWAYS_INLINE bool jsonSwiftStoreWithIdentifier(JSONSwiftObjectModelState& state,
+    JSObject* object, const Identifier& ident, JSValue value)
+{
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    if (std::optional<uint32_t> index = parseIndex(ident)) {
+        object->putDirectIndex(state.globalObject, index.value(), value);
+        RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    } else
+        object->putDirect(state.vm, ident, value);
+    return true;
+}
+
+ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue value)
+{
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+
+    if (state.frames.isEmpty()) [[unlikely]] {
+        // A bare top-level value: the island's grammar reaches this once, for a document
+        // that is a primitive rather than a container. Not an error, just not the
+        // island's job — `parsePrimitiveValue` handles it and this declines.
+        return false;
+    }
+
+    // The frame of the container being stored into, which is the innermost one: a nested
+    // container has already popped its own by the time `endContainer` gets here.
+    auto& frame = state.frames.last();
+    JSObject* container = state.containers[state.frames.size() - 1];
+    if (frame.isObject) {
+        using PendingKey = JSONSwiftObjectModelState::PendingKey;
+        if (frame.pendingKey == PendingKey::None) [[unlikely]]
+            return false;
+
+        if (frame.pendingKey != PendingKey::Offsets) [[unlikely]] {
+            // An unescaped name: already an Identifier, because the characters were in the
+            // lexer's StringBuilder rather than in the input. It skips the resolution fast
+            // path, which wants a span to hash.
+            RELEASE_AND_RETURN(scope, jsonSwiftStoreWithIdentifier(state, container,
+                state.takeResolvedKey(frame), value));
+        }
+
+        // `parseRecursively`'s three-way property resolution (:1576). The C++ has to
+        // resolve the name *before* parsing the value, its token being transient; the
+        // facade holds the name as offsets, which stay valid, so resolution and the store
+        // are adjacent and there is no window between them at all.
+        std::span<const char16_t> name = state.input.subspan(frame.keyStart, frame.keyLength);
+        frame.pendingKey = PendingKey::None;
+        VM& vm = state.vm;
+        Structure* originalStructure = container->structure();
+
+        if (Structure* transition = originalStructure->trySingleTransition()) {
+            // Avoids a hash lookup and refcount churn in the common case of a matching
+            // single transition — same-shaped objects, which is what JSON is full of.
+            SUPPRESS_UNCOUNTED_ARG if (transition->transitionKind() == TransitionKind::PropertyAddition
+                && !transition->transitionPropertyAttributes()
+                && jsonSwiftEqualIdentifier(transition->transitionPropertyName(), name)) {
+                return jsonSwiftStoreToExistingProperty(state, container, originalStructure,
+                    transition, transition->transitionOffset(), value);
+            }
+        } else if (!originalStructure->isDictionary()) {
+            // Avoids refcount churn in the common case of a cached Identifier.
+            if (SUPPRESS_UNCOUNTED_LOCAL AtomStringImpl* ident = vm.jsonAtomStringCache.existingIdentifier(name)) {
+                PropertyOffset offset = 0;
+                Structure* newStructure = Structure::addPropertyTransitionToExistingStructure(originalStructure, ident, 0, offset);
+                if (newStructure) [[likely]] {
+                    return jsonSwiftStoreToExistingProperty(state, container,
+                        originalStructure, newStructure, offset, value);
+                }
+                RELEASE_AND_RETURN(scope, jsonSwiftStoreWithIdentifier(state, container,
+                    Identifier::fromString(vm, ident), value));
+            }
+        }
+
+        RELEASE_AND_RETURN(scope, jsonSwiftStoreWithIdentifier(state, container,
+            Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(name)), value));
+    }
+
+    unsigned index = frame.nextIndex++;
+    container->putDirectIndex(state.globalObject, index, value);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    return true;
+}
+
+// `isObject` comes from the caller rather than from `container->inherits<JSArray>()`: the
+// grammar knows which bracket it lexed, so asking the cell would re-derive at run time
+// something the call site has as a constant, once per container.
+ALWAYS_INLINE bool jsonSwiftPushContainer(JSONSwiftObjectModelState& state,
+    JSObject* container, bool isObject)
+{
+    if (!container) [[unlikely]] {
+        state.sawException = true;
+        return false;
+    }
+    // The grammar refuses a 65th container, so this is a bound on a Swift-side invariant
+    // rather than a reachable path — but it is the write into a fixed-size array, and one
+    // compare against a constant is what makes this side's memory safety independent of the
+    // other language's. `sawException` stays false, so the document is re-parsed in C++.
+    size_t depth = state.frames.size();
+    if (depth >= JSONSwiftObjectModelState::maxDepth) [[unlikely]]
+        return false;
+    state.containers[depth] = container;
+    // One append and one removeLast per container rather than two: the index counter, the
+    // object flag and the pending property name are per-frame state and travel together.
+    // The new frame starts with no pending key, which is what leaves the *parent's* name
+    // intact while a nested container is built.
+    state.frames.append(JSONSwiftObjectModelState::Frame {
+        0, 0, 0, 0, JSONSwiftObjectModelState::PendingKey::None, isObject });
+    return true;
+}
+
+} // namespace
+
+bool JSONSwiftObjectModel::beginObject()
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    JSObject* object = constructEmptyObject(state.globalObject);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    return jsonSwiftPushContainer(state, object, true);
+}
+
+bool JSONSwiftObjectModel::beginArray()
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    JSArray* array = constructEmptyArray(state.globalObject, nullptr);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    return jsonSwiftPushContainer(state, array, false);
+}
+
+bool JSONSwiftObjectModel::endContainer()
+{
+    auto& state = *m_state;
+    size_t depth = state.frames.size();
+    if (!depth) [[unlikely]]
+        return false;
+
+    JSObject* finished = state.containers[depth - 1];
+    state.frames.removeLast();
+    if (depth == 1) {
+        // The document is complete. `finished` is unrooted between here and the return, as
+        // it is on every path below, which is sound for the same reason the stack above is:
+        // this is a local of a frame the collector scans.
+        state.result = finished;
+        state.hasResult = true;
+        return true;
+    }
+    return jsonSwiftStoreValue(state, finished);
+}
+
+bool JSONSwiftObjectModel::key(uint32_t start, uint32_t length)
+{
+    auto& state = *m_state;
+    // The name belongs to the object currently being filled, which is the innermost open
+    // container. The grammar only reaches a key position inside an object, so the emptiness
+    // test is defensive rather than reachable.
+    if (state.frames.isEmpty()) [[unlikely]]
+        return false;
+    auto& frame = state.frames.last();
+    frame.pendingKey = JSONSwiftObjectModelState::PendingKey::Offsets;
+    frame.keyStart = start;
+    frame.keyLength = length;
+    return true;
+}
+
+bool JSONSwiftObjectModel::stringValue(uint32_t start, uint32_t length)
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    // The same cache `makeJSString` uses (LiteralParser.cpp:196-200), so the island's
+    // strings are interned identically to the C++ path's.
+    JSString* string = state.vm.jsonAtomStringCache.makeJSString(
+        state.input.subspan(start, length));
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    return jsonSwiftStoreValue(state, string);
+}
+
+bool JSONSwiftObjectModel::intValue(int32_t value)
+{
+    return jsonSwiftStoreValue(*m_state, jsNumber(value));
+}
+
+bool JSONSwiftObjectModel::doubleValue(double value)
+{
+    return jsonSwiftStoreValue(*m_state, jsNumber(value));
+}
+
+bool JSONSwiftObjectModel::literalValue(uint8_t code)
+{
+    // A JSONTokenType raw value, which is a TokenType value: the two numberings are
+    // asserted equal above.
+    JSValue value;
+    switch (code) {
+    case TokTrue:
+        value = jsBoolean(true);
+        break;
+    case TokFalse:
+        value = jsBoolean(false);
+        break;
+    case TokNull:
+        value = jsNull();
+        break;
+    default:
+        return false;
+    }
+    return jsonSwiftStoreValue(*m_state, value);
+}
+
+// MARK: - The two cold paths
+//
+// Declared in LiteralParserSwiftTypes.h, which has the reason resolution and the store are
+// fused. `Lexer::island*` does the C++ work on the C++ state and only says where to resume,
+// and both dispatch on the `TokenType` it *returned* rather than on `m_currentToken.type`.
+
+JSONSwiftColdResult JSONSwiftObjectModel::slowStringValue(uint32_t runStart,
+    ptrdiff_t stopOffset, uint16_t terminator)
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    if (state.lexer->islandLexStringSlow(runStart, stopOffset, terminator) != TokString)
+        return { 0, JSONSwiftParseDeclined };
+
+    JSString* string = state.adoptColdString();
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true,
+        JSONSwiftColdResult { 0, JSONSwiftParseStopped }));
+    if (!jsonSwiftStoreValue(state, string))
+        return { 0, JSONSwiftParseStopped };
+    return { state.lexer->islandOffset(), JSONSwiftParseOK };
+}
+
+JSONSwiftColdResult JSONSwiftObjectModel::slowStringKey(uint32_t runStart,
+    ptrdiff_t stopOffset, uint16_t terminator)
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    if (state.lexer->islandLexStringSlow(runStart, stopOffset, terminator) != TokString)
+        return { 0, JSONSwiftParseDeclined };
+
+    // Resolved here rather than at store time, because after the next token is lexed the
+    // characters may be gone: an unescaped name lives in the lexer's StringBuilder, which
+    // the next cold string clears.
+    if (!state.adoptColdKey())
+        return { 0, JSONSwiftParseStopped };
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true,
+        JSONSwiftColdResult { 0, JSONSwiftParseStopped }));
+    return { state.lexer->islandOffset(), JSONSwiftParseOK };
+}
+
+JSONSwiftColdResult JSONSwiftObjectModel::slowNumberValue(uint32_t initial)
+{
+    auto& state = *m_state;
+    double value = 0;
+    ptrdiff_t endOffset = 0;
+    // No lexNumberError call: a malformed number makes the island decline, and the C++
+    // parse that then runs from the top builds the message.
+    if (!state.lexer->islandParseDouble(initial, value, endOffset))
+        return { 0, JSONSwiftParseDeclined };
+    if (!jsonSwiftStoreValue(state, jsNumber(value)))
+        return { 0, JSONSwiftParseStopped };
+    return { endOffset, JSONSwiftParseOK };
+}
+
+// MARK: - The C++ entry point
+//
+// Builds the state and the facade on its own stack — both ordinary C++ locals, so the
+// container stack inside the state is scanned by the collector the way any other frame is
+// — hands the island the input, and reads the result out.
+
+template<typename CharType, JSONReviverMode reviverMode>
+JSValue LiteralParser<CharType, reviverMode>::parseWithSwiftIsland(VM& vm, bool& handled)
+    requires (reviverMode == JSONReviverMode::Disabled)
+{
+    handled = false;
+    if constexpr (sizeof(CharType) != 2)
+        return { };
+    else {
+        auto characters = m_lexer.islandInput();
+        // The island's offsets are 31-bit, which is not a new restriction —
+        // LiteralParserToken::stringOrIdentifierLength is `unsigned : 31` — but the
+        // island states it as a precondition rather than checking it per token, so it is
+        // checked here, once per document.
+        if (characters.size() >= (1u << 31)) [[unlikely]]
+            return { };
+
+        std::span<const char16_t> input {
+            reinterpret_cast<const char16_t*>(characters.data()), characters.size() };
+        JSONSwiftObjectModelState state(vm, m_globalObject, m_lexer, input);
+        JSONSwiftObjectModel model(state);
+
+        uint8_t status = jsonSwiftParseDocument16(input, model);
+        if (status == JSONSwiftParseOK) [[likely]] {
+            ASSERT(state.hasResult);
+            handled = true;
+            return state.result;
+        }
+        if (status == JSONSwiftParseStopped && state.sawException) {
+            handled = true;
+            return { };
+        }
+
+        // Declined. Everything the island did is either a cursor, rewound here, or a
+        // half-built object graph, which no user code can have seen because this is
+        // StrictJSON.
+        //
+        // A decline is invisible from the outside — the C++ re-parse returns the same value,
+        // so a validation run passes and a benchmark quietly measures the C++ against
+        // itself — so it is logged on request.
+        if (Options::verboseSwiftJSONParserDeclines()) [[unlikely]] {
+            constexpr size_t prefixLength = 60;
+            dataLogLn("JSON island declined (status ", status, ", ", characters.size(),
+                " units): ",
+                StringView { characters.first(std::min(prefixLength, characters.size())) });
+        }
+        m_lexer.islandRewind();
+        return { };
+    }
+}
+
+// MARK: - The lexer's half of the two cold paths
+//
+// Out-of-line for the same reason the C++ marks them cold: `lexStringSlow` is not inline
+// there either.
+
+template<typename CharType, JSONReviverMode reviverMode>
+TokenType LiteralParser<CharType, reviverMode>::Lexer::islandLexStringSlow(uint32_t runStart,
+    ptrdiff_t stopOffset, CharType terminator)
+{
+    m_ptr = m_start + stopOffset;
+    return lexStringSlow(m_currentToken, m_start + runStart, terminator);
+}
+
+template<typename CharType, JSONReviverMode reviverMode>
+bool LiteralParser<CharType, reviverMode>::Lexer::islandParseDouble(uint32_t initial,
+    double& value, ptrdiff_t& endOffset)
+{
+    const CharType* start = m_start + initial;
+    size_t parsedLength = 0;
+    auto parsed = WTF::parseJSONDouble(std::span { start, m_end }, parsedLength);
+    if (!parsed) [[unlikely]]
+        return false;
+    value = parsed.value();
+    endOffset = (start - m_start) + static_cast<ptrdiff_t>(parsedLength);
+    return true;
+}
+
+#endif // JSC_SUPPORTS_SWIFT
 
 // Instantiate the two flavors of LiteralParser we need instead of putting most of this file in LiteralParser.h
 template class LiteralParser<Latin1Character, JSONReviverMode::Enabled>;

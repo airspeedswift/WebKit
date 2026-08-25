@@ -1,0 +1,247 @@
+/*
+ * Copyright (C) 2026 Apple Inc. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+ * THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// Boundary types for the Swift JSON parser island (LiteralParserSwift.swift).
+//
+// Everything the island and LiteralParser share is defined here in C++, and resilience is not
+// the reason — `@frozen` plus `@usableFromInline` gives a Swift-defined struct inline storage
+// of the real size even under BUILD_LIBRARY_FOR_DISTRIBUTION. What no annotation changes is
+// that the generated C++ class keeps a *private* default constructor and routes destroy, copy
+// and copy-assign through the value witness table behind a metadata accessor, however
+// trivially copyable its fields are. So it is never a C++ aggregate: WTF's Vector would run
+// initialization over the whole buffer (`CSSSwiftToken` documents that trap on the WebCore
+// side) and every copy would be an indirect call. Usable for a single returned value, which is
+// all JSONSwiftColdResult has to be, and for nothing the two sides share by address.
+//
+// Self-contained on purpose — only <cstdint>, <cstddef> and <span> — so it can be
+// exposed to Swift as its own narrow module in JavaScriptCore_Private.modulemap
+// without dragging JavaScriptCore internals into a Clang module.
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+
+namespace JSC {
+
+// The source text, as a std::span because Swift's `Span` is not C++-representable. Named
+// typedefs rather than the templates inline, because `@_expose(Cxx)` needs a concrete type.
+using JSONLexerSpan16 = std::span<const char16_t>;
+
+// Mirrors JSC::TokenType (LiteralParser.h:59-63) for the values the island can
+// produce, plus the two codes by which it declines to the C++ cold paths. The
+// island asserts the numbering against TokenType in LiteralParserSwiftBridge.cpp
+// rather than trusting these to stay in step.
+enum JSONSwiftTokenType : uint8_t {
+    JSONSwiftTokLBracket = 0,
+    JSONSwiftTokRBracket = 1,
+    JSONSwiftTokLBrace = 2,
+    JSONSwiftTokRBrace = 3,
+    JSONSwiftTokString = 4,
+    JSONSwiftTokIdentifier = 5,
+    JSONSwiftTokNumber = 6,
+    JSONSwiftTokNumberInt32 = 7,
+    JSONSwiftTokColon = 8,
+    JSONSwiftTokLParen = 9,
+    JSONSwiftTokRParen = 10,
+    JSONSwiftTokComma = 11,
+    JSONSwiftTokTrue = 12,
+    JSONSwiftTokFalse = 13,
+    JSONSwiftTokNull = 14,
+    JSONSwiftTokEnd = 15,
+    JSONSwiftTokDot = 16,
+    JSONSwiftTokAssign = 17,
+    JSONSwiftTokSemi = 18,
+    JSONSwiftTokError = 19,
+    JSONSwiftTokErrorSpace = 20,
+
+    // Island-internal, listed to keep the transcription complete: the grammar handles
+    // both itself through the facade's cold paths below.
+    JSONSwiftTokNeedsSlowString = 21,
+    JSONSwiftTokNeedsDoubleParse = 22,
+};
+
+// Deliberately outside `#if JSC_SUPPORTS_SWIFT`, and load-bearing: nothing passes
+// `-Xcc -DJSC_SUPPORTS_SWIFT=1` to the ClangImporter, so a declaration under that guard
+// is invisible to Swift, with the importer reporting "'X' is not a member type of enum
+// '__ObjC.JSC'". Only the implementation needs guarding.
+
+// MARK: - The object-model facade the Swift grammar builds through
+//
+// Derived from what `parseRecursively` does to the object model
+// (LiteralParser.cpp:1512), not invented, and shaped by three constraints:
+//
+//  1. Swift must not name a cell type. Materializing `JSC::Structure` fails because WTF
+//     templates over JSC types instantiate inside module `wtf`, where the definitions
+//     are unreachable, and three of the five failures are wtf-internal.
+//  2. Swift must not hold a cell, in a frame or inside a `JSValue` — the
+//     conservative-stack-scan question, which cells never reaching Swift's hands closes.
+//  3. The store sequence must stay atomic: between `nukeStructureAndSetButterfly` and
+//     `setStructure` a conservatively-scanned cell is a release `die()`
+//     (heap/SlotVisitor.cpp:188), so no Swift frame may sit inside it.
+//
+// So the facade owns the value stack and the `ThrowScope`, and the island only says what it
+// saw, in document order, getting back a keep-going flag. The containers live in a fixed-size
+// array inside `JSONSwiftObjectModelState`, which is a local of the C++ entry point: the
+// conservative stack scan roots them, and the grammar declines a document nested deeper than
+// the array holds. Strings cross as offsets, so no buffer and no lifetime crosses.
+
+// `SWIFT_UNSAFE_REFERENCE` from wtf/SwiftBridging.h, spelled out rather than included
+// because as a Clang module `wtf` is where the instantiation failures in (1) live. Unsafe
+// rather than immortal because a cell's lifetime is the collector's business, and it is
+// enforced: WebKit builds Swift with `-Werror StrictMemorySafety`
+// (Configurations/CommonBase.xcconfig).
+#if defined(__has_attribute) && __has_attribute(swift_attr)
+#define JSC_SWIFT_UNSAFE_REFERENCE                    \
+    __attribute__((swift_attr("import_reference")))    \
+    __attribute__((swift_attr("retain:immortal")))     \
+    __attribute__((swift_attr("release:immortal")))    \
+    __attribute__((swift_attr("unsafe")))
+#else
+#define JSC_SWIFT_UNSAFE_REFERENCE
+#endif
+
+// `SWIFT_SAFE` (wtf/SwiftBridging.h:394), spelled out for the same reason as the reference
+// annotation above, and the counterpart to it: the class is unsafe, each *call* on it is not.
+// SE-0458's `@safe` takes responsibility for the unsafe-typed direct arguments of a call, the
+// `self` included, which is what a facade method that neither escapes the receiver nor
+// outlives the call can honestly promise. Deliberately weaker than
+// `SWIFT_IMMORTAL_REFERENCE`, which would be a lie: an *escape* of the receiver still
+// diagnoses. Diagnostic only, so no member below changes shape.
+#if defined(__has_attribute) && __has_attribute(swift_attr)
+#define JSC_SWIFT_SAFE __attribute__((swift_attr("safe")))
+#else
+#define JSC_SWIFT_SAFE
+#endif
+
+// Defined in LiteralParser.cpp, where the object model's headers are available. Only a
+// pointer to it appears here, so this header stays free of JavaScriptCore internals.
+struct JSONSwiftObjectModelState;
+
+// Why the island's parse stopped. It builds no error messages: on anything but a
+// completed document the C++ re-parses from the top, which keeps the error text
+// byte-identical for free, and StrictJSON runs no user code so the half-built graph is
+// unobservable.
+enum JSONSwiftParseStatus : uint8_t {
+    // The document is complete and the state holds the result.
+    JSONSwiftParseOK = 0,
+    // Malformed, nesting deeper than its stack, a top-level primitive, or a failed cold
+    // path. Re-parse in C++.
+    JSONSwiftParseDeclined = 1,
+    // The object model told the island to stop; `sawException` says whether an exception
+    // must be propagated or the document re-parses.
+    JSONSwiftParseStopped = 2,
+};
+
+// What a cold path did. `endOffset` is where the island's lexer resumes, in code units from
+// the start of the input, and is only meaningful for JSONSwiftParseOK.
+struct JSONSwiftColdResult {
+    // ptrdiff_t so that Swift sees an `Int` and the island's cursor needs no conversion.
+    ptrdiff_t endOffset { 0 };
+    // A JSONSwiftParseStatus, so the island can return it unchanged.
+    uint8_t status { JSONSwiftParseOK };
+};
+
+class JSC_SWIFT_UNSAFE_REFERENCE JSONSwiftObjectModel {
+public:
+    // Non-copyable and non-movable, like the cells it stands in front of, which is what
+    // makes the annotation above necessary: without it the importer drops the class for
+    // having no Swift value representation.
+    JSONSwiftObjectModel(const JSONSwiftObjectModel&) = delete;
+    JSONSwiftObjectModel& operator=(const JSONSwiftObjectModel&) = delete;
+    JSONSwiftObjectModel(JSONSwiftObjectModel&&) = delete;
+    JSONSwiftObjectModel& operator=(JSONSwiftObjectModel&&) = delete;
+
+    // The C++ entry point owns both the state and this, on its own stack.
+    explicit JSONSwiftObjectModel(JSONSwiftObjectModelState& state)
+        : m_state(&state)
+    {
+    }
+
+    // Every one returns false to mean "stop" — an exception is pending, or the document
+    // is structurally bad — and the C++ reads the reason out of the state.
+    JSC_SWIFT_SAFE bool beginObject();
+    JSC_SWIFT_SAFE bool beginArray();
+    JSC_SWIFT_SAFE bool endContainer();
+
+    // The pending property name, as an offset into the input. Resolution happens at the
+    // store rather than here, so no `Structure*` is held across the value's parse — which
+    // is equivalent for StrictJSON, where no user code can run, and makes the store
+    // atomic.
+    JSC_SWIFT_SAFE bool key(uint32_t start, uint32_t length);
+
+    JSC_SWIFT_SAFE bool stringValue(uint32_t start, uint32_t length);
+    JSC_SWIFT_SAFE bool intValue(int32_t);
+    JSC_SWIFT_SAFE bool doubleValue(double);
+    // A `JSONTokenType` raw value: true, false or null.
+    JSC_SWIFT_SAFE bool literalValue(uint8_t code);
+
+    // MARK: The two cold paths, reached from inside the island's grammar loop
+    //
+    // `lexStringSlow` and `parseJSONDouble` stay in C++, both wanting a `StringBuilder`
+    // and both already cold there, so the island declines to them — from inside its
+    // grammar loop rather than by unwinding and being re-entered, which is what keeps its
+    // shape the same as the C++ parse's.
+    //
+    // Resolution and the store are fused rather than split into a resolve call and a
+    // `stringValue` call, which is what keeps the boundary free of a "the characters are
+    // in a scratch buffer" flag: an unescaped string is not in the input at all, so there
+    // are no offsets to hand back and the island learns only where to resume.
+    //
+    // `terminator` is always '"' in StrictJSON but is passed rather than assumed, being
+    // the lexer's state and not the grammar's.
+    JSONSwiftColdResult slowStringValue(uint32_t runStart, ptrdiff_t stopOffset, uint16_t terminator);
+    JSONSwiftColdResult slowStringKey(uint32_t runStart, ptrdiff_t stopOffset, uint16_t terminator);
+    // `initial` is the C++ `initial`, i.e. the optional '-'. Where the island's scan
+    // stopped is not passed, since `parseJSONDouble` re-scans from `initial`.
+    JSC_SWIFT_SAFE JSONSwiftColdResult slowNumberValue(uint32_t initial);
+
+private:
+    JSONSwiftObjectModelState* m_state { nullptr };
+};
+
+#if defined(JSC_SUPPORTS_SWIFT) && JSC_SUPPORTS_SWIFT
+
+// Reached through plain C++ rather than the generated `JavaScriptCore-Swift.h` thunks,
+// because JSC is two targets: the island is compiled by the framework target, while its
+// consumer is compiled into libJavaScriptCore, which cannot see that target's generated
+// header. So the call into Swift lives in LiteralParserSwiftBridge.cpp, which the
+// framework target compiles, and everything else goes through these declarations.
+// WebCore needs no equivalent, being a single target.
+
+// Parses a whole document, building it through the facade as it goes: the island owns
+// the grammar as well as the lexer, and the only thing that crosses back is a
+// JSONSwiftParseStatus. Strict JSON, 16-bit input, no reviver.
+//
+// One call per document rather than per batch, which is the point of it — the batched
+// lexer boundary exists to amortise a crossing the parser island does not have. The
+// cold paths are reached through the facade from inside the grammar loop, so this does
+// not return to be re-entered mid-document either.
+uint8_t jsonSwiftParseDocument16(std::span<const char16_t> input, JSONSwiftObjectModel&);
+
+#endif // JSC_SUPPORTS_SWIFT
+
+} // namespace JSC

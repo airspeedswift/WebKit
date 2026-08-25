@@ -2,6 +2,18 @@ framework module JavaScriptCore_Private [system] {
     // These ad-hoc explicit modules are the exhaustive set of headers that are both private and compatible
     // with both C and C++.
 
+    // Boundary types shared between LiteralParser.cpp and the Swift JSON parser
+    // island (LiteralParserSwift.swift). Self-contained —
+    // <cstddef>, <cstdint>, <span> — so it keeps this modulemap's property of
+    // listing only headers valid in both C and C++, and drags no JavaScriptCore
+    // internals into a Clang module. `requires cplusplus` because std::span is
+    // not available in C.
+    explicit module LiteralParserSwiftTypes {
+        header "LiteralParserSwiftTypes.h"
+        requires cplusplus
+        export *
+    }
+
     explicit module APIIntegrityPrivate {
         header "APIIntegrityPrivate.h"
         export *
