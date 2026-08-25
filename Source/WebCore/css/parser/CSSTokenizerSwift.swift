@@ -1,4 +1,8 @@
-public import WebCore_Private
+// Only the island's own boundary types, not the WebCore_Private umbrella: importing
+// that walks ~3,500 headers into JavaScriptCore's, where two inner structs are
+// defined in explicit submodules nothing imports, and the Swift step fails to
+// compile on WTF::KeyValuePair instantiated over them. See CSSTokenizerSwiftTypes.h.
+public import WebCore_Private.CSSTokenizerSwiftTypes
 
 // Swift island for the CSS tokenizer: a zero-`unsafe` port of CSSTokenizer.cpp and
 // CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).

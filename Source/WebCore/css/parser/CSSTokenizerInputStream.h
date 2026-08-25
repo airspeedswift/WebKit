@@ -30,55 +30,12 @@
 #pragma once
 
 #include <array>
+#include <WebCore/CSSTokenizerSwiftTypes.h>
 #include <wtf/text/StringView.h>
 
 namespace WebCore {
 
 constexpr Latin1Character kEndOfFileMarker = 0;
-
-// A contiguous 8-bit view of an already-preprocessed stylesheet. This is what
-// the Swift tokenizer island takes instead of the input stream itself, because
-// a token carrying offsets into this span is all CSSParserToken needs — see
-// CSSTokenizerSwift.swift.
-using CSSTokenizerSpan8 = std::span<const Latin1Character>;
-using CSSTokenizerSpan16 = std::span<const char16_t>;
-
-// One token as the Swift tokenizer reports it: offsets into the span above, plus
-// the small amount of classification CSSParserToken needs. Everything here is
-// resolved against the input by CSSTokenizer::tokenizeWithSwiftIsland.
-//
-// Defined in C++ rather than in Swift on purpose. WebCore compiles Swift with
-// -enable-library-evolution, so a Swift struct exposed with @_expose(Cxx) is
-// *resilient*: the generated C++ class wraps a heap-allocated opaque box, has no
-// default constructor, and its sizeof() is not the Swift struct's size. That is
-// fine for a value returned once, but it cannot be an element type of a buffer
-// the two languages share. A plain C++ aggregate can, and Swift imports it
-// directly.
-// Deliberately no default member initializers: with them the type is not
-// trivially default constructible, so WTF's Vector runs initialization over the
-// whole buffer (VectorTypeOperations::initializeIfNonPOD) before Swift overwrites
-// every byte of it. On a large stylesheet that is tens of megabytes of pointless
-// zero stores.
-struct CSSSwiftToken {
-    // Extent of the token in the input.
-    uint32_t start;
-    uint32_t end;
-    // The token's value text: an ident/at-keyword/hash/string/url name, or the
-    // unit of a dimension. Normally a range of the input; a range of the chunk's
-    // unescape buffer when `flags` has the unescaped bit set.
-    uint32_t valueStart;
-    uint32_t valueLength;
-    // For numeric tokens, the number's text, which is CSSParserToken's
-    // originalText and the range converted to a double.
-    uint32_t numberStart;
-    uint32_t numberLength;
-    // Delimiter code point, or the whitespace run length.
-    uint32_t extra;
-
-    uint8_t type;
-    uint8_t blockType;
-    uint8_t flags;
-};
 
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSTokenizerInputStream);
 class CSSTokenizerInputStream {
