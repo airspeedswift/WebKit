@@ -129,8 +129,19 @@ public:
     };
     using StarExportEntries = OrderedHashSet<StarExportEntry, StarExportEntryHash>;
 
+    // Hidden from the Clang importer, which cannot instantiate these: the container's
+    // KeyValuePair needs the complete ImportEntry/ExportEntry, and under Clang modules the
+    // instantiation is attributed to wtf's module, from which a definition owned by an
+    // `explicit module *` submodule of JavaScriptCore_Private is not reachable. That makes
+    // any Swift compile that imports this module fail with "definition of 'ImportEntry'
+    // must be imported from module JavaScriptCore_Private.Cxx.AbstractModuleRecord before
+    // it is required" -- which is how it first showed up, as WebCore's Swift step being
+    // unable to build at all. Nothing in Swift names these; the storage below keeps the
+    // two views of this class the same size, and C++ asserts that it does.
+#if !defined(__swift__)
     using ImportEntries = OrderedHashMap<RefPtr<UniquedStringImpl>, ImportEntry, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>>;
     using ExportEntries = OrderedHashMap<RefPtr<UniquedStringImpl>, ExportEntry, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>>;
+#endif
 
     struct ModuleRequest {
         Identifier m_specifier;
@@ -180,11 +191,15 @@ public:
 
     const Identifier& moduleKey() const { return m_moduleKey; }
     ScriptFetchParameters::Type moduleType() const;
+#if !defined(__swift__)
     const Vector<ModuleRequest>& requestedModules() const LIFETIME_BOUND { return m_requestedModules; }
     ModuleMap<LoadedModuleRequest>& loadedModules() LIFETIME_BOUND { return m_loadedModules; }
     const ModuleMap<LoadedModuleRequest>& loadedModules() const LIFETIME_BOUND { return m_loadedModules; }
+#endif
+#if !defined(__swift__)
     const ExportEntries& exportEntries() const LIFETIME_BOUND { return m_exportEntries; }
     const ImportEntries& importEntries() const LIFETIME_BOUND { return m_importEntries; }
+#endif
     const StarExportEntries& starExportEntries() const LIFETIME_BOUND { return m_starExportEntries; }
     const Vector<WriteBarrier<AbstractModuleRecord>>& asyncParentModules() const LIFETIME_BOUND { return m_asyncParentModules; }
     CyclicModuleRecord* cycleRoot() const { return m_cycleRoot.get(); }
@@ -270,18 +285,34 @@ private:
     // The loader resolves the given module name to the module key. The module key is the unique value to represent this module.
     Identifier m_moduleKey;
 
+#if !defined(__swift__)
     // Map localName -> ImportEntry.
     ImportEntries m_importEntries;
 
     // Map exportName -> ExportEntry.
     ExportEntries m_exportEntries;
 
+    static_assert(sizeof(ImportEntries) == 4 * sizeof(void*) && alignof(ImportEntries) == alignof(void*));
+    static_assert(sizeof(ExportEntries) == 4 * sizeof(void*) && alignof(ExportEntries) == alignof(void*));
+#else
+    // Same size and alignment as the two containers above, asserted there.
+    alignas(void*) unsigned char m_importEntries[4 * sizeof(void*)];
+    alignas(void*) unsigned char m_exportEntries[4 * sizeof(void*)];
+#endif
+
     // Save the occurrence order since resolveExport requires it.
     StarExportEntries m_starExportEntries;
 
     // Save the occurrence order since the module loader loads and runs the modules in this order.
     // http://www.ecma-international.org/ecma-262/6.0/#sec-moduleevaluation
+#if !defined(__swift__)
     Vector<ModuleRequest> m_requestedModules;
+
+    static_assert(alignof(Vector<ModuleRequest>) == alignof(void*));
+#else
+    // Storage in place of a container over an inner struct; see ImportEntries above.
+    alignas(void*) unsigned char m_requestedModules[sizeof(void*) + 2 * sizeof(unsigned)];
+#endif
 
     WriteBarrier<JSModuleNamespaceObject> m_moduleNamespaceObject;
     WriteBarrier<JSModuleNamespaceObject> m_deferredNamespaceObject;
@@ -292,13 +323,28 @@ private:
     // So here, we don't visit each object for GC. The resolution cache map caches the once
     // looked up correctly resolved resolution, since (1) we rarely looked up the non-resolved one,
     // and (2) if we cache all the attempts the size of the map becomes infinitely large.
+#if !defined(__swift__)
     typedef UncheckedKeyHashMap<RefPtr<UniquedStringImpl>, Resolution, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>> Resolutions;
     Resolutions m_resolutionCache;
+
+    static_assert(sizeof(Resolutions) == sizeof(void*) && alignof(Resolutions) == alignof(void*));
+#else
+    // Hidden from the Clang importer for the reason ImportEntries is, with storage of the
+    // same size and alignment in its place.
+    void* m_resolutionCache;
+#endif
 
 protected:
     WriteBarrier<JSModuleEnvironment> m_moduleEnvironment;
 
+#if !defined(__swift__)
     ModuleMap<LoadedModuleRequest> m_loadedModules;
+
+    static_assert(sizeof(ModuleMap<LoadedModuleRequest>) == sizeof(void*) && alignof(ModuleMap<LoadedModuleRequest>) == alignof(void*));
+    static_assert(sizeof(Vector<ModuleRequest>) == sizeof(void*) + 2 * sizeof(unsigned));
+#else
+    void* m_loadedModules;
+#endif
 
     Vector<WriteBarrier<AbstractModuleRecord>> m_asyncParentModules;
 
