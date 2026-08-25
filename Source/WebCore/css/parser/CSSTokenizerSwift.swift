@@ -1,91 +1,25 @@
 public import WebCore_Private
 
-// Swift island for the CSS tokenizer.
+// Swift island for the CSS tokenizer: a zero-`unsafe` port of CSSTokenizer.cpp and
+// CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
 //
-// A zero-`unsafe` port of WebCore's CSSTokenizer (Source/WebCore/css/parser/
-// CSSTokenizer.cpp + CSSTokenizerInputStream.h), following the island pattern
-// established for the HTML tokenizer (notes §8, §10).
+// Input is a `Span` over the preprocessed string, which C++ already owns and already
+// hands out as a contiguous span. Output is a POD token returned by value, carrying
+// the value's *offsets* — which loses nothing, since `CSSParserToken` already stores
+// a view into the input. Numbers are not converted here, so C++ keeps calling
+// charactersToDouble and double rounding stays bit-identical for free. Values
+// containing escapes are unescaped here into a caller-provided buffer, so nothing
+// has to be re-tokenized in C++.
 //
-// Boundary design, and why this needs no new interop feature:
+// Nine trap-guarding branches remain, all in inlined stdlib code, and `-Ounchecked`
+// measures no throughput difference from removing them; the three that are compiler
+// misses rather than real checks are filed (see the HTML island's SITE A-D notes and
+// ~/Documents/swift-runtime-check-scrub/).
 //
-//  * Input is a `Span<UInt8>` over the *preprocessed* string. C++ already owns
-//    that string (CSSTokenizer::preprocessString) and already hands out
-//    contiguous spans.
-//  * Output is a POD `CSSTokenSwift` returned by value, one per call. The C++
-//    `CSSParserToken` already stores its value as a view into the input
-//    (m_valueDataCharRaw + m_valueLength), and the tokenizer already builds it
-//    from `m_input.rangeAt(start, length)`, so a token carrying *offsets*
-//    loses nothing.
-//  * Numbers are NOT converted here. The token carries the number's offsets and
-//    C++ calls charactersToDouble as it does today, so double rounding is
-//    bit-identical for free, and the island needs no C++ call in its interior
-//    (which is where an `unsafe` std::span construction would otherwise land).
-//  * Values containing escapes are unescaped *here*, into a buffer the caller
-//    provides alongside the token buffer, and the token's range then indexes that
-//    buffer rather than the input. The caller only has to turn code units into
-//    whatever string type it wants — it never has to re-tokenize, so no part of
-//    this component's logic is left in C++.
-//
-//
-// Runtime-check scrub (notes §10 discipline). Enumerated from the emitted arm64,
-// not from reading the code. Zero retain/release, zero CoW uniqueness checks,
-// zero `swift_once`, zero exclusivity checks, zero allocations (after the one
-// block-stack malloc) and zero outlined value-witness calls. What remains is 9
-// conditional branches into trap blocks, all in stdlib code inlined here, and
-// `-Ounchecked` measures *no* throughput difference from removing them:
-//
-//   6   `Span._checkIndex` in the two whitespace scans and the digit scan
-//       (`advanceUntilNonWhitespace`, `advanceUntilNewlineOrNonWhitespace`,
-//       `skipDigits`). Emitted as `b.hs` range checks, four of them sharing one
-//       trap block after threading duplicated the loop. `byteAt` below would
-//       discharge them, but only pays where the EOF-marker select it performs is
-//       wanted anyway — forcing it into these loops, whose own condition already
-//       bounds the index, cost 28% on whitespace-heavy input. So they index
-//       directly and keep the check, which measures zero.
-//       Why the optimizer keeps them is NOT established. Two candidate fixes
-//       were tried and refuted: `precondition(offset >= 0)` before the loop, and
-//       the same with the index bound to a local first, both of which produce
-//       instruction-for-instruction identical code. That is worth knowing because
-//       it *does* work when the index is an SSA value rather than one held in
-//       memory — see SITE-F.md in ~/Documents/swift-runtime-check-scrub/decoupled/,
-//       which also shows the equivalent C is no better, so the miss is in LLVM.
-//   1   `Span._checkIndex` in `nextCharsAreIdentifier`, reached from three call
-//       sites: jump threading duplicates the guard, canonicalises the copies to
-//       different signedness and tail-merges them, leaving a block no copy's
-//       fact discharges. Same shape as the HTML island's SITE C. Forcing the
-//       function to inline makes it *worse* (three checks, not one).
-//   1   `_RigidArray.append(_:)` — `_precondition(!isFull)`, already
-//       established by `UniqueArray.append(_:)` on both arms. HTML island
-//       SITE A; filed.
-//   1   `_RigidArray._items` — bounds-checks a slice formed only to
-//       `deinitialize()`, a no-op for `UInt8`. HTML island SITE B; filed.
-//
-// Measured, standalone A/B against a same-work C++ control on identical input
-// (~/src/webkit-swift-ports/cssprobe), medians of interleaved runs:
-//
-//   whitespace 1.02x   idents 1.04x   strings 1.18x   comments 0.94x
-//   punctuation 0.91x  numbers 0.88x  declarations 0.80x
-//   yui.css 0.96x      mixed real stylesheets 1.00x
-//
-// So Swift is at or ahead of C++ wherever a token involves scanning, and behind
-// on token-dense input, i.e. the residual is per-token overhead rather than
-// per-character. Ruled out as causes, each by measurement: runtime checks (zero
-// under `-Ounchecked`), dispatch shape (C++'s member-function-pointer table and
-// a switch measure identically), indirect vs register struct return (forcing
-// sret is 15% worse), storing the span in the tokenizer instead of passing it
-// (3% worse), and iterating a `Span` slice instead of indexing (no better).
-//
-// In-tree, the island scans at ~700 MB/s where the whole real CSSTokenizer runs
-// at ~310 MB/s on the same stylesheet, so scanning is not where that tokenizer
-// spends its time and there is headroom for the token materialisation the island
-// deliberately leaves in C++.
-//
-// Validated token-by-token against the real CSSTokenizer, not just against the
-// C++ control — see CSSTokenizerSwiftBridge.cpp and CSSTokenizerSwiftTest.cpp.
-//
-// This file names no C++ type and imports nothing but the standard library:
-// the entire interior is Swift-owned, per the §4b' diagnostic. The C++ span
-// conversion lives in a separate entry-point file.
+// Validated token-by-token against the real CSSTokenizer — CSSTokenizerSwiftBridge.cpp
+// and CSSTokenizerSwiftTest.cpp — not only against a same-work C++ control. Standalone
+// ratios, per-construct measurements and the causes ruled out for the token-dense
+// deficit are in ~/src/webkit-swift-ports/cssprobe and adoption notes §11.
 
 /// Mirrors CSSParserTokenType. Raw values match so C++ can cast directly.
 public enum CSSTokenTypeSwift: UInt8 {
@@ -196,38 +130,25 @@ extension UInt16: CSSCodeUnit { }
     c <= 0x08 || c == 0x0B || (c >= 0x0E && c <= 0x1F) || c == 0x7F
 }
 
-/// A bounds-checked read of the input that costs one unsigned compare.
+/// A bounds-checked read of the input that costs one unsigned compare, which is the
+/// shape C++ gets for free by indexing with `size_t`.
 ///
-/// `Span`'s subscript checks `0 <= index && index < count`. Every offset in this
-/// file is non-negative by construction, but nothing establishes that for the
-/// optimizer — the index arrives as a parameter or is loaded from a stored
-/// property — so a check survives. Comparing bit patterns as unsigned discharges
-/// both halves at once and is not `unsafe`: `UInt(bitPattern:)` is a
-/// reinterpretation, and a negative index would fail the compare and read as the
-/// EOF marker rather than going out of bounds. Using this on the name scan, the
-/// hottest loop here, was worth 26% (994 -> 1279 MB/s, matching `-Ounchecked`).
+/// `Span`'s subscript checks `0 <= index && index < count`, and nothing establishes
+/// the first half for the optimizer because the index arrives as a parameter or from
+/// a stored property. Comparing bit patterns as unsigned discharges both at once and
+/// is not `unsafe`: a negative index fails the compare and reads as the EOF marker.
+/// Worth 26% on the name scan, the hottest loop here.
 ///
-/// NOT caused by the wrapping arithmetic. `&+` versus `+` makes no difference:
-/// the two forms compile to the same body, which the minimal reproducer in
-/// ~/Documents/swift-runtime-check-scrub/decoupled/ (site-f.swift, site-f.c,
-/// SITE-F.md) shows, along with the fact that clang emits an identical loop from
-/// equivalent C. So the underlying miss is in LLVM, not in Swift.
-///
-/// This is the shape C++ gets for free by indexing with `size_t`.
-///
-/// Use this ONLY where the EOF-marker semantics are wanted anyway. In a loop
-/// whose own condition already bounds the index (`while i < count`), the select
-/// this performs is pure overhead — measured at 28% on an all-whitespace input —
-/// so those loops index directly.
+/// Use this ONLY where the EOF-marker semantics are wanted anyway: in a loop whose
+/// own condition already bounds the index, the select is pure overhead, measured at
+/// 28% on all-whitespace input, so those loops index directly.
 @inline(always) private func byteAt<Unit: CSSCodeUnit>(_ data: Span<Unit>, _ index: Int) -> Unit {
     UInt(bitPattern: index) < UInt(bitPattern: data.count) ? data[index] : 0
 }
 
-/// The 128-entry dispatch class. The C++ holds a `std::array<CodePoint, 128>`
-/// of *member function pointers* and calls through it once per token
-/// (CSSTokenizer::nextToken). Here it is a `switch` on the byte, so the
-/// dispatch is a jump table with no indirect call — see the notes for the
-/// measured difference.
+/// The 128-entry dispatch class. The C++ holds a `std::array<CodePoint, 128>` of
+/// member function pointers and calls through it once per token; here it is a `switch`
+/// on the byte, so the dispatch is a jump table with no indirect call.
 private enum Dispatch {
     case endOfFile, whitespace, newline, stringStart, hash, dollarSign
     case leftParenthesis, rightParenthesis, asterisk, plusOrFullStop, comma
@@ -290,17 +211,11 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// on an exhausted input returns the EOF marker and still advances — so
     /// every read clamps and every report goes through `clampedOffset`.
     private var offset = 0
-    /// Mirrors m_blockStack. Owned here and growable, so nesting is unbounded and no
-    /// buffer has to cross the boundary for it.
-    ///
-    /// C++ uses `Vector<CSSParserTokenType, 8>`, whose inline capacity keeps shallow
-    /// nesting out of the heap, and Swift has no growable container with inline
-    /// capacity (§0a item 14). A two-tier `InlineArray` + spill version of this was
-    /// tried, on the theory that the block-heavy corpora were paying for the heap
-    /// indirection. It showed **no resolvable improvement** — punctuation moved from
-    /// 194.3 to 196.1 MB/s while the C++ side drifted 5% the other way, so the
-    /// apparent ratio gain was drift — and the extra tier was reverted. See the notes
-    /// for what the gap actually tracks.
+    /// Mirrors m_blockStack, owned here and growable, so nesting is unbounded and no
+    /// buffer crosses the boundary for it. C++ uses `Vector<CSSParserTokenType, 8>`,
+    /// whose inline capacity keeps shallow nesting off the heap; Swift has no growable
+    /// container with inline capacity, and a two-tier InlineArray-plus-spill version
+    /// measured no resolvable improvement.
     private var blockStack = UniqueArray<UInt8>()
 
     /// Code units of values that contained escapes, in the order the tokens
