@@ -2188,6 +2188,16 @@ public:
     // reason the C++ must propagate rather than re-parse.
     bool sawException { false };
 
+    // The island's offsets are bounded by its own cursor, but that is an invariant of the
+    // *other* language, and this side turns them into `subspan` and `m_start + start`,
+    // neither of which checks. So every entry that takes one asserts it.
+    // `JSON_ISLAND_CHECKED_LOADS` is the Swift half of the same question.
+    bool isValidRange(uint32_t start, uint32_t length) const
+    {
+        size_t size = is8Bit ? input8.size() : input16.size();
+        return static_cast<size_t>(start) + static_cast<size_t>(length) <= size;
+    }
+
     // The property name for a cold key, whose characters are not in the input. The fast
     // path resolves the common case from `keyStart`/`keyLength` itself, inside the store,
     // so this is only the unescaped case.
@@ -2635,6 +2645,7 @@ JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::key(uint32_t start, uint32_t le
     // test is defensive rather than reachable.
     if (state.frames.isEmpty()) [[unlikely]]
         return false;
+    ASSERT(state.isValidRange(start, length));
     auto& frame = state.frames.last();
     frame.pendingKey = JSONSwiftObjectModelState::PendingKey::Offsets;
     frame.keyStart = start;
@@ -2646,6 +2657,7 @@ JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::stringValue(uint32_t start, uin
 {
     auto& state = *m_state;
     auto scope = DECLARE_THROW_SCOPE(state.vm);
+    ASSERT(state.isValidRange(start, length));
     // The same cache `makeJSString` uses (LiteralParser.cpp:196-200), so the island's
     // strings are interned identically to the C++ path's — and identically at both
     // widths, since the cache is templated on the character type and an 8-bit document
@@ -2708,6 +2720,8 @@ JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::literalValue(uint8_t code)
 static TokenType islandLexStringSlow(JSONSwiftObjectModelState& state, uint32_t runStart,
     ptrdiff_t stopOffset, uint16_t terminator)
 {
+    ASSERT(state.isValidRange(runStart, 0));
+    ASSERT(stopOffset >= 0 && state.isValidRange(static_cast<uint32_t>(stopOffset), 0));
     if (state.is8Bit) {
         return state.lexer<Latin1Character>().islandLexStringSlow(runStart, stopOffset,
             static_cast<Latin1Character>(terminator));
@@ -2725,6 +2739,7 @@ static ptrdiff_t islandOffset(JSONSwiftObjectModelState& state)
 static bool islandParseDouble(JSONSwiftObjectModelState& state, uint32_t initial,
     double& value, ptrdiff_t& endOffset)
 {
+    ASSERT(state.isValidRange(initial, 0));
     return state.is8Bit
         ? state.lexer<Latin1Character>().islandParseDouble(initial, value, endOffset)
         : state.lexer<char16_t>().islandParseDouble(initial, value, endOffset);
@@ -2809,11 +2824,15 @@ JSValue LiteralParser<CharType, reviverMode>::parseWithSwiftIsland(VM& vm, bool&
     else
         status = jsonSwiftParseDocument16(characters, model);
 
-    if (status == JSONSwiftParseOK) [[likely]] {
-        ASSERT(state.hasResult);
+    if (status == JSONSwiftParseOK && state.hasResult) [[likely]] {
         handled = true;
         return state.result;
     }
+    // `OK` without a result cannot happen: the grammar reaches `.documentEnd` only after a
+    // container closed, and closing the outermost one is what sets this. But `result` would
+    // then be the empty JSValue and `handled` would say it was a real answer, so it declines
+    // rather than being asserted away, at one compare per document.
+    ASSERT(status != JSONSwiftParseOK || state.hasResult);
     if (status == JSONSwiftParseStopped && state.sawException) {
         handled = true;
         return { };
