@@ -58,6 +58,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		DEADBEEF00000000000000E2 /* HTMLTokenizerSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000E1 /* HTMLTokenizerSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DEADBEEF00000000000000B2 /* HTMLTokenizerSwiftBridge.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000B1 /* HTMLTokenizerSwiftBridge.cpp */; };
 		DEADBEEF00000000000000A2 /* HTMLTokenizerSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000A1 /* HTMLTokenizerSwift.swift */; };
 		0014628B103CD1DE000B20DB /* OriginAccessEntry.h in Headers */ = {isa = PBXBuildFile; fileRef = 00146289103CD1DE000B20DB /* OriginAccessEntry.h */; };
@@ -7764,6 +7765,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		DEADBEEF00000000000000E1 /* HTMLTokenizerSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = html/parser/HTMLTokenizerSwiftTypes.h; sourceTree = "<group>"; };
 		DEADBEEF00000000000000B1 /* HTMLTokenizerSwiftBridge.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = html/parser/HTMLTokenizerSwiftBridge.cpp; sourceTree = "<group>"; };
 		DEADBEEF00000000000000A1 /* HTMLTokenizerSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = html/parser/HTMLTokenizerSwift.swift; sourceTree = "<group>"; };
 		00146288103CD1DE000B20DB /* OriginAccessEntry.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = OriginAccessEntry.cpp; sourceTree = "<group>"; };
@@ -48805,6 +48807,7 @@
 				974D2DA5146A535D00D51F8B /* SecurityPolicy.h in Headers */,
 				2D5BC42716F882EE007048D0 /* SecurityPolicyViolationEvent.h in Headers */,
 				7ABA250528AAF779005D4F6D /* SecurityPolicyViolationEventDisposition.h in Headers */,
+				DEADBEEF00000000000000E2 /* HTMLTokenizerSwiftTypes.h in Headers */,
 				B2C3DA2F0D006C1D00EF6F26 /* SegmentedString.h in Headers */,
 				D245256B2F22773C000DFFF6 /* SelectFallbackButtonElement.h in Headers */,
 				BEA807C90F714A0300524199 /* SelectionGeometry.h in Headers */,

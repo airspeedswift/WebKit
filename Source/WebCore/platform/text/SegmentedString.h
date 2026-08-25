@@ -19,18 +19,13 @@
 
 #pragma once
 
+#include <WebCore/HTMLTokenizerSwiftTypes.h>
 #include <wtf/Deque.h>
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
 namespace WebCore {
-
-// Named alias for the span type currentSubstringSpan8() returns, so Swift can
-// refer to it at an interop boundary (Swift cannot spell std::span<const T>
-// directly). Same pattern as WebGPU's CxxBridgingPublic.h SpanConstUInt8 and
-// PAL::Crypto::SpanConstUInt8.
-using SegmentedStringSpan8 = std::span<const Latin1Character>;
 
 class SegmentedString {
 public:
