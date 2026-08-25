@@ -201,6 +201,16 @@ protocol JSONUnits {
     c == 0x20 || c == 0x0A || c == 0x0D || c == 0x09
 }
 
+/// `isASCIIHexDigit` and `toASCIIHexValue` (wtf/ASCIICType.h) fused, for `\uNNNN`.
+/// One function rather than a test and a convert, because the escape decoder needs both
+/// answers about the same unit and `nil` carries the rejection.
+@inline(always) func asciiHexValue<U: FixedWidthInteger & UnsignedInteger>(_ c: U) -> UInt8? {
+    if c >= 0x30, c <= 0x39 { return UInt8(truncatingIfNeeded: c) &- 0x30 }
+    if c >= 0x41, c <= 0x46 { return UInt8(truncatingIfNeeded: c) &- 0x41 &+ 10 }
+    if c >= 0x61, c <= 0x66 { return UInt8(truncatingIfNeeded: c) &- 0x61 &+ 10 }
+    return nil
+}
+
 /// The index into either Latin1 table: the C++'s `static_cast<Latin1Character>`.
 /// The caller owns the `isLatin1` rescue the C++ pairs it with.
 @inline(always) func tableIndex<U: FixedWidthInteger>(_ c: U) -> Int {
@@ -819,6 +829,151 @@ enum JSONParseStatus: UInt8 {
     case stopped = 2
 }
 
+/// `Lexer::lexStringSlow`'s scan (LiteralParser.cpp:1043), with the buffer left in C++.
+///
+/// What is in Swift here is the part that was unchecked: the C++ walks raw `m_ptr`/`m_end`
+/// pointers with no bounds checking at all (the file is inside
+/// `WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN`), bounds `\uNNNN`'s four digits with a hand-written
+/// `(m_end - m_ptr) < 5`, builds spans from raw pointer pairs, and enters the middle of its own
+/// `do`/`while` with a `goto`. This indexes a `Span` and loops. It also shortens a lifetime:
+/// the C++ leaves the decoded characters in the builder and a *raw pointer to them* in the
+/// token, valid only until the next cold string clears it, which is why it has to resolve a
+/// property name before the next token is lexed. Here the buffer becomes a cell inside one call
+/// and no pointer to it exists on either side.
+///
+/// What deliberately stays in C++ is the `StringBuilder`: it owns the 8-bit-to-16-bit
+/// upconversion policy, and that policy decides the resulting string's representation and
+/// therefore how it interns. So runs of literal input and decoded units are emitted to C++ as
+/// they are produced, one call each, and every crossing here is cold.
+///
+/// Anything malformed declines instead of being reported, like the rest of the island:
+/// the C++ re-parse from offset zero produces the message, which keeps every error
+/// byte-identical for free. Strict JSON only, so the sloppy `\'` case cannot arise.
+///
+/// `@inline(never)` and a *free* function, not a mutating method: `mutating` passes `self` by
+/// pointer, which would leave the grammar's cursor and position in memory across the call
+/// instead of in registers, at a large cost in the hot function's size. Everything it needs
+/// comes in by value and the new cursor goes back in the result.
+@inline(never)
+@safe
+func decodeEscapedString<T: JSONUnits>(
+    _ model: JSC.JSONSwiftObjectModel,
+    _ input: RawSpan, _ units: Span<T.Unit>,
+    runStart: Int, from: Int, terminator: T.Unit, isKey: Bool, _ width: T.Type
+) -> (status: UInt8, endOffset: Int) {
+    // `units.count`, not a `count` handed in beside the span, and that is the difference
+    // between five surviving bounds checks and none. The caller holds the two as one fact
+    // (`let count = units.count`), but this function is `@inline(never)`, so inside it a
+    // passed-in `count` is an unrelated `Int` and no guard written against it can discharge
+    // the subscript's own check. Derived here, `i < count` is a fact about the same value.
+    let count = units.count
+    // Where the fast scan started, and where it stopped — at a backslash, at a control
+    // character, or at the end of the input. It cannot have stopped at the terminator,
+    // or `lexString` would have returned `.string` instead of asking for this.
+    var runFrom = runStart
+    var i = from
+    var decodedAnything = false
+    guard model.escapeBegin() else { return (JSONParseStatus.stopped.rawValue, 0) }
+
+    while true {
+        if UInt(bitPattern: i) >= UInt(bitPattern: count) {
+            return (JSONParseStatus.declined.rawValue, 0) // "Unterminated string"
+        }
+        let unit = units[i]
+
+        if unit == terminator {
+            // A run with no escape in it cannot reach here on the first pass, so the
+            // builder always holds at least one decoded unit by now; the guard states
+            // that rather than trusting it, since an empty builder would silently make
+            // an empty string.
+            if !decodedAnything { return (JSONParseStatus.declined.rawValue, 0) }
+            if i > runFrom {
+                guard emitRun(model, from: runFrom, to: i) else {
+                    return (JSONParseStatus.stopped.rawValue, 0)
+                }
+            }
+            let end = i &+ 1
+            let r: JSC.JSONSwiftColdResult
+            if isKey {
+                r = model.escapeFinishKey(end)
+            } else {
+                r = model.escapeFinishValue(end)
+            }
+            // The cursor goes back in the result rather than being written through a
+            // pointer to the grammar, which is the whole reason this is a free function.
+            return (r.status, r.endOffset)
+        }
+
+        guard unit == 0x5C else {
+            // A control character, which strict JSON rejects. The C++ reports it as an
+            // unterminated string; declining gets that message for free.
+            return (JSONParseStatus.declined.rawValue, 0)
+        }
+        if i > runFrom {
+            guard emitRun(model, from: runFrom, to: i) else {
+                return (JSONParseStatus.stopped.rawValue, 0)
+            }
+        }
+
+        i &+= 1
+        if UInt(bitPattern: i) >= UInt(bitPattern: count) {
+            return (JSONParseStatus.declined.rawValue, 0) // "Unterminated string"
+        }
+        let decoded: UInt16
+        switch units[i] {
+        case 0x22: decoded = 0x22; i &+= 1 // \"
+        case 0x5C: decoded = 0x5C; i &+= 1 // \\
+        case 0x2F: decoded = 0x2F; i &+= 1 // \/
+        case 0x62: decoded = 0x08; i &+= 1 // \b
+        case 0x66: decoded = 0x0C; i &+= 1 // \f
+        case 0x6E: decoded = 0x0A; i &+= 1 // \n
+        case 0x72: decoded = 0x0D; i &+= 1 // \r
+        case 0x74: decoded = 0x09; i &+= 1 // \t
+        case 0x75:
+            // The C++ bound is `(m_end - m_ptr) < 5` with the cursor on the `u`, so
+            // four digits must follow it inside the input.
+            //
+            // Spelled `count &- i >= 5` and not `i &+ 5 <= count`: the second does not
+            // actually prove the four reads below are in range, because `&+` is allowed to
+            // wrap and a wrapped `i` satisfies it. Here `i` is already known to be in
+            // `0..<count`, so `count &- i` is in `1...count` and cannot wrap either.
+            guard count &- i >= 5 else { return (JSONParseStatus.declined.rawValue, 0) }
+            var value: UInt16 = 0
+            for digit in 1...4 {
+                guard let nibble = asciiHexValue(units[i &+ digit]) else {
+                    return (JSONParseStatus.declined.rawValue, 0)
+                }
+                value = (value << 4) | UInt16(nibble)
+            }
+            // `Lexer::convertUnicode` (Lexer.h:291) is this, spelled as two byte
+            // converts: `(convertHex(c1, c2) << 8) | convertHex(c3, c4)`.
+            decoded = value
+            i &+= 5
+        default:
+            return (JSONParseStatus.declined.rawValue, 0)
+        }
+        guard model.escapeUnit(decoded) else {
+            return (JSONParseStatus.stopped.rawValue, 0)
+        }
+        decodedAnything = true
+
+        // The next literal run, found with the same SIMD scan the fast path uses, so an
+        // escaped string is not scanned character by character between its escapes.
+        runFrom = i
+        i = T.findUnsafeStrict(input, units, from: i, count: count)
+    }
+}
+
+@inline(always)
+@safe
+func emitRun(
+    _ model: JSC.JSONSwiftObjectModel, from: Int, to: Int
+) -> Bool {
+    model.escapeRun(UInt32(truncatingIfNeeded: from),
+                    UInt32(truncatingIfNeeded: to &- from))
+}
+
+
 /// `parseRecursively`'s recursive descent, iteratively, with the container stack as a
 /// 64-bit mask and a depth: no allocation, no refcount traffic, and no heap-allocated
 /// Swift state for the conservative stack scan to reason about. Deeper than 64
@@ -931,9 +1086,11 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                 case JSONTokenType.needsSlowString.rawValue:
                     // Called from inside the loop rather than by unwinding to C++, so
                     // the shape matches the C++, which calls `lexStringSlow` inline.
-                    let r = unsafe model.slowStringValue(lexer.currentToken.start,
-                                                        lexer.offset,
-                                                        lexer.pendingTerminator)
+                    let r = decodeEscapedString(
+                        model, input, units,
+                        runStart: Int(lexer.currentToken.start), from: lexer.offset,
+                        terminator: T.Unit(truncatingIfNeeded: lexer.pendingTerminator),
+                        isKey: false, T.self)
                     if r.status != JSONParseStatus.ok.rawValue { return r.status }
                     lexer.offset = r.endOffset
                     position = positionAfterValue
@@ -972,9 +1129,11 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     position = positionAfterValue
 
                 case JSONTokenType.needsSlowString.rawValue:
-                    let r = unsafe model.slowStringKey(lexer.currentToken.start,
-                                                      lexer.offset,
-                                                      lexer.pendingTerminator)
+                    let r = decodeEscapedString(
+                        model, input, units,
+                        runStart: Int(lexer.currentToken.start), from: lexer.offset,
+                        terminator: T.Unit(truncatingIfNeeded: lexer.pendingTerminator),
+                        isKey: true, T.self)
                     if r.status != JSONParseStatus.ok.rawValue { return r.status }
                     lexer.offset = r.endOffset
                     position = .colon

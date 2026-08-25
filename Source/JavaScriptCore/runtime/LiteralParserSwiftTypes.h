@@ -206,25 +206,39 @@ public:
     // A `JSONTokenType` raw value: true, false or null.
     JSC_SWIFT_SAFE bool literalValue(uint8_t code);
 
-    // MARK: The two cold paths, reached from inside the island's grammar loop
+    // MARK: The one remaining cold path, reached from inside the island's grammar loop
     //
-    // `lexStringSlow` and `parseJSONDouble` stay in C++, both wanting a `StringBuilder`
-    // and both already cold there, so the island declines to them — from inside its
-    // grammar loop rather than by unwinding and being re-entered, which is what keeps its
-    // shape the same as the C++ parse's.
+    // `parseJSONDouble` stays in C++ and should: it is a correctly-rounded decimal-to-double
+    // conversion shared with the rest of WTF, so porting it would be replacing vetted code
+    // with new code, with bit-exactness as the acceptance test and no safety to gain.
     //
-    // Resolution and the store are fused rather than split into a resolve call and a
-    // `stringValue` call, which is what keeps the boundary free of a "the characters are
-    // in a scratch buffer" flag: an unescaped string is not in the input at all, so there
-    // are no offsets to hand back and the island learns only where to resume.
-    //
-    // `terminator` is always '"' in StrictJSON but is passed rather than assumed, being
-    // the lexer's state and not the grammar's.
-    JSONSwiftColdResult slowStringValue(uint32_t runStart, ptrdiff_t stopOffset, uint16_t terminator);
-    JSONSwiftColdResult slowStringKey(uint32_t runStart, ptrdiff_t stopOffset, uint16_t terminator);
-    // `initial` is the C++ `initial`, i.e. the optional '-'. Where the island's scan
-    // stopped is not passed, since `parseJSONDouble` re-scans from `initial`.
+    // Reached from inside the grammar loop rather than by unwinding and being re-entered,
+    // which is what keeps the island's shape the same as the C++ parse's. `initial` is the C++
+    // `initial`, i.e. the optional '-'; where the island's scan stopped is not passed, since
+    // `parseJSONDouble` re-scans from there.
     JSC_SWIFT_SAFE JSONSwiftColdResult slowNumberValue(uint32_t initial);
+
+    // MARK: An escaped string, decoded by the island rather than declined
+    //
+    // The island scans and decodes the escapes and emits the result as alternating runs of
+    // literal input and single decoded units; these hold them in the lexer's
+    // `StringBuilder` and then make one cell out of it. There is no C++ fallback for an
+    // escaped string any more: the island decodes every one it accepts and declines the
+    // rest to the C++ re-parse, which is what keeps the error messages byte-identical for
+    // free — and what makes a wrong decoder show up instead of hiding behind a fallback
+    // that would produce the same answer.
+    //
+    // A call per run rather than a decoded buffer handed across, because the buffer is
+    // where the 8-bit-to-16-bit upconversion policy lives and that policy decides the
+    // resulting string's representation. Chatty by design: escapes are 0% to 4% of the
+    // strings in real payloads, so this is a cold path and a crossing here costs nothing
+    // that matters.
+    JSC_SWIFT_SAFE bool escapeBegin();
+    JSC_SWIFT_SAFE bool escapeRun(uint32_t start, uint32_t length);
+    JSC_SWIFT_SAFE bool escapeUnit(uint16_t unit);
+    // `endOffset` is the offset just past the closing quote, which the island computed.
+    JSC_SWIFT_SAFE JSONSwiftColdResult escapeFinishValue(ptrdiff_t endOffset);
+    JSC_SWIFT_SAFE JSONSwiftColdResult escapeFinishKey(ptrdiff_t endOffset);
 
 private:
     JSONSwiftObjectModelState* m_state { nullptr };
