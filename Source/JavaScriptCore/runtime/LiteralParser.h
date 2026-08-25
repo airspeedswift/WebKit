@@ -252,13 +252,24 @@ private:
         // Where a cold path left the cursor, for the island to resume from.
         ptrdiff_t islandOffset() const { return m_ptr - m_start; }
 
-        // `lexStringSlow` for a string the island declined: an escape, or unterminated.
-        // `stopOffset` is where the island's scan stopped, which is exactly where the
-        // C++ resumes, so this is the existing cold path running on existing state.
-        // Leaves the resolved string in m_currentToken, whose characters are either in
-        // the input or in m_builder — which is why the caller resolves it here rather
-        // than handing offsets back to Swift. Out-of-line: cold by construction.
-        TokenType islandLexStringSlow(uint32_t runStart, ptrdiff_t stopOffset, CharType terminator);
+        // MARK: The escape decoder's buffer half — the island owns the scan
+        //
+        // The island decodes escapes itself and emits the result as alternating runs of
+        // literal input and single decoded units; these hold them until the string is
+        // complete. `m_builder` is the same buffer `lexStringSlow` fills, which is the
+        // point: it owns the 8-bit-to-16-bit upconversion policy, so a string built this
+        // way is interned and represented exactly as the C++ path's would be.
+        //
+        // Splitting it this way is what lets the *scan* — 70-odd lines of unchecked
+        // pointer arithmetic, a hand-rolled five-unit lookahead for `\uNNNN`, and a `goto`
+        // into the middle of a do-while — move to Swift, where the input is a bounds-
+        // checked span. What stays here is a call into `StringBuilder`, which is not
+        // where the hazard was. All out-of-line: cold by construction.
+        void islandEscapeBegin();
+        void islandEscapeRun(uint32_t start, uint32_t length);
+        void islandEscapeUnit(char16_t);
+        JSString* islandEscapedJSString(VM&) const;
+        Identifier islandEscapedIdentifier(VM&) const;
 
         // `parseJSONDouble` for a number outside the int32 fast path. No lexNumberError
         // call: a malformed number makes the island decline, and the C++ parse that then
