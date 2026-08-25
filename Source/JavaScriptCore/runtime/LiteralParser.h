@@ -363,7 +363,10 @@ private:
     // declined mid-parse, and the C++ parse then runs from the top.
     bool swiftParserUsable() const
     {
-        if constexpr (sizeof(CharType) != 2 || reviverMode != JSONReviverMode::Disabled)
+        // Both widths now, which is the point of the 8-bit instantiation: a `JSString`
+        // is 8-bit whenever every character is Latin1, so before it existed the island
+        // never ran on ASCII JSON — which is nearly all of it.
+        if constexpr (reviverMode != JSONReviverMode::Disabled)
             return false;
         else
             return m_mode == StrictJSON && Options::useSwiftJSONParser();
