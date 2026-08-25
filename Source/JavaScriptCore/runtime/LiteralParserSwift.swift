@@ -38,8 +38,9 @@ internal import JavaScriptCore_Private.LiteralParserSwiftTypes
 //
 // Anything this cannot finish returns .declined, and the C++ LiteralParser — which the
 // entry point does not build until then — parses the document instead. A *malformed*
-// document can instead return .failed and format the message itself (`formatError`), so
-// that the C++ lexer does not run over the same bytes a second time.
+// document whose diagnostic the lexer here knows returns .failed instead, formatting the
+// message itself (`formatError`), so that the C++ lexer does not run over the same
+// bytes a second time; the grammar-level classes are still declines.
 //
 // `@safe` on everything below that takes the facade, and `JSC_SWIFT_SAFE` on each of its
 // methods (LiteralParserSwiftTypes.h): the facade *type* is unsafe, because a cell's lifetime
@@ -343,6 +344,9 @@ struct JSONLexer<T: JSONUnits> {
         let character = units[offset]
         // Constant-true for a byte, so this guard is not in the Latin1 lexer at all.
         guard T.isLatin1(character) else {
+            // `.unrecognizedToken`: the C++ falls out of its `isLatin1` block to the same
+            // site the table's TokError entries reach (:856), so a non-Latin1 character is
+            // quoted the same way any unrecognized one is.
             return fail()
         }
 
@@ -352,7 +356,7 @@ struct JSONLexer<T: JSONUnits> {
             // Single quotes are in the table because sloppy JSON accepts them;
             // strict JSON rejects them (:768).
             if character == 0x27 && mode == JSONParserMode.strictJSON.rawValue {
-                return fail()
+                return fail() // `.singleQuotes` (:779)
             }
             return lexString(input, units, count, terminator: character,
                              maybeIdentifier: maybeIdentifier)
@@ -390,7 +394,7 @@ struct JSONLexer<T: JSONUnits> {
         case JSONTokenType.error.rawValue, JSONTokenType.errorSpace.rawValue:
             // `.errorSpace` is unreachable — the whitespace loop consumed every
             // character the table maps to it — but the C++ lists it here too.
-            return fail()
+            return fail() // `.unrecognizedToken` (:856)
 
         default:
             // The single-character punctuation: [ ] { } : ( ) , . = ;
@@ -400,8 +404,15 @@ struct JSONLexer<T: JSONUnits> {
         }
     }
 
-    /// Sets up a `.error` token. Which error it was does not cross the boundary:
-    /// the grammar declines and the C++ re-parse produces the diagnostic.
+    /// Sets up a `.error` token, carrying nothing about which error it was and leaving the
+    /// cursor where the failure was found.
+    ///
+    /// **Which diagnostic it was is re-derived from that cursor**, in `diagnoseLexError`,
+    /// at the one grammar position that rejects the token — so add a case there when adding
+    /// a site here. That is not the obvious design and it is the measured one: a kind carried
+    /// on the token is written here and read after the grammar's dispatch, so it is live
+    /// across all of it, which costs the hot function far more than re-deriving does. The
+    /// four ways `lex` can fail are distinguishable at the cursor.
     @inline(always)
     mutating func fail() -> UInt8 {
         currentToken.type = JSONTokenType.error.rawValue
@@ -499,6 +510,10 @@ struct JSONLexer<T: JSONUnits> {
                 }
             }
         } else {
+            // `.invalidNumber` (:1188), and only a `-` with no digit after it can reach it:
+            // the table sends nothing else here but digits, and `.` is `TokDot`. This is the
+            // one `fail` that has already advanced the cursor, which is what makes
+            // end-of-input its signature in `diagnoseLexError`.
             return fail()
         }
 
@@ -895,6 +910,21 @@ enum JSONParseStatus: UInt8 {
     case failed = 3
 }
 
+/// Reports a lexer-level diagnostic and returns the status that says it was reported. Every
+/// caller is on a path that has already decided the document is malformed, so at most one of
+/// these runs per failing document. Always-inline in front of an out-of-line `formatError`, so
+/// what lands at each of the thirty-odd call sites is one call with the kind in a register: the
+/// message literals must not be inlined into the lexer.
+@inline(always)
+@safe
+func reportLexError(
+    _ model: JSC.JSONSwiftObjectModel, _ kind: JSONErrorKind,
+    quoting start: Int = 0, length: UInt32 = 0
+) -> UInt8 {
+    formatError(model, kind, quoting: start, length: length)
+    return JSONParseStatus.failed.rawValue
+}
+
 /// MARK: - The message text, which the island owns
 ///
 /// Every message strict `JSON.parse` can spell is a prefix, a run of the document, and a
@@ -1008,6 +1038,46 @@ func emitError(
         suffix.utf8Span.span)
 }
 
+/// Which diagnostic `JSONLexer.fail` found, re-derived from the cursor it left behind, and
+/// reported. The other half of the note on `fail`: this is what carrying the kind on the
+/// token would have bought, at 120 instructions in the hot function.
+///
+/// Exhaustive over that function's four `fail` sites, and the cases are disjoint because
+/// three of them do not move the cursor:
+///
+///  * end of input — only `lexNumber` gets there, having stepped over a `-`;
+///  * a character that is not Latin1 at all, or one the token-type table maps to `TokError`
+///    or `TokErrorSpace` — both of which the C++ reports as `Unrecognized token` (:856);
+///  * a single quote, which the table maps to `TokString` and strict JSON rejects (:779);
+///  * anything else, which is a character that *starts* a token, and the only `fail` that
+///    can leave the cursor on one is `lexNumber`'s `-` with a non-digit after it (:1188).
+///
+/// `@inline(never)` and a free function taking values, like the escape decoder beside it:
+/// reached at most once per document, and only for a document that is already malformed.
+@inline(never)
+@safe
+func diagnoseLexError<T: JSONUnits>(
+    _ model: JSC.JSONSwiftObjectModel, _ units: Span<T.Unit>, at offset: Int, _ width: T.Type
+) -> UInt8 {
+    guard offset < units.count else {
+        return reportLexError(model, .invalidNumber)
+    }
+    let character = units[offset]
+    guard T.isLatin1(character) else {
+        return reportLexError(model, .unrecognizedToken, quoting: offset, length: 1)
+    }
+    // Before the table, which maps `'` to `TokString`: in strict JSON `lex` rejects it there
+    // rather than lexing a string, and the island is strict-only.
+    if character == 0x27 {
+        return reportLexError(model, .singleQuotes)
+    }
+    let kind = tokenTypesOfLatin1Characters[tableIndex(character)]
+    if kind == JSONTokenType.error.rawValue || kind == JSONTokenType.errorSpace.rawValue {
+        return reportLexError(model, .unrecognizedToken, quoting: offset, length: 1)
+    }
+    return reportLexError(model, .invalidNumber)
+}
+
 /// `Lexer::lexStringSlow`'s scan (LiteralParser.cpp:1043), with the buffer left in C++.
 ///
 /// What is in Swift here is the part that was unchecked: the C++ walks raw `m_ptr`/`m_end`
@@ -1025,9 +1095,9 @@ func emitError(
 /// therefore how it interns. So runs of literal input and decoded units are emitted to C++ as
 /// they are produced, one call each, and every crossing here is cold.
 ///
-/// Anything malformed declines instead of being reported, like the rest of the island:
-/// the C++ re-parse from offset zero produces the message, which keeps every error
-/// byte-identical for free. Strict JSON only, so the sloppy `\'` case cannot arise.
+/// Every way this can fail is a message it reports rather than a decline, and between them
+/// they are the bulk of what malformed input produces. Each site cites the C++ line whose
+/// message it reports. Strict JSON only, so the sloppy `\'` case cannot arise.
 ///
 /// `@inline(never)` and a *free* function, not a mutating method: `mutating` passes `self` by
 /// pointer, which would leave the grammar's cursor and position in memory across the call
@@ -1056,7 +1126,8 @@ func decodeEscapedString<T: JSONUnits>(
 
     while true {
         if UInt(bitPattern: i) >= UInt(bitPattern: count) {
-            return (JSONParseStatus.declined.rawValue, 0) // "Unterminated string"
+            // :1131, the C++'s exit from its do-while with the terminator never reached.
+            return (reportLexError(model, .unterminatedString), 0)
         }
         let unit = units[i]
 
@@ -1085,8 +1156,9 @@ func decodeEscapedString<T: JSONUnits>(
 
         guard unit == 0x5C else {
             // A control character, which strict JSON rejects. The C++ reports it as an
-            // unterminated string; declining gets that message for free.
-            return (JSONParseStatus.declined.rawValue, 0)
+            // unterminated string, its scan stopping here and its loop then exiting with
+            // `m_ptr == runStart` (:1131) — not as a message of its own.
+            return (reportLexError(model, .unterminatedString), 0)
         }
         if i > runFrom {
             guard emitRun(model, from: runFrom, to: i) else {
@@ -1096,7 +1168,7 @@ func decodeEscapedString<T: JSONUnits>(
 
         i &+= 1
         if UInt(bitPattern: i) >= UInt(bitPattern: count) {
-            return (JSONParseStatus.declined.rawValue, 0) // "Unterminated string"
+            return (reportLexError(model, .unterminatedString), 0) // :1066
         }
         let decoded: UInt16
         switch units[i] {
@@ -1116,11 +1188,17 @@ func decodeEscapedString<T: JSONUnits>(
             // actually prove the four reads below are in range, because `&+` is allowed to
             // wrap and a wrapped `i` satisfies it. Here `i` is already known to be in
             // `0..<count`, so `count &- i` is in `1...count` and cannot wrap either.
-            guard count &- i >= 5 else { return (JSONParseStatus.declined.rawValue, 0) }
+            guard count &- i >= 5 else {
+                // :1105.
+                return (reportLexError(model, .unicodeEscapeNeedsFourHexDigits), 0)
+            }
             var value: UInt16 = 0
             for digit in 1...4 {
                 guard let nibble = asciiHexValue(units[i &+ digit]) else {
-                    return (JSONParseStatus.declined.rawValue, 0)
+                    // :1110, whose span is `{ m_ptr, 5 }` with the cursor on the `u`, and
+                    // the guard above is what puts those five units inside the input.
+                    return (reportLexError(model, .invalidUnicodeEscape,
+                                           quoting: i, length: 5), 0)
                 }
                 value = (value << 4) | UInt16(nibble)
             }
@@ -1129,7 +1207,10 @@ func decodeEscapedString<T: JSONUnits>(
             decoded = value
             i &+= 5
         default:
-            return (JSONParseStatus.declined.rawValue, 0)
+            // :1124, quoting the one unit after the backslash. The sloppy-mode `\'` arm
+            // beside it there cannot arise: the island is strict-only.
+            return (reportLexError(model, .invalidEscapeCharacter,
+                                   quoting: i, length: 1), 0)
         }
         guard model.escapeUnit(decoded) else {
             return (JSONParseStatus.stopped.rawValue, 0)
@@ -1174,6 +1255,24 @@ struct JSONSwiftGrammar<T: JSONUnits> {
     @inline(always)
     var positionAfterValue: JSONParsePosition {
         depth == 0 ? .documentEnd : .commaOrClose
+    }
+
+    /// The status for a token the position it arrived at cannot use.
+    ///
+    /// `.failed` when the lexer already knows which diagnostic it is, and that ordering is
+    /// the whole of the precedence rule: `getErrorMessage` prefers the lexer's message to
+    /// the parser's, so a lexer-level kind is what gets reported at a grammar position and
+    /// a grammar-level one must never overwrite it. `.declined` otherwise — every
+    /// grammar-level class still takes the C++ re-parse and the message it produces.
+    ///
+    /// Non-mutating and always-inline, so nothing is passed by pointer and the cursor stays
+    /// in a register; the diagnosis itself is out of line.
+    @inline(always)
+    func failure(_ model: JSC.JSONSwiftObjectModel, _ units: Span<T.Unit>) -> UInt8 {
+        guard lexer.currentToken.type == JSONTokenType.error.rawValue else {
+            return JSONParseStatus.declined.rawValue
+        }
+        return unsafe diagnoseLexError(model, units, at: lexer.offset, T.self)
     }
 
     @inline(always)
@@ -1281,7 +1380,10 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     position = positionAfterValue
 
                 default:
-                    return JSONParseStatus.declined.rawValue
+                    // A value position cannot use this token. Every grammar-level kind for
+                    // it — `Unexpected EOF`, the `Unexpected token 'X'` family, class D's
+                    // `Unexpected identifier "..."` — is still a decline.
+                    return failure(model, units)
                 }
 
             case .key, .keyOrClose:
@@ -1318,13 +1420,16 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     position = .colon
 
                 default:
-                    return JSONParseStatus.declined.rawValue
+                    return failure(model, units)
                 }
 
             case .colon:
                 let type = lexer.lex(input, units, count, maybeIdentifier: false)
                 if type != JSONTokenType.colon.rawValue {
-                    return JSONParseStatus.declined.rawValue
+                    // The C++ sets "Expected ':' before value in object property
+                    // definition" here (:1524) *and* keeps whatever the lexer said, which
+                    // wins — so a lex failure at a colon reports the lexer's kind.
+                    return failure(model, units)
                 }
                 position = .value
 
@@ -1341,13 +1446,17 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     }
                     position = positionAfterValue
                 } else {
-                    return JSONParseStatus.declined.rawValue
+                    return failure(model, units)
                 }
 
             case .documentEnd:
                 let type = lexer.lex(input, units, count, maybeIdentifier: false)
                 if type != JSONTokenType.end.rawValue {
-                    return JSONParseStatus.declined.rawValue
+                    // Trailing content. If it lexed cleanly the C++ sets no message at all
+                    // and `getErrorMessage` falls back to "Unable to parse JSON string"
+                    // (`[1]]`), so that half stays a decline; if it failed to lex, the
+                    // lexer's kind is the message (`[1]@`).
+                    return failure(model, units)
                 }
                 return JSONParseStatus.ok.rawValue
             }
