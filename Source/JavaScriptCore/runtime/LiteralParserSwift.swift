@@ -168,10 +168,9 @@ protocol JSONUnits {
     /// are not representable in a byte, so the Latin1 form is shorter.
     static func isValidIdentifierCharacter(_ c: Unit) -> Bool
 
-    /// `WTF::compareCharacters` for three and four units (FastCharacterComparison.h:
-    /// 96-112): one unaligned load against a folded constant. The widths differ —
-    /// `COMPARE_3CHARS` is a 16-bit load plus a byte, `COMPARE_3UCHARS` a 32-bit load
-    /// plus a unit — so these are per-width rather than generic over a stride.
+    /// `WTF::compareCharacters` for three and four units
+    /// (FastCharacterComparison.h:96): one unaligned load against a folded
+    /// constant. Per width, because the load widths differ.
     static func matches3(
         _ input: RawSpan, at index: Int, _ c0: Unit, _ c1: Unit, _ c2: Unit,
         _ units: Span<Unit>
@@ -247,12 +246,17 @@ struct JSONLexer<T: JSONUnits> {
     /// `Lexer::lex<hint>` (:742). No `next()`/`nextMaybeIdentifier()` pair: the
     /// grammar passes a constant hint at each call site, keeping both scan shapes
     /// specialised and the call inlined.
+    ///
+    /// The wrapping cursor arithmetic and the *unsigned* spelling of every guard that
+    /// dominates a `units[...]` read are load-bearing only in combination: together they
+    /// are what let the optimizer discharge the read's bounds check. Neither can overflow,
+    /// by the entry precondition.
     @inline(always)
     mutating func lex(
         _ input: RawSpan, _ units: Span<T.Unit>, _ count: Int, maybeIdentifier: Bool
     ) -> UInt8 {
-        while offset < count && isJSONWhiteSpace(units[offset]) {
-            offset += 1
+        while UInt(bitPattern: offset) < UInt(bitPattern: count) && isJSONWhiteSpace(units[offset]) {
+            offset &+= 1
         }
 
         // `== count`, as the C++ writes it (:757), not `>= count`. `>=` would discharge
@@ -286,30 +290,30 @@ struct JSONLexer<T: JSONUnits> {
             // length guards are `>=`, so a keyword ending at end-of-input matches.
             switch character {
             case 0x74: // t
-                if count - offset >= 4 && T.matches3(input, at: offset + 1, 0x72, 0x75, 0x65, units) {
-                    offset += 4
+                if count &- offset >= 4 && T.matches3(input, at: offset &+ 1, 0x72, 0x75, 0x65, units) {
+                    offset &+= 4
                     currentToken.type = JSONTokenType.true.rawValue
                     return JSONTokenType.true.rawValue
                 }
             case 0x66: // f
-                if count - offset >= 5 && T.matches4(input, at: offset + 1, 0x61, 0x6C, 0x73, 0x65) {
-                    offset += 5
+                if count &- offset >= 5 && T.matches4(input, at: offset &+ 1, 0x61, 0x6C, 0x73, 0x65) {
+                    offset &+= 5
                     currentToken.type = JSONTokenType.false.rawValue
                     return JSONTokenType.false.rawValue
                 }
             case 0x6E: // n
-                if count - offset >= 4 && T.matches3(input, at: offset + 1, 0x75, 0x6C, 0x6C, units) {
-                    offset += 4
+                if count &- offset >= 4 && T.matches3(input, at: offset &+ 1, 0x75, 0x6C, 0x6C, units) {
+                    offset &+= 4
                     currentToken.type = JSONTokenType.null.rawValue
                     return JSONTokenType.null.rawValue
                 }
             default:
                 break
             }
-            return lexIdentifier(units, count)
+            return lexIdentifier(input, units, count)
 
         case JSONTokenType.number.rawValue:
-            return lexNumber(units, count)
+            return lexNumber(input, units, count)
 
         case JSONTokenType.error.rawValue, JSONTokenType.errorSpace.rawValue:
             // `.errorSpace` is unreachable — the whitespace loop consumed every
@@ -319,7 +323,7 @@ struct JSONLexer<T: JSONUnits> {
         default:
             // The single-character punctuation: [ ] { } : ( ) , . = ;
             currentToken.type = kind
-            offset += 1
+            offset &+= 1
             return kind
         }
     }
@@ -334,17 +338,19 @@ struct JSONLexer<T: JSONUnits> {
 
     /// `Lexer::lexIdentifier` (:862).
     @inline(always)
-    mutating func lexIdentifier(_ units: Span<T.Unit>, _ count: Int) -> UInt8 {
+    mutating func lexIdentifier(
+        _ input: RawSpan, _ units: Span<T.Unit>, _ count: Int
+    ) -> UInt8 {
         let start = offset
         var i = offset
-        while i < count && T.isValidIdentifierCharacter(units[i]) {
-            i += 1
+        while UInt(bitPattern: i) < UInt(bitPattern: count) && T.isValidIdentifierCharacter(units[i]) {
+            i &+= 1
         }
         offset = i
         // `truncatingIfNeeded`, not `UInt32(_:)`: the trapping conversion emits
         // three checks for a bound the entry precondition already establishes.
         currentToken.start = UInt32(truncatingIfNeeded: start)
-        currentToken.length = UInt32(truncatingIfNeeded: i - start)
+        currentToken.length = UInt32(truncatingIfNeeded: i &- start)
         currentToken.type = JSONTokenType.identifier.rawValue
         return JSONTokenType.identifier.rawValue
     }
@@ -355,15 +361,15 @@ struct JSONLexer<T: JSONUnits> {
         _ input: RawSpan, _ units: Span<T.Unit>, _ count: Int,
         terminator: T.Unit, maybeIdentifier: Bool
     ) -> UInt8 {
-        offset += 1
+        offset &+= 1
         let runStart = offset
 
         if mode == JSONParserMode.strictJSON.rawValue {
             // terminator is '"' here; the ''' case errored out in lex().
             if maybeIdentifier {
                 var i = offset
-                while i < count && isSafeStringCharacterForIdentifierStrict(units[i], T.self) {
-                    i += 1
+                while UInt(bitPattern: i) < UInt(bitPattern: count) && isSafeStringCharacterForIdentifierStrict(units[i], T.self) {
+                    i &+= 1
                 }
                 offset = i
             } else {
@@ -372,9 +378,9 @@ struct JSONLexer<T: JSONUnits> {
         } else {
             if maybeIdentifier {
                 var i = offset
-                while i < count
+                while UInt(bitPattern: i) < UInt(bitPattern: count)
                     && isSafeStringCharacterForIdentifierSloppy(units[i], terminator, T.self) {
-                    i += 1
+                    i &+= 1
                 }
                 offset = i
             } else {
@@ -383,10 +389,10 @@ struct JSONLexer<T: JSONUnits> {
             }
         }
 
-        if offset < count && units[offset] == terminator {
+        if UInt(bitPattern: offset) < UInt(bitPattern: count) && units[offset] == terminator {
             currentToken.start = UInt32(truncatingIfNeeded: runStart)
-            currentToken.length = UInt32(truncatingIfNeeded: offset - runStart)
-            offset += 1
+            currentToken.length = UInt32(truncatingIfNeeded: offset &- runStart)
+            offset &+= 1
             currentToken.type = JSONTokenType.string.rawValue
             return JSONTokenType.string.rawValue
         }
@@ -400,22 +406,24 @@ struct JSONLexer<T: JSONUnits> {
 
     /// `Lexer::lexNumber` (:1110), int32 fast path only.
     @inline(always)
-    mutating func lexNumber(_ units: Span<T.Unit>, _ count: Int) -> UInt8 {
+    mutating func lexNumber(
+        _ input: RawSpan, _ units: Span<T.Unit>, _ count: Int
+    ) -> UInt8 {
         let initial = offset
         var negative = false
-        if offset < count && units[offset] == 0x2D { // '-'
+        if UInt(bitPattern: offset) < UInt(bitPattern: count) && units[offset] == 0x2D { // '-'
             negative = true
-            offset += 1
+            offset &+= 1
         }
         let start = offset // does not include the '-'
 
         // (0 | [1-9][0-9]*)
-        if offset < count && isASCIIDigit(units[offset]) {
+        if UInt(bitPattern: offset) < UInt(bitPattern: count) && isASCIIDigit(units[offset]) {
             let character = units[offset]
-            offset += 1
+            offset &+= 1
             if character != 0x30 { // not '0'
-                while offset < count && isASCIIDigit(units[offset]) {
-                    offset += 1
+                while UInt(bitPattern: offset) < UInt(bitPattern: count) && isASCIIDigit(units[offset]) {
+                    offset &+= 1
                 }
             }
         } else {
@@ -431,17 +439,14 @@ struct JSONLexer<T: JSONUnits> {
         if offset < count {
             let c = units[offset]
             if c != 0x2E && c != 0x65 && c != 0x45 // '.', 'e', 'E'
-                && (offset - start) <= numberOfDigitsForSafeInt32 {
-                // Wrapping arithmetic, not checked: the branch above bounds
-                // this at nine digits, and 999999999 < Int32.max, so no step can
-                // overflow. The checked form emits four traps in this loop —
-                // one for the multiply, two for the add and subtract, one for
-                // the widening — for a bound the C++ states as a comment.
+                && (offset &- start) <= numberOfDigitsForSafeInt32 {
+                // Wrapping: the branch above bounds this at nine digits, so no step
+                // can overflow. The checked form emits four traps per iteration.
                 var result: Int32 = 0
                 var cursor = start
                 repeat {
                     result = result &* 10 &+ Int32(truncatingIfNeeded: units[cursor]) &- 0x30
-                    cursor += 1
+                    cursor &+= 1
                 } while cursor < offset
 
                 if !negative {
@@ -545,7 +550,7 @@ enum WideUnits: JSONUnits {
     ) -> Bool {
         let pair = UInt32(c0) | (UInt32(c1) << 16)
         return unsafe loadBytes(input, at: index * 2, as: UInt32.self) == pair
-            && units[index + 2] == c2
+            && units[index &+ 2] == c2
     }
 
     @inline(always) static func matches4(
@@ -685,7 +690,7 @@ enum Latin1Units: JSONUnits {
     ) -> Bool {
         let pair = UInt16(c0) | (UInt16(c1) << 8)
         return unsafe loadBytes(input, at: index, as: UInt16.self) == pair
-            && units[index + 2] == c2
+            && units[index &+ 2] == c2
     }
 
     @inline(always) static func matches4(
