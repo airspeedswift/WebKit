@@ -2084,28 +2084,18 @@ struct JSONSwiftObjectModelState {
     WTF_FORBID_HEAP_ALLOCATION;
 public:
 
-    // The two instantiations the island covers, both StrictJSON with no reviver. Naming
-    // them here is what makes this a friend of LiteralParser, whose `Lexer` and
-    // `makeIdentifier` are private. One state, one facade and one grammar serve both
-    // widths because nothing crossing the boundary names a character; what is
-    // width-dependent is `is8Bit` and the templates below.
-    using Parser16 = LiteralParser<char16_t, JSONReviverMode::Disabled>;
-    using Parser8 = LiteralParser<Latin1Character, JSONReviverMode::Disabled>;
-
     JSONSwiftObjectModelState(VM& vm, JSGlobalObject* globalObject,
-        Parser16::Lexer& lexer, std::span<const char16_t> input)
+        std::span<const char16_t> input)
         : vm(vm)
         , globalObject(globalObject)
-        , lexer16(&lexer)
         , input16(input)
     {
     }
 
     JSONSwiftObjectModelState(VM& vm, JSGlobalObject* globalObject,
-        Parser8::Lexer& lexer, std::span<const Latin1Character> input)
+        std::span<const Latin1Character> input)
         : vm(vm)
         , globalObject(globalObject)
-        , lexer8(&lexer)
         , input8(input)
         , is8Bit(true)
     {
@@ -2113,24 +2103,20 @@ public:
 
     VM& vm;
     JSGlobalObject* globalObject { nullptr };
-    // Only for the two cold paths, and exactly one of the two is set. The island owns
-    // the cursor for the whole document, so nothing else in here touches the lexer.
-    Parser16::Lexer* lexer16 { nullptr };
-    Parser8::Lexer* lexer8 { nullptr };
+    // The document, at whichever width it is: exactly one of the two is set. This is
+    // everything the island takes from its caller — there is no LiteralParser behind it,
+    // which is why the caller does not build one until the island declines.
     std::span<const char16_t> input16;
     std::span<const Latin1Character> input8;
-    // Which of the two pairs above is live. Constant for a whole document, so every
-    // branch on it is perfectly predicted; it is read once per string, once per
-    // property store and once per cold path.
+    // Which of the two above is live. Constant for a whole document, so every branch on it
+    // is perfectly predicted; it is read once per string, once per property store and once
+    // per cold path.
     bool is8Bit { false };
 
     // The characters of a token, at whichever width this parse is. A template rather
     // than two members so that the store's name handling stays one piece of source.
     template<typename CharType>
     std::span<const CharType> input() const;
-
-    template<typename CharType>
-    typename LiteralParser<CharType, JSONReviverMode::Disabled>::Lexer& lexer() const;
 
     // The open containers, innermost last, with `frames.size()` as the depth: the two are
     // pushed and popped together, so a second count would be the same number twice.
@@ -2180,7 +2166,7 @@ public:
 
     // The completed document, once the outermost container closes — or the single value, for
     // a document that is a bare primitive. Rooted the same way `containers` is: this state is
-    // a local of `parseWithSwiftIsland`, so the collector scans it as it scans any frame.
+    // a local of `parseJSONWithSwiftIsland`, so the collector scans it as it scans any frame.
     JSValue result;
     bool hasResult { false };
 
@@ -2188,14 +2174,63 @@ public:
     // reason the C++ must propagate rather than re-parse.
     bool sawException { false };
 
+    // MARK: The escaped string's buffer — the island owns the scan, this holds the result
+    //
+    // The island decodes escapes itself and emits the result as alternating runs of literal
+    // input and single decoded units; they land here until the string is complete. A
+    // `StringBuilder` and nothing narrower because it owns the 8-bit-to-16-bit upconversion
+    // policy, and that policy decides the resulting string's representation: `lexStringSlow`
+    // builds an escaped string in one of these too, so a string the island decoded is
+    // interned and represented exactly as the C++ path's would be. Splitting the path here is
+    // what lets the *scan* — unchecked pointer arithmetic, a hand-rolled five-unit lookahead
+    // for `\uNNNN`, and a `goto` into the middle of a do-while — live in Swift over a
+    // bounds-checked span, leaving C++ only the call into `StringBuilder`.
+    //
+    // Built on the first escape rather than with the state, because almost every string in
+    // real payloads contains no escape at all and a document with none must not pay for a
+    // buffer: it pays one flag store and one not-taken branch in the destructor.
+    std::optional<StringBuilder> escapeBuilder;
+
+    // Every entry that touches the buffer goes through this, so a run or a unit arriving
+    // without an `escapeBegin` before it is a decline rather than an empty-optional
+    // dereference — the same rule as the offsets below: an invariant of the other language is
+    // checked, not trusted.
+    StringBuilder* escapeBuffer() { return escapeBuilder ? &escapeBuilder.value() : nullptr; }
+
+    void escapeBegin()
+    {
+        if (escapeBuilder) [[likely]]
+            escapeBuilder->clear();
+        else
+            escapeBuilder.emplace();
+    }
+
     // The island's offsets are bounded by its own cursor, but that is an invariant of the
-    // *other* language, and this side turns them into `subspan` and `m_start + start`,
+    // *other* language, and this side turns them into `subspan` and `data() + start`,
     // neither of which checks. So every entry that takes one asserts it.
     // `JSON_ISLAND_CHECKED_LOADS` is the Swift half of the same question.
     bool isValidRange(uint32_t start, uint32_t length) const
     {
         size_t size = is8Bit ? input8.size() : input16.size();
         return static_cast<size_t>(start) + static_cast<size_t>(length) <= size;
+    }
+
+    // `parseJSONDouble` for a number outside the island's int32 fast path, which stays in C++
+    // and should: it is a correctly-rounded decimal-to-double conversion shared with the rest
+    // of WTF. No lexNumberError call — a malformed number makes the island decline, and the
+    // C++ parse that then runs from the top produces the message.
+    template<typename CharType>
+    bool parseDouble(uint32_t initial, double& value, ptrdiff_t& endOffset) const
+    {
+        auto characters = input<CharType>();
+        ASSERT(initial <= characters.size());
+        size_t parsedLength = 0;
+        auto parsed = WTF::parseJSONDouble(characters.subspan(initial), parsedLength);
+        if (!parsed) [[unlikely]]
+            return false;
+        value = parsed.value();
+        endOffset = static_cast<ptrdiff_t>(initial) + static_cast<ptrdiff_t>(parsedLength);
+        return true;
     }
 
     // The property name for a cold key, whose characters are not in the input. The fast
@@ -2209,28 +2244,38 @@ public:
         return WTF::move(resolvedKeys[frame.resolvedKeyIndex - 1]);
     }
 
-    // The two calls that need the token the cold path left in the lexer. Both are here
-    // rather than in the facade because they are what the friendship is for.
-    // MARK: An escaped string's value and name, read out of the builder
+    // MARK: An escaped string's value and name, made out of the buffer
     //
-    // The island decoded the escapes itself, so there is no token: the characters are in
-    // the lexer's builder and nowhere else. That is the lifetime improvement — the C++ path
-    // puts a raw pointer to them in the token and relies on nobody lexing another cold
-    // string before it is read. Here the buffer becomes a cell in one step, and no pointer
-    // to it exists on either side.
+    // The island decoded the escapes itself, so there is no token: the characters are in the
+    // buffer above and nowhere else. That is the lifetime improvement over the C++ path,
+    // which puts a raw pointer to them in the token and relies on nobody lexing another cold
+    // string before it is read. Here the buffer becomes a cell in one step, and no pointer to
+    // it exists on either side.
+    //
+    // `makeJSString` and `makeIdentifier` on the atom-string cache, exactly as
+    // `LiteralParser::makeJSString` reaches them for a token whose characters `lexStringSlow`
+    // left in its own builder, so the interning is identical.
 
     JSString* adoptEscapedString()
     {
-        return is8Bit ? lexer8->islandEscapedJSString(vm) : lexer16->islandEscapedJSString(vm);
+        StringBuilder* builder = escapeBuffer();
+        if (!builder) [[unlikely]]
+            return nullptr;
+        return builder->is8Bit()
+            ? vm.jsonAtomStringCache.makeJSString(builder->span8())
+            : vm.jsonAtomStringCache.makeJSString(builder->span16());
     }
 
     bool adoptEscapedKey()
     {
+        StringBuilder* builder = escapeBuffer();
+        if (!builder) [[unlikely]]
+            return false;
         if (frames.isEmpty()) [[unlikely]]
             return false;
-        Identifier resolved = is8Bit
-            ? lexer8->islandEscapedIdentifier(vm)
-            : lexer16->islandEscapedIdentifier(vm);
+        Identifier resolved = builder->is8Bit()
+            ? Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(builder->span8()))
+            : Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(builder->span16()));
         resolvedKeys.append(WTF::move(resolved));
         Frame& frame = frames.last();
         frame.resolvedKeyIndex = resolvedKeys.size();
@@ -2251,20 +2296,6 @@ ALWAYS_INLINE std::span<const Latin1Character> JSONSwiftObjectModelState::input<
 {
     ASSERT(is8Bit);
     return input8;
-}
-
-template<>
-ALWAYS_INLINE JSONSwiftObjectModelState::Parser16::Lexer& JSONSwiftObjectModelState::lexer<char16_t>() const
-{
-    ASSERT(!is8Bit);
-    return *lexer16;
-}
-
-template<>
-ALWAYS_INLINE JSONSwiftObjectModelState::Parser8::Lexer& JSONSwiftObjectModelState::lexer<Latin1Character>() const
-{
-    ASSERT(is8Bit);
-    return *lexer8;
 }
 
 namespace {
@@ -2728,16 +2759,17 @@ JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::literalValue(uint8_t code)
 // MARK: - The one cold path reached from inside the grammar loop
 //
 // Declared in LiteralParserSwiftTypes.h, which has the reason resolution and the store are
-// fused. `Lexer::island*` does the C++ work on the C++ state and only says where to resume,
-// and it dispatches on the width rather than on `m_currentToken.type`.
+// fused. It does its C++ work on the island's own state — there is no LiteralParser here to
+// borrow one from — and only says where the island's cursor resumes. It dispatches on the
+// width rather than on a token type.
 
 static bool islandParseDouble(JSONSwiftObjectModelState& state, uint32_t initial,
     double& value, ptrdiff_t& endOffset)
 {
     ASSERT(state.isValidRange(initial, 0));
     return state.is8Bit
-        ? state.lexer<Latin1Character>().islandParseDouble(initial, value, endOffset)
-        : state.lexer<char16_t>().islandParseDouble(initial, value, endOffset);
+        ? state.parseDouble<Latin1Character>(initial, value, endOffset)
+        : state.parseDouble<char16_t>(initial, value, endOffset);
 }
 
 JSONSwiftColdResult JSONSwiftObjectModel::slowNumberValue(uint32_t initial)
@@ -2760,43 +2792,38 @@ JSONSwiftColdResult JSONSwiftObjectModel::slowNumberValue(uint32_t initial)
 // rather than as a finished buffer. Each of these is a `StringBuilder` call and a range
 // assertion; the scan that produces the ranges is in Swift.
 
-static void islandEscapeRun(JSONSwiftObjectModelState& state, uint32_t start, uint32_t length)
-{
-    if (state.is8Bit)
-        state.lexer<Latin1Character>().islandEscapeRun(start, length);
-    else
-        state.lexer<char16_t>().islandEscapeRun(start, length);
-}
-
 bool JSONSwiftObjectModel::escapeBegin()
 {
-    auto& state = *m_state;
-    if (state.is8Bit)
-        state.lexer<Latin1Character>().islandEscapeBegin();
-    else
-        state.lexer<char16_t>().islandEscapeBegin();
+    m_state->escapeBegin();
     return true;
 }
 
 bool JSONSwiftObjectModel::escapeRun(uint32_t start, uint32_t length)
 {
     auto& state = *m_state;
+    StringBuilder* builder = state.escapeBuffer();
+    if (!builder) [[unlikely]]
+        return false;
     // The one range the island computes that is not bounded by a token it already lexed:
     // it is the span between two escapes. Checked here rather than asserted, because
-    // `islandEscapeRun` turns it straight into a pointer and a length.
+    // `subspan` does not check.
     if (!state.isValidRange(start, length)) [[unlikely]]
         return false;
-    islandEscapeRun(state, start, length);
+    if (state.is8Bit)
+        builder->append(state.input<Latin1Character>().subspan(start, length));
+    else
+        builder->append(state.input<char16_t>().subspan(start, length));
     return true;
 }
 
 bool JSONSwiftObjectModel::escapeUnit(uint16_t unit)
 {
-    auto& state = *m_state;
-    if (state.is8Bit)
-        state.lexer<Latin1Character>().islandEscapeUnit(static_cast<char16_t>(unit));
-    else
-        state.lexer<char16_t>().islandEscapeUnit(static_cast<char16_t>(unit));
+    StringBuilder* builder = m_state->escapeBuffer();
+    if (!builder) [[unlikely]]
+        return false;
+    // `char16_t` at either width on purpose: this is where a `\uNNNN` above Latin1 forces the
+    // builder to 16 bits, which is the policy being kept in C++.
+    builder->append(static_cast<char16_t>(unit));
     return true;
 }
 
@@ -2807,6 +2834,10 @@ JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishValue(ptrdiff_t endOffset)
     JSString* string = state.adoptEscapedString();
     RETURN_IF_EXCEPTION(scope, (state.sawException = true,
         JSONSwiftColdResult { 0, JSONSwiftParseStopped }));
+    // No buffer to make a string out of, i.e. no `escapeBegin` reached this state. Declines
+    // rather than storing a null cell, on the same terms as the range checks.
+    if (!string) [[unlikely]]
+        return { 0, JSONSwiftParseDeclined };
     if (!jsonSwiftStoreValue(state, string))
         return { 0, JSONSwiftParseStopped };
     return { endOffset, JSONSwiftParseOK };
@@ -2826,18 +2857,21 @@ JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishKey(ptrdiff_t endOffset)
     return { endOffset, JSONSwiftParseOK };
 }
 
-// MARK: - The C++ entry point
+// MARK: - The island's entry point
 //
 // Builds the state and the facade on its own stack — both ordinary C++ locals, so the
 // container stack inside the state is scanned by the collector the way any other frame is
 // — hands the island the input, and reads the result out.
+//
+// The input, and nothing else: there is no `LiteralParser` behind this call. `parseStrictJSON`
+// (LiteralParser.h) builds one only when this declines, which is what the two constructors of
+// the state and the buffer inside it are for.
 
-template<typename CharType, JSONReviverMode reviverMode>
-JSValue LiteralParser<CharType, reviverMode>::parseWithSwiftIsland(VM& vm, bool& handled)
-    requires (reviverMode == JSONReviverMode::Disabled)
+template<typename CharType>
+JSValue parseJSONWithSwiftIsland(JSGlobalObject* globalObject,
+    std::span<const CharType> characters, bool& handled)
 {
     handled = false;
-    auto characters = m_lexer.islandInput();
     // The island's offsets are 31-bit, which is not a new restriction —
     // LiteralParserToken::stringOrIdentifierLength is `unsigned : 31` — but the
     // island states it as a precondition rather than checking it per token, so it is
@@ -2848,7 +2882,7 @@ JSValue LiteralParser<CharType, reviverMode>::parseWithSwiftIsland(VM& vm, bool&
     // One line per width, and nothing else here is width-dependent: the state picks its
     // constructor, the facade is the same class, and the entry point differs only in
     // which specialization of the Swift grammar it names.
-    JSONSwiftObjectModelState state(vm, m_globalObject, m_lexer, characters);
+    JSONSwiftObjectModelState state(getVM(globalObject), globalObject, characters);
     JSONSwiftObjectModel model(state);
 
     uint8_t status;
@@ -2872,88 +2906,30 @@ JSValue LiteralParser<CharType, reviverMode>::parseWithSwiftIsland(VM& vm, bool&
         return { };
     }
 
-    // Declined. Everything the island did is either a cursor, rewound here, or a
-    // half-built object graph, which no user code can have seen because this is StrictJSON.
+    // Declined, and there is nothing to undo: the cursor was the island's own, and the
+    // half-built object graph is unobservable because no user code can have seen it — this is
+    // StrictJSON. The C++ parser the caller builds next starts at offset zero because it has
+    // not existed until now.
     //
-    // A decline is invisible from the outside — the C++ re-parse returns the same value, so
-    // a validation run passes and a benchmark quietly measures the C++ against itself — so
-    // it is logged on request.
+    // A decline is invisible from the outside — the C++ parse returns the same value, so a
+    // validation run passes and a benchmark quietly measures the C++ against itself — so it
+    // is logged on request.
     if (Options::verboseSwiftJSONParserDeclines()) [[unlikely]] {
         constexpr size_t prefixLength = 60;
         dataLogLn("JSON island declined (", sizeof(CharType) == 1 ? "8-bit"_s : "16-bit"_s,
             ", status ", status, ", ", characters.size(), " units): ",
             StringView { characters.first(std::min(prefixLength, characters.size())) });
     }
-    m_lexer.islandRewind();
     return { };
 }
 
-// MARK: - The lexer's half of the two cold paths
-//
-// Out-of-line for the same reason the C++ marks them cold: `lexStringSlow` is not inline
-// there either.
-
-template<typename CharType, JSONReviverMode reviverMode>
-bool LiteralParser<CharType, reviverMode>::Lexer::islandParseDouble(uint32_t initial,
-    double& value, ptrdiff_t& endOffset)
-{
-    const CharType* start = m_start + initial;
-    size_t parsedLength = 0;
-    auto parsed = WTF::parseJSONDouble(std::span { start, m_end }, parsedLength);
-    if (!parsed) [[unlikely]]
-        return false;
-    value = parsed.value();
-    endOffset = (start - m_start) + static_cast<ptrdiff_t>(parsedLength);
-    return true;
-}
-
-// MARK: - The escape decoder's buffer half
-//
-// Declared in LiteralParser.h with the reason the scan and the buffer are split here.
-// Nothing in this group touches the cursor: the island owns it for the whole document and
-// tells the facade where the string ended.
-
-template<typename CharType, JSONReviverMode reviverMode>
-void LiteralParser<CharType, reviverMode>::Lexer::islandEscapeBegin()
-{
-    m_builder.clear();
-}
-
-template<typename CharType, JSONReviverMode reviverMode>
-void LiteralParser<CharType, reviverMode>::Lexer::islandEscapeRun(uint32_t start, uint32_t length)
-{
-    // The range is the island's, so it is checked rather than trusted, on the same
-    // argument as every other offset crossing the boundary — `m_start + start` does not
-    // check and neither does `span`.
-    ASSERT(static_cast<size_t>(start) + length <= static_cast<size_t>(m_end - m_start));
-    m_builder.append(std::span { m_start + start, static_cast<size_t>(length) });
-}
-
-template<typename CharType, JSONReviverMode reviverMode>
-void LiteralParser<CharType, reviverMode>::Lexer::islandEscapeUnit(char16_t unit)
-{
-    // `char16_t` at either width on purpose: this is where `\uNNNN` above Latin1 forces
-    // the builder to 16 bits, which is the policy being kept in C++.
-    m_builder.append(unit);
-}
-
-template<typename CharType, JSONReviverMode reviverMode>
-JSString* LiteralParser<CharType, reviverMode>::Lexer::islandEscapedJSString(VM& vm) const
-{
-    // `makeJSString(vm, token)` with the token's characters in the builder, which is what
-    // `lexStringSlow` left behind, so the interning is identical.
-    return m_builder.is8Bit()
-        ? vm.jsonAtomStringCache.makeJSString(m_builder.span8())
-        : vm.jsonAtomStringCache.makeJSString(m_builder.span16());
-}
-
-template<typename CharType, JSONReviverMode reviverMode>
-Identifier LiteralParser<CharType, reviverMode>::Lexer::islandEscapedIdentifier(VM& vm) const
-{
-    return m_builder.is8Bit()
-        ? Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(m_builder.span8()))
-        : Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(m_builder.span16()));
-}
+// The two widths the island covers, instantiated here rather than in the header: its callers
+// are the strict-JSON entries in JSONObject.cpp and the two C API ones, all of which parse a
+// `JSString`'s characters at whichever width it happens to be.
+template JSValue parseJSONWithSwiftIsland<Latin1Character>(JSGlobalObject*,
+    std::span<const Latin1Character>, bool&);
+template JSValue parseJSONWithSwiftIsland<char16_t>(JSGlobalObject*,
+    std::span<const char16_t>, bool&);
 
 #endif // JSC_SUPPORTS_SWIFT
 

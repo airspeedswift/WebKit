@@ -2212,23 +2212,17 @@ JSC_DEFINE_HOST_FUNCTION(jsonProtoFuncParse, (JSGlobalObject* globalObject, Call
             RELEASE_AND_RETURN(scope, JSValue::encode(jsonParseSlow(globalObject, string, view, WTF::move(callData), asObject(function))));
     }
 
-    if (view->is8Bit()) {
-        LiteralParser<Latin1Character, JSONReviverMode::Disabled> jsonParser(globalObject, view->span8(), StrictJSON);
-        JSValue unfiltered = jsonParser.tryLiteralParse();
-        EXCEPTION_ASSERT(!scope.exception() || !unfiltered);
-        if (!unfiltered) {
-            RETURN_IF_EXCEPTION(scope, { });
-            return throwVMError(globalObject, scope, createSyntaxError(globalObject, jsonParser.getErrorMessage()));
-        }
-        return JSValue::encode(unfiltered);
-    }
-
-    LiteralParser<char16_t, JSONReviverMode::Disabled> jsonParser(globalObject, view->span16(), StrictJSON);
-    JSValue unfiltered = jsonParser.tryLiteralParse();
+    // The Swift island first and the C++ parser only if it declines, both inside
+    // `parseStrictJSON`: the island needs the characters and nothing else, so a
+    // `LiteralParser` — six containers and an error message — is not built to be asked.
+    String errorMessage;
+    JSValue unfiltered = view->is8Bit()
+        ? parseStrictJSON(globalObject, view->span8(), &errorMessage)
+        : parseStrictJSON(globalObject, view->span16(), &errorMessage);
     EXCEPTION_ASSERT(!scope.exception() || !unfiltered);
     if (!unfiltered) {
         RETURN_IF_EXCEPTION(scope, { });
-        return throwVMError(globalObject, scope, createSyntaxError(globalObject, jsonParser.getErrorMessage()));
+        return throwVMError(globalObject, scope, createSyntaxError(globalObject, errorMessage));
     }
     return JSValue::encode(unfiltered);
 }
@@ -2245,13 +2239,9 @@ JSValue JSONParse(JSGlobalObject* globalObject, StringView json)
     if (json.isNull())
         return JSValue();
 
-    if (json.is8Bit()) {
-        LiteralParser<Latin1Character, JSONReviverMode::Disabled> jsonParser(globalObject, json.span8(), StrictJSON);
-        return jsonParser.tryLiteralParse();
-    }
-
-    LiteralParser<char16_t, JSONReviverMode::Disabled> jsonParser(globalObject, json.span16(), StrictJSON);
-    return jsonParser.tryLiteralParse();
+    if (json.is8Bit())
+        return parseStrictJSON(globalObject, json.span8());
+    return parseStrictJSON(globalObject, json.span16());
 }
 
 JSValue JSONParseWithException(JSGlobalObject* globalObject, StringView json)
@@ -2262,20 +2252,13 @@ JSValue JSONParseWithException(JSGlobalObject* globalObject, StringView json)
     if (json.isNull())
         return JSValue();
 
-    if (json.is8Bit()) {
-        LiteralParser<Latin1Character, JSONReviverMode::Disabled> jsonParser(globalObject, json.span8(), StrictJSON);
-        JSValue result = jsonParser.tryLiteralParse();
-        RETURN_IF_EXCEPTION(scope, { });
-        if (!result)
-            throwSyntaxError(globalObject, scope, jsonParser.getErrorMessage());
-        return result;
-    }
-
-    LiteralParser<char16_t, JSONReviverMode::Disabled> jsonParser(globalObject, json.span16(), StrictJSON);
-    JSValue result = jsonParser.tryLiteralParse();
+    String errorMessage;
+    JSValue result = json.is8Bit()
+        ? parseStrictJSON(globalObject, json.span8(), &errorMessage)
+        : parseStrictJSON(globalObject, json.span16(), &errorMessage);
     RETURN_IF_EXCEPTION(scope, { });
     if (!result)
-        throwSyntaxError(globalObject, scope, jsonParser.getErrorMessage());
+        throwSyntaxError(globalObject, scope, errorMessage);
     return result;
 }
 

@@ -36,8 +36,9 @@ internal import JavaScriptCore_Private.LiteralParserSwiftTypes
 // parseRecursively's grammar (:1512). The object model stays in C++ behind the
 // JSC::JSONSwiftObjectModel facade, as does parseJSONDouble. Reviver mode Disabled only.
 //
-// Anything this cannot finish returns .declined and LiteralParser re-parses in C++,
-// so no error message is built here. Reviver mode Disabled only.
+// Anything this cannot finish returns .declined, and the C++ LiteralParser — which the
+// entry point does not build until then — parses the document instead, so no error
+// message is built here. Reviver mode Disabled only.
 //
 // `@safe` on everything below that takes the facade, and `JSC_SWIFT_SAFE` on each of its
 // methods (LiteralParserSwiftTypes.h): the facade *type* is unsafe, because a cell's lifetime

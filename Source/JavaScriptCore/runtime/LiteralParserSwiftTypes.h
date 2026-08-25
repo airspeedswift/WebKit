@@ -221,8 +221,9 @@ public:
     // MARK: An escaped string, decoded by the island rather than declined
     //
     // The island scans and decodes the escapes and emits the result as alternating runs of
-    // literal input and single decoded units; these hold them in the lexer's
-    // `StringBuilder` and then make one cell out of it. There is no C++ fallback for an
+    // literal input and single decoded units; these hold them in a `StringBuilder` the
+    // object-model state owns — built on the first escape, since most documents have none —
+    // and then make one cell out of it. There is no C++ fallback for an
     // escaped string any more: the island decodes every one it accepts and declines the
     // rest to the C++ re-parse, which is what keeps the error messages byte-identical for
     // free — and what makes a wrong decoder show up instead of hiding behind a fallback
