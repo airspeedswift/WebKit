@@ -2243,23 +2243,24 @@ ALWAYS_INLINE bool jsonSwiftStoreWithIdentifier(JSONSwiftObjectModelState& state
     return true;
 }
 
-ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue value)
+// The object half of the store, deliberately out of line and shared. It reaches WTF::equal,
+// the atom-string cache's hashing, the transition table lookup, parseIndex and putDirect's
+// structure machinery — a few hundred instructions — and every facade entry funnels through
+// it, so it must not be inlined: that puts a copy in each of intValue, doubleValue,
+// literalValue, stringValue and endContainer, where for an array element all of it is dead
+// and only its register pressure is real.
+//
+NEVER_INLINE bool jsonSwiftStorePropertyValue(JSONSwiftObjectModelState& state,
+    JSObject* container, JSValue value)
 {
     auto scope = DECLARE_THROW_SCOPE(state.vm);
-
-    if (state.frames.isEmpty()) [[unlikely]] {
-        // A bare top-level value: the island's grammar reaches this once, for a document
-        // that is a primitive rather than a container. Not an error, just not the
-        // island's job — `parsePrimitiveValue` handles it and this declines.
-        return false;
-    }
-
-    // The frame of the container being stored into, which is the innermost one: a nested
-    // container has already popped its own by the time `endContainer` gets here.
-    auto& frame = state.frames.last();
-    JSObject* container = state.containers[state.frames.size() - 1];
-    if (frame.isObject) {
+    {
         using PendingKey = JSONSwiftObjectModelState::PendingKey;
+        // The frame of the object being stored into, which is the innermost one: a nested
+        // container has already popped its own by the time `endContainer` gets here.
+        if (state.frames.isEmpty()) [[unlikely]]
+            return false;
+        auto& frame = state.frames.last();
         if (frame.pendingKey == PendingKey::None) [[unlikely]]
             return false;
 
@@ -2306,7 +2307,26 @@ ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue
         RELEASE_AND_RETURN(scope, jsonSwiftStoreWithIdentifier(state, container,
             Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(name)), value));
     }
+}
 
+// What is left inline: the empty check, which container this is, and an array append —
+// `putDirectIndex`'s own fast path is an indexing-mode switch and a vector-length compare
+// before it hands off to an out-of-line slow path of its own, so this stays small.
+ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue value)
+{
+    if (state.frames.isEmpty()) [[unlikely]] {
+        // A bare top-level value: the island's grammar reaches this once, for a document
+        // that is a primitive rather than a container. Not an error, just not the
+        // island's job — `parsePrimitiveValue` handles it and this declines.
+        return false;
+    }
+
+    auto& frame = state.frames.last();
+    JSObject* container = state.containers[state.frames.size() - 1];
+    if (frame.isObject)
+        return jsonSwiftStorePropertyValue(state, container, value);
+
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
     unsigned index = frame.nextIndex++;
     container->putDirectIndex(state.globalObject, index, value);
     RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
