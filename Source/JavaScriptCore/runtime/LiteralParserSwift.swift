@@ -1124,6 +1124,47 @@ func diagnoseFailure<T: JSONUnits>(
     }
 }
 
+/// `Lexer::lexNumberError` (LiteralParser.cpp:1227): which of the two number messages a text
+/// `WTF::parseJSONDouble` refused deserves, by walking the grammar it violated. Entered where
+/// the C++ enters it — the cursor just past the integer part, where `lexNumber` left it when it
+/// asked for the double path and where it still is when that parse fails — so this is the C++'s
+/// own scan, over a `Span` rather than a raw pointer pair.
+///
+/// The C++ has `ASSERT_NOT_REACHED()` after both arms and then sets "Invalid number", on the
+/// grounds that a text `parseJSONDouble` refused must violate one of them. This returns that
+/// same message instead of asserting: matching release behaviour is the requirement, and an
+/// island that crashed where the shipping C++ produces a message would be a new failure mode.
+@inline(never)
+@safe
+func diagnoseNumberError<T: JSONUnits>(
+    _ model: JSC.JSONSwiftObjectModel, _ units: Span<T.Unit>, from: Int, _ width: T.Type
+) -> UInt8 {
+    let count = units.count
+    var i = from
+    // ('.' [0-9]+)?
+    if i < count && units[i] == 0x2E {
+        i &+= 1
+        guard i < count, isASCIIDigit(units[i]) else {
+            return reportLexError(model, .invalidDigitsAfterDecimalPoint) // :1235
+        }
+        i &+= 1
+        while i < count && isASCIIDigit(units[i]) {
+            i &+= 1
+        }
+    }
+    // ([eE][+-]?[0-9]+)?
+    if i < count && (units[i] == 0x65 || units[i] == 0x45) {
+        i &+= 1
+        if i < count && (units[i] == 0x2D || units[i] == 0x2B) {
+            i &+= 1
+        }
+        guard i < count, isASCIIDigit(units[i]) else {
+            return reportLexError(model, .exponentSymbols) // :1254
+        }
+    }
+    return reportLexError(model, .invalidNumber) // :1264, the C++'s post-assert message
+}
+
 /// Whether the token starting at `index` has a comma in front of it, whitespace aside. Only
 /// ever asked about a token the grammar has already refused, so the backward scan is as cold
 /// as the rest of the diagnosis; `isJSONWhiteSpace` is the same predicate the lexer skips
@@ -1452,7 +1493,17 @@ struct JSONSwiftGrammar<T: JSONUnits> {
 
                 case JSONTokenType.needsDoubleParse.rawValue:
                     let r = model.slowNumberValue(lexer.currentToken.start)
-                    if r.status != JSONParseStatus.ok.rawValue { return r.status }
+                    if r.status != JSONParseStatus.ok.rawValue {
+                        // A decline from there means one thing and only one:
+                        // `WTF::parseJSONDouble` refused the text, which is exactly the
+                        // condition under which the C++ calls `lexNumberError`. So the
+                        // island runs that analysis rather than handing the document back.
+                        if r.status == JSONParseStatus.declined.rawValue {
+                            return diagnoseNumberError(model, units,
+                                                       from: lexer.offset, T.self)
+                        }
+                        return r.status
+                    }
                     lexer.offset = r.endOffset
                     position = positionAfterValue
 

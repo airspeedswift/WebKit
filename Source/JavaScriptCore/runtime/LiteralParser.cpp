@@ -2793,8 +2793,10 @@ JSONSwiftColdResult JSONSwiftObjectModel::slowNumberValue(uint32_t initial)
     auto& state = *m_state;
     double value = 0;
     ptrdiff_t endOffset = 0;
-    // No lexNumberError call: a malformed number makes the island decline, and the C++
-    // parse that then runs from the top builds the message.
+    // No lexNumberError call here: the island's grammar reads this status, runs
+    // `lexNumberError`'s own analysis over the same cursor (`diagnoseNumberError`) and reports
+    // the message itself. So `Declined` from here means one thing to it —
+    // `parseJSONDouble` refused the text — and nothing else here may return it.
     if (!islandParseDouble(state, initial, value, endOffset))
         return { 0, JSONSwiftParseDeclined };
     if (!jsonSwiftStoreValue(state, jsNumber(value)))
