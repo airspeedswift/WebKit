@@ -44,6 +44,7 @@
 #include <wtf/CompactPointerTuple.h>
 #include <wtf/CompactPtr.h>
 #include <wtf/CompactRefPtr.h>
+#include <wtf/SwiftBridging.h>
 
 namespace WTF {
 
@@ -191,7 +192,8 @@ private:
     const Structure* m_structure;
 };
 
-class Structure : public JSCell {
+// Repeated from JSCell deliberately; see the comment there on `unsafe` not inheriting.
+class SWIFT_UNSAFE_REFERENCE Structure : public JSCell {
     static constexpr uint16_t shortInvalidOffset = std::numeric_limits<uint16_t>::max() - 1;
     static constexpr uint16_t useRareDataFlag = std::numeric_limits<uint16_t>::max();
 public:
