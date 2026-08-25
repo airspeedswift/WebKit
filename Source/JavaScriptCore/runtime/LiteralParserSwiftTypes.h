@@ -148,20 +148,67 @@ enum JSONSwiftTokenType : uint8_t {
 // pointer to it appears here, so this header stays free of JavaScriptCore internals.
 struct JSONSwiftObjectModelState;
 
-// Why the island's parse stopped. It builds no error messages: on anything but a
-// completed document the C++ re-parses from the top, which keeps the error text
-// byte-identical for free, and StrictJSON runs no user code so the half-built graph is
-// unobservable.
+// Why the island's parse stopped. A declined document is re-parsed by the C++ from the top,
+// which keeps the error text byte-identical for free and is safe because StrictJSON runs no
+// user code, so the half-built graph is unobservable.
 enum JSONSwiftParseStatus : uint8_t {
     // The document is complete and the state holds the result.
     JSONSwiftParseOK = 0,
-    // Malformed, nesting deeper than its stack, a top-level primitive, or a failed cold
-    // path. Re-parse in C++.
+    // Nesting deeper than its stack, or a malformed document whose diagnostic the island
+    // does not produce yet. Re-parse in C++.
     JSONSwiftParseDeclined = 1,
     // The object model told the island to stop; `sawException` says whether an exception
     // must be propagated or the document re-parses.
     JSONSwiftParseStopped = 2,
+    // Malformed, and the island said *which* way: it formatted the message itself through
+    // `errorMessage` below, so the C++ does not lex the document a second time. That is the
+    // whole of the distinction from `Declined`, which runs the C++ lexer over every
+    // attacker-chosen byte again.
+    JSONSwiftParseFailed = 3,
 };
+
+// MARK: - Which diagnostic a failed parse produces
+//
+// Every message strict `JSON.parse` can spell is prefix + a quoted run of the document +
+// suffix, with `getErrorMessage`'s "JSON Parse error: " (LiteralParser.h:146) already inside
+// the prefix. So the literals live in Swift, beside the code that detects each condition, and
+// what crosses is two spans of ASCII and the offsets of the run — see `errorMessage` below. No
+// error *kind* crosses the boundary, so there is no table on this side to keep in step.
+//
+// Two rules the island has to keep, both from the C++'s own structure:
+//
+//  1. A lexer-level diagnostic wins over a grammar-level one, always: `getErrorMessage`
+//     prefers `m_lexErrorMessage` to `m_parseErrorMessage`, and every `return TokError` site
+//     in the lexer sets a message within three lines of the return. So whoever detects first
+//     formats, and the grammar must never overwrite what the lexer reported — get it backwards
+//     and `[1e]` reports "Expected ']'" instead of "Invalid number". Enforced on both sides:
+//     the island reports at the point of detection, and `errorMessage` keeps the first message.
+//  2. Three of the file's messages are unreachable here and are deliberately absent.
+//     "Could not parse value expression" is always shadowed by rule 1; "Attempted to redefine
+//     __proto__ property" is guarded by `parserMode != StrictJSON` (LiteralParser.cpp:1578);
+//     "Unexpected content at end of JSON literal" belongs to
+//     `tryLiteralParsePrimitiveValue`, i.e. `JSON.rawJSON`.
+
+// `__counted_by(n)` plus `noescape` is what makes the importer synthesize a `Span`-taking
+// overload beside the pointer+count one, so the island hands text across with no `unsafe` at
+// the call site and no table on this side (`CSSSwiftTokenSink::takeChunk` is the same mechanism
+// in WebCore). Both attributes are required: `counted_by` alone imports as
+// `UnsafeBufferPointer`, `noescape` alone as pointer+count. They must also be repeated on the
+// definition, which in C++ is a different type without them.
+//
+// Spelled here rather than included because this header stays free of WTF, and guarded
+// because a compiler without them still has to compile the C++ side — where the fallback
+// costs the island its safe overload, so `JSC_SUPPORTS_SWIFT` would not build.
+#if defined(__counted_by)
+#define JSC_SWIFT_COUNTED_BY(x) __counted_by(x)
+#else
+#define JSC_SWIFT_COUNTED_BY(x)
+#endif
+#if defined(__has_attribute) && __has_attribute(noescape)
+#define JSC_SWIFT_NOESCAPE __attribute__((noescape))
+#else
+#define JSC_SWIFT_NOESCAPE
+#endif
 
 // What a cold path did. `endOffset` is where the island's lexer resumes, in code units from
 // the start of the input, and is only meaningful for JSONSwiftParseOK.
@@ -240,6 +287,29 @@ public:
     // `endOffset` is the offset just past the closing quote, which the island computed.
     JSC_SWIFT_SAFE JSONSwiftColdResult escapeFinishValue(ptrdiff_t endOffset);
     JSC_SWIFT_SAFE JSONSwiftColdResult escapeFinishKey(ptrdiff_t endOffset);
+
+    // MARK: The message, for a document the island refuses rather than declines
+    //
+    // The island formats it and this side allocates it: `prefix` and `suffix` are the ASCII
+    // literal parts, and `quoteStart`/`quoteLength` name the run of the *document* that goes
+    // between them — 0/0 for the messages that quote nothing, which is most of them. One
+    // crossing per failing document, and one `tryMakeString` here. The run crosses as offsets
+    // rather than characters for the same reason a property name does: the document is already
+    // in hand on this side, at a width the island does not have to know, so the 8-bit case
+    // stays 8-bit and quoting is a `subspan`.
+    //
+    // Both offsets are bounds-checked here, being an invariant of the *other* language. A range
+    // that does not bound — like a `String` that cannot be allocated — leaves no message at
+    // all, which makes the document decline to the C++ re-parse and produce the same text the
+    // slow way, so the island needs no fallback of its own (:1324 is the C++'s).
+    //
+    // Void, and the return path is the status rather than this call, because there is nothing
+    // for the object model to say: no cell is made and no exception can be thrown here.
+    JSC_SWIFT_SAFE void errorMessage(
+        const uint8_t* JSC_SWIFT_COUNTED_BY(prefixLength) JSC_SWIFT_NOESCAPE prefix,
+        size_t prefixLength, uint32_t quoteStart, uint32_t quoteLength,
+        const uint8_t* JSC_SWIFT_COUNTED_BY(suffixLength) JSC_SWIFT_NOESCAPE suffix,
+        size_t suffixLength);
 
 private:
     JSONSwiftObjectModelState* m_state { nullptr };

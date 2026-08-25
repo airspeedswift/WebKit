@@ -37,16 +37,19 @@ internal import JavaScriptCore_Private.LiteralParserSwiftTypes
 // JSC::JSONSwiftObjectModel facade, as does parseJSONDouble. Reviver mode Disabled only.
 //
 // Anything this cannot finish returns .declined, and the C++ LiteralParser — which the
-// entry point does not build until then — parses the document instead, so no error
-// message is built here. Reviver mode Disabled only.
+// entry point does not build until then — parses the document instead. A *malformed*
+// document can instead return .failed and format the message itself (`formatError`), so
+// that the C++ lexer does not run over the same bytes a second time.
 //
 // `@safe` on everything below that takes the facade, and `JSC_SWIFT_SAFE` on each of its
 // methods (LiteralParserSwiftTypes.h): the facade *type* is unsafe, because a cell's lifetime
 // is the collector's business, but no call on it is. SE-0458 lets the callee take
 // responsibility for an unsafe-typed direct argument, `self` included, so the assertion is
-// made once per declaration instead of restated at each of sixty-one call sites — and it is
-// the honest one, since an *escape* of the receiver still diagnoses where
-// `SWIFT_IMMORTAL_REFERENCE` would have silenced it.
+// made once per declaration rather than at every call site — and it is the honest one, since
+// an *escape* of the receiver still diagnoses where `SWIFT_IMMORTAL_REFERENCE` would have
+// silenced it. What remains is twenty unchecked `RawSpan` loads, two `std::span` imports at
+// the entries, and one facade call whose synthesized safe overload drops the attribute
+// (`emitError`).
 
 /// Mirrors `JSC::TokenType`. Raw values match so C++ can cast directly.
 enum JSONTokenType: UInt8 {
@@ -60,6 +63,64 @@ enum JSONTokenType: UInt8 {
     case needsSlowString = 21
     /// Island-only. Off the int32 fast path. `start` is the C++ `initial`.
     case needsDoubleParse = 22
+}
+
+/// Which diagnostic a malformed document reports. Island-only vocabulary: no counterpart
+/// crosses the boundary, since the message *text* is formatted here (`formatError`) and only
+/// the finished pieces cross.
+///
+/// The two rules from `JSC::JSONSwiftParseFailed`'s declaration, restated where they are
+/// enforced:
+///
+///  * a lexer-level kind outranks a grammar-level one, always — the C++'s
+///    `getErrorMessage` prefers `m_lexErrorMessage`, so the island reports at the point of
+///    detection and `errorMessage` keeps the first message;
+///  * the three messages that are unreachable from strict `JSON.parse` are absent, and
+///    must stay absent.
+enum JSONErrorKind: UInt8 {
+    /// Island-only, never crossing the boundary: resolve the kind from the refused token's
+    /// type, which is what a *value* position does (`parsePrimitiveValue`'s family).
+    case fromTokenType = 0
+    // Lexer-level.
+    /// The commonest failure of all by a wide margin, and what a control character inside a
+    /// string reports too, the C++ scan stopping there.
+    case unterminatedString = 1
+    /// Reached in strict mode only, which is the island's only mode.
+    case singleQuotes
+    /// One code unit at `start`.
+    case unrecognizedToken
+    /// One code unit at `start`: the character after the backslash.
+    case invalidEscapeCharacter
+    /// Fewer than four units follow the `u`, so there is nothing to quote.
+    case unicodeEscapeNeedsFourHexDigits
+    /// Five code units at `start`: the `u` and the four that are not all hex digits.
+    case invalidUnicodeEscape
+    case invalidNumber
+    case invalidDigitsAfterDecimalPoint
+    case exponentSymbols
+
+    // Grammar-level.
+    case expectedRBrace
+    case expectedRBracket
+    case expectedColon
+    case unexpectedTokenRBracket
+    case unexpectedTokenRBrace
+    case unexpectedTokenColon
+    case unexpectedTokenLParen
+    case unexpectedTokenRParen
+    case unexpectedTokenComma
+    case unexpectedTokenDot
+    case unexpectedTokenAssign
+    case unexpectedTokenSemi
+    case unexpectedEOF
+    /// The identifier's full extent at `start`; `formatError` applies the 200-unit cap.
+    case unexpectedIdentifier
+    case unexpectedCommaAtEndOfArray
+    case propertyNameMustBeAStringLiteral
+    /// The absence of a message rather than a message: `getErrorMessage`'s fallback,
+    /// which is what a complete document followed by content that itself lexes cleanly
+    /// reports (`[1]]`).
+    case unableToParseJSONString
 }
 
 /// Mirrors `JSC::ParserMode`.
@@ -828,6 +889,123 @@ enum JSONParseStatus: UInt8 {
     case ok = 0
     case declined = 1
     case stopped = 2
+    /// Malformed, and the island formatted the message itself through
+    /// `model.errorMessage`, so the C++ allocates the `String` instead of lexing the
+    /// document a second time.
+    case failed = 3
+}
+
+/// MARK: - The message text, which the island owns
+///
+/// Every message strict `JSON.parse` can spell is a prefix, a run of the document, and a
+/// suffix, with `getErrorMessage`'s "JSON Parse error: " (LiteralParser.h:146) folded into the
+/// prefix. So the literals live here, next to the code that detects each condition, and what
+/// crosses is the two ASCII parts as spans plus the run's offsets; the C++ half is one
+/// `tryMakeString` and a bounds check. Each case cites the site in LiteralParser.cpp whose
+/// literal it repeats, and a mistyped literal is the only way the two can disagree, no error
+/// kind crossing the boundary.
+///
+/// `@inline(never)`: its caller is always-inline and sits inside the lexer's error arms, so
+/// inlining this would put every message literal into the hot function.
+@inline(never)
+@safe
+func formatError(
+    _ model: JSC.JSONSwiftObjectModel, _ kind: JSONErrorKind,
+    quoting start: Int, length: UInt32
+) {
+    let quoteStart = UInt32(truncatingIfNeeded: start)
+    if kind == .unexpectedIdentifier {
+        // :1320, truncation rule and all, which moved here with the message. The two-step
+        // fallback for an allocation that cannot be made did not: a `tryMakeString` that
+        // fails leaves no message, and the document then declines to the C++ re-parse, which
+        // has that fallback (:1324) already.
+        let shown = min(length, 200)
+        emitError(model, "JSON Parse error: Unexpected identifier \"",
+            quoteStart, shown, shown == length ? "\"" : "...\"")
+        return
+    }
+    emitError(model, errorMessagePrefix(kind), quoteStart, length,
+        errorMessageSuffix(kind))
+}
+
+/// The literal before the quoted run — the whole message, for the majority that quote
+/// nothing.
+private func errorMessagePrefix(_ kind: JSONErrorKind) -> String {
+    switch kind {
+    // The four that quote the document.
+    case .unrecognizedToken: "JSON Parse error: Unrecognized token '" // :856
+    case .invalidEscapeCharacter: "JSON Parse error: Invalid escape character " // :1124
+    case .invalidUnicodeEscape: "JSON Parse error: \"\\" // :1110
+    case .unexpectedIdentifier: "JSON Parse error: Unexpected identifier \"" // :1320
+
+    // Lexer-level.
+    case .unterminatedString: "JSON Parse error: Unterminated string" // :1066, :1131
+    case .singleQuotes: "JSON Parse error: Single quotes (') are not allowed in JSON" // :779
+    case .unicodeEscapeNeedsFourHexDigits:
+        "JSON Parse error: \\u must be followed by 4 hex digits" // :1105
+    case .invalidNumber: "JSON Parse error: Invalid number" // :1188, :1264
+    case .invalidDigitsAfterDecimalPoint:
+        "JSON Parse error: Invalid digits after decimal point" // :1235
+    case .exponentSymbols:
+        "JSON Parse error: Exponent symbols should be followed by an optional '+' or '-' and then by at least one number" // :1254
+
+    // Grammar-level.
+    case .expectedRBrace: "JSON Parse error: Expected '}'" // :1273
+    case .expectedRBracket: "JSON Parse error: Expected ']'" // :1276
+    case .expectedColon:
+        "JSON Parse error: Expected ':' before value in object property definition" // :1279
+    case .unexpectedTokenRBracket: "JSON Parse error: Unexpected token ']'" // :1316
+    case .unexpectedTokenRBrace: "JSON Parse error: Unexpected token '}'" // :1319
+    case .unexpectedTokenColon: "JSON Parse error: Unexpected token ':'" // :1344
+    case .unexpectedTokenLParen: "JSON Parse error: Unexpected token '('" // :1347
+    case .unexpectedTokenRParen: "JSON Parse error: Unexpected token ')'" // :1350
+    case .unexpectedTokenComma: "JSON Parse error: Unexpected token ','" // :1353
+    case .unexpectedTokenDot: "JSON Parse error: Unexpected token '.'" // :1356
+    case .unexpectedTokenAssign: "JSON Parse error: Unexpected token '='" // :1359
+    case .unexpectedTokenSemi: "JSON Parse error: Unexpected token ';'" // :1362
+    case .unexpectedEOF: "JSON Parse error: Unexpected EOF" // :1365
+    case .unexpectedCommaAtEndOfArray:
+        "JSON Parse error: Unexpected comma at the end of array expression" // :1459, :1662
+    case .propertyNameMustBeAStringLiteral:
+        "JSON Parse error: Property name must be a string literal" // :1600, :1789, :1831
+
+    // `getErrorMessage`'s fallback (LiteralParser.h:152), and `.fromTokenType` with it: that
+    // kind is resolved to a real one before anything is reported, so reaching here with it
+    // would be an island bug, and the fallback message is what the C++ produces for a
+    // document it has no message for.
+    case .unableToParseJSONString, .fromTokenType:
+        "JSON Parse error: Unable to parse JSON string"
+    }
+}
+
+/// The literal after the quoted run, for the three kinds that have one. `.unexpectedIdentifier`
+/// is not here: its suffix is the truncation's, decided in `formatError`.
+private func errorMessageSuffix(_ kind: JSONErrorKind) -> String {
+    switch kind {
+    case .unrecognizedToken: "'"
+    case .invalidUnicodeEscape: "\" is not a valid unicode escape"
+    default: ""
+    }
+}
+
+/// The one crossing. `prefix` and `suffix` arrive as `Span<UInt8>` rather than pointers
+/// because the C++ declaration annotates them `__counted_by` plus `noescape`, which is what
+/// makes the importer offer a safe overload.
+///
+/// The one `unsafe` the facade still costs, and it is the *safe* overload that costs it:
+/// `JSC_SWIFT_SAFE` discharges the receiver on the other fifteen facade members, and on
+/// this same declaration when it is called as pointer-plus-count — but the `Span` overload
+/// the importer synthesizes from `__counted_by` + `noescape` does not carry the attribute
+/// over, so the safer spelling of one call is the only one that needs a marker. Not a
+/// position problem: prefix and trailing both lose it.
+@inline(always)
+@safe
+func emitError(
+    _ model: JSC.JSONSwiftObjectModel, _ prefix: String,
+    _ quoteStart: UInt32, _ quoteLength: UInt32, _ suffix: String
+) {
+    unsafe model.errorMessage(prefix.utf8Span.span, quoteStart, quoteLength,
+        suffix.utf8Span.span)
 }
 
 /// `Lexer::lexStringSlow`'s scan (LiteralParser.cpp:1043), with the buffer left in C++.

@@ -2085,19 +2085,21 @@ struct JSONSwiftObjectModelState {
 public:
 
     JSONSwiftObjectModelState(VM& vm, JSGlobalObject* globalObject,
-        std::span<const char16_t> input)
+        std::span<const char16_t> input, String* errorMessage)
         : vm(vm)
         , globalObject(globalObject)
         , input16(input)
+        , errorMessage(errorMessage)
     {
     }
 
     JSONSwiftObjectModelState(VM& vm, JSGlobalObject* globalObject,
-        std::span<const Latin1Character> input)
+        std::span<const Latin1Character> input, String* errorMessage)
         : vm(vm)
         , globalObject(globalObject)
         , input8(input)
         , is8Bit(true)
+        , errorMessage(errorMessage)
     {
     }
 
@@ -2173,6 +2175,20 @@ public:
     // Whether the island stopped because an exception is pending, which is the one
     // reason the C++ must propagate rather than re-parse.
     bool sawException { false };
+
+    // MARK: The diagnostic, for a document the island refused rather than declined
+    //
+    // The island formats the text and `errorMessage` writes it straight into the caller's
+    // `String` — a pointer to it and nothing else, so this costs one null store in the
+    // prologue and no destructor, where a `String` member would cost both. A caller that
+    // does not want the text (`JSONParse`) passes nothing, and then nothing is built.
+    //
+    // `hasMessage` is what makes a `Failed` status that produced no text — a range the
+    // island's offsets did not bound, or an allocation that failed — decline to the C++
+    // re-parse rather than throw an empty syntax error, and it is what implements rule 1's
+    // first-writer-wins on this side.
+    String* errorMessage { nullptr };
+    bool hasErrorMessage { false };
 
     // MARK: The escaped string's buffer — the island owns the scan, this holds the result
     //
@@ -2857,19 +2873,68 @@ JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishKey(ptrdiff_t endOffset)
     return { endOffset, JSONSwiftParseOK };
 }
 
+// MARK: - The message the island formatted, made into the caller's `String`
+//
+// Two ASCII literal parts from the island and a run of the document between them; see the
+// declaration in LiteralParserSwiftTypes.h for why the text lives on that side. What is left
+// here is the allocation and the bounds check — the whole of what C++ still has to own.
+//
+// The annotations are repeated from the declaration deliberately: without them this is a
+// different type in C++, and the island loses the `Span`-taking overload that keeps its call
+// site free of `unsafe`.
+void JSONSwiftObjectModel::errorMessage(
+    const uint8_t* JSC_SWIFT_COUNTED_BY(prefixLength) JSC_SWIFT_NOESCAPE prefix,
+    size_t prefixLength, uint32_t quoteStart, uint32_t quoteLength,
+    const uint8_t* JSC_SWIFT_COUNTED_BY(suffixLength) JSC_SWIFT_NOESCAPE suffix,
+    size_t suffixLength)
+{
+    auto& state = *m_state;
+    // Nothing to build: this caller throws no syntax error and discards the text, so the
+    // parse still reports `Failed` and the C++ lexer still does not run again.
+    if (!state.errorMessage)
+        return;
+    // First writer wins, which is rule 1 in LiteralParserSwiftTypes.h stated on this side as
+    // well: a lexer-level diagnostic is formatted before the grammar sees the `.error` token,
+    // and `getErrorMessage` would prefer it. The island reports in the same order, so this is
+    // a backstop rather than the mechanism.
+    if (state.hasErrorMessage) [[unlikely]]
+        return;
+    // The island's offsets are bounded by its own cursor, but that is an invariant of the
+    // other language and `subspan` does not check.
+    if (!state.isValidRange(quoteStart, quoteLength)) [[unlikely]]
+        return;
+
+    // `Latin1Character` and `uint8_t` are the same type, so the literal parts are 8-bit
+    // string pieces and the result is 8-bit unless the quoted run forces otherwise — which
+    // is exactly what the C++ parse's `makeString` over the same pieces produced.
+    std::span<const Latin1Character> prefixCharacters { prefix, prefixLength };
+    std::span<const Latin1Character> suffixCharacters { suffix, suffixLength };
+    String message = state.is8Bit
+        ? tryMakeString(prefixCharacters,
+            state.input<Latin1Character>().subspan(quoteStart, quoteLength), suffixCharacters)
+        : tryMakeString(prefixCharacters,
+            state.input<char16_t>().subspan(quoteStart, quoteLength), suffixCharacters);
+    // An allocation that could not be made leaves the document to the C++ re-parse, which
+    // has its own two-step fallback for exactly this (:1324).
+    if (!message) [[unlikely]]
+        return;
+    *state.errorMessage = WTF::move(message);
+    state.hasErrorMessage = true;
+}
+
 // MARK: - The island's entry point
 //
 // Builds the state and the facade on its own stack — both ordinary C++ locals, so the
-// container stack inside the state is scanned by the collector the way any other frame is
-// — hands the island the input, and reads the result out.
-//
-// The input, and nothing else: there is no `LiteralParser` behind this call. `parseStrictJSON`
-// (LiteralParser.h) builds one only when this declines, which is what the two constructors of
-// the state and the buffer inside it are for.
+// container stack inside the state is scanned by the collector the way any other frame is —
+// hands the island the input, and reads the result out. The input and nothing else: there is
+// no `LiteralParser` behind this call, `parseStrictJSON` (LiteralParser.h) building one only
+// when this declines. `errorMessage` is where a *failed* parse's diagnostic goes, and it is the
+// caller's `String*` rather than a member, so a caller that does not want the text
+// (`JSONParse`) passes nothing and nothing is built.
 
 template<typename CharType>
 JSValue parseJSONWithSwiftIsland(JSGlobalObject* globalObject,
-    std::span<const CharType> characters, bool& handled)
+    std::span<const CharType> characters, bool& handled, String* errorMessage)
 {
     handled = false;
     // The island's offsets are 31-bit, which is not a new restriction —
@@ -2882,7 +2947,7 @@ JSValue parseJSONWithSwiftIsland(JSGlobalObject* globalObject,
     // One line per width, and nothing else here is width-dependent: the state picks its
     // constructor, the facade is the same class, and the entry point differs only in
     // which specialization of the Swift grammar it names.
-    JSONSwiftObjectModelState state(getVM(globalObject), globalObject, characters);
+    JSONSwiftObjectModelState state(getVM(globalObject), globalObject, characters, errorMessage);
     JSONSwiftObjectModel model(state);
 
     uint8_t status;
@@ -2902,6 +2967,20 @@ JSValue parseJSONWithSwiftIsland(JSGlobalObject* globalObject,
     // than being asserted away, at one compare per document.
     ASSERT(status != JSONSwiftParseOK || state.hasResult);
     if (status == JSONSwiftParseStopped && state.sawException) {
+        handled = true;
+        return { };
+    }
+
+    // Malformed, and the island said which way, so the C++ lexer does not run over the same
+    // attacker-chosen bytes a second time. That double lex is what every failing parse used
+    // to cost and is the reason this status exists.
+    //
+    // `hasErrorMessage` is the island's own `errorMessage` call having produced text, and a
+    // caller that wanted none is the other way to be handled: either way the message the
+    // C++ would have built is not needed. Anything else — an offset that did not bound, an
+    // allocation that failed — falls through to the decline, which produces the same text
+    // the slow way.
+    if (status == JSONSwiftParseFailed && (state.hasErrorMessage || !errorMessage)) {
         handled = true;
         return { };
     }
@@ -2927,9 +3006,9 @@ JSValue parseJSONWithSwiftIsland(JSGlobalObject* globalObject,
 // are the strict-JSON entries in JSONObject.cpp and the two C API ones, all of which parse a
 // `JSString`'s characters at whichever width it happens to be.
 template JSValue parseJSONWithSwiftIsland<Latin1Character>(JSGlobalObject*,
-    std::span<const Latin1Character>, bool&);
+    std::span<const Latin1Character>, bool&, String*);
 template JSValue parseJSONWithSwiftIsland<char16_t>(JSGlobalObject*,
-    std::span<const char16_t>, bool&);
+    std::span<const char16_t>, bool&, String*);
 
 #endif // JSC_SUPPORTS_SWIFT
 
