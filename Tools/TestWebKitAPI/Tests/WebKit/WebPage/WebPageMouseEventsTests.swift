@@ -27,6 +27,7 @@ import AppKit
 import SwiftUI
 import Testing
 @_spi(Testing) import WebKit
+import _WebKit_SwiftUI
 private import TestWebKitAPILibrary
 
 @MainActor
