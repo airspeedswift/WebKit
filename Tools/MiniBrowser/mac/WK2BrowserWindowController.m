@@ -136,6 +136,15 @@ static const int testFooterBannerHeight = 58;
 {
     _webView = [[WKWebView alloc] initWithFrame:[containerView bounds] configuration:_configuration];
     _webView.inspectable = YES;
+
+    // Keep running at full speed when the window is covered. Otherwise WebKit marks the
+    // page hidden and throttles it, which for a benchmark run means the page never posts
+    // its result and run-benchmark hangs until its timeout instead of failing -- with only
+    // the page's own "NotAllowedError, Document is hidden" as a clue. MiniBrowser is a
+    // development and benchmarking tool, so it has no reason to want the power saving.
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"WindowOcclusionDetectionEnabled"])
+        _webView._windowOcclusionDetectionEnabled = NO;
+
     [self didChangeSettings];
 
     _webView.allowsMagnification = YES;
