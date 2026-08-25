@@ -1019,9 +1019,9 @@ struct JSONSwiftGrammar<T: JSONUnits> {
 
 /// Parses a whole document, returning a `JSC::JSONSwiftParseStatus`. One entry point
 /// per width: `@_expose(Cxx)` needs a concrete signature, and these two are what
-/// force the grammar to be specialized rather than run through witnesses. A
-/// top-level primitive is not handled here — the facade declines the store, this
-/// returns `.stopped` with nothing pending, and C++ `parsePrimitiveValue` takes it.
+/// force the grammar to be specialized rather than run through witnesses. A document
+/// that is a bare primitive needs nothing special here: at depth 0 the position after
+/// a value is `.documentEnd`, and the facade records the value as the result.
 @_expose(Cxx)
 func jsonParseDocument16(
     _ data: JSC.JSONLexerSpan16,
