@@ -1,21 +1,18 @@
 public import WebCore_Private
 
-// A zero-`unsafe` Swift port of WebCore's CSSTokenizer (CSSTokenizer.cpp and
-// CSSTokenizerInputStream.h).
+// Swift tokenizer for the CSS parser: a zero-`unsafe` port of CSSTokenizer.cpp
+// and CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
 //
-// Input is a `Span<UInt8>` over the *preprocessed* string; C++ already owns
-// that string (CSSTokenizer::preprocessString) and hands out contiguous
-// spans. Output is a POD `CSSTokenSwift` returned by value, one per call,
-// carrying the token's value as *offsets* into the input — `CSSParserToken`
-// already stores its value as a view into the input
-// (m_valueDataCharRaw + m_valueLength) built from
-// `m_input.rangeAt(start, length)`, so this loses nothing.
+// Input is a `Span` over the preprocessed string, which C++ already owns and
+// hands out as a contiguous span. Output is a POD token returned by value,
+// carrying the value's *offsets* — `CSSParserToken` already stores a view
+// into the input, so this loses nothing. Numbers are not converted here, so
+// C++ keeps calling charactersToDouble and double rounding stays
+// bit-identical. Values containing escapes are unescaped here into a
+// caller-provided buffer, so nothing has to be re-tokenized in C++.
 //
-// Numbers are not converted here: C++ still calls charactersToDouble on the
-// token's number range, so double rounding stays bit-identical, and no C++
-// call is needed inside the tokenizer. Values needing unescaping set
-// `needsUnescape`; C++ materialises those (rare) strings into its existing
-// m_stringPool.
+// Validated token-by-token against the real CSSTokenizer —
+// CSSTokenizerSwiftBridge.cpp and CSSTokenizerSwiftTest.cpp.
 
 /// Mirrors CSSParserTokenType. Raw values match so C++ can cast directly.
 public enum CSSTokenTypeSwift: UInt8 {
@@ -126,35 +123,25 @@ extension UInt16: CSSCodeUnit { }
     c <= 0x08 || c == 0x0B || (c >= 0x0E && c <= 0x1F) || c == 0x7F
 }
 
-/// A bounds-checked read of the input that costs one unsigned compare.
+/// A bounds-checked read of the input that costs one unsigned compare, which is the
+/// shape C++ gets for free by indexing with `size_t`.
 ///
-/// `Span`'s subscript checks `0 <= index && index < count`. Every offset in this
-/// file is non-negative by construction, but nothing establishes that for the
-/// optimizer — the index arrives as a parameter or is loaded from a stored
-/// property — so a check survives. Comparing bit patterns as unsigned discharges
-/// both halves at once and is not `unsafe`: `UInt(bitPattern:)` is a
-/// reinterpretation, and a negative index would fail the compare and read as the
-/// EOF marker rather than going out of bounds. Using this on the name scan, the
-/// hottest loop here, was worth 26% (994 -> 1279 MB/s, matching `-Ounchecked`).
+/// `Span`'s subscript checks `0 <= index && index < count`, and nothing establishes
+/// the first half for the optimizer because the index arrives as a parameter or from
+/// a stored property. Comparing bit patterns as unsigned discharges both at once and
+/// is not `unsafe`: a negative index fails the compare and reads as the EOF marker.
+/// Worth 26% on the name scan, the hottest loop here.
 ///
-/// Not caused by the wrapping arithmetic: `&+` versus `+` compiles to the same
-/// body, and clang emits an identical loop from equivalent C, so the underlying
-/// miss is in LLVM rather than in Swift.
-///
-/// This is the shape C++ gets for free by indexing with `size_t`.
-///
-/// Use this ONLY where the EOF-marker semantics are wanted anyway. In a loop
-/// whose own condition already bounds the index (`while i < count`), the select
-/// this performs is pure overhead — measured at 28% on an all-whitespace input —
-/// so those loops index directly.
+/// Use this ONLY where the EOF-marker semantics are wanted anyway: in a loop whose
+/// own condition already bounds the index, the select is pure overhead, measured at
+/// 28% on all-whitespace input, so those loops index directly.
 @inline(always) private func byteAt<Unit: CSSCodeUnit>(_ data: Span<Unit>, _ index: Int) -> Unit {
     UInt(bitPattern: index) < UInt(bitPattern: data.count) ? data[index] : 0
 }
 
-/// The 128-entry dispatch class. The C++ holds a `std::array<CodePoint, 128>`
-/// of *member function pointers* and calls through it once per token
-/// (CSSTokenizer::nextToken). Here it is a `switch` on the byte, so the
-/// dispatch is a jump table with no indirect call.
+/// The 128-entry dispatch class. The C++ holds a `std::array<CodePoint, 128>` of
+/// member function pointers and calls through it once per token; here it is a `switch`
+/// on the byte, so the dispatch is a jump table with no indirect call.
 private enum Dispatch {
     case endOfFile, whitespace, newline, stringStart, hash, dollarSign
     case leftParenthesis, rightParenthesis, asterisk, plusOrFullStop, comma
@@ -217,13 +204,11 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// on an exhausted input returns the EOF marker and still advances — so
     /// every read clamps and every report goes through `clampedOffset`.
     private var offset = 0
-    /// Mirrors m_blockStack. Owned here and growable, so nesting is unbounded and no
-    /// buffer has to cross the boundary for it.
-    ///
-    /// C++ uses `Vector<CSSParserTokenType, 8>`, whose inline capacity keeps shallow
-    /// nesting out of the heap; Swift has no growable container with inline capacity.
-    /// A two-tier `InlineArray` + spill version of this measured no resolvable
-    /// improvement over plain heap storage, so it was not kept.
+    /// Mirrors m_blockStack, owned here and growable, so nesting is unbounded and no
+    /// buffer crosses the boundary for it. C++ uses `Vector<CSSParserTokenType, 8>`,
+    /// whose inline capacity keeps shallow nesting off the heap; Swift has no growable
+    /// container with inline capacity, and a two-tier InlineArray-plus-spill version
+    /// measured no resolvable improvement.
     private var blockStack = UniqueArray<UInt8>()
 
     /// Code units of values that contained escapes, in the order the tokens
