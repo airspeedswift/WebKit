@@ -1,53 +1,24 @@
 public import WebCore_Private
 
-// Swift island for the HTML tokenizer's state machine.
+// Swift island for the HTML tokenizer's state machine, mirroring HTMLTokenizer.cpp.
 //
-// Design notes (see ~/Documents/webkit-swift-adoption-notes.md §8):
-//  * §8a  loop+switch is at parity with C++ goto threading, because the optimizer
-//         threads `state = .x; continue` when it sits adjacent to the switch.
-//         Therefore the advance idiom is repeated at each transition site rather
-//         than centralised — centralising it is 3x slower (§8b).
-//  * §8c  the token is owned by the tokenizer and reused via clear(); callers read
-//         it through an SE-0507 `borrow` accessor, so there is no copy per token.
-//         UniqueArray, not Array: no CoW uniqueness check, and removeAll() keeps
-//         capacity so refilling is allocation-free.
-//  * §8g  the island does NOT take a SegmentedString: that type deletes both its
-//         copy and move constructors so Swift cannot represent it. C++ hands over
-//         a contiguous span (SegmentedString::currentSubstringSpan8() already
-//         returns exactly that) and drives this.
+// A loop and a switch, at parity with the C++'s goto threading because the optimizer
+// threads `state = .x; continue` where it sits adjacent to the switch — which is why the
+// advance idiom is repeated at each transition site rather than centralised, that being
+// 3x slower. The token is owned here and reused via clear(), read through a `borrow`
+// accessor so there is no copy per token, and held in UniqueArray rather than Array to
+// avoid the CoW uniqueness check.
 //
-// The state machine and token are zero-`unsafe`. The single `unsafe` is the
-// C++ span conversion at the entry point — see the TODO there.
+// The island does not take a SegmentedString: that type deletes its copy and move
+// constructors, so Swift cannot represent it. C++ hands over a contiguous span, which
+// `SegmentedString::currentSubstringSpan8()` already returns, and drives this.
 //
-// Runtime-check scrub (§10). Enumerated from the emitted arm64, not from reading
-// the code. This file has zero retain/release, zero CoW uniqueness checks, zero
-// `swift_once`, zero exclusivity checks, zero allocations and zero outlined
-// value-witness calls. What remains is 12 conditional branches into trap blocks,
-// none of which is reachable, all of which are in stdlib code inlined into this
-// file, and none of which can be removed from here without introducing `unsafe`:
-//
-//   5   `_RigidArray.append(_:)` — `_precondition(!isFull)`, already established
-//       by `UniqueArray.append(_:)` on both of its arms.  [SITE A, stdlib bug]
-//   3   `_RigidArray._items` — bounds-checks a slice formed only to
-//       `deinitialize()` it, a no-op for `UInt8`.         [SITE B, stdlib bug]
-//   2   `Span._checkIndex` — the source guard immediately above re-emitted; jump
-//       threading duplicated the guard, canonicalised the copies to different
-//       signedness, then tail-merged them.               [SITE C, optimizer bug]
-//   2   `Span.extracting(Range)` — needs the induction fact that `runEnd` came
-//       from a loop bounded by `count`.                   [SITE D, optimizer bug]
-//
-// A and B are stdlib layering, fixable in `UniqueArray`/`_RigidArray` without any
-// optimizer change; C and D are missed optimizations. The C++ control discharges
-// C's equivalent check at every site, so C is a Swift-vs-C++ gap on identical
-// source logic, not an inherent cost of the check.
-//
-// Measured cost, standalone A/B on the same 8 MiB of markup, median of 17
-// interleaved runs: removing all 12 is worth 6.3% (`-Ounchecked` control), of
-// which 2.9% is SITE A + SITE B alone (matched control that changes nothing but
-// those checks). SITE D measured at zero — it is once per text run, not per byte.
-//
-// Reproducers and the three bug reports: ~/Documents/swift-runtime-check-scrub/,
-// summarised in the notes §10. Each site below is marked with its letter.
+// The state machine and token are zero-`unsafe`; the only `unsafe` is the C++ span
+// conversion at the entry point. Twelve trap-guarding branches remain, none reachable,
+// all in inlined stdlib code, and none removable from here without `unsafe`: eight are
+// stdlib layering (SITE A and B below), four are missed optimizations (SITE C and D).
+// Together worth 6.3%, of which A and B are 2.9%. Reproducers and the three filed
+// reports: ~/Documents/swift-runtime-check-scrub/, summarised in adoption notes §8, §10.
 
 public enum HTMLTokenizerSwiftState {
     case data, tagOpen, endTagOpen, tagName
@@ -80,15 +51,11 @@ public struct HTMLTokenSwift: ~Copyable {
         kind = .uninitialized
         attributeCount = 0
         selfClosing = false
-        // SITE B (§10): `removeAll()` traps on `count <= capacity`, a type
-        // invariant. `_RigidArray.removeAll()` forms `_items` — a bounds-checked
-        // slice — purely to `deinitialize()` it, which is a no-op for `UInt8`, so
-        // only the check survives. The check exists because `_items` uses
-        // `UnsafeMutableBufferPointer.extracting(_: Range)`, which is a deliberate
-        // `@safe` overload carrying a release-enabled `_precondition`, rather than the
-        // `extracting(unchecked:)` sibling. Must stay from here: this is the only API
-        // that empties a `UniqueArray` while keeping its capacity, and the fact it
-        // needs is not published to the optimizer. Paid once per token.
+        // SITE B: `removeAll()` traps on `count <= capacity`, a type invariant.
+        // `_RigidArray.removeAll()` forms a bounds-checked slice purely to
+        // `deinitialize()` it, a no-op for `UInt8`, so only the check survives. Must stay
+        // from here — this is the only API that empties a `UniqueArray` while keeping its
+        // capacity — and is paid once per token.
         name.removeAll()
     }
 }
@@ -112,10 +79,9 @@ public struct HTMLTokenizerSwift: ~Copyable {
     public mutating func nextToken(_ data: Span<UInt8>) -> Bool {
         token.clear()
         let count = data.count
-        // state and offset are copied into locals for the loop. As stored
-        // properties of self they are re-read through memory on every access,
-        // which defeats the jump threading that makes loop+switch match goto
-        // (§8a) — that benchmark used locals. Written back on exit.
+        // Locals, not stored properties: as properties they are re-read through memory
+        // on every access, which defeats the jump threading that makes loop+switch match
+        // goto. Written back on exit.
         var state = self.state
         var offset = self.offset
         defer { self.state = state; self.offset = offset }
@@ -136,16 +102,12 @@ public struct HTMLTokenizerSwift: ~Copyable {
                 token.kind = .character
                 var runEnd = offset
                 while runEnd < count, data[runEnd] != 0x3C { runEnd &+= 1 }
-                // SITE D (§10): `extracting` re-validates both bounds against
-                // `count`. Both hold — `runEnd` starts at `offset` and the loop
-                // above exits at `count` — but proving it needs the induction fact
-                // across the loop exit. Must stay: `extracting(unchecked:)` is the
-                // only formulation that drops it and it is `@unsafe`, and clamping
-                // with `min`/`max` merely trades these two for a `Range`
-                // lowerBound <= upperBound check. Measured cost: zero, because it
-                // is once per text run rather than once per byte.
-                // SITE A (§10) also applies to the append: one capacity check here
-                // is redundant with `_ensureFreeCapacity` immediately above it.
+                // SITE D: `extracting` re-validates both bounds, which hold but need
+                // an induction fact across the loop exit. The only formulation that
+                // drops it is `@unsafe`, and clamping trades it for a Range check;
+                // measured at zero, being once per text run. SITE A applies to the
+                // append too, its capacity check being redundant with the
+                // `_ensureFreeCapacity` above.
                 token.name.append(copying: data.extracting(offset ..< runEnd))
                 offset = runEnd
                 if offset >= count { return true }
@@ -158,14 +120,11 @@ public struct HTMLTokenizerSwift: ~Copyable {
                 }
                 if isASCIIAlphaByte(character) {
                     token.kind = .startTag
-                    // SITE A (§10), and likewise at the two other single-byte
-                    // appends below. `UniqueArray.append(_:)` tests `!isFull` to
-                    // pick its arm, then `_RigidArray.append(_:)` re-tests it —
-                    // redundant on the fast arm by negation of the branch taken,
-                    // and on the slow arm because the growth just guaranteed it.
-                    // Must stay: no safe API appends a single element without it
-                    // (`appendAssumingCapacity` carries the same precondition).
-                    // This is the per-byte cost, and the bulk of the 2.9%.
+                    // SITE A, and likewise at the two other single-byte appends
+                    // below. `UniqueArray.append(_:)` tests `!isFull` to pick its
+                    // arm and `_RigidArray.append(_:)` re-tests it, redundantly on
+                    // both. No safe API appends without it. The per-byte cost, and
+                    // the bulk of the 2.9%.
                     token.name.append(character | 0x20)
                     offset &+= 1; if offset >= count { return true }
                     character = data[offset]; state = .tagName; continue
@@ -286,16 +245,12 @@ public struct HTMLTokenizerSwift: ~Copyable {
                 character = data[offset]; continue
 
             case .afterAttributeValueQuoted:
-                // SITE C (§10): the two `data[offset]` reads in this state are the
-                // only two of ~25 in this function whose bounds check survives.
-                // This is the one state entered from two others
-                // (attributeValueDoubleQuoted and attributeValueSingleQuoted), so
-                // jump threading makes two copies of the guard below, canonicalises
-                // one to a signed and one to an unsigned compare, then tail-merges
-                // them — leaving a block that neither copy's fact discharges. Must
-                // stay: it is a consequence of the threading §8a depends on, and
-                // nothing at this level chooses the canonical form. Reordering the
-                // arms or hoisting `offset >= 0` out of the loop does not help.
+                // SITE C: the only two `data[offset]` reads of ~25 in this function
+                // whose bounds check survives. This state is entered from two others,
+                // so jump threading makes two copies of the guard below, canonicalises
+                // one signed and one unsigned, then tail-merges them into a block
+                // neither copy's fact discharges — a consequence of the very threading
+                // this shape depends on, and not chosen at this level.
                 if isTokenizerWhitespace(character) {
                     offset &+= 1; if offset >= count { return true }
                     character = data[offset]; state = .beforeAttributeName; continue
