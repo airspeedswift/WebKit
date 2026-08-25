@@ -627,6 +627,10 @@ struct JSONSwiftGrammar {
         return true
     }
 
+    // `@inline(always)` with one call site, so it duplicates nothing, and not for the
+    // call: `mutating` passes `self` by pointer, and the optimizer then leaves the grammar's
+    // state in the caller's frame instead of in registers. Inlined, SROA promotes it.
+    @inline(always)
     @safe
     mutating func parse(
         _ input: RawSpan, _ model: JSC.JSONSwiftObjectModel
