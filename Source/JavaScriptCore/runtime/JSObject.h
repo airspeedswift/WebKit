@@ -43,6 +43,7 @@
 #include <JavaScriptCore/Structure.h>
 #include <JavaScriptCore/StructureTransitionTable.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/SwiftBridging.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -97,7 +98,9 @@ struct PrototypeChainDebugData {
     class JSObject* previousInChain;
 };
 
-class JSObject : public JSCell {
+// Repeated from JSCell deliberately: `unsafe` does not inherit, so without this,
+// putDirectOffset and friends would be reachable from Swift with no marker at all.
+class SWIFT_UNSAFE_REFERENCE JSObject : public JSCell {
     friend class BatchedTransitionOptimizer;
     friend class JIT;
     friend class JSCell;

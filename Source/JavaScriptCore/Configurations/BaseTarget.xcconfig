@@ -33,7 +33,38 @@ WK_PGO_GEN_FLAGS_YES = -fprofile-generate;
 GCC_PREFIX_HEADER = JavaScriptCorePrefix.h;
 GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES);
 GCC_SYMBOLS_PRIVATE_EXTERN = YES;
-OTHER_CFLAGS = $(inherited) -fno-slp-vectorize --system-header-prefix=unicode/ -D__STDC_WANT_LIB_EXT1__=1 $(WK_PGO_GEN_FLAGS);
+
+// The gate itself, duplicated from JavaScriptCore.xcconfig rather than moved,
+// because that file also uses WK_HAS_VALID_JSC_PRIVATE_MODULE for MODULEMAP_PRIVATE_FILE
+// and the module verifier settings, which belong to the framework target alone.
+// Keep the two in step.
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX = YES;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=macosx26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=macosx26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=iphone*26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=iphone*26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=appletv*26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=appletv*26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=watch*26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=watch*26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=xr*26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=xr*26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=bridgeos*] = ;
+
+JSC_SUPPORTS_SWIFT = $(JSC_SUPPORTS_SWIFT_VALID_MODULE_CONFIGURATION_$(WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX)_$(CONFIGURATION));
+JSC_SUPPORTS_SWIFT_VALID_MODULE_CONFIGURATION_YES_Debug = YES;
+JSC_SUPPORTS_SWIFT_VALID_MODULE_CONFIGURATION_YES_Release = YES;
+
+// JSC_SUPPORTS_SWIFT for the C++ side, in BaseTarget rather than in
+// JavaScriptCore.xcconfig because the framework and libJavaScriptCore are separate
+// targets and both need it: the Swift island is compiled by the JavaScriptCore
+// target, but the C++ that consumes it (runtime/LiteralParser.cpp) is compiled into
+// libJavaScriptCore. Swift itself gets the condition from
+// SWIFT_ACTIVE_COMPILATION_CONDITIONS in JavaScriptCore.xcconfig, and
+// TestExecutable.xcconfig:43-44 already defines the macro this way for tests.
+OTHER_CFLAGS_JSC_SUPPORTS_SWIFT_YES = -DJSC_SUPPORTS_SWIFT=1;
+
+OTHER_CFLAGS = $(inherited) -fno-slp-vectorize --system-header-prefix=unicode/ -D__STDC_WANT_LIB_EXT1__=1 $(WK_PGO_GEN_FLAGS) $(OTHER_CFLAGS_JSC_SUPPORTS_SWIFT_$(JSC_SUPPORTS_SWIFT));
 HEADER_SEARCH_PATHS = "${BUILT_PRODUCTS_DIR}/DerivedSources/JavaScriptCore" $(HEADER_SEARCH_PATHS);
 PRODUCT_NAME = JavaScriptCore;
 
