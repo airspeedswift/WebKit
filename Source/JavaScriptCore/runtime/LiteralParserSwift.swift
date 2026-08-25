@@ -496,11 +496,23 @@ struct JSONLexer<T: JSONUnits> {
         let start = offset // does not include the '-'
 
         // (0 | [1-9][0-9]*)
+        //
+        // The value accumulates *while* scanning, rather than in a second walk from
+        // `start` once the digit count is known, as the C++ this mirrors also does
+        // (319419@main).
+        //
+        // The wrapping operators are what make it safe: a document may carry more digits
+        // than an `Int32` holds, and the digit-count test below then discards `accumulated`
+        // and sends the token to the double path. So overflow here is reachable, expected,
+        // and unobserved — the checked operators would trap on it.
+        var accumulated: UInt32 = 0
         if UInt(bitPattern: offset) < UInt(bitPattern: count) && isASCIIDigit(units[offset]) {
             let character = units[offset]
             offset &+= 1
+            accumulated = UInt32(truncatingIfNeeded: character) &- 0x30
             if character != 0x30 { // not '0'
                 while UInt(bitPattern: offset) < UInt(bitPattern: count) && isASCIIDigit(units[offset]) {
+                    accumulated = accumulated &* 10 &+ (UInt32(truncatingIfNeeded: units[offset]) &- 0x30)
                     offset &+= 1
                 }
             }
@@ -522,14 +534,9 @@ struct JSONLexer<T: JSONUnits> {
             let c = units[offset]
             if c != 0x2E && c != 0x65 && c != 0x45 // '.', 'e', 'E'
                 && (offset &- start) <= numberOfDigitsForSafeInt32 {
-                // Wrapping: the branch above bounds this at nine digits, so no step
-                // can overflow. The checked form emits four traps per iteration.
-                var result: Int32 = 0
-                var cursor = start
-                repeat {
-                    result = result &* 10 &+ Int32(truncatingIfNeeded: units[cursor]) &- 0x30
-                    cursor &+= 1
-                } while cursor < offset
+                // At most nine digits, by the branch above, so the accumulation cannot
+                // have overflowed on this path and the truncation is exact.
+                let result = Int32(truncatingIfNeeded: accumulated)
 
                 if !negative {
                     currentToken.int32Value = result
