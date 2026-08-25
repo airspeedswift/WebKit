@@ -1038,9 +1038,106 @@ func emitError(
         suffix.utf8Span.span)
 }
 
-/// Which diagnostic `JSONLexer.fail` found, re-derived from the cursor it left behind, and
-/// reported. The other half of the note on `fail`: this is what carrying the kind on the
-/// token would have bought, at 120 instructions in the hot function.
+/// MARK: - The diagnosis for a token the grammar refuses
+///
+/// One function, called from the five arms that refuse one, with the kind that arm wants —
+/// `.fromTokenType` for the position whose message depends on the token rather than on the
+/// position itself.
+///
+/// `@inline(never)` and taking a kind is the cheapest of the shapes tried. Even so it costs the
+/// hot function, not in call setup but in register pressure from what the cold arms demand.
+/// Passing the position and the container stack instead of a kind, giving each position its own
+/// entry point, and storing the kind to break to a single call after the loop are all worse;
+/// the last is the worst, because reading `currentToken.type` at the loop exit makes the
+/// token's type live across every arm.
+///
+/// Rule 1 is first, and it is the whole of the precedence: a lexer-level kind outranks
+/// anything a position would say, because `getErrorMessage` prefers `m_lexErrorMessage` to
+/// `m_parseErrorMessage`. So an `.error` token is diagnosed from the cursor and the position's
+/// own kind is not used at all.
+@inline(never)
+@safe
+func diagnoseFailure<T: JSONUnits>(
+    _ model: JSC.JSONSwiftObjectModel, _ units: Span<T.Unit>,
+    _ kind: JSONErrorKind, _ type: UInt8, at offset: Int, _ width: T.Type
+) -> UInt8 {
+    if type == JSONTokenType.error.rawValue {
+        return diagnoseLexError(model, units, at: offset, T.self)
+    }
+
+    switch kind {
+    case .fromTokenType:
+        // A value position: one kind per token type, which is `parsePrimitiveValue`'s own
+        // shape (LiteralParser.cpp:1314-1367). The C++ ends up there for any token a value
+        // position cannot use — at the top level through `parseRecursivelyEntry`, inside a
+        // container through `parseRecursively`'s two `else value = parsePrimitiveValue(vm)`.
+        switch type {
+        case JSONTokenType.end.rawValue:
+            return reportLexError(model, .unexpectedEOF)
+        case JSONTokenType.rbracket.rawValue:
+            // Two messages for this one token, and *not* from a grammar state: `[1,]` is the
+            // array's own "Unexpected comma at the end of array expression", which the C++
+            // checks for right after consuming the comma (:1459) and before any value parse,
+            // while `{"a":]}` and a bare `]` are "Unexpected token ']'" (:1316). Told apart by
+            // the character in front of the token, which is exact: a `]` at a value position is
+            // preceded by a comma only in that one case, the alternatives being the start of
+            // the document and the `:` of a property. The other way of doing it is an extra
+            // `JSONParsePosition`, which makes the whole grammar loop carry a state for a fact
+            // read only here.
+            if precededByComma(units, before: offset &- 1) {
+                return reportLexError(model, .unexpectedCommaAtEndOfArray)
+            }
+            return reportLexError(model, .unexpectedTokenRBracket)
+        case JSONTokenType.rbrace.rawValue:
+            return reportLexError(model, .unexpectedTokenRBrace)
+        case JSONTokenType.colon.rawValue:
+            return reportLexError(model, .unexpectedTokenColon)
+        case JSONTokenType.lparen.rawValue:
+            return reportLexError(model, .unexpectedTokenLParen)
+        case JSONTokenType.rparen.rawValue:
+            return reportLexError(model, .unexpectedTokenRParen)
+        case JSONTokenType.comma.rawValue:
+            return reportLexError(model, .unexpectedTokenComma)
+        case JSONTokenType.dot.rawValue:
+            return reportLexError(model, .unexpectedTokenDot)
+        case JSONTokenType.assign.rawValue:
+            return reportLexError(model, .unexpectedTokenAssign)
+        case JSONTokenType.semi.rawValue:
+            return reportLexError(model, .unexpectedTokenSemi)
+        default:
+            // `.identifier`, i.e. `Unexpected identifier "..."`, which declines here; and
+            // `.needsDoubleParse`, which reaches a decline only when `parseJSONDouble`
+            // failed, where the message is `lexNumberError`'s analysis of the digits rather
+            // than anything a token type says.
+            return JSONParseStatus.declined.rawValue
+        }
+
+    default:
+        // The positions whose message the arm itself knows: a key's two states (:1617 straight
+        // after `{`, so `{a:1}` and a bare `{` are "Expected '}'"; :1600 after a comma, which
+        // `{"a":1,` reaches at end of input too), the colon (:1524), either closer (:1466 for
+        // an array, :1607 for an object), and the document's end — the one case where the C++
+        // sets no message at all, `tryLiteralParse` returning an empty JSValue and
+        // `getErrorMessage` falling back (LiteralParser.h:152, e.g. `[1]]`).
+        return reportLexError(model, kind)
+    }
+}
+
+/// Whether the token starting at `index` has a comma in front of it, whitespace aside. Only
+/// ever asked about a token the grammar has already refused, so the backward scan is as cold
+/// as the rest of the diagnosis; `isJSONWhiteSpace` is the same predicate the lexer skips
+/// with, so "whitespace aside" means the same thing on both sides.
+@inline(always)
+func precededByComma<U: FixedWidthInteger>(_ units: Span<U>, before index: Int) -> Bool {
+    var i = index
+    while i > 0 && isJSONWhiteSpace(units[i &- 1]) {
+        i &-= 1
+    }
+    return i > 0 && units[i &- 1] == 0x2C
+}
+
+/// Which diagnostic `JSONLexer.fail` found, re-derived from the cursor it left behind — the
+/// other half of the note on `fail`.
 ///
 /// Exhaustive over that function's four `fail` sites, and the cases are disjoint because
 /// three of them do not move the cursor:
@@ -1051,10 +1148,7 @@ func emitError(
 ///  * a single quote, which the table maps to `TokString` and strict JSON rejects (:779);
 ///  * anything else, which is a character that *starts* a token, and the only `fail` that
 ///    can leave the cursor on one is `lexNumber`'s `-` with a non-digit after it (:1188).
-///
-/// `@inline(never)` and a free function taking values, like the escape decoder beside it:
-/// reached at most once per document, and only for a document that is already malformed.
-@inline(never)
+@inline(always)
 @safe
 func diagnoseLexError<T: JSONUnits>(
     _ model: JSC.JSONSwiftObjectModel, _ units: Span<T.Unit>, at offset: Int, _ width: T.Type
@@ -1257,24 +1351,6 @@ struct JSONSwiftGrammar<T: JSONUnits> {
         depth == 0 ? .documentEnd : .commaOrClose
     }
 
-    /// The status for a token the position it arrived at cannot use.
-    ///
-    /// `.failed` when the lexer already knows which diagnostic it is, and that ordering is
-    /// the whole of the precedence rule: `getErrorMessage` prefers the lexer's message to
-    /// the parser's, so a lexer-level kind is what gets reported at a grammar position and
-    /// a grammar-level one must never overwrite it. `.declined` otherwise — every
-    /// grammar-level class still takes the C++ re-parse and the message it produces.
-    ///
-    /// Non-mutating and always-inline, so nothing is passed by pointer and the cursor stays
-    /// in a register; the diagnosis itself is out of line.
-    @inline(always)
-    func failure(_ model: JSC.JSONSwiftObjectModel, _ units: Span<T.Unit>) -> UInt8 {
-        guard lexer.currentToken.type == JSONTokenType.error.rawValue else {
-            return JSONParseStatus.declined.rawValue
-        }
-        return unsafe diagnoseLexError(model, units, at: lexer.offset, T.self)
-    }
-
     @inline(always)
     mutating func pushContainer(isObject: Bool) -> Bool {
         // 64 containers, because the mask is 64 bits wide.
@@ -1380,10 +1456,10 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     position = positionAfterValue
 
                 default:
-                    // A value position cannot use this token. Every grammar-level kind for
-                    // it — `Unexpected EOF`, the `Unexpected token 'X'` family, class D's
-                    // `Unexpected identifier "..."` — is still a decline.
-                    return failure(model, units)
+                    // A value position cannot use this token: `Unexpected EOF` or the
+                    // `Unexpected token 'X'` family, one kind per token type, or a decline
+                    // for `Unexpected identifier "..."`.
+                    return failure(model, units, .fromTokenType, type)
                 }
 
             case .key, .keyOrClose:
@@ -1420,7 +1496,18 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     position = .colon
 
                 default:
-                    return failure(model, units)
+                    // Two different messages for the same token, and the position is what
+                    // tells them apart: straight after `{` the C++ falls out of its whole
+                    // object branch to `if (type != TokRBrace)` (:1617), so `{a:1}` and a
+                    // bare `{` are "Expected '}'"; after a comma it is the property-name
+                    // message (:1600), which `{"a":1,` reaches at end of input too. Read from
+                    // the position rather than derived from the input, because unlike the `]`
+                    // case a key-position token can be several units wide (`{"a":1, 123:2}`)
+                    // so there is no fixed place to look behind it. This arm already reads
+                    // the position, for the `}` case above.
+                    return failure(model, units,
+                        position == .keyOrClose ? .expectedRBrace
+                                                : .propertyNameMustBeAStringLiteral, type)
                 }
 
             case .colon:
@@ -1429,7 +1516,7 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     // The C++ sets "Expected ':' before value in object property
                     // definition" here (:1524) *and* keeps whatever the lexer said, which
                     // wins — so a lex failure at a colon reports the lexer's kind.
-                    return failure(model, units)
+                    return failure(model, units, .expectedColon, type)
                 }
                 position = .value
 
@@ -1446,21 +1533,37 @@ struct JSONSwiftGrammar<T: JSONUnits> {
                     }
                     position = positionAfterValue
                 } else {
-                    return failure(model, units)
+                    // `setErrorMessageForToken` of whichever closer this container wants
+                    // (:1466, :1607), and `isObject` is already in hand for the test above.
+                    // This arm has just tested which closer the container wants.
+                    return failure(model, units,
+                        isObject ? .expectedRBrace : .expectedRBracket, type)
                 }
 
             case .documentEnd:
                 let type = lexer.lex(input, units, count, maybeIdentifier: false)
                 if type != JSONTokenType.end.rawValue {
-                    // Trailing content. If it lexed cleanly the C++ sets no message at all
-                    // and `getErrorMessage` falls back to "Unable to parse JSON string"
-                    // (`[1]]`), so that half stays a decline; if it failed to lex, the
-                    // lexer's kind is the message (`[1]@`).
-                    return failure(model, units)
+                    // Trailing content, and the two halves report differently: content that
+                    // lexed cleanly is the message the C++ *does not* set (`[1]]`, which
+                    // `getErrorMessage` turns into "Unable to parse JSON string"), and
+                    // content that failed to lex is the lexer's kind (`[1]@`).
+                    return failure(model, units, .unableToParseJSONString, type)
                 }
                 return JSONParseStatus.ok.rawValue
             }
         }
+    }
+
+    /// The status for a token the position it arrived at cannot use: `.failed` with the
+    /// diagnostic reported, or `.declined` for a class the C++ still owns. Non-mutating and
+    /// always-inline, so nothing is passed by pointer and the cursor stays in a register.
+    @inline(always)
+    @safe
+    func failure(
+        _ model: JSC.JSONSwiftObjectModel, _ units: Span<T.Unit>, _ kind: JSONErrorKind,
+        _ type: UInt8
+    ) -> UInt8 {
+        diagnoseFailure(model, units, kind, type, at: lexer.offset, T.self)
     }
 }
 
