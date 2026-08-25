@@ -57,10 +57,10 @@ public enum HTMLTokenizerSwiftState {
     case afterAttributeValueQuoted, selfClosingStartTag
 }
 
-@inline(__always) private func isTokenizerWhitespace(_ c: UInt8) -> Bool {
+@inline(always) private func isTokenizerWhitespace(_ c: UInt8) -> Bool {
     c == 0x20 || c == 0x0A || c == 0x09 || c == 0x0C
 }
-@inline(__always) private func isASCIIAlphaByte(_ c: UInt8) -> Bool {
+@inline(always) private func isASCIIAlphaByte(_ c: UInt8) -> Bool {
     ((c | 0x20) >= 0x61) && ((c | 0x20) <= 0x7A)
 }
 
