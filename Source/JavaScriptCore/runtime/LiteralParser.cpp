@@ -2455,6 +2455,70 @@ ALWAYS_INLINE bool jsonSwiftFastArrayAppend(VM& vm, JSObject* array, unsigned in
     }
 }
 
+// The property store's fast half: a structure with exactly one recorded transition that
+// adds an unattributed property whose name is the one being stored, which is what a run of
+// same-shaped objects hits. Everything else tail-calls the general store above and reaches
+// identical code. It declines an escaped name, a transition *table*, a dictionary, a
+// symbol-named transition, a name that does not match, and the property that first spills out
+// of inline storage.
+//
+// It must stay out of line. `parseRecursively` pays the general store's prologue once per
+// container, while the island pays one function entry per property, which is why this fast
+// half exists at all; marking it ALWAYS_INLINE would put a copy of it in each of five facade
+// entries, and that loses more on documents that never store a property than it wins where it
+// fires.
+//
+// The condition is `isInlineOffset` rather than the general store's capacity compare: one
+// compare against a constant, and it keeps the butterfly reallocation behind the decline,
+// so the window in which the object's StructureID is nuked — a release-mode `die()` if the
+// collector scans it (heap/SlotVisitor.cpp:188) — stays where it already was. Below
+// `firstOutOfLineOffset` both sides have no out-of-line slots, so equal capacity is implied and
+// the reallocation provably cannot be the skipped branch; the ASSERT below states that.
+NEVER_INLINE bool jsonSwiftStorePropertyValueFast(JSONSwiftObjectModelState& state,
+    JSObject* object, JSValue value)
+{
+    using PendingKey = JSONSwiftObjectModelState::PendingKey;
+    if (state.frames.isEmpty()) [[unlikely]]
+        return false;
+    auto& frame = state.frames.last();
+    if (frame.pendingKey != PendingKey::Offsets) [[unlikely]]
+        return jsonSwiftStorePropertyValue(state, object, value);
+
+    Structure* originalStructure = object->structure();
+    Structure* transition = originalStructure->trySingleTransition();
+    if (!transition) [[unlikely]]
+        return jsonSwiftStorePropertyValue(state, object, value);
+    if (transition->transitionKind() != TransitionKind::PropertyAddition
+        || transition->transitionPropertyAttributes()) [[unlikely]]
+        return jsonSwiftStorePropertyValue(state, object, value);
+
+    PropertyOffset offset = transition->transitionOffset();
+    if (!isInlineOffset(offset)) [[unlikely]]
+        return jsonSwiftStorePropertyValue(state, object, value);
+
+    // The one width-dependent step: the name is offsets into the input, so comparing it
+    // names a character. The branch is on a flag that is constant for the whole document.
+    SUPPRESS_UNCOUNTED_ARG bool nameMatches = state.is8Bit
+        ? jsonSwiftEqualIdentifier(transition->transitionPropertyName(),
+            state.input8.subspan(frame.keyStart, frame.keyLength))
+        : jsonSwiftEqualIdentifier(transition->transitionPropertyName(),
+            state.input16.subspan(frame.keyStart, frame.keyLength));
+    if (!nameMatches)
+        return jsonSwiftStorePropertyValue(state, object, value);
+
+    frame.pendingKey = PendingKey::None;
+    validateOffset(offset);
+    ASSERT(transition->isValidOffset(offset));
+    ASSERT(transition->outOfLineCapacity() == originalStructure->outOfLineCapacity());
+    // As in `jsonSwiftStoreToExistingProperty`: what says the concurrent GC cannot read
+    // garbage from a put that does not transition.
+    ASSERT(!object->getDirect(offset) || !JSValue::encode(object->getDirect(offset)));
+    object->putDirectOffset(state.vm, offset, value);
+    object->setStructure(state.vm, transition);
+    ASSERT(!transition->mayBePrototype()); // There is no way to make it prototype object.
+    return true;
+}
+
 // What is left inline: the empty check, which container this is, and the array append
 // above.
 ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue value)
@@ -2469,7 +2533,7 @@ ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue
     auto& frame = state.frames.last();
     JSObject* container = state.containers[state.frames.size() - 1];
     if (frame.isObject)
-        return jsonSwiftStorePropertyValue(state, container, value);
+        return jsonSwiftStorePropertyValueFast(state, container, value);
 
     unsigned index = frame.nextIndex++;
     // Nothing on this path can throw or allocate, so the throw scope is declared below it
