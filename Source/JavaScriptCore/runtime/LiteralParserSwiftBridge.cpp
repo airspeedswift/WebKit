@@ -43,6 +43,11 @@ uint8_t jsonSwiftParseDocument16(std::span<const char16_t> input, JSONSwiftObjec
     return JavaScriptCore::jsonParseDocument16(input, &model);
 }
 
+uint8_t jsonSwiftParseDocument8(std::span<const uint8_t> input, JSONSwiftObjectModel& model)
+{
+    return JavaScriptCore::jsonParseDocument8(input, &model);
+}
+
 } // namespace JSC
 
 #endif // JSC_SUPPORTS_SWIFT
