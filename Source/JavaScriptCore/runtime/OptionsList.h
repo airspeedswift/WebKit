@@ -657,7 +657,7 @@ bool hasCapacityToUseLargeGigacage();
     v(Bool, dumpWasmOpcodeStatistics, false, Normal, nullptr) \
     v(Bool, dumpWasmWarnings, false, Normal, nullptr) \
     v(Bool, useRecursiveJSONParse, true, Normal, nullptr) \
-    v(Bool, useSwiftJSONParser, false, Normal, "Use the Swift JSON parser island (the grammar as well as the lexer) for strict JSON.parse of a 16-bit string (LiteralParserSwift.swift). Declines to the C++ parse for anything it cannot finish, so it changes no observable behaviour."_s) \
+    v(Bool, useSwiftJSONParser, false, Normal, "Use the Swift JSON parser island (the grammar as well as the lexer) for strict JSON.parse, at either character width (LiteralParserSwift.swift). Declines to the C++ parse for anything it cannot finish, so it changes no observable behaviour."_s) \
     v(Bool, verboseSwiftJSONParserDeclines, false, Normal, "Log every document the Swift JSON parser island declines, with the start of the input. A decline is invisible otherwise -- the C++ re-parse produces the same answer -- so this is how a validation or benchmark run proves the island engaged rather than measuring the code it was meant to replace."_s) \
     v(Unsigned, thresholdForStringReplaceCache, 0x1000, Normal, nullptr) \
     v(Bool, useWasmIPInt, ipintEnabledByDefault(), Normal, "Use the in-place interpereter for WASM instead of LLInt."_s) \

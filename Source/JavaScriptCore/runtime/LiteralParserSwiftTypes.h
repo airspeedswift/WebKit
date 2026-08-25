@@ -51,10 +51,17 @@ namespace JSC {
 // typedefs rather than the templates inline, because `@_expose(Cxx)` needs a concrete type.
 using JSONLexerSpan16 = std::span<const char16_t>;
 
-// Mirrors JSC::TokenType (LiteralParser.h:59-63) for the values the island can
-// produce, plus the two codes by which it declines to the C++ cold paths. The
-// island asserts the numbering against TokenType in LiteralParserSwiftBridge.cpp
-// rather than trusting these to stay in step.
+// `uint8_t` rather than `Latin1Character` only because this header carries no WTF include;
+// they are the same type. This is the width that decides whether the island runs in production
+// at all, a `JSString` being 8-bit whenever every character is Latin1.
+using JSONLexerSpan8 = std::span<const uint8_t>;
+
+// Mirrors JSC::TokenType (LiteralParser.h:59) for the values the island can produce.
+//
+// It exists as the *proxy* by which the two numberings are checked. The island's Swift
+// `JSONTokenType` is what crosses the boundary, in `literalValue`, and no C++ assertion can
+// name a Swift enum — so this is transcribed by hand and LiteralParser.cpp asserts all 21
+// values against `TokenType`. Delete it and the keyword path is an unchecked coincidence.
 enum JSONSwiftTokenType : uint8_t {
     JSONSwiftTokLBracket = 0,
     JSONSwiftTokRBracket = 1,
@@ -232,15 +239,14 @@ private:
 // framework target compiles, and everything else goes through these declarations.
 // WebCore needs no equivalent, being a single target.
 
-// Parses a whole document, building it through the facade as it goes: the island owns
-// the grammar as well as the lexer, and the only thing that crosses back is a
-// JSONSwiftParseStatus. Strict JSON, 16-bit input, no reviver.
-//
-// One call per document rather than per batch, which is the point of it — the batched
-// lexer boundary exists to amortise a crossing the parser island does not have. The
-// cold paths are reached through the facade from inside the grammar loop, so this does
-// not return to be re-entered mid-document either.
+// Parses a whole document, building it through the facade as it goes: the island owns the
+// grammar as well as the lexer, and only a JSONSwiftParseStatus crosses back. Strict JSON, no
+// reviver, one entry point per code-unit width, and one call per document — the cold paths are
+// reached through the facade from inside the grammar loop, so this is not re-entered
+// mid-document. One facade type serves both widths because nothing in its interface names a
+// character; what knows the width is `JSONSwiftObjectModelState`, forward-declared above.
 uint8_t jsonSwiftParseDocument16(std::span<const char16_t> input, JSONSwiftObjectModel&);
+uint8_t jsonSwiftParseDocument8(std::span<const uint8_t> input, JSONSwiftObjectModel&);
 
 #endif // JSC_SUPPORTS_SWIFT
 
