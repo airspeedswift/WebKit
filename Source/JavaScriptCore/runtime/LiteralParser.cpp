@@ -2362,7 +2362,20 @@ ALWAYS_INLINE bool jsonSwiftPushContainer(JSONSwiftObjectModelState& state,
 
 } // namespace
 
-bool JSONSwiftObjectModel::beginObject()
+// The eight hot value entries below are always-inline so that an LTO build folds them into
+// the island's grammar loop, which is the shape `parseRecursively` has: a prologue once per
+// *container* rather than one per *value*. That is worth most on punctuation-dense input, the
+// input with the most facade calls per byte; LTO alone folds only `key`, the one entry small
+// enough for the cost model. Without LTO nothing here can inline them — the island is their
+// only caller — so the island's entry point is bit-identical either way.
+//
+// Spelled out rather than ALWAYS_INLINE because that macro also supplies `inline`, and
+// these must keep emitting an out-of-line symbol for Swift to odr-use from its own
+// translation unit. The store is deliberately left out: it stays NEVER_INLINE, so what
+// folds in is each entry's prologue and the array path, not eight copies of the store.
+#define JSC_JSON_FACADE_ENTRY __attribute__((__always_inline__))
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::beginObject()
 {
     auto& state = *m_state;
     auto scope = DECLARE_THROW_SCOPE(state.vm);
@@ -2371,7 +2384,7 @@ bool JSONSwiftObjectModel::beginObject()
     return jsonSwiftPushContainer(state, object, true);
 }
 
-bool JSONSwiftObjectModel::beginArray()
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::beginArray()
 {
     auto& state = *m_state;
     auto scope = DECLARE_THROW_SCOPE(state.vm);
@@ -2380,7 +2393,7 @@ bool JSONSwiftObjectModel::beginArray()
     return jsonSwiftPushContainer(state, array, false);
 }
 
-bool JSONSwiftObjectModel::endContainer()
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::endContainer()
 {
     auto& state = *m_state;
     size_t depth = state.frames.size();
@@ -2400,7 +2413,7 @@ bool JSONSwiftObjectModel::endContainer()
     return jsonSwiftStoreValue(state, finished);
 }
 
-bool JSONSwiftObjectModel::key(uint32_t start, uint32_t length)
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::key(uint32_t start, uint32_t length)
 {
     auto& state = *m_state;
     // The name belongs to the object currently being filled, which is the innermost open
@@ -2415,7 +2428,7 @@ bool JSONSwiftObjectModel::key(uint32_t start, uint32_t length)
     return true;
 }
 
-bool JSONSwiftObjectModel::stringValue(uint32_t start, uint32_t length)
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::stringValue(uint32_t start, uint32_t length)
 {
     auto& state = *m_state;
     auto scope = DECLARE_THROW_SCOPE(state.vm);
@@ -2427,20 +2440,27 @@ bool JSONSwiftObjectModel::stringValue(uint32_t start, uint32_t length)
     return jsonSwiftStoreValue(state, string);
 }
 
-bool JSONSwiftObjectModel::intValue(int32_t value)
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::intValue(int32_t value)
 {
     return jsonSwiftStoreValue(*m_state, jsNumber(value));
 }
 
-bool JSONSwiftObjectModel::doubleValue(double value)
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::doubleValue(double value)
 {
     return jsonSwiftStoreValue(*m_state, jsNumber(value));
 }
 
-bool JSONSwiftObjectModel::literalValue(uint8_t code)
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::literalValue(uint8_t code)
 {
     // A JSONTokenType raw value, which is a TokenType value: the two numberings are
     // asserted equal above.
+    //
+    // One entry switching on the code rather than a `trueValue`/`falseValue`/`nullValue`
+    // trio, which would fold this dispatch at the three call sites that each know their
+    // constant. The trade is not the dispatch, it is the duplication: this entry is
+    // always-inline and `jsonSwiftStoreValue` is too, so three entries would put three copies
+    // of the store's inline body into the grammar loop where there is now one, and the loop's
+    // size is what empty-container and punctuation-dense documents charge for.
     JSValue value;
     switch (code) {
     case TokTrue:
