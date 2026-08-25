@@ -2155,10 +2155,41 @@ public:
         uint32_t keyLength;
         // PendingKey::Resolved: one-based index into `resolvedKeys`, 0 for none.
         uint32_t resolvedKeyIndex;
+        // Where this array's elements start in `elementStack`, while it is still buffering
+        // them. Meaningless for an object frame and for an array that has spilled.
+        unsigned stackBase;
         PendingKey pendingKey;
         bool isObject;
+        // An array frame that is still collecting its elements rather than storing them:
+        // `containers[depth]` holds no array yet, and the one for this frame is allocated
+        // at the closing bracket. Always false for an object, and cleared for an array
+        // that outgrew the buffer. Sits in `Frame`'s existing tail padding.
+        bool deferred;
     };
     Vector<Frame, 32> frames;
+
+    // MARK: The element buffer — an array is allocated once, at its final length
+    //
+    // Values inside an array land here instead of being stored into a butterfly as they
+    // arrive, so that the array can be created at exactly its final length with its indexing
+    // type already known, rather than growing a butterfly once per element. The C++ does the
+    // same thing through `m_elementStack` (319420@main).
+    //
+    // `EncodedJSValue` and not `JSValue`, which is the whole reason this is affordable: a
+    // `JSValue` array member is default-*initialised*, so declaring one here would put
+    // 4 KB of stores in this entry's prologue and charge every document — including the
+    // ones with no array in them — for a buffer it never reads. The encoded form is a
+    // trivial integer, so it is uninitialised, exactly like `containers` above, and it is
+    // rooted the same way: this state is a local of `parseJSONWithSwiftIsland`, and on
+    // JSVALUE64 a cell's encoding *is* its pointer, so a buffered cell is a word the
+    // conservative scanner recognises.
+    //
+    // Fixed capacity with a spill path rather than a growable vector, which would have to
+    // register itself in the mark set once it mallocs. Arrays that do not fit spill to the
+    // store-as-you-go path and stay correct — see `spillDeferredArray`.
+    static constexpr unsigned elementStackCapacity = 512;
+    EncodedJSValue elementStack[elementStackCapacity];
+    unsigned elementStackSize { 0 };
 
     // The property names that had to be unescaped, which are not in the input at all and
     // so cannot be offsets. Appended to rather than overwritten, because a cold key can
@@ -2606,6 +2637,121 @@ NEVER_INLINE bool jsonSwiftStorePropertyValueFast(JSONSwiftObjectModelState& sta
     return true;
 }
 
+// Create an array holding `length` buffered values, at exactly that length and with its
+// indexing type settled before a single element is written. This is the whole point of the
+// element buffer, and it is `LiteralParser::materializeArray` (:1423) for the island's
+// side of the parser — kept as its own function rather than shared with that one so that
+// measuring this change moves only the island, leaving the C++ denominator alone.
+//
+// NEVER_INLINE: it is one call per array container, not per element, and it carries an
+// `ObjectInitializationScope` plus an out-of-line-memory fallback. Folding that into the
+// facade's array path would grow the frame that spans the grammar loop, which is the cost
+// the sentinel corpora keep catching.
+NEVER_INLINE JSArray* jsonSwiftMaterializeArray(JSONSwiftObjectModelState& state,
+    EncodedJSValue* values, unsigned length)
+{
+    VM& vm = state.vm;
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    ASSERT(length);
+
+    // What `putDirectIndex` would have discovered by converting the butterfly as it grew,
+    // decided in one pass over values that are already in hand. The order matters: a
+    // double demotes an int32 array and anything else settles it, so the loop can stop.
+    IndexingType indexingType = ArrayWithInt32;
+    for (unsigned i = 0; i < length; ++i) {
+        JSValue value = JSValue::decode(values[i]);
+        if (value.isInt32())
+            continue;
+        if (value.isDouble()) {
+            indexingType = ArrayWithDouble;
+            continue;
+        }
+        indexingType = ArrayWithContiguous;
+        break;
+    }
+
+    {
+        ObjectInitializationScope initializationScope(vm);
+        Structure* structure =
+            state.globalObject->arrayStructureForIndexingTypeDuringAllocation(indexingType);
+        if (JSArray* array = JSArray::tryCreateUninitializedRestricted(initializationScope,
+                structure, length)) [[likely]] {
+            for (unsigned i = 0; i < length; ++i)
+                array->initializeIndex(initializationScope, i, JSValue::decode(values[i]));
+            return array;
+        }
+    }
+
+    // A length past what a contiguous vector can hold, and allocation failure, grow an
+    // empty array instead so that the document reports out of memory rather than crashing.
+    JSArray* array = constructEmptyArray(state.globalObject, nullptr);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, nullptr));
+    for (unsigned i = 0; i < length; ++i) {
+        array->putDirectIndex(state.globalObject, i, JSValue::decode(values[i]));
+        RETURN_IF_EXCEPTION(scope, (state.sawException = true, nullptr));
+    }
+    return array;
+}
+
+// Close a deferred array: turn the values collected since `beginArray` into the array
+// itself, and give the buffer's slots back.
+//
+// NEVER_INLINE, and that is the whole point of it existing rather than sitting in
+// `endContainer`, which is one of the always-inline facade entries: anything in there is
+// duplicated into the grammar loop at every close, and this function's length arithmetic plus
+// an inlined `constructEmptyArray` measurably grew the island's hot function and cost the
+// documents made of empty containers more than the deferral wins. Code a corpus never executes
+// is not free. The empty array is handled here for the same reason.
+NEVER_INLINE JSObject* jsonSwiftCloseDeferredArray(JSONSwiftObjectModelState& state,
+    JSONSwiftObjectModelState::Frame& frame)
+{
+    ASSERT(frame.deferred && !frame.isObject);
+    // `stackBase` is this side's own bookkeeping and the subtraction below is traced sound —
+    // but it is an *unsigned* subtraction feeding a length, so if the invariant were ever
+    // broken the result is a ~4-billion-element read off the top of `elementStack`, decoded
+    // as `JSValue`s into a JS array. One compare against a value already in a register, on a
+    // path taken once per array container rather than once per element, is what makes that
+    // structurally impossible rather than argued: false without `sawException` re-parses the
+    // document in C++, as every other guard on this side does.
+    if (frame.stackBase > state.elementStackSize) [[unlikely]]
+        return nullptr;
+    unsigned length = state.elementStackSize - frame.stackBase;
+    JSObject* array = length
+        ? jsonSwiftMaterializeArray(state, state.elementStack + frame.stackBase, length)
+        : constructEmptyArray(state.globalObject, nullptr);
+    state.elementStackSize = frame.stackBase;
+    if (!array) [[unlikely]] {
+        // Either arm can fail only by throwing, and a pending exception is the one thing
+        // the C++ must propagate rather than re-parse the document over.
+        state.sawException = true;
+        return nullptr;
+    }
+    return array;
+}
+
+// The buffer is finite and a document's arrays are not, so an array that fills it stops
+// deferring: what it has collected so far becomes a real array, that array goes into
+// `containers`, and its remaining elements are stored into it as they arrive. Only the
+// innermost frame can be the one that overflows — values only ever arrive for the innermost
+// container — so releasing its slots is enough, and the outer frames' buffered elements below
+// `stackBase` are untouched.
+//
+// Correctness, not speed: afterwards the array has a vector of exactly the spilled length, so
+// the next element declines `jsonSwiftFastArrayAppend` and grows through `putDirectIndex`.
+// Growing an empty array through `putDirectIndex` from here instead is measurably worse.
+NEVER_INLINE bool jsonSwiftSpillDeferredArray(JSONSwiftObjectModelState& state,
+    JSONSwiftObjectModelState::Frame& frame, size_t depth)
+{
+    unsigned length = state.elementStackSize - frame.stackBase;
+    JSObject* array = jsonSwiftCloseDeferredArray(state, frame);
+    if (!array) [[unlikely]]
+        return false;
+    state.containers[depth - 1] = array;
+    frame.nextIndex = length;
+    frame.deferred = false;
+    return true;
+}
+
 // What is left inline: the empty check, which container this is, and the array append
 // above.
 ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue value)
@@ -2627,12 +2773,26 @@ ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue
         return true;
     }
 
+    size_t depth = state.frames.size();
     auto& frame = state.frames.last();
-    JSObject* container = state.containers[state.frames.size() - 1];
     if (frame.isObject)
-        return jsonSwiftStorePropertyValueFast(state, frame, container, value);
+        return jsonSwiftStorePropertyValueFast(state, frame, state.containers[depth - 1],
+            value);
+
+    // An array still collecting: the element is a store into the buffer and nothing else,
+    // which is what makes an array cost one allocation instead of one per element.
+    if (frame.deferred) [[likely]] {
+        if (state.elementStackSize < JSONSwiftObjectModelState::elementStackCapacity)
+            [[likely]] {
+            state.elementStack[state.elementStackSize++] = JSValue::encode(value);
+            return true;
+        }
+        if (!jsonSwiftSpillDeferredArray(state, frame, depth)) [[unlikely]]
+            return false;
+    }
 
     unsigned index = frame.nextIndex++;
+    JSObject* container = state.containers[depth - 1];
     // Nothing on this path can throw or allocate, so the throw scope is declared below it
     // rather than around it.
     if (jsonSwiftFastArrayAppend(state.vm, container, index, value)) [[likely]]
@@ -2647,13 +2807,13 @@ ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue
 // `isObject` comes from the caller rather than from `container->inherits<JSArray>()`: the
 // grammar knows which bracket it lexed, so asking the cell would re-derive at run time
 // something the call site has as a constant, once per container.
+//
+// `container` is null for an array, which has none yet: the frame it pushes buffers its
+// elements and the array is created at the closing bracket. So the only caller that can
+// have failed to allocate is the object entry, which is where that null check lives.
 ALWAYS_INLINE bool jsonSwiftPushContainer(JSONSwiftObjectModelState& state,
     JSObject* container, bool isObject)
 {
-    if (!container) [[unlikely]] {
-        state.sawException = true;
-        return false;
-    }
     // The grammar refuses a 65th container, so this is a bound on a Swift-side invariant
     // rather than a reachable path — but it is the write into a fixed-size array, and one
     // compare against a constant is what makes this side's memory safety independent of the
@@ -2667,7 +2827,8 @@ ALWAYS_INLINE bool jsonSwiftPushContainer(JSONSwiftObjectModelState& state,
     // The new frame starts with no pending key, which is what leaves the *parent's* name
     // intact while a nested container is built.
     state.frames.append(JSONSwiftObjectModelState::Frame {
-        0, 0, 0, 0, JSONSwiftObjectModelState::PendingKey::None, isObject });
+        0, 0, 0, 0, state.elementStackSize,
+        JSONSwiftObjectModelState::PendingKey::None, isObject, !isObject });
     return true;
 }
 
@@ -2692,16 +2853,20 @@ JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::beginObject()
     auto scope = DECLARE_THROW_SCOPE(state.vm);
     JSObject* object = constructEmptyObject(state.globalObject);
     RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    if (!object) [[unlikely]] {
+        state.sawException = true;
+        return false;
+    }
     return jsonSwiftPushContainer(state, object, true);
 }
 
+// No allocation here at all: the array's elements are buffered and the array itself is
+// created at the closing bracket, at its final length and indexing type (319420@main took
+// the C++ parser the same way). So an array of *k* elements costs one allocation rather
+// than one plus however many butterfly growths `putDirectIndex` needed on the way to *k*.
 JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::beginArray()
 {
-    auto& state = *m_state;
-    auto scope = DECLARE_THROW_SCOPE(state.vm);
-    JSArray* array = constructEmptyArray(state.globalObject, nullptr);
-    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
-    return jsonSwiftPushContainer(state, array, false);
+    return jsonSwiftPushContainer(*m_state, nullptr, false);
 }
 
 JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::endContainer()
@@ -2711,7 +2876,17 @@ JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::endContainer()
     if (!depth) [[unlikely]]
         return false;
 
-    JSObject* finished = state.containers[depth - 1];
+    auto& frame = state.frames.last();
+    JSObject* finished;
+    if (frame.deferred) {
+        // The array is built here rather than at the opening bracket, out of line so that
+        // the always-inline entry stays small — see `jsonSwiftCloseDeferredArray`.
+        finished = jsonSwiftCloseDeferredArray(state, frame);
+        if (!finished) [[unlikely]]
+            return false;
+    } else
+        finished = state.containers[depth - 1];
+
     state.frames.removeLast();
     if (depth == 1) {
         // The document is complete. `finished` is unrooted between here and the return, as
