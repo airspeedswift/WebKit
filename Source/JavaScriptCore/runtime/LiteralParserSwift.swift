@@ -51,7 +51,8 @@ internal import JavaScriptCore_Private.LiteralParserSwiftTypes
 // silenced it. What remains is two `std::span` imports at the entries and one facade call whose
 // synthesized safe overload drops the attribute (`emitError`). The twenty `RawSpan` loads in the
 // scans used to be unchecked and are now checked (`loadBytes`), which is what took this island
-// from twenty-five `unsafe` markers to four.
+// from twenty-five `unsafe` markers to three. Each of those three carries its own safety
+// rationale and the toolchain ask that would remove it, at the site.
 
 /// Mirrors `JSC::TokenType`. Raw values match so C++ can cast directly.
 ///
@@ -1064,13 +1065,25 @@ private func errorMessageSuffix(_ kind: JSONErrorKind) -> String {
 /// this same declaration when it is called as pointer-plus-count — but the `Span` overload
 /// the importer synthesizes from `__counted_by` + `noescape` does not carry the attribute
 /// over, so the safer spelling of one call is the only one that needs a marker. Not a
-/// position problem: prefix and trailing both lose it.
+/// position problem: prefix and trailing both lose it. Filings register §25; the underlying
+/// want of a *scoped* reference import is §23.
 @inline(always)
 @safe
 func emitError(
     _ model: JSC.JSONSwiftObjectModel, _ prefix: String,
     _ quoteStart: UInt32, _ quoteLength: UInt32, _ suffix: String
 ) {
+    // SAFETY: the marker is on the *receiver*, not on either span. `model` is imported
+    // `SWIFT_UNSAFE_REFERENCE` because a cell's lifetime is the collector's business, and the
+    // three available reference imports are shared / immortal / unsafe — none of them "scoped",
+    // which is what this actually is: a stack local the C++ caller owns for exactly the duration
+    // of this call, so it can neither be retained nor outlive us. `JSC_SWIFT_SAFE` discharges
+    // that on the other fifteen members and on this same declaration called as
+    // pointer-plus-count; only the synthesized overload loses it. Asserting
+    // `SWIFT_IMMORTAL_REFERENCE` instead would zero the marker by claiming something false.
+    //
+    // The two arguments need no justification of their own: `utf8Span.span` over a Swift string
+    // literal is safe and bounds-carrying, and the C++ side reads them within `__counted_by`.
     unsafe model.errorMessage(prefix.utf8Span.span, quoteStart, quoteLength,
         suffix.utf8Span.span)
 }
@@ -1685,6 +1698,31 @@ func jsonParseDocument16(
     _ data: JSC.JSONLexerSpan16,
     _ model: JSC.JSONSwiftObjectModel
 ) -> UInt8 {
+    // SAFETY: `_unsafeCxxSpan` is `@unsafe` and `@_unsafeNonescapableResult`, so it hands back a
+    // `Span` whose lifetime the compiler cannot tie to the C++ `std::span` it came from. Nothing
+    // here checks the bounds either — they are `data`'s own. What makes it sound is a property of
+    // the caller, so it has to be asserted rather than derived:
+    //
+    //  * the buffer is a ref-counted malloc'd `StringImpl` owned by `LiteralParser.cpp` across the
+    //    whole parse, NOT GC-heap memory. The facade allocates on nearly every call, so the
+    //    collector runs repeatedly inside this span's lifetime and must be unable to move or free
+    //    it. That invariant is stated where a caller would break it, on the C++ declaration
+    //    (LiteralParserSwiftTypes.h) — hand the island a collector-owned buffer and this is wrong
+    //    with no line of Swift changed;
+    //  * the extent comes from that same `StringImpl`, so `data.size()` cannot exceed it;
+    //  * the derived `Span` does not outlive the call. It is converted once, here, and the only
+    //    thing that holds it is `grammar`, a local. The state reachable through `model` holds the
+    //    same bytes, but the C++ caller put them there, not Swift — which is what lets the entry
+    //    be `noescape`, and `noescape` is in turn what makes this claim checkable from C++.
+    //
+    // The marker is not removable from this side. Spelling the parameter `Span<UInt16>` does
+    // type-check, but `@_expose(Cxx)` then emits "Parameter 'data' of type 'Span<UInt16>' is not
+    // representable in C++" in place of the function, so the entry must take the imported
+    // `std::span` and convert. The ask that would retire this and its 8-bit twin — expose a
+    // `Span<T>` parameter as `std::span<const T> __attribute__((noescape))`, the signature the
+    // importer already round-trips in the other direction — is filings register §27, with the
+    // reproducer in webkit-swift-ports/noescape/. Note it is specifically the *callee* direction
+    // that is missing: `noescape` on a C++ parameter Swift *calls* already imports as a `Span`.
     let units = unsafe Span<UInt16>(_unsafeCxxSpan: data)
     // Fewer than 2^31 units, which `JSString::MaxLength` already guarantees. Stating
     // it licenses the wrapping `UInt32` conversions and discharges the overflow branches
@@ -1704,6 +1742,11 @@ func jsonParseDocument8(
     _ data: JSC.JSONLexerSpan8,
     _ model: JSC.JSONSwiftObjectModel
 ) -> UInt8 {
+    // SAFETY: identical to `jsonParseDocument16` above, and it rests on the same caller-side
+    // invariant — a ref-counted `StringImpl` that outlives the call, bounds taken from it, and a
+    // derived `Span` held only by the local `grammar`. Same unremovable marker, same ask
+    // (filings register §27). Read the rationale there; it is not repeated so the two entries
+    // cannot drift apart.
     let units = unsafe Span<UInt8>(_unsafeCxxSpan: data)
     let raw = RawSpan(elements: units)
     var grammar = JSONSwiftGrammar<Latin1Units>()
