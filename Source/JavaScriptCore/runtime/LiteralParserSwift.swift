@@ -43,9 +43,8 @@ internal import JavaScriptCore_Private.LiteralParserSwiftTypes
 //
 // The facade *type* is unsafe — a cell's lifetime is the collector's business — but no call
 // on it is, so `@safe` and `JSC_SWIFT_SAFE` (LiteralParserSwiftTypes.h) assert that once per
-// declaration (SE-0458) rather than at every call site. Four `unsafe` markers remain: the two
-// `std::span` imports at the entries, and `emitError`, whose synthesized safe overload drops
-// the attribute.
+// declaration (SE-0458) rather than at every call site. Three `unsafe` markers remain, each
+// justified at its site.
 
 /// Mirrors `JSC::TokenType`. Raw values match so C++ can cast directly.
 ///
@@ -1034,13 +1033,22 @@ private func errorMessageSuffix(_ kind: JSONErrorKind) -> String {
 /// this same declaration when it is called as pointer-plus-count — but the `Span` overload
 /// the importer synthesizes from `__counted_by` + `noescape` does not carry the attribute
 /// over, so the safer spelling of one call is the only one that needs a marker. Not a
-/// position problem: prefix and trailing both lose it.
+/// position problem: prefix and trailing both lose it. Filings register §25; the underlying
+/// want of a *scoped* reference import is §23.
 @inline(always)
 @safe
 func emitError(
     _ model: JSC.JSONSwiftObjectModel, _ prefix: String,
     _ quoteStart: UInt32, _ quoteLength: UInt32, _ suffix: String
 ) {
+    // SAFETY: the marker is on the *receiver*, not on either span. `model` is imported
+    // `SWIFT_UNSAFE_REFERENCE` because a cell's lifetime is the collector's business; what it
+    // actually is here is a stack local the C++ caller owns for exactly this call, so it can
+    // neither be retained nor outlive us. No "scoped" reference import exists to say that —
+    // filings register §23 — and `SWIFT_IMMORTAL_REFERENCE` would zero the marker by claiming
+    // something false. `JSC_SWIFT_SAFE` discharges it on the other fifteen members; only the
+    // synthesized overload loses it. Both spans are safe: a string literal's `utf8Span.span`
+    // carries its bounds, and C++ reads them within `__counted_by`.
     unsafe model.errorMessage(prefix.utf8Span.span, quoteStart, quoteLength,
         suffix.utf8Span.span)
 }
@@ -1646,6 +1654,21 @@ func jsonParseDocument16(
     _ data: JSC.JSONLexerSpan16,
     _ model: JSC.JSONSwiftObjectModel
 ) -> UInt8 {
+    // SAFETY: `_unsafeCxxSpan` is `@unsafe` and `@_unsafeNonescapableResult`, so the derived
+    // `Span`'s lifetime is not tied to the C++ `std::span` it came from, and the bounds are
+    // `data`'s own. Soundness is a property of the caller, so it is asserted, not derived:
+    //
+    //  * the buffer is a ref-counted malloc'd `StringImpl` owned by `LiteralParser.cpp` across
+    //    the whole parse, NOT GC-heap memory. The facade allocates on nearly every call, so the
+    //    collector runs repeatedly inside this span's lifetime and must be unable to move or
+    //    free it. The invariant is stated where a caller would break it, on the C++ declaration
+    //    (LiteralParserSwiftTypes.h);
+    //  * the extent comes from that same `StringImpl`, so `data.size()` cannot exceed it;
+    //  * the derived `Span` does not outlive the call — only the local `grammar` holds it.
+    //
+    // The marker is not removable from this side: spelling the parameter `Span<UInt16>`
+    // type-checks, but `@_expose(Cxx)` then emits "not representable in C++" in place of the
+    // function. Filings register §27 is the ask.
     let units = unsafe Span<UInt16>(_unsafeCxxSpan: data)
     // Fewer than 2^31 units, which `JSString::MaxLength` already guarantees. Stating it
     // licenses the wrapping `UInt32` conversions and discharges the overflow branches in this
@@ -1665,6 +1688,8 @@ func jsonParseDocument8(
     _ data: JSC.JSONLexerSpan8,
     _ model: JSC.JSONSwiftObjectModel
 ) -> UInt8 {
+    // SAFETY: as `jsonParseDocument16`, resting on the same caller-side invariant and the same
+    // ask (filings register §27). Not repeated, so the two entries cannot drift apart.
     let units = unsafe Span<UInt8>(_unsafeCxxSpan: data)
     let raw = RawSpan(elements: units)
     var grammar = JSONSwiftGrammar<Latin1Units>()
