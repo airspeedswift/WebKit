@@ -48,6 +48,12 @@ internal import JavaScriptCore_Private.LiteralParserSwiftTypes
 // the attribute.
 
 /// Mirrors `JSC::TokenType`. Raw values match so C++ can cast directly.
+///
+/// `@c` (SE-0495) makes this the single declaration of the numbering: it is emitted into
+/// JavaScriptCore-Swift.h as a `uint8_t`-backed C enum and LiteralParserSwiftBridge.cpp
+/// asserts it against `TokenType` there. The two island-only cases are exported too, which
+/// is harmless.
+@c
 enum JSONTokenType: UInt8 {
     case lbracket = 0, rbracket, lbrace, rbrace
     case string, identifier, number, numberInt32, colon

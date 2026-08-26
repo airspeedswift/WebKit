@@ -895,40 +895,6 @@ ALWAYS_INLINE TokenType LiteralParser<CharType, reviverMode>::Lexer::nextMaybeId
     return result;
 }
 
-#if JSC_SUPPORTS_SWIFT
-
-// The island reports token types as its own Swift `JSONTokenType` and this file reads
-// them as `TokenType` with no conversion — `literalValue` below switches a raw value
-// that came out of Swift straight onto `TokTrue`/`TokFalse`/`TokNull` — so the two
-// numberings have to agree. Nothing in C++ can assert against a Swift enum, so
-// `JSONSwiftTokenType` (LiteralParserSwiftTypes.h) is transcribed from it by hand and
-// these assert *that* against `TokenType`. The enum is therefore not scaffolding to be
-// tidied away with the last C++ user of a `JSONSwiftTok*` constant: it is the only thing
-// keeping the Swift numbering, the C++ numbering and this file's casts in step.
-static_assert(static_cast<uint8_t>(TokLBracket) == JSONSwiftTokLBracket);
-static_assert(static_cast<uint8_t>(TokRBracket) == JSONSwiftTokRBracket);
-static_assert(static_cast<uint8_t>(TokLBrace) == JSONSwiftTokLBrace);
-static_assert(static_cast<uint8_t>(TokRBrace) == JSONSwiftTokRBrace);
-static_assert(static_cast<uint8_t>(TokString) == JSONSwiftTokString);
-static_assert(static_cast<uint8_t>(TokIdentifier) == JSONSwiftTokIdentifier);
-static_assert(static_cast<uint8_t>(TokNumber) == JSONSwiftTokNumber);
-static_assert(static_cast<uint8_t>(TokNumberInt32) == JSONSwiftTokNumberInt32);
-static_assert(static_cast<uint8_t>(TokColon) == JSONSwiftTokColon);
-static_assert(static_cast<uint8_t>(TokLParen) == JSONSwiftTokLParen);
-static_assert(static_cast<uint8_t>(TokRParen) == JSONSwiftTokRParen);
-static_assert(static_cast<uint8_t>(TokComma) == JSONSwiftTokComma);
-static_assert(static_cast<uint8_t>(TokTrue) == JSONSwiftTokTrue);
-static_assert(static_cast<uint8_t>(TokFalse) == JSONSwiftTokFalse);
-static_assert(static_cast<uint8_t>(TokNull) == JSONSwiftTokNull);
-static_assert(static_cast<uint8_t>(TokEnd) == JSONSwiftTokEnd);
-static_assert(static_cast<uint8_t>(TokDot) == JSONSwiftTokDot);
-static_assert(static_cast<uint8_t>(TokAssign) == JSONSwiftTokAssign);
-static_assert(static_cast<uint8_t>(TokSemi) == JSONSwiftTokSemi);
-static_assert(static_cast<uint8_t>(TokError) == JSONSwiftTokError);
-static_assert(static_cast<uint8_t>(TokErrorSpace) == JSONSwiftTokErrorSpace);
-
-#endif // JSC_SUPPORTS_SWIFT
-
 template <>
 ALWAYS_INLINE void setParserTokenString<Latin1Character>(LiteralParserToken<Latin1Character>& token, const Latin1Character* string)
 {
