@@ -38,12 +38,14 @@
 
 namespace JSC {
 
-uint8_t jsonSwiftParseDocument16(std::span<const char16_t> input, JSONSwiftObjectModel& model)
+// The `noescape` annotations are repeated on the definitions: an unannotated definition is a
+// different declaration to Clang, and the mismatch is not always diagnosed (interop notes §67).
+uint8_t jsonSwiftParseDocument16(std::span<const char16_t> input JSC_SWIFT_NOESCAPE, JSONSwiftObjectModel& model)
 {
     return JavaScriptCore::jsonParseDocument16(input, &model);
 }
 
-uint8_t jsonSwiftParseDocument8(std::span<const uint8_t> input, JSONSwiftObjectModel& model)
+uint8_t jsonSwiftParseDocument8(std::span<const uint8_t> input JSC_SWIFT_NOESCAPE, JSONSwiftObjectModel& model)
 {
     return JavaScriptCore::jsonParseDocument8(input, &model);
 }

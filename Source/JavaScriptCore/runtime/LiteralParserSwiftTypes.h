@@ -334,8 +334,20 @@ private:
 // reached through the facade from inside the grammar loop, so this is not re-entered
 // mid-document. One facade type serves both widths because nothing in its interface names a
 // character; what knows the width is `JSONSwiftObjectModelState`, forward-declared above.
-uint8_t jsonSwiftParseDocument16(std::span<const char16_t> input, JSONSwiftObjectModel&);
-uint8_t jsonSwiftParseDocument8(std::span<const uint8_t> input, JSONSwiftObjectModel&);
+//
+// `noescape` on the input states what the island actually does, and it is worth stating
+// because a reader cannot tell from here: the Swift side converts the span once at the entry
+// and stores nothing that outlives the call, the grammar being a local. The addresses do not
+// reach `JSONSwiftObjectModel` through this parameter either — the state holds the same span,
+// but it was handed that by the C++ caller (LiteralParser.cpp), not by Swift.
+//
+// The invariant underneath both of those, which nothing else here says: the buffer is a
+// ref-counted malloc'd `StringImpl`, not GC-heap memory. The facade allocates on nearly every
+// call, so the collector runs repeatedly *inside* this span's lifetime, and it can neither
+// move nor free it. A future caller handing the island a buffer the collector owns would break
+// the island without changing a line of it.
+uint8_t jsonSwiftParseDocument16(std::span<const char16_t> input JSC_SWIFT_NOESCAPE, JSONSwiftObjectModel&);
+uint8_t jsonSwiftParseDocument8(std::span<const uint8_t> input JSC_SWIFT_NOESCAPE, JSONSwiftObjectModel&);
 
 #endif // JSC_SUPPORTS_SWIFT
 
