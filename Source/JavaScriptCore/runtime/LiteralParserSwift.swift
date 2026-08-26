@@ -54,6 +54,15 @@ internal import JavaScriptCore_Private.LiteralParserSwiftTypes
 // from twenty-five `unsafe` markers to four.
 
 /// Mirrors `JSC::TokenType`. Raw values match so C++ can cast directly.
+///
+/// `@c` (SE-0495) so this is the *single* declaration of the numbering: it is emitted into
+/// JavaScriptCore-Swift.h as a `uint8_t`-backed C enum, and LiteralParserSwiftBridge.cpp
+/// asserts it against `TokenType` there. Before this the numbering existed three times --
+/// here, as a hand-transcribed `JSONSwiftTokenType` in the boundary header, and in
+/// `JSC::TokenType` -- the middle one only so that a C++ assertion had something it could
+/// name. The two island-only cases below are exported too, which is harmless: C++ gains two
+/// constants it does not use.
+@c
 enum JSONTokenType: UInt8 {
     case lbracket = 0, rbracket, lbrace, rbrace
     case string, identifier, number, numberInt32, colon

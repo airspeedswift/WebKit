@@ -56,45 +56,11 @@ using JSONLexerSpan16 = std::span<const char16_t>;
 // at all, a `JSString` being 8-bit whenever every character is Latin1.
 using JSONLexerSpan8 = std::span<const uint8_t>;
 
-// Mirrors JSC::TokenType (LiteralParser.h:59) for the values the island can produce.
-//
-// It exists as the *proxy* by which the two numberings are checked. The island's Swift
-// `JSONTokenType` is what crosses the boundary, in `literalValue`, and no C++ assertion can
-// name a Swift enum — so this is transcribed by hand and LiteralParser.cpp asserts all 21
-// values against `TokenType`. Delete it and the keyword path is an unchecked coincidence.
-enum JSONSwiftTokenType : uint8_t {
-    JSONSwiftTokLBracket = 0,
-    JSONSwiftTokRBracket = 1,
-    JSONSwiftTokLBrace = 2,
-    JSONSwiftTokRBrace = 3,
-    JSONSwiftTokString = 4,
-    JSONSwiftTokIdentifier = 5,
-    JSONSwiftTokNumber = 6,
-    JSONSwiftTokNumberInt32 = 7,
-    JSONSwiftTokColon = 8,
-    JSONSwiftTokLParen = 9,
-    JSONSwiftTokRParen = 10,
-    JSONSwiftTokComma = 11,
-    JSONSwiftTokTrue = 12,
-    JSONSwiftTokFalse = 13,
-    JSONSwiftTokNull = 14,
-    JSONSwiftTokEnd = 15,
-    JSONSwiftTokDot = 16,
-    JSONSwiftTokAssign = 17,
-    JSONSwiftTokSemi = 18,
-    JSONSwiftTokError = 19,
-    JSONSwiftTokErrorSpace = 20,
-
-    // Island-internal, listed to keep the transcription complete: the grammar handles
-    // both itself through the facade's cold paths below.
-    JSONSwiftTokNeedsSlowString = 21,
-    JSONSwiftTokNeedsDoubleParse = 22,
-};
-
-// Deliberately outside `#if JSC_SUPPORTS_SWIFT`, and load-bearing: nothing passes
-// `-Xcc -DJSC_SUPPORTS_SWIFT=1` to the ClangImporter, so a declaration under that guard
-// is invisible to Swift, with the importer reporting "'X' is not a member type of enum
-// '__ObjC.JSC'". Only the implementation needs guarding.
+// Every *type* in this header sits outside `#if JSC_SUPPORTS_SWIFT` deliberately, and that is
+// load-bearing: nothing passes `-Xcc -DJSC_SUPPORTS_SWIFT=1` to the ClangImporter, so a
+// declaration under that guard is invisible to Swift, with the importer reporting "'X' is not a
+// member type of enum '__ObjC.JSC'". Only the implementation — the entry-point declarations at
+// the bottom of the file — needs guarding.
 
 // MARK: - The object-model facade the Swift grammar builds through
 //
