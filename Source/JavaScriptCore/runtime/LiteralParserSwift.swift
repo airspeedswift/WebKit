@@ -48,9 +48,10 @@ internal import JavaScriptCore_Private.LiteralParserSwiftTypes
 // responsibility for an unsafe-typed direct argument, `self` included, so the assertion is
 // made once per declaration rather than at every call site — and it is the honest one, since
 // an *escape* of the receiver still diagnoses where `SWIFT_IMMORTAL_REFERENCE` would have
-// silenced it. What remains is twenty unchecked `RawSpan` loads, two `std::span` imports at
-// the entries, and one facade call whose synthesized safe overload drops the attribute
-// (`emitError`).
+// silenced it. What remains is two `std::span` imports at the entries and one facade call whose
+// synthesized safe overload drops the attribute (`emitError`). The twenty `RawSpan` loads in the
+// scans used to be unchecked and are now checked (`loadBytes`), which is what took this island
+// from twenty-five `unsafe` markers to four.
 
 /// Mirrors `JSC::TokenType`. Raw values match so C++ can cast directly.
 enum JSONTokenType: UInt8 {
@@ -563,31 +564,30 @@ struct JSONLexer<T: JSONUnits> {
 
 @inline(always) func isASCIIDigit<U: FixedWidthInteger>(_ c: U) -> Bool { c >= 0x30 && c <= 0x39 }
 
-// Every `RawSpan` read in the SIMD scans and keyword compares below goes through this, and at
-// all twenty sites the offset is in bounds by an invariant the caller has just tested and
-// states at the site. Those statements are the safety argument and each has to hold on its own.
+// Every `RawSpan` read in the SIMD scans and keyword compares below goes through this, and it
+// is a **checked** load: the twenty call sites are ordinary safe Swift and need no audit.
 //
-// It is not simply a missed optimization: the loops establish facts about the element count
-// (`i + 2 * stride <= count`) while the check is against the byte count, and
-// `byteCount &- i >= 8` is the stronger predicate only where `i <= byteCount` is separately
-// established, unsigned-wrapping into a weaker one otherwise — which is why clang declines the
-// identical fold against a hardened `std::span`. Establishing both halves in the caller does
-// discharge the check, at the price of turning each trap into a live `else` the caller has to
-// supply a value for inside these hot loops. rdar://185372093 asks for the annotation that
-// discharges it from the invariant instead; delete the `@unsafe` and the markers at the call
-// sites when it lands.
+// SE-0525's safe `load(fromByteOffset:as:)` performs an *unaligned* read by design (§"Alignment"
+// — it deliberately departs from `UnsafeRawPointer.load`'s alignment requirement), so it is an
+// exact replacement for the `unsafeLoadUnaligned(fromUncheckedByteOffset:)` this used to call.
+// The only difference is the range check, which makes the cost of that check directly
+// measurable rather than entangled with a semantic change.
 //
-// `-D JSON_ISLAND_CHECKED_LOADS` restores the check, and that build is the bounds audit: run
-// the JSON tests under it after touching any cursor or bound here.
-@unsafe
+// The check is not discharged automatically, and it is not simply a missed optimization: the
+// loops establish facts about the element count (`i + 2 * stride <= count`) while the check is
+// against the byte count, and `byteCount &- i >= 8` is the stronger predicate only where
+// `i <= byteCount` is separately established, unsigned-wrapping into a weaker one otherwise —
+// which is why clang declines the identical fold against a hardened `std::span`. Establishing
+// both halves in the caller does discharge it, at the price of turning each trap into a live
+// `else` the caller has to supply a value for inside these hot loops.
+//
+// rdar://185372093 (annotate `RawSpan`/`MutableRawSpan` range checks with
+// `fixed_storage.check_range`) asks for the annotation that discharges the check from the
+// invariant instead. When it lands this becomes free and nothing here has to change.
 @inline(always) func loadBytes<T: BitwiseCopyable & ConvertibleFromBytes>(
     _ input: RawSpan, at byteOffset: Int, as type: T.Type
 ) -> T {
-#if JSON_ISLAND_CHECKED_LOADS
     input.load(fromByteOffset: byteOffset, as: T.self)
-#else
-    unsafe input.unsafeLoadUnaligned(fromUncheckedByteOffset: byteOffset, as: T.self)
-#endif
 }
 
 // MARK: - The SIMD string scans
@@ -664,7 +664,7 @@ enum WideUnits: JSONUnits {
         _ units: Span<UInt16>
     ) -> Bool {
         let pair = UInt32(c0) | (UInt32(c1) << 16)
-        return unsafe loadBytes(input, at: index * 2, as: UInt32.self) == pair
+        return loadBytes(input, at: index * 2, as: UInt32.self) == pair
             && units[index &+ 2] == c2
     }
 
@@ -672,7 +672,7 @@ enum WideUnits: JSONUnits {
         _ input: RawSpan, at index: Int, _ c0: UInt16, _ c1: UInt16, _ c2: UInt16, _ c3: UInt16
     ) -> Bool {
         let quad = UInt64(c0) | (UInt64(c1) << 16) | (UInt64(c2) << 32) | (UInt64(c3) << 48)
-        return unsafe loadBytes(input, at: index * 2, as: UInt64.self) == quad
+        return loadBytes(input, at: index * 2, as: UInt64.self) == quad
     }
 
     // MARK: The wide SIMD scans
@@ -705,8 +705,8 @@ enum WideUnits: JSONUnits {
         if count - from >= stride {
             var i = from
             while i + 2 * stride <= count {
-                let m0 = strictMask(unsafe loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self))
-                let m1 = strictMask(unsafe loadBytes(input, at: i * 2 + 16, as: SIMD8<UInt16>.self))
+                let m0 = strictMask(loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self))
+                let m1 = strictMask(loadBytes(input, at: i * 2 + 16, as: SIMD8<UInt16>.self))
                 if any(m0 .| m1) {
                     if any(m0) { return i + rankFirstLane(m0) }
                     return i + stride + rankFirstLane(m1)
@@ -714,7 +714,7 @@ enum WideUnits: JSONUnits {
                 i += 2 * stride
             }
             while i + stride <= count {
-                let m = strictMask(unsafe loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self))
+                let m = strictMask(loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self))
                 if any(m) { return i + rankFirstLane(m) }
                 i += stride
             }
@@ -722,7 +722,7 @@ enum WideUnits: JSONUnits {
                 // The overlapping last vector ends exactly at the end of the span,
                 // and `tail >= from >= 0` by the outer test.
                 let tail = count - stride
-                let m = strictMask(unsafe loadBytes(input, at: tail * 2, as: SIMD8<UInt16>.self))
+                let m = strictMask(loadBytes(input, at: tail * 2, as: SIMD8<UInt16>.self))
                 if any(m) { return tail + rankFirstLane(m) }
             }
             return count
@@ -743,9 +743,9 @@ enum WideUnits: JSONUnits {
             var i = from
             while i + 2 * stride <= count {
                 let m0 = sloppyMask(
-                    unsafe loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self), terminator)
+                    loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self), terminator)
                 let m1 = sloppyMask(
-                    unsafe loadBytes(input, at: i * 2 + 16, as: SIMD8<UInt16>.self), terminator)
+                    loadBytes(input, at: i * 2 + 16, as: SIMD8<UInt16>.self), terminator)
                 if any(m0 .| m1) {
                     if any(m0) { return i + rankFirstLane(m0) }
                     return i + stride + rankFirstLane(m1)
@@ -754,14 +754,14 @@ enum WideUnits: JSONUnits {
             }
             while i + stride <= count {
                 let m = sloppyMask(
-                    unsafe loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self), terminator)
+                    loadBytes(input, at: i * 2, as: SIMD8<UInt16>.self), terminator)
                 if any(m) { return i + rankFirstLane(m) }
                 i += stride
             }
             if i < count {
                 let tail = count - stride
                 let m = sloppyMask(
-                    unsafe loadBytes(input, at: tail * 2, as: SIMD8<UInt16>.self), terminator)
+                    loadBytes(input, at: tail * 2, as: SIMD8<UInt16>.self), terminator)
                 if any(m) { return tail + rankFirstLane(m) }
             }
             return count
@@ -804,7 +804,7 @@ enum Latin1Units: JSONUnits {
         _ units: Span<UInt8>
     ) -> Bool {
         let pair = UInt16(c0) | (UInt16(c1) << 8)
-        return unsafe loadBytes(input, at: index, as: UInt16.self) == pair
+        return loadBytes(input, at: index, as: UInt16.self) == pair
             && units[index &+ 2] == c2
     }
 
@@ -812,7 +812,7 @@ enum Latin1Units: JSONUnits {
         _ input: RawSpan, at index: Int, _ c0: UInt8, _ c1: UInt8, _ c2: UInt8, _ c3: UInt8
     ) -> Bool {
         let quad = UInt32(c0) | (UInt32(c1) << 8) | (UInt32(c2) << 16) | (UInt32(c3) << 24)
-        return unsafe loadBytes(input, at: index, as: UInt32.self) == quad
+        return loadBytes(input, at: index, as: UInt32.self) == quad
     }
 
     // MARK: The Latin1 SIMD scans
@@ -840,8 +840,8 @@ enum Latin1Units: JSONUnits {
         if count - from >= stride {
             var i = from
             while i + 2 * stride <= count {
-                let m0 = strictMask(unsafe loadBytes(input, at: i, as: SIMD16<UInt8>.self))
-                let m1 = strictMask(unsafe loadBytes(input, at: i + 16, as: SIMD16<UInt8>.self))
+                let m0 = strictMask(loadBytes(input, at: i, as: SIMD16<UInt8>.self))
+                let m1 = strictMask(loadBytes(input, at: i + 16, as: SIMD16<UInt8>.self))
                 if any(m0 .| m1) {
                     if any(m0) { return i + rankFirstLane(m0) }
                     return i + stride + rankFirstLane(m1)
@@ -849,13 +849,13 @@ enum Latin1Units: JSONUnits {
                 i += 2 * stride
             }
             while i + stride <= count {
-                let m = strictMask(unsafe loadBytes(input, at: i, as: SIMD16<UInt8>.self))
+                let m = strictMask(loadBytes(input, at: i, as: SIMD16<UInt8>.self))
                 if any(m) { return i + rankFirstLane(m) }
                 i += stride
             }
             if i < count {
                 let tail = count - stride
-                let m = strictMask(unsafe loadBytes(input, at: tail, as: SIMD16<UInt8>.self))
+                let m = strictMask(loadBytes(input, at: tail, as: SIMD16<UInt8>.self))
                 if any(m) { return tail + rankFirstLane(m) }
             }
             return count
@@ -875,8 +875,8 @@ enum Latin1Units: JSONUnits {
         if count - from >= stride {
             var i = from
             while i + 2 * stride <= count {
-                let m0 = sloppyMask(unsafe loadBytes(input, at: i, as: SIMD16<UInt8>.self), terminator)
-                let m1 = sloppyMask(unsafe loadBytes(input, at: i + 16, as: SIMD16<UInt8>.self), terminator)
+                let m0 = sloppyMask(loadBytes(input, at: i, as: SIMD16<UInt8>.self), terminator)
+                let m1 = sloppyMask(loadBytes(input, at: i + 16, as: SIMD16<UInt8>.self), terminator)
                 if any(m0 .| m1) {
                     if any(m0) { return i + rankFirstLane(m0) }
                     return i + stride + rankFirstLane(m1)
@@ -884,13 +884,13 @@ enum Latin1Units: JSONUnits {
                 i += 2 * stride
             }
             while i + stride <= count {
-                let m = sloppyMask(unsafe loadBytes(input, at: i, as: SIMD16<UInt8>.self), terminator)
+                let m = sloppyMask(loadBytes(input, at: i, as: SIMD16<UInt8>.self), terminator)
                 if any(m) { return i + rankFirstLane(m) }
                 i += stride
             }
             if i < count {
                 let tail = count - stride
-                let m = sloppyMask(unsafe loadBytes(input, at: tail, as: SIMD16<UInt8>.self), terminator)
+                let m = sloppyMask(loadBytes(input, at: tail, as: SIMD16<UInt8>.self), terminator)
                 if any(m) { return tail + rankFirstLane(m) }
             }
             return count
