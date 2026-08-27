@@ -4,12 +4,18 @@ framework module WebCore_Private [system] {
         export *
     }
 
-    // The Swift island's boundary, its own module so that the island can import
+    // The Swift islands' boundaries, each its own module so that an island can import
     // *only* what it is allowed to see rather than the Core umbrella below. Walking
     // that umbrella reaches JavaScriptCore's private headers, where two inner structs
     // are defined in explicit submodules that nothing imports, and WTF::KeyValuePair's
     // instantiation over them then fails to compile — so importing the umbrella from
-    // Swift does not build at all. See HTMLTokenizerSwiftTypes.h.
+    // Swift does not build at all. See CSSTokenizerSwiftTypes.h.
+    explicit module CSSTokenizerSwiftTypes {
+        header "CSSTokenizerSwiftTypes.h"
+        requires cplusplus
+        export *
+    }
+
     explicit module HTMLTokenizerSwiftTypes {
         header "HTMLTokenizerSwiftTypes.h"
         requires cplusplus
@@ -40,7 +46,8 @@ framework module WebCore_Private [system] {
         // on iOS, so it needs the definition of the class excluded above.
         exclude header "WebCoreView.h"
 
-        // This header is already included via its dedicated module above.
+        // These headers are already included via their dedicated modules above.
+        exclude header "CSSTokenizerSwiftTypes.h"
         exclude header "HTMLTokenizerSwiftTypes.h"
 
         module * {

@@ -32,11 +32,27 @@
 #include <WebCore/CSSParserToken.h>
 #include <WebCore/CSSTokenizerInputStream.h>
 #include <climits>
+#include <wtf/SwiftBridging.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
+// Which scanner CSSTokenizer uses, chosen at compile time. Both are compiled in
+// either way — the comparison tests need both — but only one is reachable from the
+// constructors the rest of WebCore calls.
+//
+// Off by default: the Swift scanner is validated against the C++ one and matches it
+// on everything measured (notes §11i–§11m), but the two are deliberately kept side
+// by side for now rather than one replacing the other. Build with
+// -DUSE_SWIFT_CSS_TOKENIZER=1 to select it, which is also how to run the layout
+// tests against it. If this outlives the experiment it should become a real USE()
+// macro rather than a local one.
+#if !defined(USE_SWIFT_CSS_TOKENIZER)
+#define USE_SWIFT_CSS_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
+class CSSTokenizer;
 class CSSTokenizerInputStream;
 class CSSParserObserverWrapper;
 class CSSParserTokenRange;
@@ -49,20 +65,55 @@ public:
     static std::unique_ptr<CSSTokenizer> tryCreate(const String&);
     static std::unique_ptr<CSSTokenizer> tryCreate(const String&, CSSParserObserverWrapper&); // For the inspector
 
+    // Which scanner builds the token stream. Both are compiled in; this chooses
+    // which one CSSTokenizer uses, and the choice is made at compile time.
+    enum class Scanner : bool { Cpp, Swift };
+
+    static constexpr Scanner defaultScanner =
+#if USE_SWIFT_CSS_TOKENIZER
+        Scanner::Swift;
+#else
+        Scanner::Cpp;
+#endif
+
     WEBCORE_EXPORT explicit CSSTokenizer(const String&);
     CSSTokenizer(const String&, CSSParserObserverWrapper&); // For the inspector
+
+    // Builds with a named scanner regardless of `defaultScanner`, so a test can
+    // build both token streams from one source in one process and compare them.
+    // That comparison is what makes keeping two scanners side by side cheap, so it
+    // has to work whichever way the compile-time choice went.
+    WEBCORE_EXPORT CSSTokenizer(const String&, Scanner);
+    CSSTokenizer(const String&, CSSParserObserverWrapper&, Scanner);
 
     WEBCORE_EXPORT CSSParserTokenRange NODELETE tokenRange() const LIFETIME_BOUND;
     unsigned NODELETE tokenCount();
 
     static bool NODELETE isWhitespace(CSSParserTokenType);
 
+    // How many times the Swift scanner has declined an input and fallen back to the
+    // C++ one. A test that compares the two passes trivially if the Swift scanner
+    // silently declined, so tests assert on this.
+    WEBCORE_EXPORT static unsigned swiftIslandDeclineCountForTesting();
+
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
-    CSSTokenizer(const String&, CSSParserObserverWrapper*, bool* constructionSuccess);
+    friend class CSSSwiftTokenSink;
+
+    CSSTokenizer(const String&, CSSParserObserverWrapper*, bool* constructionSuccess, Scanner = defaultScanner);
 
     CSSParserToken nextToken();
+
+    // Swift tokenizer path (CSSTokenizerSwift.swift, notes §11). Fills m_tokens
+    // by driving the Swift island and converting its POD tokens, instead of
+    // running the C++ state machine below. Both of StringImpl's widths are
+    // handled and the island's block stack grows, so the only decline left is
+    // running out of memory, in which case the caller falls back to the C++ path.
+    bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
+    bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
+    bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
+    Vector<String>& stringPool() { return m_stringPool; }
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);
@@ -133,5 +184,6 @@ private:
     Vector<String> m_stringPool;
     CSSTokenizerInputStream m_input;
 };
+
 
 } // namespace WebCore

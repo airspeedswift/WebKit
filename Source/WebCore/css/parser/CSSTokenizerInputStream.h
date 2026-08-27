@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include <array>
+#include <WebCore/CSSTokenizerSwiftTypes.h>
 #include <wtf/text/StringView.h>
 
 namespace WebCore {
@@ -61,6 +63,12 @@ public:
     }
 
     void advance(unsigned offset = 1) { m_offset += offset; }
+
+    // Repositions the cursor. Used by the Swift tokenizer path to re-tokenize a
+    // single token whose value contains escapes, with the C++ code below, rather
+    // than duplicating the unescaping rules.
+    void seek(size_t offset) { m_offset = offset; }
+
     void pushBack(char16_t cc)
     {
         --m_offset;
@@ -89,6 +97,10 @@ public:
 
     unsigned length() const { return m_stringLength; }
     unsigned offset() const { return std::min(m_offset, m_stringLength); }
+
+    // The whole preprocessed input, for the Swift tokenizer path, which takes a
+    // contiguous span rather than driving this stream.
+    StringView currentString() const LIFETIME_BOUND { return m_string.get(); }
 
     StringView rangeAt(unsigned start, unsigned length) const
     {
