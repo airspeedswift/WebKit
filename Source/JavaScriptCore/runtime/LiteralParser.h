@@ -29,6 +29,7 @@
 #include "GetVM.h"
 #include "Identifier.h"
 #include "JSCJSValue.h"
+#include "Options.h"
 #include "Strong.h"
 #include <array>
 #include <wtf/Range.h>
@@ -153,6 +154,10 @@ public:
         return "JSON Parse error: Unable to parse JSON string"_s;
     }
     
+    // The C++ parse of a strict JSON document. Where the Swift island is enabled this is
+    // the fallback rather than the entry: `parseStrictJSON` below tries the island first,
+    // and reaches here only when it declines — with nothing to undo, because this parser
+    // is constructed after the decline and so starts at offset zero anyway.
     JSValue tryLiteralParse()
         requires (reviverMode == JSONReviverMode::Disabled)
     {
@@ -221,7 +226,7 @@ private:
         
         TokenType next();
         TokenType nextMaybeIdentifier();
-        
+
 #if !ASSERT_ENABLED
         using LiteralParserTokenPtr = const LiteralParserToken<CharType>*;
 
@@ -317,6 +322,59 @@ private:
     Vector<Identifier, 16, UnsafeVectorOverflow> m_identifierStack;
     Vector<JSONRanges::Entry, 8> m_rangesStack;
 };
+
+#if JSC_SUPPORTS_SWIFT
+// MARK: - The Swift parser island
+//
+// Runs the island over a whole strict-JSON document — the grammar as well as the lexer,
+// building the object graph through JSONSwiftObjectModel as it goes. It takes the input and
+// not a LiteralParser, which is the whole of what it needs.
+//
+// `handled` is set when the island finished — with a result, with an exception pending, or
+// with the diagnostic for a malformed document in `errorMessage` — and left false when it
+// declined. A decline leaves nothing to undo: no cursor has to be rewound because the C++
+// parser has not been built yet, and the half-built object graph is unobservable because
+// StrictJSON runs no user code.
+//
+// Defined in LiteralParser.cpp, where the object model's headers are available, and
+// instantiated there for the two code-unit widths. No cell and no JSC type reaches Swift.
+template<typename CharType>
+JSValue parseJSONWithSwiftIsland(JSGlobalObject*, std::span<const CharType>, bool& handled, String* errorMessage);
+#endif
+
+// MARK: - Strict JSON with no reviver: the one entry both parses go through
+//
+// The island is tried here rather than from inside `tryLiteralParse`, and that is the
+// difference between the island being a guest inside a C++ parser and owning the entry. A
+// `LiteralParser` is a lexer, an object stack, a state stack, an identifier stack, a ranges
+// stack, a visited-prototype hash set and an error message; the island wants none of them, so
+// constructing one before asking it is pure overhead, and a large fraction of the cost of a
+// tiny document such as `JSON.parse("{}")`.
+//
+// `errorMessage` is filled in by whichever parse failed. The island writes it directly for
+// the malformed documents whose diagnostic it knows, and declines the rest, which the C++
+// then parses from the top — so the text is byte-identical either way. Callers that do not
+// need it pass nothing, and then no message is built at all.
+template<typename CharType>
+ALWAYS_INLINE JSValue parseStrictJSON(JSGlobalObject* globalObject, std::span<const CharType> characters, String* errorMessage = nullptr)
+{
+#if JSC_SUPPORTS_SWIFT
+    // The gate, read once per document. Both widths, which is the point of the 8-bit
+    // instantiation: a `JSString` is 8-bit whenever every character is Latin1, so before it
+    // existed the island never ran on ASCII JSON — which is nearly all of it.
+    if (Options::useSwiftJSONParser()) [[unlikely]] {
+        bool handled = false;
+        JSValue result = parseJSONWithSwiftIsland(globalObject, characters, handled, errorMessage);
+        if (handled)
+            return result;
+    }
+#endif
+    LiteralParser<CharType, JSONReviverMode::Disabled> jsonParser(globalObject, characters, StrictJSON);
+    JSValue result = jsonParser.tryLiteralParse();
+    if (!result && errorMessage) [[unlikely]]
+        *errorMessage = jsonParser.getErrorMessage();
+    return result;
+}
 
 } // namespace JSC
 

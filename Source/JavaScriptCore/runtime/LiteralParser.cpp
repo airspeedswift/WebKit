@@ -32,13 +32,23 @@
 #include "JSCInlines.h"
 #include "JSONAtomStringCacheInlines.h"
 #include "Lexer.h"
+#include "MarkedVector.h"
 #include "ObjectConstructor.h"
 #include <wtf/ASCIICType.h>
+#include <wtf/ForbidHeapAllocation.h>
 #include <wtf/Range.h>
 #include <wtf/text/FastCharacterComparison.h>
 #include <wtf/text/MakeString.h>
 
 #include "KeywordLookup.h"
+
+// The island's boundary types. Included here rather than in LiteralParser.h because
+// nothing in that header names one: the facade and its state are defined in this file, and
+// so are the calls to the two Swift entry points this header declares. Nothing above this
+// point in the file knows the island exists.
+#if JSC_SUPPORTS_SWIFT
+#include "LiteralParserSwiftTypes.h"
+#endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -2021,6 +2031,1206 @@ JSValue LiteralParser<CharType, reviverMode>::parse(VM& vm, ParserState initialS
         continue;
     }
 }
+
+#if JSC_SUPPORTS_SWIFT
+
+// MARK: - The object-model facade the Swift grammar builds through
+//
+// Declared in LiteralParserSwiftTypes.h, which has the reasons the interface is not one
+// that hands `JSValue`s to Swift. The rule this file enforces: no cell ever leaves here.
+// Swift holds a `JSONSwiftObjectModel*` and nothing else, and every cell lives either in
+// the state below — whose container stack and element buffer the conservative stack scan
+// finds, the state itself being a local of `parseJSONWithSwiftIsland` — or in a local of
+// one of these functions.
+
+struct JSONSwiftObjectModelState {
+    // Every cell this holds is rooted by the conservative stack scan and nothing else, so
+    // it has to be on a stack. Machine-checked rather than left to the comment on
+    // `containers`, which is the argument that depends on it.
+    WTF_FORBID_HEAP_ALLOCATION;
+public:
+
+    JSONSwiftObjectModelState(VM& vm, JSGlobalObject* globalObject,
+        std::span<const char16_t> input, String* errorMessage)
+        : vm(vm)
+        , globalObject(globalObject)
+        , input16(input)
+        , errorMessage(errorMessage)
+    {
+    }
+
+    JSONSwiftObjectModelState(VM& vm, JSGlobalObject* globalObject,
+        std::span<const Latin1Character> input, String* errorMessage)
+        : vm(vm)
+        , globalObject(globalObject)
+        , input8(input)
+        , is8Bit(true)
+        , errorMessage(errorMessage)
+    {
+    }
+
+    VM& vm;
+    JSGlobalObject* globalObject { nullptr };
+    // The document, at whichever width it is: exactly one of the two is set. This is
+    // everything the island takes from its caller — there is no LiteralParser behind it,
+    // which is why the caller does not build one until the island declines.
+    std::span<const char16_t> input16;
+    std::span<const Latin1Character> input8;
+    // Which of the two above is live. Constant for a whole document, so every branch on it
+    // is perfectly predicted; it is read once per string, once per property store and once
+    // per cold path.
+    bool is8Bit { false };
+
+    // The characters of a token, at whichever width this parse is. A template rather
+    // than two members so that the store's name handling stays one piece of source.
+    template<typename CharType>
+    std::span<const CharType> input() const;
+
+    // The open containers, innermost last, with `frames.size()` as the depth: the two are
+    // pushed and popped together, so a second count would be the same number twice.
+    //
+    // Rooted rather than registered: this state is a local of `parseJSONWithSwiftIsland`, so
+    // the conservative stack scan finds every cell in here the way it finds any other frame's,
+    // and `WTF_FORBID_HEAP_ALLOCATION` above is what machine-checks that the state really is
+    // on a stack. A growable container would instead have to register itself in the mark set
+    // once it mallocs; the fixed 64 slots remove that case, because the grammar refuses to
+    // open a 65th container (`JSONSwiftGrammar.pushContainer`, whose mask is 64 bits wide) and
+    // `jsonSwiftPushContainer` bounds the write in release rather than trusting that across
+    // the language boundary.
+    //
+    // Uninitialised on purpose. Slots at or above the depth hold stale or garbage bits,
+    // which is what the conservative scanner exists to handle; a stale entry is a cell that
+    // was stored into its parent and so is live anyway.
+    static constexpr unsigned maxDepth = 64;
+    JSObject* containers[maxDepth];
+    // Per open container: the next array index, whether it is an object, and the property
+    // name waiting for a value. One vector because they are pushed and popped together.
+    //
+    // The pending key has to be per frame rather than one field on the state, or
+    // `{"a":{"b":1}}` loses the outer name to the inner object's `key()` and every object
+    // directly inside an object declines — which is invisible, since the C++ re-parse
+    // returns the same value.
+    //
+    // Trivially copyable on purpose, so push and pop stay a store and a decrement: a name
+    // is offsets, and the rare escaped one an index into `resolvedKeys`.
+    enum class PendingKey : uint8_t { None, Offsets, Resolved };
+    struct Frame {
+        unsigned nextIndex;
+        // PendingKey::Offsets: the name's position in the input.
+        uint32_t keyStart;
+        uint32_t keyLength;
+        // PendingKey::Resolved: one-based index into `resolvedKeys`, 0 for none.
+        uint32_t resolvedKeyIndex;
+        // Where this array's elements start in `elementStack`, while it is still buffering
+        // them. Meaningless for an object frame and for an array that has spilled.
+        unsigned stackBase;
+        PendingKey pendingKey;
+        bool isObject;
+        // An array frame that is still collecting its elements rather than storing them:
+        // `containers[depth]` holds no array yet, and the one for this frame is allocated
+        // at the closing bracket. Always false for an object, and cleared for an array
+        // that outgrew the buffer. Sits in `Frame`'s existing tail padding.
+        bool deferred;
+    };
+    Vector<Frame, 32> frames;
+
+    // MARK: The element buffer — an array is allocated once, at its final length
+    //
+    // Values inside an array land here instead of being stored into a butterfly as they
+    // arrive, so that the array can be created at exactly its final length with its indexing
+    // type already known, rather than growing a butterfly once per element. The C++ does the
+    // same thing through `m_elementStack` (319420@main).
+    //
+    // `EncodedJSValue` and not `JSValue`, which is the whole reason this is affordable: a
+    // `JSValue` array member is default-*initialised*, so declaring one here would put
+    // 4 KB of stores in this entry's prologue and charge every document — including the
+    // ones with no array in them — for a buffer it never reads. The encoded form is a
+    // trivial integer, so it is uninitialised, exactly like `containers` above, and it is
+    // rooted the same way: this state is a local of `parseJSONWithSwiftIsland`, and on
+    // JSVALUE64 a cell's encoding *is* its pointer, so a buffered cell is a word the
+    // conservative scanner recognises.
+    //
+    // Fixed capacity with a spill path rather than a growable vector, which would have to
+    // register itself in the mark set once it mallocs. Arrays that do not fit spill to the
+    // store-as-you-go path and stay correct — see `spillDeferredArray`.
+    static constexpr unsigned elementStackCapacity = 512;
+    EncodedJSValue elementStack[elementStackCapacity];
+    unsigned elementStackSize { 0 };
+
+    // The property names that had to be unescaped, which are not in the input at all and
+    // so cannot be offsets. Appended to rather than overwritten, because a cold key can
+    // be pending on any number of open frames at once; `takeResolvedKey` moves the entry
+    // out, leaving the slot empty.
+    Vector<Identifier, 4> resolvedKeys;
+
+    // The completed document, once the outermost container closes — or the single value, for
+    // a document that is a bare primitive. Rooted the same way `containers` is: this state is
+    // a local of `parseJSONWithSwiftIsland`, so the collector scans it as it scans any frame.
+    JSValue result;
+    bool hasResult { false };
+
+    // Whether the island stopped because an exception is pending, which is the one
+    // reason the C++ must propagate rather than re-parse.
+    bool sawException { false };
+
+    // MARK: The diagnostic, for a document the island refused rather than declined
+    //
+    // The island formats the text and `errorMessage` writes it straight into the caller's
+    // `String` — a pointer to it and nothing else, so this costs one null store in the
+    // prologue and no destructor, where a `String` member would cost both. A caller that
+    // does not want the text (`JSONParse`) passes nothing, and then nothing is built.
+    //
+    // `hasMessage` is what makes a `Failed` status that produced no text — a range the
+    // island's offsets did not bound, or an allocation that failed — decline to the C++
+    // re-parse rather than throw an empty syntax error, and it is what implements rule 1's
+    // first-writer-wins on this side.
+    String* errorMessage { nullptr };
+    bool hasErrorMessage { false };
+
+    // MARK: The escaped string's buffer — the island owns the scan, this holds the result
+    //
+    // The island decodes escapes itself and emits the result as alternating runs of literal
+    // input and single decoded units; they land here until the string is complete. A
+    // `StringBuilder` and nothing narrower because it owns the 8-bit-to-16-bit upconversion
+    // policy, and that policy decides the resulting string's representation: `lexStringSlow`
+    // builds an escaped string in one of these too, so a string the island decoded is
+    // interned and represented exactly as the C++ path's would be. Splitting the path here is
+    // what lets the *scan* — unchecked pointer arithmetic, a hand-rolled five-unit lookahead
+    // for `\uNNNN`, and a `goto` into the middle of a do-while — live in Swift over a
+    // bounds-checked span, leaving C++ only the call into `StringBuilder`.
+    //
+    // Built on the first escape rather than with the state, because almost every string in
+    // real payloads contains no escape at all and a document with none must not pay for a
+    // buffer: it pays one flag store and one not-taken branch in the destructor.
+    std::optional<StringBuilder> escapeBuilder;
+
+    // Every entry that touches the buffer goes through this, so a run or a unit arriving
+    // without an `escapeBegin` before it is a decline rather than an empty-optional
+    // dereference — the same rule as the offsets below: an invariant of the other language is
+    // checked, not trusted.
+    StringBuilder* escapeBuffer() { return escapeBuilder ? &escapeBuilder.value() : nullptr; }
+
+    void escapeBegin()
+    {
+        if (escapeBuilder) [[likely]]
+            escapeBuilder->clear();
+        else
+            escapeBuilder.emplace();
+    }
+
+    // The island's offsets are bounded by its own cursor, but that is an invariant of the
+    // *other* language, and this side turns them into `subspan` and `data() + start`,
+    // neither of which checks. So every entry that takes one asserts it.
+    // `JSON_ISLAND_CHECKED_LOADS` is the Swift half of the same question.
+    bool isValidRange(uint32_t start, uint32_t length) const
+    {
+        size_t size = is8Bit ? input8.size() : input16.size();
+        return static_cast<size_t>(start) + static_cast<size_t>(length) <= size;
+    }
+
+    // `parseJSONDouble` for a number outside the island's int32 fast path, which stays in C++
+    // and should: it is a correctly-rounded decimal-to-double conversion shared with the rest
+    // of WTF. No lexNumberError call — a malformed number makes the island decline, and the
+    // C++ parse that then runs from the top produces the message.
+    template<typename CharType>
+    bool parseDouble(uint32_t initial, double& value, ptrdiff_t& endOffset) const
+    {
+        auto characters = input<CharType>();
+        ASSERT(initial <= characters.size());
+        size_t parsedLength = 0;
+        auto parsed = WTF::parseJSONDouble(characters.subspan(initial), parsedLength);
+        if (!parsed) [[unlikely]]
+            return false;
+        value = parsed.value();
+        endOffset = static_cast<ptrdiff_t>(initial) + static_cast<ptrdiff_t>(parsedLength);
+        return true;
+    }
+
+    // The property name for a cold key, whose characters are not in the input. The fast
+    // path resolves the common case from `keyStart`/`keyLength` itself, inside the store,
+    // so this is only the unescaped case.
+    Identifier takeResolvedKey(Frame& frame)
+    {
+        ASSERT(frame.pendingKey == PendingKey::Resolved);
+        ASSERT(frame.resolvedKeyIndex);
+        frame.pendingKey = PendingKey::None;
+        return WTF::move(resolvedKeys[frame.resolvedKeyIndex - 1]);
+    }
+
+    // MARK: An escaped string's value and name, made out of the buffer
+    //
+    // The island decoded the escapes itself, so there is no token: the characters are in the
+    // buffer above and nowhere else. That is the lifetime improvement over the C++ path,
+    // which puts a raw pointer to them in the token and relies on nobody lexing another cold
+    // string before it is read. Here the buffer becomes a cell in one step, and no pointer to
+    // it exists on either side.
+    //
+    // `makeJSString` and `makeIdentifier` on the atom-string cache, exactly as
+    // `LiteralParser::makeJSString` reaches them for a token whose characters `lexStringSlow`
+    // left in its own builder, so the interning is identical.
+
+    JSString* adoptEscapedString()
+    {
+        StringBuilder* builder = escapeBuffer();
+        if (!builder) [[unlikely]]
+            return nullptr;
+        return builder->is8Bit()
+            ? vm.jsonAtomStringCache.makeJSString(builder->span8())
+            : vm.jsonAtomStringCache.makeJSString(builder->span16());
+    }
+
+    bool adoptEscapedKey()
+    {
+        StringBuilder* builder = escapeBuffer();
+        if (!builder) [[unlikely]]
+            return false;
+        if (frames.isEmpty()) [[unlikely]]
+            return false;
+        Identifier resolved = builder->is8Bit()
+            ? Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(builder->span8()))
+            : Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(builder->span16()));
+        resolvedKeys.append(WTF::move(resolved));
+        Frame& frame = frames.last();
+        frame.resolvedKeyIndex = resolvedKeys.size();
+        frame.pendingKey = PendingKey::Resolved;
+        return true;
+    }
+};
+
+template<>
+ALWAYS_INLINE std::span<const char16_t> JSONSwiftObjectModelState::input<char16_t>() const
+{
+    ASSERT(!is8Bit);
+    return input16;
+}
+
+template<>
+ALWAYS_INLINE std::span<const Latin1Character> JSONSwiftObjectModelState::input<Latin1Character>() const
+{
+    ASSERT(is8Bit);
+    return input8;
+}
+
+namespace {
+
+// `LiteralParser::equalIdentifier` (:159) against a span rather than a token, since the
+// facade's property name is offsets into the input. Templated on the width rather than
+// duplicated: `WTF::equal` and the atom-string cache have both overloads already.
+template<typename CharType>
+ALWAYS_INLINE bool jsonSwiftEqualIdentifier(UniquedStringImpl* rep, std::span<const CharType> name)
+{
+    // As there: a transition to a symbol-named property must not be followed.
+    if (rep->isSymbol())
+        return false;
+    return WTF::equal(rep, name);
+}
+
+// The same comparison with nothing out of line in it, for the one caller that is entered
+// once per property. `WTF::equal(const StringImpl*, span)` is defined in StringImpl.cpp, so
+// the version above is a call — and the call is what gives its caller a stack frame, on the
+// path a run of same-shaped objects takes. `parseRecursively` pays that once per container,
+// because its store is inlined into a frame spanning the whole object loop; the island would
+// pay it once per property.
+//
+// This is `equalInternal` (StringImpl.cpp:1464) spelled out of the ALWAYS_INLINE span
+// overloads, which exist for all four width pairs. The null checks there are dropped, not
+// forgotten: `rep` is a transition's property name and `name` is a subspan of the document,
+// so neither can have a null data pointer, and the empty case is the length compare's.
+template<typename CharType>
+ALWAYS_INLINE bool jsonSwiftEqualIdentifierLeaf(UniquedStringImpl* rep, std::span<const CharType> name)
+{
+    if (rep->isSymbol())
+        return false;
+    if (rep->length() != name.size())
+        return false;
+    if (name.empty())
+        return true;
+    if (rep->is8Bit())
+        return WTF::equal(rep->span8().data(), name);
+    return WTF::equal(rep->span16().data(), name);
+}
+
+// `parseRecursively`'s four-operation store (:1644), and the reason the facade is shaped
+// this way rather than as primitives Swift drives: between `nukeStructureAndSetButterfly`
+// and `setStructure` the object's StructureID is nuked, and a conservatively-scanned cell
+// in that state is a release-mode `die()` (heap/SlotVisitor.cpp:188). Here the whole
+// sequence is one C++ call with no Swift frame in it.
+ALWAYS_INLINE bool jsonSwiftStoreToExistingProperty(JSONSwiftObjectModelState& state,
+    JSObject* object, Structure* originalStructure, Structure* newStructure,
+    PropertyOffset offset, JSValue value)
+{
+    VM& vm = state.vm;
+    if (originalStructure->outOfLineCapacity() != newStructure->outOfLineCapacity()) {
+        ASSERT(newStructure != originalStructure);
+        Butterfly* newButterfly = object->allocateMoreOutOfLineStorage(vm,
+            originalStructure->outOfLineCapacity(), newStructure->outOfLineCapacity());
+        object->nukeStructureAndSetButterfly(vm, originalStructure->id(), newButterfly);
+    }
+
+    validateOffset(offset);
+    ASSERT(newStructure->isValidOffset(offset));
+    // As in parseRecursively: this is what says the concurrent GC cannot read garbage from
+    // a put that does not transition.
+    ASSERT(!object->getDirect(offset) || !JSValue::encode(object->getDirect(offset)));
+    object->putDirectOffset(vm, offset, value);
+    object->setStructure(vm, newStructure);
+    ASSERT(!newStructure->mayBePrototype()); // There is no way to make it prototype object.
+    return true;
+}
+
+// The general store, for a name that did not resolve to an existing transition. No
+// `__proto__` handling, and that is not an omission: `parseRecursively`'s
+// `m_visitedUnderscoreProto` path is guarded by `parserMode != StrictJSON`, and a strict
+// JSON value cannot run user code.
+ALWAYS_INLINE bool jsonSwiftStoreWithIdentifier(JSONSwiftObjectModelState& state,
+    JSObject* object, const Identifier& ident, JSValue value)
+{
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    if (std::optional<uint32_t> index = parseIndex(ident)) {
+        object->putDirectIndex(state.globalObject, index.value(), value);
+        RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    } else
+        object->putDirect(state.vm, ident, value);
+    return true;
+}
+
+// The object half of the store, deliberately out of line and shared. It reaches WTF::equal,
+// the atom-string cache's hashing, the transition table lookup, parseIndex and putDirect's
+// structure machinery — a few hundred instructions — and every facade entry funnels through
+// it, so it must not be inlined: that puts a copy in each of intValue, doubleValue,
+// literalValue, stringValue and endContainer, where for an array element all of it is dead
+// and only its register pressure is real.
+//
+// Templated on the width and dispatched once at the bottom of this file. The only
+// width-dependent thing in it is the name span, so this is one branch per store, on a flag
+// constant for the whole document, against two copies of a few hundred instructions.
+template<typename CharType>
+NEVER_INLINE bool jsonSwiftStorePropertyValueImpl(JSONSwiftObjectModelState& state,
+    JSObject* container, JSValue value)
+{
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    {
+        using PendingKey = JSONSwiftObjectModelState::PendingKey;
+        // The frame of the object being stored into, which is the innermost one: a nested
+        // container has already popped its own by the time `endContainer` gets here.
+        if (state.frames.isEmpty()) [[unlikely]]
+            return false;
+        auto& frame = state.frames.last();
+        if (frame.pendingKey == PendingKey::None) [[unlikely]]
+            return false;
+
+        if (frame.pendingKey != PendingKey::Offsets) [[unlikely]] {
+            // An unescaped name: already an Identifier, because the characters were in the
+            // lexer's StringBuilder rather than in the input. It skips the resolution fast
+            // path, which wants a span to hash.
+            RELEASE_AND_RETURN(scope, jsonSwiftStoreWithIdentifier(state, container,
+                state.takeResolvedKey(frame), value));
+        }
+
+        // `parseRecursively`'s three-way property resolution (:1576). The C++ has to
+        // resolve the name *before* parsing the value, its token being transient; the
+        // facade holds the name as offsets, which stay valid, so resolution and the store
+        // are adjacent and there is no window between them at all.
+        std::span<const CharType> name =
+            state.input<CharType>().subspan(frame.keyStart, frame.keyLength);
+        frame.pendingKey = PendingKey::None;
+        VM& vm = state.vm;
+        Structure* originalStructure = container->structure();
+
+        if (Structure* transition = originalStructure->trySingleTransition()) {
+            // Avoids a hash lookup and refcount churn in the common case of a matching
+            // single transition — same-shaped objects, which is what JSON is full of.
+            SUPPRESS_UNCOUNTED_ARG if (transition->transitionKind() == TransitionKind::PropertyAddition
+                && !transition->transitionPropertyAttributes()
+                && jsonSwiftEqualIdentifier(transition->transitionPropertyName(), name)) {
+                return jsonSwiftStoreToExistingProperty(state, container, originalStructure,
+                    transition, transition->transitionOffset(), value);
+            }
+        } else if (!originalStructure->isDictionary()) {
+            // Avoids refcount churn in the common case of a cached Identifier.
+            if (SUPPRESS_UNCOUNTED_LOCAL AtomStringImpl* ident = vm.jsonAtomStringCache.existingIdentifier(name)) {
+                PropertyOffset offset = 0;
+                Structure* newStructure = Structure::addPropertyTransitionToExistingStructure(originalStructure, ident, 0, offset);
+                if (newStructure) [[likely]] {
+                    return jsonSwiftStoreToExistingProperty(state, container,
+                        originalStructure, newStructure, offset, value);
+                }
+                RELEASE_AND_RETURN(scope, jsonSwiftStoreWithIdentifier(state, container,
+                    Identifier::fromString(vm, ident), value));
+            }
+        }
+
+        RELEASE_AND_RETURN(scope, jsonSwiftStoreWithIdentifier(state, container,
+            Identifier::fromString(vm, vm.jsonAtomStringCache.makeIdentifier(name)), value));
+    }
+}
+
+// The width dispatch. `NEVER_INLINE` on both this and the two instantiations, so a facade
+// entry still pays one call and not two copies of the store: this tail-calls.
+NEVER_INLINE bool jsonSwiftStorePropertyValue(JSONSwiftObjectModelState& state,
+    JSObject* container, JSValue value)
+{
+    if (state.is8Bit)
+        return jsonSwiftStorePropertyValueImpl<Latin1Character>(state, container, value);
+    return jsonSwiftStorePropertyValueImpl<char16_t>(state, container, value);
+}
+
+// The array append, written out rather than left to `putDirectIndex`, whose fast path
+// calls `JSObject::setIndexQuickly` — a function clang will not inline, because it also
+// carries the typed-array, array-storage, undecided and conversion arms. So going through
+// it costs a `bl setIndexQuickly` per array element where `parseRecursively` pays nothing,
+// its store being inlined into a frame spanning the whole array loop.
+//
+// This is `setIndexQuickly`'s fast case for the three writable contiguous-family shapes an
+// array of JSON values takes, and nothing else. Everything unusual declines to
+// `putDirectIndex` and reaches the same code as before: an index past the vector, the
+// undecided shape (every array's first element), copy-on-write, array storage, a
+// non-`JSArray` container, and a value the shape cannot hold, which is a conversion.
+ALWAYS_INLINE bool jsonSwiftFastArrayAppend(VM& vm, JSObject* array, unsigned index,
+    JSValue value)
+{
+    // `indexingMode()` masks in the copy-on-write bit and masks out the cell lock bits and
+    // the indexed-accessor history, which is exactly the set `putDirectIndex` switches on.
+    // The `IsArray` bit is in these constants and the island's array containers all come
+    // from `constructEmptyArray`, so a `NonArrayWith*` shape declining costs nothing.
+    switch (array->indexingMode()) {
+    case ArrayWithInt32: {
+        if (!value.isInt32()) [[unlikely]]
+            return false;
+        Butterfly* butterfly = array->butterfly();
+        if (index >= butterfly->vectorLength()) [[unlikely]]
+            return false;
+        butterfly->contiguous().at(array, index).setWithoutWriteBarrier(value);
+        if (index >= butterfly->publicLength())
+            butterfly->setPublicLength(index + 1);
+        // No write barrier, and that is not an omission: `setIndexQuickly` reaches its
+        // `vm.writeBarrier(this, v)` for an int32 array by falling through to the
+        // contiguous case, and the barrier returns immediately for a non-cell value.
+        return true;
+    }
+    case ArrayWithContiguous: {
+        Butterfly* butterfly = array->butterfly();
+        if (index >= butterfly->vectorLength()) [[unlikely]]
+            return false;
+        butterfly->contiguous().at(array, index).setWithoutWriteBarrier(value);
+        if (index >= butterfly->publicLength())
+            butterfly->setPublicLength(index + 1);
+        vm.writeBarrier(array, value);
+        return true;
+    }
+    case ArrayWithDouble: {
+        if (!value.isNumber()) [[unlikely]]
+            return false;
+        double number = value.asNumber();
+        // A NaN in a double array is how a hole reads, so `setIndexQuickly` converts to
+        // contiguous instead of storing it. JSON cannot spell NaN, but `jsNumber` is not
+        // told that, so the check stays where the original had it.
+        if (number != number) [[unlikely]]
+            return false;
+        Butterfly* butterfly = array->butterfly();
+        if (index >= butterfly->vectorLength()) [[unlikely]]
+            return false;
+        butterfly->contiguousDouble().at(array, index) = number;
+        if (index >= butterfly->publicLength())
+            butterfly->setPublicLength(index + 1);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+// The property store's fast half: a structure with exactly one recorded transition that
+// adds an unattributed property whose name is the one being stored, which is what a run of
+// same-shaped objects hits. Everything else tail-calls the general store above and reaches
+// identical code. It declines an escaped name, a transition *table*, a dictionary, a
+// symbol-named transition, a name that does not match, and the property that first spills out
+// of inline storage.
+//
+// It must stay out of line. `parseRecursively` pays the general store's prologue once per
+// container, while the island pays one function entry per property, which is why this fast
+// half exists at all; marking it ALWAYS_INLINE would put a copy of it in each of five facade
+// entries, and that loses more on documents that never store a property than it wins where it
+// fires. It takes the caller's `Frame&` for the same reason: `jsonSwiftStoreValue` has already
+// tested `frames.isEmpty()` and computed `frames.last()` to decide this is an object at all,
+// and a fixed cost per property is exactly what this function is shaped around.
+//
+// The condition is `isInlineOffset` rather than the general store's capacity compare: one
+// compare against a constant, and it keeps the butterfly reallocation behind the decline,
+// so the window in which the object's StructureID is nuked — a release-mode `die()` if the
+// collector scans it (heap/SlotVisitor.cpp:188) — stays where it already was. Below
+// `firstOutOfLineOffset` both sides have no out-of-line slots, so equal capacity is implied and
+// the reallocation provably cannot be the skipped branch; the ASSERT below states that.
+NEVER_INLINE bool jsonSwiftStorePropertyValueFast(JSONSwiftObjectModelState& state,
+    JSONSwiftObjectModelState::Frame& frame, JSObject* object, JSValue value)
+{
+    using PendingKey = JSONSwiftObjectModelState::PendingKey;
+    if (frame.pendingKey != PendingKey::Offsets) [[unlikely]]
+        return jsonSwiftStorePropertyValue(state, object, value);
+
+    Structure* originalStructure = object->structure();
+    Structure* transition = originalStructure->trySingleTransition();
+    if (!transition) [[unlikely]]
+        return jsonSwiftStorePropertyValue(state, object, value);
+    if (transition->transitionKind() != TransitionKind::PropertyAddition
+        || transition->transitionPropertyAttributes()) [[unlikely]]
+        return jsonSwiftStorePropertyValue(state, object, value);
+
+    PropertyOffset offset = transition->transitionOffset();
+    if (!isInlineOffset(offset)) [[unlikely]]
+        return jsonSwiftStorePropertyValue(state, object, value);
+
+    // The one width-dependent step: the name is offsets into the input, so comparing it
+    // names a character. The branch is on a flag that is constant for the whole document.
+    SUPPRESS_UNCOUNTED_ARG bool nameMatches = state.is8Bit
+        ? jsonSwiftEqualIdentifierLeaf(transition->transitionPropertyName(),
+            state.input8.subspan(frame.keyStart, frame.keyLength))
+        : jsonSwiftEqualIdentifierLeaf(transition->transitionPropertyName(),
+            state.input16.subspan(frame.keyStart, frame.keyLength));
+    if (!nameMatches)
+        return jsonSwiftStorePropertyValue(state, object, value);
+
+    frame.pendingKey = PendingKey::None;
+    validateOffset(offset);
+    ASSERT(transition->isValidOffset(offset));
+    ASSERT(transition->outOfLineCapacity() == originalStructure->outOfLineCapacity());
+    // As in `jsonSwiftStoreToExistingProperty`: what says the concurrent GC cannot read
+    // garbage from a put that does not transition.
+    ASSERT(!object->getDirect(offset) || !JSValue::encode(object->getDirect(offset)));
+    object->putDirectOffset(state.vm, offset, value);
+    object->setStructure(state.vm, transition);
+    ASSERT(!transition->mayBePrototype()); // There is no way to make it prototype object.
+    return true;
+}
+
+// Create an array holding `length` buffered values, at exactly that length and with its
+// indexing type settled before a single element is written. This is the whole point of the
+// element buffer, and it is `LiteralParser::materializeArray` (:1423) for the island's
+// side of the parser — kept as its own function rather than shared with that one so that
+// measuring this change moves only the island, leaving the C++ denominator alone.
+//
+// NEVER_INLINE: it is one call per array container, not per element, and it carries an
+// `ObjectInitializationScope` plus an out-of-line-memory fallback. Folding that into the
+// facade's array path would grow the frame that spans the grammar loop, which is the cost
+// the sentinel corpora keep catching.
+NEVER_INLINE JSArray* jsonSwiftMaterializeArray(JSONSwiftObjectModelState& state,
+    EncodedJSValue* values, unsigned length)
+{
+    VM& vm = state.vm;
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    ASSERT(length);
+
+    // What `putDirectIndex` would have discovered by converting the butterfly as it grew,
+    // decided in one pass over values that are already in hand. The order matters: a
+    // double demotes an int32 array and anything else settles it, so the loop can stop.
+    IndexingType indexingType = ArrayWithInt32;
+    for (unsigned i = 0; i < length; ++i) {
+        JSValue value = JSValue::decode(values[i]);
+        if (value.isInt32())
+            continue;
+        if (value.isDouble()) {
+            indexingType = ArrayWithDouble;
+            continue;
+        }
+        indexingType = ArrayWithContiguous;
+        break;
+    }
+
+    {
+        ObjectInitializationScope initializationScope(vm);
+        Structure* structure =
+            state.globalObject->arrayStructureForIndexingTypeDuringAllocation(indexingType);
+        if (JSArray* array = JSArray::tryCreateUninitializedRestricted(initializationScope,
+                structure, length)) [[likely]] {
+            for (unsigned i = 0; i < length; ++i)
+                array->initializeIndex(initializationScope, i, JSValue::decode(values[i]));
+            return array;
+        }
+    }
+
+    // A length past what a contiguous vector can hold, and allocation failure, grow an
+    // empty array instead so that the document reports out of memory rather than crashing.
+    JSArray* array = constructEmptyArray(state.globalObject, nullptr);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, nullptr));
+    for (unsigned i = 0; i < length; ++i) {
+        array->putDirectIndex(state.globalObject, i, JSValue::decode(values[i]));
+        RETURN_IF_EXCEPTION(scope, (state.sawException = true, nullptr));
+    }
+    return array;
+}
+
+// Close a deferred array: turn the values collected since `beginArray` into the array
+// itself, and give the buffer's slots back.
+//
+// NEVER_INLINE, and that is the whole point of it existing rather than sitting in
+// `endContainer`, which is one of the always-inline facade entries: anything in there is
+// duplicated into the grammar loop at every close, and this function's length arithmetic plus
+// an inlined `constructEmptyArray` measurably grew the island's hot function and cost the
+// documents made of empty containers more than the deferral wins. Code a corpus never executes
+// is not free. The empty array is handled here for the same reason.
+NEVER_INLINE JSObject* jsonSwiftCloseDeferredArray(JSONSwiftObjectModelState& state,
+    JSONSwiftObjectModelState::Frame& frame)
+{
+    ASSERT(frame.deferred && !frame.isObject);
+    // `stackBase` is this side's own bookkeeping and the subtraction below is traced sound —
+    // but it is an *unsigned* subtraction feeding a length, so if the invariant were ever
+    // broken the result is a ~4-billion-element read off the top of `elementStack`, decoded
+    // as `JSValue`s into a JS array. One compare against a value already in a register, on a
+    // path taken once per array container rather than once per element, is what makes that
+    // structurally impossible rather than argued: false without `sawException` re-parses the
+    // document in C++, as every other guard on this side does.
+    if (frame.stackBase > state.elementStackSize) [[unlikely]]
+        return nullptr;
+    unsigned length = state.elementStackSize - frame.stackBase;
+    JSObject* array = length
+        ? jsonSwiftMaterializeArray(state, state.elementStack + frame.stackBase, length)
+        : constructEmptyArray(state.globalObject, nullptr);
+    state.elementStackSize = frame.stackBase;
+    if (!array) [[unlikely]] {
+        // Either arm can fail only by throwing, and a pending exception is the one thing
+        // the C++ must propagate rather than re-parse the document over.
+        state.sawException = true;
+        return nullptr;
+    }
+    return array;
+}
+
+// The buffer is finite and a document's arrays are not, so an array that fills it stops
+// deferring: what it has collected so far becomes a real array, that array goes into
+// `containers`, and its remaining elements are stored into it as they arrive. Only the
+// innermost frame can be the one that overflows — values only ever arrive for the innermost
+// container — so releasing its slots is enough, and the outer frames' buffered elements below
+// `stackBase` are untouched.
+//
+// Correctness, not speed: afterwards the array has a vector of exactly the spilled length, so
+// the next element declines `jsonSwiftFastArrayAppend` and grows through `putDirectIndex`.
+// Growing an empty array through `putDirectIndex` from here instead is measurably worse.
+NEVER_INLINE bool jsonSwiftSpillDeferredArray(JSONSwiftObjectModelState& state,
+    JSONSwiftObjectModelState::Frame& frame, size_t depth)
+{
+    unsigned length = state.elementStackSize - frame.stackBase;
+    JSObject* array = jsonSwiftCloseDeferredArray(state, frame);
+    if (!array) [[unlikely]]
+        return false;
+    state.containers[depth - 1] = array;
+    frame.nextIndex = length;
+    frame.deferred = false;
+    return true;
+}
+
+// What is left inline: the empty check, which container this is, and the array append
+// above.
+ALWAYS_INLINE bool jsonSwiftStoreValue(JSONSwiftObjectModelState& state, JSValue value)
+{
+    if (state.frames.isEmpty()) [[unlikely]] {
+        // A document that is a bare primitive — `1`, `"x"`, `true` — which the grammar
+        // reaches here exactly once, before any container has opened. Recorded as the
+        // result rather than declined, because a decline costs the document twice: the
+        // island lexes the number, gives up, and the C++ lexes it again from offset zero.
+        //
+        // Trailing content is still rejected, by the grammar rather than here: at depth 0
+        // the position after a value is `.documentEnd`, which accepts nothing but the end
+        // token. A second value therefore cannot reach this, and the guard below is for
+        // the invariant rather than for a reachable input.
+        if (state.hasResult) [[unlikely]]
+            return false;
+        state.result = value;
+        state.hasResult = true;
+        return true;
+    }
+
+    size_t depth = state.frames.size();
+    auto& frame = state.frames.last();
+    if (frame.isObject)
+        return jsonSwiftStorePropertyValueFast(state, frame, state.containers[depth - 1],
+            value);
+
+    // An array still collecting: the element is a store into the buffer and nothing else,
+    // which is what makes an array cost one allocation instead of one per element.
+    if (frame.deferred) [[likely]] {
+        if (state.elementStackSize < JSONSwiftObjectModelState::elementStackCapacity)
+            [[likely]] {
+            state.elementStack[state.elementStackSize++] = JSValue::encode(value);
+            return true;
+        }
+        if (!jsonSwiftSpillDeferredArray(state, frame, depth)) [[unlikely]]
+            return false;
+    }
+
+    unsigned index = frame.nextIndex++;
+    JSObject* container = state.containers[depth - 1];
+    // Nothing on this path can throw or allocate, so the throw scope is declared below it
+    // rather than around it.
+    if (jsonSwiftFastArrayAppend(state.vm, container, index, value)) [[likely]]
+        return true;
+
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    container->putDirectIndex(state.globalObject, index, value);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    return true;
+}
+
+// `isObject` comes from the caller rather than from `container->inherits<JSArray>()`: the
+// grammar knows which bracket it lexed, so asking the cell would re-derive at run time
+// something the call site has as a constant, once per container.
+//
+// `container` is null for an array, which has none yet: the frame it pushes buffers its
+// elements and the array is created at the closing bracket. So the only caller that can
+// have failed to allocate is the object entry, which is where that null check lives.
+ALWAYS_INLINE bool jsonSwiftPushContainer(JSONSwiftObjectModelState& state,
+    JSObject* container, bool isObject)
+{
+    // The grammar refuses a 65th container, so this is a bound on a Swift-side invariant
+    // rather than a reachable path — but it is the write into a fixed-size array, and one
+    // compare against a constant is what makes this side's memory safety independent of the
+    // other language's. `sawException` stays false, so the document is re-parsed in C++.
+    size_t depth = state.frames.size();
+    if (depth >= JSONSwiftObjectModelState::maxDepth) [[unlikely]]
+        return false;
+    state.containers[depth] = container;
+    // One append and one removeLast per container rather than two: the index counter, the
+    // object flag and the pending property name are per-frame state and travel together.
+    // The new frame starts with no pending key, which is what leaves the *parent's* name
+    // intact while a nested container is built.
+    state.frames.append(JSONSwiftObjectModelState::Frame {
+        0, 0, 0, 0, state.elementStackSize,
+        JSONSwiftObjectModelState::PendingKey::None, isObject, !isObject });
+    return true;
+}
+
+} // namespace
+
+// The eight hot value entries below are always-inline so that an LTO build folds them into
+// the island's grammar loop, which is the shape `parseRecursively` has: a prologue once per
+// *container* rather than one per *value*. That is worth most on punctuation-dense input, the
+// input with the most facade calls per byte; LTO alone folds only `key`, the one entry small
+// enough for the cost model. Without LTO nothing here can inline them — the island is their
+// only caller — so the island's entry point is bit-identical either way.
+//
+// Spelled out rather than ALWAYS_INLINE because that macro also supplies `inline`, and
+// these must keep emitting an out-of-line symbol for Swift to odr-use from its own
+// translation unit. The store is deliberately left out: it stays NEVER_INLINE, so what
+// folds in is each entry's prologue and the array path, not eight copies of the store.
+#define JSC_JSON_FACADE_ENTRY __attribute__((__always_inline__))
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::beginObject()
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    JSObject* object = constructEmptyObject(state.globalObject);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    if (!object) [[unlikely]] {
+        state.sawException = true;
+        return false;
+    }
+    return jsonSwiftPushContainer(state, object, true);
+}
+
+// No allocation here at all: the array's elements are buffered and the array itself is
+// created at the closing bracket, at its final length and indexing type (319420@main took
+// the C++ parser the same way). So an array of *k* elements costs one allocation rather
+// than one plus however many butterfly growths `putDirectIndex` needed on the way to *k*.
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::beginArray()
+{
+    return jsonSwiftPushContainer(*m_state, nullptr, false);
+}
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::endContainer()
+{
+    auto& state = *m_state;
+    size_t depth = state.frames.size();
+    if (!depth) [[unlikely]]
+        return false;
+
+    auto& frame = state.frames.last();
+    JSObject* finished;
+    if (frame.deferred) {
+        // The array is built here rather than at the opening bracket, out of line so that
+        // the always-inline entry stays small — see `jsonSwiftCloseDeferredArray`.
+        finished = jsonSwiftCloseDeferredArray(state, frame);
+        if (!finished) [[unlikely]]
+            return false;
+    } else
+        finished = state.containers[depth - 1];
+
+    state.frames.removeLast();
+    if (depth == 1) {
+        // The document is complete. `finished` is unrooted between here and the return, as
+        // it is on every path below, which is sound for the same reason the stack above is:
+        // this is a local of a frame the collector scans.
+        state.result = finished;
+        state.hasResult = true;
+        return true;
+    }
+    return jsonSwiftStoreValue(state, finished);
+}
+
+// `[]`. The C++ never runs its array machinery for this shape at all: it sees the `]` one
+// token after the `[` and returns an empty array before it has taken an element-stack base
+// (:1479). The island's grammar knows the same thing at the same point, so what it needs is
+// an entry that says so. Against calling `endContainer` here: the length is known to be zero,
+// so the general close's arithmetic and its choice between materializing and constructing go
+// away; the store dispatch is known to be an array element or the result; and because this is
+// NEVER_INLINE where `endContainer` is always-inline, the grammar loop loses one of its three
+// inlined copies of that entry rather than gaining anything.
+//
+// Going further — deferring `beginArray`/`beginObject` to the container's first member, so
+// that an empty one pushes no frame at all, which is exactly the C++'s shape — is measurably
+// worse and was rejected: the test that says "this container is still unopened" lands on the
+// *value* path, and a per-value branch costs more everywhere than it wins on empty ones.
+NEVER_INLINE bool JSONSwiftObjectModel::emptyArray()
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+
+    // The grammar only reaches this straight after the `[` that pushed a deferred array
+    // frame, but that is an invariant of the *other* language, so it is checked rather than
+    // trusted: false without `sawException` re-parses the document in C++, which is what
+    // every other guard on this side does.
+    size_t depth = state.frames.size();
+    if (!depth) [[unlikely]]
+        return false;
+    auto& frame = state.frames.last();
+    if (frame.isObject || !frame.deferred) [[unlikely]]
+        return false;
+
+    JSArray* array = constructEmptyArray(state.globalObject, nullptr);
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    if (!array) [[unlikely]] {
+        state.sawException = true;
+        return false;
+    }
+
+    // Read before the frame goes away, and assigned rather than left alone: nothing can
+    // have arrived since the `[`, so this restores the invariant `stackBase` stands for
+    // instead of relying on it.
+    state.elementStackSize = frame.stackBase;
+    state.frames.removeLast();
+    if (depth == 1) {
+        state.result = array;
+        state.hasResult = true;
+        return true;
+    }
+    return jsonSwiftStoreValue(state, array);
+}
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::key(uint32_t start, uint32_t length)
+{
+    auto& state = *m_state;
+    // The name belongs to the object currently being filled, which is the innermost open
+    // container. The grammar only reaches a key position inside an object, so the emptiness
+    // test is defensive rather than reachable.
+    if (state.frames.isEmpty()) [[unlikely]]
+        return false;
+    ASSERT(state.isValidRange(start, length));
+    auto& frame = state.frames.last();
+    frame.pendingKey = JSONSwiftObjectModelState::PendingKey::Offsets;
+    frame.keyStart = start;
+    frame.keyLength = length;
+    return true;
+}
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::stringValue(uint32_t start, uint32_t length)
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    ASSERT(state.isValidRange(start, length));
+    // The same cache `makeJSString` uses (LiteralParser.cpp:196-200), so the island's
+    // strings are interned identically to the C++ path's — and identically at both
+    // widths, since the cache is templated on the character type and an 8-bit document
+    // produces 8-bit `JSString`s exactly as the C++ parse would.
+    JSString* string = state.is8Bit
+        ? state.vm.jsonAtomStringCache.makeJSString(
+            state.input<Latin1Character>().subspan(start, length))
+        : state.vm.jsonAtomStringCache.makeJSString(
+            state.input<char16_t>().subspan(start, length));
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true, false));
+    return jsonSwiftStoreValue(state, string);
+}
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::intValue(int32_t value)
+{
+    return jsonSwiftStoreValue(*m_state, jsNumber(value));
+}
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::doubleValue(double value)
+{
+    return jsonSwiftStoreValue(*m_state, jsNumber(value));
+}
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::literalValue(uint8_t code)
+{
+    // A JSONTokenType raw value, which is a TokenType value: the two numberings are
+    // asserted equal above.
+    //
+    // One entry switching on the code rather than a `trueValue`/`falseValue`/`nullValue`
+    // trio, which would fold this dispatch at the three call sites that each know their
+    // constant. The trade is not the dispatch, it is the duplication: this entry is
+    // always-inline and `jsonSwiftStoreValue` is too, so three entries would put three copies
+    // of the store's inline body into the grammar loop where there is now one, and the loop's
+    // size is what empty-container and punctuation-dense documents charge for.
+    JSValue value;
+    switch (code) {
+    case TokTrue:
+        value = jsBoolean(true);
+        break;
+    case TokFalse:
+        value = jsBoolean(false);
+        break;
+    case TokNull:
+        value = jsNull();
+        break;
+    default:
+        return false;
+    }
+    return jsonSwiftStoreValue(*m_state, value);
+}
+
+// MARK: - The one cold path reached from inside the grammar loop
+//
+// Declared in LiteralParserSwiftTypes.h, which has the reason resolution and the store are
+// fused. It does its C++ work on the island's own state — there is no LiteralParser here to
+// borrow one from — and only says where the island's cursor resumes. It dispatches on the
+// width rather than on a token type.
+
+static bool islandParseDouble(JSONSwiftObjectModelState& state, uint32_t initial,
+    double& value, ptrdiff_t& endOffset)
+{
+    ASSERT(state.isValidRange(initial, 0));
+    return state.is8Bit
+        ? state.parseDouble<Latin1Character>(initial, value, endOffset)
+        : state.parseDouble<char16_t>(initial, value, endOffset);
+}
+
+JSONSwiftColdResult JSONSwiftObjectModel::slowNumberValue(uint32_t initial)
+{
+    auto& state = *m_state;
+    double value = 0;
+    ptrdiff_t endOffset = 0;
+    // No lexNumberError call here: the island's grammar reads this status, runs
+    // `lexNumberError`'s own analysis over the same cursor (`diagnoseNumberError`) and reports
+    // the message itself. So `Declined` from here means one thing to it —
+    // `parseJSONDouble` refused the text — and nothing else here may return it.
+    if (!islandParseDouble(state, initial, value, endOffset))
+        return { 0, JSONSwiftParseDeclined };
+    if (!jsonSwiftStoreValue(state, jsNumber(value)))
+        return { 0, JSONSwiftParseStopped };
+    return { endOffset, JSONSwiftParseOK };
+}
+
+// MARK: - The escaped-string path the island decodes itself
+//
+// Declared in LiteralParserSwiftTypes.h, which has the reason the runs cross one at a time
+// rather than as a finished buffer. Each of these is a `StringBuilder` call and a range check;
+// the scan that produces the ranges is in Swift. They carry `JSC_JSON_FACADE_ENTRY` for the
+// same reason the value entries do: a run and a unit cross once per escape, so on input that is
+// mostly escapes they are per-value crossings rather than a cold path. The only caller of all
+// five is `decodeEscapedString`, which is itself `@inline(never)` and cold, so what grows here
+// is a function no escape-free document ever executes.
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::escapeBegin()
+{
+    m_state->escapeBegin();
+    return true;
+}
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::escapeRun(uint32_t start, uint32_t length)
+{
+    auto& state = *m_state;
+    StringBuilder* builder = state.escapeBuffer();
+    if (!builder) [[unlikely]]
+        return false;
+    // The one range the island computes that is not bounded by a token it already lexed:
+    // it is the span between two escapes. Checked here rather than asserted, because
+    // `subspan` does not check.
+    if (!state.isValidRange(start, length)) [[unlikely]]
+        return false;
+    if (state.is8Bit)
+        builder->append(state.input<Latin1Character>().subspan(start, length));
+    else
+        builder->append(state.input<char16_t>().subspan(start, length));
+    return true;
+}
+
+JSC_JSON_FACADE_ENTRY bool JSONSwiftObjectModel::escapeUnit(uint16_t unit)
+{
+    StringBuilder* builder = m_state->escapeBuffer();
+    if (!builder) [[unlikely]]
+        return false;
+    // `char16_t` at either width on purpose: this is where a `\uNNNN` above Latin1 forces the
+    // builder to 16 bits, which is the policy being kept in C++.
+    builder->append(static_cast<char16_t>(unit));
+    return true;
+}
+
+JSC_JSON_FACADE_ENTRY JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishValue(ptrdiff_t endOffset)
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    JSString* string = state.adoptEscapedString();
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true,
+        JSONSwiftColdResult { 0, JSONSwiftParseStopped }));
+    // No buffer to make a string out of, i.e. no `escapeBegin` reached this state. Declines
+    // rather than storing a null cell, on the same terms as the range checks.
+    if (!string) [[unlikely]]
+        return { 0, JSONSwiftParseDeclined };
+    if (!jsonSwiftStoreValue(state, string))
+        return { 0, JSONSwiftParseStopped };
+    return { endOffset, JSONSwiftParseOK };
+}
+
+JSC_JSON_FACADE_ENTRY JSONSwiftColdResult JSONSwiftObjectModel::escapeFinishKey(ptrdiff_t endOffset)
+{
+    auto& state = *m_state;
+    auto scope = DECLARE_THROW_SCOPE(state.vm);
+    // Resolved here rather than at store time, because the characters live in the builder
+    // and the next escaped string clears it. The window is far shorter than the C++ path's,
+    // which keeps a raw pointer to them in the token until the value is stored.
+    if (!state.adoptEscapedKey())
+        return { 0, JSONSwiftParseStopped };
+    RETURN_IF_EXCEPTION(scope, (state.sawException = true,
+        JSONSwiftColdResult { 0, JSONSwiftParseStopped }));
+    return { endOffset, JSONSwiftParseOK };
+}
+
+// MARK: - The message the island formatted, made into the caller's `String`
+//
+// Two ASCII literal parts from the island and a run of the document between them; see the
+// declaration in LiteralParserSwiftTypes.h for why the text lives on that side. What is left
+// here is the allocation and the bounds check — the whole of what C++ still has to own.
+//
+// The annotations are repeated from the declaration deliberately: without them this is a
+// different type in C++, and the island loses the `Span`-taking overload that keeps its call
+// site free of `unsafe`.
+void JSONSwiftObjectModel::errorMessage(
+    const uint8_t* JSC_SWIFT_COUNTED_BY(prefixLength) JSC_SWIFT_NOESCAPE prefix,
+    size_t prefixLength, uint32_t quoteStart, uint32_t quoteLength,
+    const uint8_t* JSC_SWIFT_COUNTED_BY(suffixLength) JSC_SWIFT_NOESCAPE suffix,
+    size_t suffixLength)
+{
+    auto& state = *m_state;
+    // Nothing to build: this caller throws no syntax error and discards the text, so the
+    // parse still reports `Failed` and the C++ lexer still does not run again.
+    if (!state.errorMessage)
+        return;
+    // First writer wins, which is rule 1 in LiteralParserSwiftTypes.h stated on this side as
+    // well: a lexer-level diagnostic is formatted before the grammar sees the `.error` token,
+    // and `getErrorMessage` would prefer it. The island reports in the same order, so this is
+    // a backstop rather than the mechanism.
+    if (state.hasErrorMessage) [[unlikely]]
+        return;
+    // The island's offsets are bounded by its own cursor, but that is an invariant of the
+    // other language and `subspan` does not check.
+    if (!state.isValidRange(quoteStart, quoteLength)) [[unlikely]]
+        return;
+
+    // `Latin1Character` and `uint8_t` are the same type, so the literal parts are 8-bit
+    // string pieces and the result is 8-bit unless the quoted run forces otherwise — which
+    // is exactly what the C++ parse's `makeString` over the same pieces produced.
+    std::span<const Latin1Character> prefixCharacters { prefix, prefixLength };
+    std::span<const Latin1Character> suffixCharacters { suffix, suffixLength };
+    String message = state.is8Bit
+        ? tryMakeString(prefixCharacters,
+            state.input<Latin1Character>().subspan(quoteStart, quoteLength), suffixCharacters)
+        : tryMakeString(prefixCharacters,
+            state.input<char16_t>().subspan(quoteStart, quoteLength), suffixCharacters);
+    // An allocation that could not be made leaves the document to the C++ re-parse, which
+    // has its own two-step fallback for exactly this (:1324).
+    if (!message) [[unlikely]]
+        return;
+    *state.errorMessage = WTF::move(message);
+    state.hasErrorMessage = true;
+}
+
+// MARK: - The island's entry point
+//
+// Builds the state and the facade on its own stack — both ordinary C++ locals, so the
+// container stack inside the state is scanned by the collector the way any other frame is —
+// hands the island the input, and reads the result out. The input and nothing else: there is
+// no `LiteralParser` behind this call, `parseStrictJSON` (LiteralParser.h) building one only
+// when this declines. `errorMessage` is where a *failed* parse's diagnostic goes, and it is the
+// caller's `String*` rather than a member, so a caller that does not want the text
+// (`JSONParse`) passes nothing and nothing is built.
+
+template<typename CharType>
+JSValue parseJSONWithSwiftIsland(JSGlobalObject* globalObject,
+    std::span<const CharType> characters, bool& handled, String* errorMessage)
+{
+    handled = false;
+    // The island's offsets are 31-bit, which is not a new restriction —
+    // LiteralParserToken::stringOrIdentifierLength is `unsigned : 31` — but the
+    // island states it as a precondition rather than checking it per token, so it is
+    // checked here, once per document.
+    if (characters.size() >= (1u << 31)) [[unlikely]]
+        return { };
+
+    // One line per width, and nothing else here is width-dependent: the state picks its
+    // constructor, the facade is the same class, and the entry point differs only in
+    // which specialization of the Swift grammar it names.
+    JSONSwiftObjectModelState state(getVM(globalObject), globalObject, characters, errorMessage);
+    JSONSwiftObjectModel model(state);
+
+    uint8_t status;
+    if constexpr (sizeof(CharType) == 1)
+        status = jsonSwiftParseDocument8(characters, model);
+    else
+        status = jsonSwiftParseDocument16(characters, model);
+
+    if (status == JSONSwiftParseOK && state.hasResult) [[likely]] {
+        handled = true;
+        return state.result;
+    }
+    // `OK` without a result cannot happen: the grammar reaches `.documentEnd` only after a
+    // value was stored, which is either the outermost container closing or the bare
+    // primitive case in `jsonSwiftStoreValue`, and both set this. But `result` would then be
+    // the empty JSValue and `handled` would say it was a real answer, so it declines rather
+    // than being asserted away, at one compare per document.
+    ASSERT(status != JSONSwiftParseOK || state.hasResult);
+    if (status == JSONSwiftParseStopped && state.sawException) {
+        handled = true;
+        return { };
+    }
+
+    // Malformed, and the island said which way, so the C++ lexer does not run over the same
+    // attacker-chosen bytes a second time. That double lex is what every failing parse used
+    // to cost and is the reason this status exists.
+    //
+    // `hasErrorMessage` is the island's own `errorMessage` call having produced text, and a
+    // caller that wanted none is the other way to be handled: either way the message the
+    // C++ would have built is not needed. Anything else — an offset that did not bound, an
+    // allocation that failed — falls through to the decline, which produces the same text
+    // the slow way.
+    if (status == JSONSwiftParseFailed && (state.hasErrorMessage || !errorMessage)) {
+        handled = true;
+        return { };
+    }
+
+    // Declined, and there is nothing to undo: the cursor was the island's own, and the
+    // half-built object graph is unobservable because no user code can have seen it — this is
+    // StrictJSON. The C++ parser the caller builds next starts at offset zero because it has
+    // not existed until now.
+    //
+    // A decline is invisible from the outside — the C++ parse returns the same value, so a
+    // validation run passes and a benchmark quietly measures the C++ against itself — so it
+    // is logged on request.
+    if (Options::verboseSwiftJSONParserDeclines()) [[unlikely]] {
+        constexpr size_t prefixLength = 60;
+        dataLogLn("JSON island declined (", sizeof(CharType) == 1 ? "8-bit"_s : "16-bit"_s,
+            ", status ", status, ", ", characters.size(), " units): ",
+            StringView { characters.first(std::min(prefixLength, characters.size())) });
+    }
+    return { };
+}
+
+// The two widths the island covers, instantiated here rather than in the header: its callers
+// are the strict-JSON entries in JSONObject.cpp and the two C API ones, all of which parse a
+// `JSString`'s characters at whichever width it happens to be.
+template JSValue parseJSONWithSwiftIsland<Latin1Character>(JSGlobalObject*,
+    std::span<const Latin1Character>, bool&, String*);
+template JSValue parseJSONWithSwiftIsland<char16_t>(JSGlobalObject*,
+    std::span<const char16_t>, bool&, String*);
+
+#endif // JSC_SUPPORTS_SWIFT
 
 // Instantiate the two flavors of LiteralParser we need instead of putting most of this file in LiteralParser.h
 template class LiteralParser<Latin1Character, JSONReviverMode::Enabled>;
