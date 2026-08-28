@@ -75,6 +75,7 @@ static const char* divergenceReason(uint32_t reason)
     case 2: return "the token counts differ";
     case 3: return "the observer's token offsets differ";
     case 4: return "the observer's end offset differs";
+    case 5: return "the numeric value, its type or its sign differs";
     case 6: return "the source was not valid UTF-8";
     default: return "unknown";
     }
@@ -84,6 +85,21 @@ static const char* divergenceReason(uint32_t reason)
     auto utf8 = String { css }.utf8(); \
     unsigned declinesBefore = webCoreCSSTokenizerSwiftDeclineCount(); \
     auto result = webCoreCSSTokenizerComparePaths(utf8.data(), utf8.length()); \
+    EXPECT_EQ(-1, result.divergenceIndex) \
+        << "diverged at token " << result.divergenceIndex << ": " << divergenceReason(result.reason) \
+        << " (C++ " << result.expectedType << " vs Swift " << result.actualType << "), " \
+        << result.realTokenCount << " tokens vs " << result.swiftTokenCount; \
+    EXPECT_EQ(declinesBefore, webCoreCSSTokenizerSwiftDeclineCount()) \
+        << "the Swift path declined this input and fell back to C++, so the comparison proved nothing"; \
+} while (0)
+
+// Raw bytes, handed to the 8-bit entry with no String round-trip. EXPECT_PATHS_AGREE
+// goes through utf8(), which turns a high Latin-1 character into the two bytes of its
+// UTF-8 encoding; this keeps it as the one character it is. sizeof - 1 rather than
+// strlen so a case can contain an embedded NUL, which is what preprocessing replaces.
+#define EXPECT_PATHS_AGREE_LATIN1(bytes) do { \
+    unsigned declinesBefore = webCoreCSSTokenizerSwiftDeclineCount(); \
+    auto result = webCoreCSSTokenizerComparePaths(bytes, sizeof(bytes) - 1); \
     EXPECT_EQ(-1, result.divergenceIndex) \
         << "diverged at token " << result.divergenceIndex << ": " << divergenceReason(result.reason) \
         << " (C++ " << result.expectedType << " vs Swift " << result.actualType << "), " \
@@ -235,6 +251,25 @@ TEST(CSSTokenizerSwift, EndOfInput)
 {
     for (auto* fragment : { "", " ", "   \t\n  ", "#", "@", "\"", "url(", "/*", "-", "+", "<", "\\", "1e", "u+" })
         EXPECT_PATHS_AGREE(String::fromUTF8(fragment));
+}
+
+// 8-bit non-ASCII. Every high byte is a name-start code point, and this is the width
+// real stylesheets actually use, so it is the figure of merit -- but it was covered only
+// out of tree, because every case in this file was either pure ASCII or went through the
+// UTF-8 entry, which forces 16-bit and asserts that it did.
+TEST(CSSTokenizerSwift, Latin1NonASCII)
+{
+    EXPECT_PATHS_AGREE_LATIN1("\xe9\xff { color: \xe9 }");
+    EXPECT_PATHS_AGREE_LATIN1(".caf\xe9 { font-family: \xc9l\xe9gant }");
+    EXPECT_PATHS_AGREE_LATIN1("@m\xe9""dia { .\x80\x81\x82 { top: 0 } }");
+    EXPECT_PATHS_AGREE_LATIN1("a { content: \"\xe9\xff\x80\" ; background: url(\xe9.png) }");
+    EXPECT_PATHS_AGREE_LATIN1("\xff""8 { a: 1\xe9 2\xff""px }");
+    EXPECT_PATHS_AGREE_LATIN1("a { b: \\e9 \xe9 \\0000e9 }");
+    // Preprocessing replaces a NUL with U+FFFD, which forces the string to 16 bits, so
+    // this case leaves the 8-bit path -- which is exactly what makes it worth having:
+    // it is the one input where the width the caller chose is not the width that runs.
+    EXPECT_PATHS_AGREE_LATIN1("a { color: re\0d }");
+    EXPECT_PATHS_AGREE_LATIN1("\0");
 }
 
 TEST(CSSTokenizerSwift, SixteenBitInput)
