@@ -59,6 +59,7 @@ CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths(const char*, s
 CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char*, size_t);
 CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(const char*, size_t);
 unsigned webCoreCSSTokenizerSwiftDeclineCount(void);
+void webCoreCSSTokenizerSetForceSwiftIslandDecline(bool);
 
 } // extern "C"
 
@@ -109,6 +110,32 @@ static const char* divergenceReason(uint32_t reason)
         << " (C++ " << result.expectedType << " vs Swift " << result.actualType << ")"; \
     EXPECT_EQ(declinesBefore, webCoreCSSTokenizerSwiftDeclineCount()) \
         << "the Swift path declined this input and fell back to C++"; \
+} while (0)
+
+// The inverse of the three above: forces the decline, then asserts that it happened and
+// that falling back still produced exactly what the C++ path produces, in the tokens and
+// in the observer offsets both. A rewind that misses something shows up here as a
+// divergence, because the C++ pass appends behind whatever was left in place.
+#define EXPECT_FALLBACK_AGREES(css) do { \
+    auto utf8 = String { css }.utf8(); \
+    unsigned declinesBefore = webCoreCSSTokenizerSwiftDeclineCount(); \
+    webCoreCSSTokenizerSetForceSwiftIslandDecline(true); \
+    auto tokens = webCoreCSSTokenizerComparePaths(utf8.data(), utf8.length()); \
+    auto offsets = webCoreCSSTokenizerCompareObserverOffsets(utf8.data(), utf8.length()); \
+    unsigned declinesAfter = webCoreCSSTokenizerSwiftDeclineCount(); \
+    webCoreCSSTokenizerSetForceSwiftIslandDecline(false); \
+    EXPECT_LT(declinesBefore, declinesAfter) \
+        << "the Swift path was forced to decline, but no decline was counted, so the " \
+           "fallback did not run and this proved nothing"; \
+    EXPECT_EQ(-1, tokens.divergenceIndex) \
+        << "after falling back, diverged at token " << tokens.divergenceIndex << ": " \
+        << divergenceReason(tokens.reason) << " (C++ " << tokens.expectedType \
+        << " vs Swift " << tokens.actualType << "), " << tokens.realTokenCount \
+        << " tokens vs " << tokens.swiftTokenCount; \
+    EXPECT_EQ(-1, offsets.divergenceIndex) \
+        << "after falling back, the observer offsets diverged at token " \
+        << offsets.divergenceIndex << ": " << divergenceReason(offsets.reason) \
+        << " (C++ " << offsets.expectedType << " vs Swift " << offsets.actualType << ")"; \
 } while (0)
 
 TEST(CSSTokenizerSwift, Rules)
@@ -255,6 +282,22 @@ TEST(CSSTokenizerSwift, SyntheticStylesheet)
     auto stylesheet = builder.toString();
     EXPECT_PATHS_AGREE(stylesheet);
     EXPECT_OBSERVER_OFFSETS_AGREE(stylesheet);
+}
+
+// Forces a decline after a chunk has been built, then checks that falling back fully
+// undoes the partial work: m_tokens, the string pool, the input cursor and the
+// inspector's observer wrapper. Includes an input over 96 characters, since below that
+// the reservation stays inside inline capacity and less of the undo path is exercised.
+TEST(CSSTokenizerSwift, DeclineFallsBackAndUndoesEverything)
+{
+    EXPECT_FALLBACK_AGREES("a { color: red }"_s);
+    EXPECT_FALLBACK_AGREES("a /* c1 */ { /* c2 */ color: \\72 ed } /* trailing */"_s);
+    EXPECT_FALLBACK_AGREES(".a { b: ( c [ d "_s);
+
+    StringBuilder builder;
+    for (unsigned i = 0; i < 60; ++i)
+        builder.append(".cls-"_s, i, " { margin: 0 auto -1.5px; content: \"\\41 "_s, i, "\" }\n"_s);
+    EXPECT_FALLBACK_AGREES(builder.toString());
 }
 
 } // namespace TestWebKitAPI

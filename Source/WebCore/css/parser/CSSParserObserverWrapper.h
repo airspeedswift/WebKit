@@ -62,6 +62,25 @@ public:
         ASSERT(!m_commentIndex);
     }
 
+    // Where the token and comment lists currently end. A caller that feeds this
+    // wrapper speculatively takes a Position first and rewinds to it if it has to
+    // start over, so that the second pass does not append behind the first one's
+    // entries: startOffset() and endOffset() index m_tokenOffsets by a token's
+    // position in the stream, so stale leading entries would misreport every range.
+    // The Swift tokenizer path is the one caller (CSSTokenizer.cpp).
+    struct Position {
+        size_t tokenCount { 0 };
+        size_t commentCount { 0 };
+    };
+    Position position() const { return { m_tokenOffsets.size(), m_commentOffsets.size() }; }
+    void rewindTo(Position position)
+    {
+        ASSERT(position.tokenCount <= m_tokenOffsets.size());
+        ASSERT(position.commentCount <= m_commentOffsets.size());
+        m_tokenOffsets.shrink(position.tokenCount);
+        m_commentOffsets.shrink(position.commentCount);
+    }
+
 private:
     explicit CSSParserObserverWrapper(CSSParserObserver& observer)
         : m_observer(observer)

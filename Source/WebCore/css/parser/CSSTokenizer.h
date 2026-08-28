@@ -90,6 +90,10 @@ public:
     // silent fallback.
     WEBCORE_EXPORT static unsigned swiftIslandDeclineCountForTesting();
 
+    // Forces the Swift scanner to fall back after building a chunk, so a test can
+    // reach the fallback path. Production only takes it on allocation failure.
+    WEBCORE_EXPORT static void setForceSwiftIslandDeclineForTesting(bool);
+
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
