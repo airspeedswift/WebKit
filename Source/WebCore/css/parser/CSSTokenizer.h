@@ -52,7 +52,6 @@
 
 namespace WebCore {
 
-class CSSTokenizer;
 class CSSTokenizerInputStream;
 class CSSParserObserverWrapper;
 class CSSParserTokenRange;
@@ -118,7 +117,6 @@ private:
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
     bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
-    Vector<String>& stringPool() { return m_stringPool; }
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);
@@ -173,7 +171,6 @@ private:
     CSSParserToken commercialAt(char16_t);
     CSSParserToken reverseSolidus(char16_t);
     CSSParserToken asciiDigit(char16_t);
-    CSSParserToken letterU(char16_t);
     CSSParserToken nameStart(char16_t);
     CSSParserToken stringStart(char16_t);
     CSSParserToken endOfFile(char16_t);

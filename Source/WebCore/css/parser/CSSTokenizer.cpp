@@ -313,6 +313,15 @@ CSSSwiftTokenSink* CSSSwiftTokenSink::create(CSSTokenizer& tokenizer, CSSParserO
 
 // The annotations have to be repeated here: an unannotated definition is a different
 // type in C++, and the mangled name differs (interop notes §67).
+//
+// unsafeMakeSpan, and not std::span's own two-argument constructor, even though
+// __counted_by has just declared each pointer's extent: clang rejects that spelling
+// outright under -Wunsafe-buffer-usage-in-container, which WebCore builds as an error,
+// and it does so without consulting the annotation. So the bound is declared here and
+// still cannot be used to build a span the compiler will accept -- a gap worth an
+// upstream report, since this is precisely the case the attribute exists for. Until
+// then unsafeMakeSpan is the sanctioned spelling and the annotations are what make it
+// true rather than merely asserted.
 bool CSSSwiftTokenSink::takeChunk(
     const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
     const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount)
