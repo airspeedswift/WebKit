@@ -4,7 +4,7 @@
 // compile on WTF::KeyValuePair instantiated over them. See CSSTokenizerSwiftTypes.h.
 public import WebCore_Private.CSSTokenizerSwiftTypes
 
-// Swift island for the CSS tokenizer: a zero-`unsafe` port of CSSTokenizer.cpp and
+// Swift island for the CSS tokenizer: a port of CSSTokenizer.cpp and
 // CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
 //
 // Input is a `Span` over the preprocessed string, which C++ already owns and already
@@ -12,13 +12,19 @@ public import WebCore_Private.CSSTokenizerSwiftTypes
 // the value's *offsets* — which loses nothing, since `CSSParserToken` already stores
 // a view into the input. Numbers are not converted here, so C++ keeps calling
 // charactersToDouble and double rounding stays bit-identical for free. Values
-// containing escapes are unescaped here into a caller-provided buffer, so nothing
-// has to be re-tokenized in C++.
+// containing escapes are unescaped into a buffer this island owns and hands to C++
+// alongside each chunk of tokens, so nothing has to be re-tokenized in C++.
 //
-// Nine trap-guarding branches remain, all in inlined stdlib code, and `-Ounchecked`
-// measures no throughput difference from removing them; the three that are compiler
-// misses rather than real checks are filed (see the HTML island's SITE A-D notes and
-// ~/Documents/swift-runtime-check-scrub/).
+// The interior is `unsafe`-free. Four sites use one construct, `Span(_unsafeCxxSpan:)`,
+// and all four are entry points receiving the source text from C++; two of those are on
+// the production path and two exist for the tests. Filings register §27 is the blocker
+// and each site names it.
+//
+// The trap-guarding branches the stdlib inlines here measured no throughput difference
+// under `-Ounchecked` (notes §11f), and the three that are compiler misses rather than
+// real checks are filed (see the HTML island's SITE A-D notes and
+// ~/Documents/swift-runtime-check-scrub/). Both the count and that measurement predate
+// the buffer-ownership inversion, though, so neither describes this file as it stands.
 //
 // Validated token-by-token against the real CSSTokenizer — CSSTokenizerSwiftBridge.cpp
 // and CSSTokenizerSwiftTest.cpp — not only against a same-work C++ control. Standalone
@@ -947,13 +953,17 @@ public struct CSSTokenizeResultSwift {
     sum &* 1000003 &+ UInt64(t.type)
 }
 
-/// TODO(unsafe): `Span(_unsafeCxxSpan:)` is the only `unsafe` in this island,
-/// and it is at the boundary rather than in the interior — see the §4b'
-/// diagnostic. It exists because there is no safe way to receive a `std::span`
-/// from C++: `WTF::BorrowedBytes` is the safe pattern for *bytes* but has no
-/// span-shaped equivalent. Per the project rule that a needed `unsafe` is a bug
-/// to file, this is a to-file item, not an accepted cost. Shared with
-/// HTMLTokenizerSwift.swift, which has the identical line.
+/// TODO(unsafe): one of the island's four `Span(_unsafeCxxSpan:)` sites, and the
+/// blocker is filings register §27. `noescape` plus `__counted_by` does import a
+/// `std::span` as a `Span` — `CSSSwiftTokenSink.takeChunk` below relies on exactly
+/// that, at no cost — but only when the *callee* is C++. Here the callee is Swift, and
+/// an `@_expose(Cxx)` function's parameters have to be C++-representable, which `Span`
+/// is not, so the source text can only arrive as a `std::span`. The conversion is
+/// unchecked in two ways: the count is taken on trust, and the resulting `Span` carries
+/// no lifetime dependency on the `StringImpl` that owns the bytes. Both hold in fact —
+/// the span is `m_input.currentString()`, whose owner outlives the call — but neither is
+/// enforced. Only the tests reach this entry, so it costs a marker the shipping path
+/// does not.
 @_expose(Cxx)
 public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokenizeResultSwift {
     let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
@@ -970,7 +980,7 @@ public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokeni
 
 /// Copies one of the island's tokens into the C++ boundary struct.
 ///
-/// The boundary type is defined in C++ (CSSTokenizerInputStream.h) rather than
+/// The boundary type is defined in C++ (CSSTokenizerSwiftTypes.h) rather than
 /// here, because WebCore compiles Swift with -enable-library-evolution: a Swift
 /// struct exposed with @_expose(Cxx) is resilient, so the generated C++ class is
 /// a heap-allocated opaque box with no default constructor and a sizeof() that is
@@ -1042,10 +1052,12 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
 
 /// 8-bit input: the common case, a stylesheet that survives preprocessing as Latin-1.
 ///
-/// TODO(unsafe): `Span(_unsafeCxxSpan:)` is the only `unsafe` left in this island, and
-/// unlike the ones it replaced it is not fixable by a WTF addition: this function's
-/// parameters have to be C++-representable, and Swift's `Span` is not, so the source
-/// text can only arrive as a C++ span. Filed as such rather than presented as a cost.
+/// TODO(unsafe): one of the island's four `Span(_unsafeCxxSpan:)` sites, and one of the
+/// two on the production path. Blocker is filings register §27; `takeChunk` below is the
+/// proof that the other direction is free. The count is taken on trust and the `Span`
+/// gets no lifetime dependency on the `StringImpl` that owns the bytes; both hold,
+/// because the span is `m_input.currentString()` and `CSSTokenizerInputStream` holds its
+/// own reference to that string for longer than this call, but neither is enforced.
 @_expose(Cxx)
 public func cssTokenizeSwiftAll8(
     _ data: WebCore.CSSTokenizerSpan8,
@@ -1057,6 +1069,9 @@ public func cssTokenizeSwiftAll8(
 /// 16-bit input. The C++ tokenizer reads every character through
 /// `StringImpl::operator[]`, which branches on `is8Bit()` per read; here the two widths
 /// are separate specializations of one implementation, so neither pays for the other.
+///
+/// TODO(unsafe): the second production `Span(_unsafeCxxSpan:)` site. Identical cause and
+/// identical blocker to `cssTokenizeSwiftAll8` above, filings register §27.
 @_expose(Cxx)
 public func cssTokenizeSwiftAll16(
     _ data: WebCore.CSSTokenizerSpan16,
@@ -1068,12 +1083,14 @@ public func cssTokenizeSwiftAll16(
 /// The `index`-th token, for the validation test to walk the stream alongside
 /// the real `CSSTokenizer`.
 ///
-/// O(index): the island's state is a `~Copyable` Swift struct, which C++ cannot
-/// hold, so there is no way to expose a resumable cursor without either an
-/// opaque class handle (refcounting) or a caller-provided output buffer (which
-/// needs the `MutableBorrowedBytes` that does not exist). Quadratic is fine for
-/// a test over a few thousand tokens, and the shape of the workaround is itself
-/// worth recording.
+/// O(index): the island's state is a `~Copyable` Swift struct, which C++ cannot hold, so
+/// there is no way to expose a resumable cursor without either an opaque class handle
+/// (refcounting) or an output buffer C++ provides, which needs a `Span` parameter on an
+/// `@_expose(Cxx)` function — filings register §27 again, the same blocker in its
+/// mutable form. Quadratic is fine for a test over a few thousand tokens, and the shape
+/// of the workaround is itself worth recording.
+///
+/// TODO(unsafe): the fourth `Span(_unsafeCxxSpan:)` site, test-only, §27.
 @_expose(Cxx)
 public func cssTokenizeSwiftNth(_ data: WebCore.CSSTokenizerSpan8, _ index: Int) -> WebCore.CSSSwiftToken {
     let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
