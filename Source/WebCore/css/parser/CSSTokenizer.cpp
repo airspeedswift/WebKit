@@ -34,6 +34,7 @@
 #include "CSSParserObserverWrapper.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
+#include "CSSTokenizerSwiftTypes.h"
 #include "WebCoreSwift-Generated.h"
 #include <atomic>
 #include <wtf/NeverDestroyed.h>
@@ -120,49 +121,21 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapp
         return;
     }
 
-    // The Swift scanner, when selected and when it accepts this input. Falls through
-    // to the C++ state machine otherwise, including on allocation failure, so this
-    // cannot make a previously-working parse fail.
-    //
-    // This is speculative execution with rollback: what makes it correct is enumerating
-    // every piece of mutable state Swift can touch, and for each one either the undo or
-    // the reason it needs none.
-    //
-    //   m_tokens         cleared. Not shrunk: shrink() keeps the capacity Swift
-    //                    reserved, and the retry below calls tryReserveInitialCapacity,
-    //                    which requires an inline-capacity buffer. It asserts that in
-    //                    debug and in release overwrites m_buffer, leaking what was
-    //                    allocated (Vector.h's allocateBuffer carries a FIXME for this).
-    //   m_stringPool     shrunk to the watermark, not to zero: preprocessString may have
-    //                    registered the input string before Swift ran, and m_input
-    //                    holds a view into it.
-    //   m_input          cursor rewound to 0.
-    //   wrapper's token and comment offsets
-    //                    rewound. Swift feeds these per chunk, and
-    //                    startOffset/endOffset index them by a token's position in the
-    //                    stream, so leftovers shift every range the inspector reports.
-    //   m_blockStack     nothing to undo: Swift keeps its own block stack
-    //                    and never writes this one.
-    //   wrapper's m_commentIndex
-    //                    nothing to undo: only the consumption-side methods advance it,
-    //                    and those run after tokenization. finalizeConstruction's
-    //                    ASSERT(!m_commentIndex) is the standing guard on that.
-    //   wrapper's m_firstParserToken
-    //                    nothing to undo: only finalizeConstruction sets it, and Swift
-    //                    reaches that only on success.
-    //   wrapper's observer
-    //                    nothing to undo: addToken and addComment only append to the
-    //                    vectors above; no observer callback fires during tokenization.
+    // The Swift scanner, when selected. It finishes every input: all 33 token types, both
+    // of StringImpl's widths, every escape form, unbounded block nesting. The only way it
+    // returns false is a failed allocation of m_tokens -- either the reservation or a
+    // per-token append -- and the C++ scanner below reserves the same size into the same
+    // vector, so it would fail on the identical allocation. There is nothing to fall back
+    // to, so this reports the failure the same way the C++ path reports its own rather
+    // than re-running it: a fallback whose alternative fails on the same allocation would
+    // only be a second way to be wrong, not a source of coverage.
     if (scanner == Scanner::Swift) {
-        size_t stringPoolSizeBeforeIsland = m_stringPool.size();
-        auto observerPositionBeforeIsland = wrapper ? wrapper->position() : CSSParserObserverWrapper::Position { };
-        if (tokenizeWithSwiftIsland(wrapper, constructionSuccessPtr))
-            return;
-        m_tokens.clear();
-        m_stringPool.shrink(stringPoolSizeBeforeIsland);
-        if (wrapper)
-            wrapper->rewindTo(observerPositionBeforeIsland);
-        m_input.seek(0);
+        if (!tokenizeWithSwiftIsland(wrapper, constructionSuccessPtr)) [[unlikely]] {
+            // Same policy as the C++ path below: crash if the caller did not ask to be told.
+            RELEASE_ASSERT(constructionSuccessPtr);
+            *constructionSuccessPtr = false;
+        }
+        return;
     }
 
     // To avoid resizing we err on the side of reserving too much space.
@@ -285,42 +258,36 @@ static_assert(alignof(CSSSwiftToken) == 4);
 static_assert(std::is_trivially_default_constructible_v<CSSSwiftToken>);
 static_assert(std::is_trivially_copyable_v<CSSSwiftToken>);
 
-static std::atomic<unsigned> s_swiftIslandDeclineCount;
+// Counts allocation failures during Swift tokenization. A failure now makes construction
+// fail outright -- the direct constructor via RELEASE_ASSERT, tryCreate via a null return --
+// so correctness does not depend on this counter. Kept because the harnesses assert on it as
+// a cheap second check.
+static std::atomic<unsigned> s_swiftIslandFailureCount;
 
 unsigned CSSTokenizer::swiftIslandDeclineCountForTesting()
 {
-    return s_swiftIslandDeclineCount.load(std::memory_order_relaxed);
+    return s_swiftIslandFailureCount.load(std::memory_order_relaxed);
 }
 
-// Test-only. The production path fails only when an allocation fails, which a test
-// cannot provoke, so the fallback's undo -- m_tokens, the string pool, the cursor and
-// the observer wrapper -- would otherwise be code no test executes. Read once per
-// chunk rather than once per token, and after the chunk has been appended, so that
-// setting it exercises a full undo without putting anything in the hot loop.
-static std::atomic<bool> s_forceSwiftIslandDeclineForTesting;
+// Test-only. This path fails only when an allocation does, which a test cannot provoke,
+// so this is the only way to reach the failure-reporting path at all. Read once per chunk
+// and after the chunk has been appended, so nothing lands in the hot loop.
+static std::atomic<bool> s_forceSwiftIslandFailureForTesting;
 
 void CSSTokenizer::setForceSwiftIslandDeclineForTesting(bool force)
 {
-    s_forceSwiftIslandDeclineForTesting.store(force, std::memory_order_relaxed);
+    s_forceSwiftIslandFailureForTesting.store(force, std::memory_order_relaxed);
 }
 
-// Counts Swift-path failures, so a test comparing the two paths cannot pass by accident
-// because the Swift path quietly fell back.
 bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
-{
-    if (tokenizeWithSwiftIslandOrDecline(wrapper, constructionSuccessPtr))
-        return true;
-    s_swiftIslandDeclineCount.fetch_add(1, std::memory_order_relaxed);
-    return false;
-}
-
-bool CSSTokenizer::tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
 {
     auto string = m_input.currentString();
 
     // Same reservation the C++ path uses.
-    if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]]
+    if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]] {
+        s_swiftIslandFailureCount.fetch_add(1, std::memory_order_relaxed);
         return false;
+    }
 
     // Swift owns its buffers and hands each chunk to this sink, so there is
     // nothing to allocate, size, grow or retry here. Both of StringImpl's
@@ -331,8 +298,10 @@ bool CSSTokenizer::tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper* wr
     bool tokenized = string.is8Bit()
         ? cssTokenizeSwiftAll8(string.span8(), sink.ptr())
         : cssTokenizeSwiftAll16(string.span16(), sink.ptr());
-    if (!tokenized) [[unlikely]]
+    if (!tokenized) [[unlikely]] {
+        s_swiftIslandFailureCount.fetch_add(1, std::memory_order_relaxed);
         return false;
+    }
 
     if (constructionSuccessPtr)
         *constructionSuccessPtr = true;
@@ -355,15 +324,6 @@ CSSSwiftTokenSink* CSSSwiftTokenSink::create(CSSTokenizer& tokenizer, CSSParserO
 // upstream report, since this is precisely the case the attribute exists for. Until
 // then unsafeMakeSpan is the sanctioned spelling and the annotations are what make it
 // true rather than merely asserted.
-bool CSSSwiftTokenSink::takeChunk(
-    const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
-    const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount)
-{
-    return m_tokenizer.appendTokensFromSwiftIsland(
-        unsafeMakeSpan(tokens, tokenCount),
-        unsafeMakeSpan(unescapedUnits, unitCount),
-        m_wrapper, m_observerOffset);
-}
 
 void CSSSwiftTokenSink::finish()
 {
@@ -375,8 +335,17 @@ void CSSSwiftTokenSink::finish()
 
 // Converts one chunk of Swift's tokens into CSSParserTokens, and feeds the
 // inspector's observer wrapper the same offsets the C++ loop would have.
-bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> podTokens, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper* wrapper, unsigned& observerOffset)
+bool CSSSwiftTokenSink::takeChunk(
+    const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
+    const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount)
 {
+    auto podTokens = unsafeMakeSpan(tokens, tokenCount);
+    auto unescaped = unsafeMakeSpan(unescapedUnits, unitCount);
+    auto& wrapper = m_wrapper;
+    auto& observerOffset = m_observerOffset;
+    auto& m_tokens = m_tokenizer.m_tokens;
+    auto& m_input = m_tokenizer.m_input;
+    auto registerString = [&](const String& s) { return m_tokenizer.registerString(s); };
     for (const auto& pod : podTokens) {
         auto type = static_cast<CSSParserTokenType>(pod.type);
 
@@ -397,7 +366,7 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
         // contents.
         auto value = [&]() -> StringView {
             if (pod.flags & SwiftFlagUnescaped) [[unlikely]] {
-                auto units = unescapedUnits.subspan(pod.valueStart, pod.valueLength);
+                auto units = unescaped.subspan(pod.valueStart, pod.valueLength);
                 return registerString(String { StringImpl::create8BitIfPossible(units) });
             }
             return m_input.rangeAt(pod.valueStart, pod.valueLength);
@@ -464,7 +433,7 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
             observerOffset = pod.end;
         }
     }
-    return !s_forceSwiftIslandDeclineForTesting.load(std::memory_order_relaxed);
+    return !s_forceSwiftIslandFailureForTesting.load(std::memory_order_relaxed);
 }
 
 unsigned CSSTokenizer::tokenCount()

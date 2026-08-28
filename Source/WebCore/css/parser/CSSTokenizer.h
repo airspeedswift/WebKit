@@ -32,7 +32,6 @@
 #include <WebCore/CSSParserToken.h>
 #include <WebCore/CSSTokenizerInputStream.h>
 #include <climits>
-#include <wtf/SwiftBridging.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
@@ -86,13 +85,14 @@ public:
 
     static bool NODELETE isWhitespace(CSSParserTokenType);
 
-    // Number of times the Swift scanner has fallen back to C++, so a test
-    // comparing both can assert real coverage instead of passing trivially on a
-    // silent fallback.
+    // Number of times the Swift scanner failed to allocate. With no fallback, an
+    // allocation failure already fails construction directly; this is a cheap second
+    // check for tests.
     WEBCORE_EXPORT static unsigned swiftIslandDeclineCountForTesting();
 
-    // Forces the Swift scanner to fall back after building a chunk, so a test can
-    // reach the fallback path. Production only takes it on allocation failure.
+    // Forces the Swift scanner to fail after building a chunk -- the only way to
+    // reach the failure-reporting path, since production reaches it only on
+    // allocation failure.
     WEBCORE_EXPORT static void setForceSwiftIslandDeclineForTesting(bool);
 
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
@@ -105,12 +105,12 @@ private:
     CSSParserToken nextToken();
 
     // Fills m_tokens by driving the Swift tokenizer (CSSTokenizerSwift.swift) and
-    // converting its POD tokens, instead of running the C++ state machine below.
-    // Both of StringImpl's widths are handled and the block stack grows to fit,
-    // so the only fallback left is an allocation failure.
+    // converting its POD tokens, instead of running the C++ state machine below. It
+    // finishes every input -- both of StringImpl's widths, every escape form,
+    // unbounded block nesting -- and returns false only if m_tokens could not be
+    // allocated, which fails construction the same way the C++ path's allocation
+    // failure does. There is no fallback.
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
-    bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
-    bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);
