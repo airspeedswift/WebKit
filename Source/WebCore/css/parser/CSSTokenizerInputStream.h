@@ -29,8 +29,6 @@
 
 #pragma once
 
-#include <array>
-#include <WebCore/CSSTokenizerSwiftTypes.h>
 #include <wtf/text/StringView.h>
 
 namespace WebCore {
@@ -63,10 +61,6 @@ public:
     }
 
     void advance(unsigned offset = 1) { m_offset += offset; }
-
-    // Repositions the cursor. Used by the Swift tokenizer path when the island declines
-    // and the C++ scanner below has to start the input over.
-    void seek(size_t offset) { m_offset = offset; }
 
     void pushBack(char16_t cc)
     {

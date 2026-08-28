@@ -32,7 +32,6 @@
 #include <WebCore/CSSParserToken.h>
 #include <WebCore/CSSTokenizerInputStream.h>
 #include <climits>
-#include <wtf/SwiftBridging.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
@@ -93,14 +92,14 @@ public:
 
     static bool NODELETE isWhitespace(CSSParserTokenType);
 
-    // How many times the Swift scanner has declined an input and fallen back to the
-    // C++ one. A test that compares the two passes trivially if the Swift scanner
-    // silently declined, so tests assert on this.
+    // How many times the Swift scanner failed to allocate. Not load-bearing: with no
+    // fallback, a failure fails construction, so a comparison test can no longer pass by
+    // accident because the island stepped aside. Kept as a cheap second check.
     WEBCORE_EXPORT static unsigned swiftIslandDeclineCountForTesting();
 
-    // Makes the Swift scanner decline every input, after it has built a chunk, so a
-    // test can reach the fallback. Nothing else does: production declines only on
-    // allocation failure.
+    // Makes the Swift scanner fail every input, after it has built a chunk. The only way
+    // to reach the failure-reporting path at all, since production reaches it only when an
+    // allocation fails.
     WEBCORE_EXPORT static void setForceSwiftIslandDeclineForTesting(bool);
 
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
@@ -112,14 +111,13 @@ private:
 
     CSSParserToken nextToken();
 
-    // Swift tokenizer path (CSSTokenizerSwift.swift, notes §11). Fills m_tokens
-    // by driving the Swift island and converting its POD tokens, instead of
-    // running the C++ state machine below. Both of StringImpl's widths are
-    // handled and the island's block stack grows, so the only decline left is
-    // running out of memory, in which case the caller falls back to the C++ path.
+    // Swift tokenizer path (CSSTokenizerSwift.swift, notes §11). Fills m_tokens by driving
+    // the Swift island and converting its POD tokens, instead of running the C++ state
+    // machine below. It finishes every input -- both of StringImpl's widths, every escape
+    // form, unbounded block nesting -- and returns false only if m_tokens could not be
+    // allocated, which fails construction exactly as the C++ path's own allocation failure
+    // does. There is no fallback to fall back to.
     bool tokenizeWithSwiftIsland(CSSParserObserverWrapper*, bool* constructionSuccess);
-    bool tokenizeWithSwiftIslandOrDecline(CSSParserObserverWrapper*, bool* constructionSuccess);
-    bool appendTokensFromSwiftIsland(std::span<const CSSSwiftToken>, std::span<const char16_t> unescapedUnits, CSSParserObserverWrapper*, unsigned& observerOffset);
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);

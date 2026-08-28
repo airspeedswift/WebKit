@@ -46,6 +46,7 @@
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizer.h"
 #include "CSSTokenizerInputStream.h"
+#include "CSSTokenizerSwiftTypes.h"
 #include "WebCoreSwift-Generated.h"
 #include <optional>
 #include <wtf/StdLibExtras.h>
@@ -114,6 +115,7 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObser
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char*, size_t);
 WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerSetForceSwiftIslandDecline(bool);
+WEBCORE_EXPORT bool webCoreCSSTokenizerTryCreateSucceeds(const char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSTokenizerDefaultScannerIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char*, size_t, bool, size_t*, uint64_t*, bool*);
@@ -448,12 +450,20 @@ WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void)
     return CSSTokenizer::swiftIslandDeclineCountForTesting();
 }
 
-// Makes the Swift path decline every input, after it has built a chunk, so a test can
-// reach the fallback. Production declines only when an allocation fails, which a test
-// cannot provoke, so without this the fallback is code nothing executes.
+// Makes the Swift scanner fail every input, after it has built a chunk, so the
+// failure-reporting path is reachable from a test. See
+// CSSTokenizer::setForceSwiftIslandDeclineForTesting.
 WEBCORE_EXPORT void webCoreCSSTokenizerSetForceSwiftIslandDecline(bool force)
 {
     CSSTokenizer::setForceSwiftIslandDeclineForTesting(force);
+}
+
+// Whether tryCreate succeeded. There is no fallback: when the island cannot allocate,
+// construction fails, and this is how a test observes that rather than inferring it.
+WEBCORE_EXPORT bool webCoreCSSTokenizerTryCreateSucceeds(const char* text, size_t length)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    return !!CSSTokenizer::tryCreate(source);
 }
 
 // Reports the compile-time choice, so a test can confirm that
