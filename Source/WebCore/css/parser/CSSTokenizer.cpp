@@ -391,7 +391,7 @@ bool CSSSwiftTokenSink::takeChunk(
         auto blockType = static_cast<CSSParserToken::BlockType>(pod.blockType);
 
         // Constructed straight into m_tokens rather than staged in a local and
-        // copied: this loop runs once per token, and a CSSParserToken is 32 bytes.
+        // copied: this loop runs once per token, and a CSSParserToken is 24 bytes.
         bool appended;
         switch (type) {
         case IdentToken:
