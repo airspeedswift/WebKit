@@ -15,10 +15,13 @@ public import WebCore_Private.CSSTokenizerSwiftTypes
 // containing escapes are unescaped into a buffer this island owns and hands to C++
 // alongside each chunk of tokens, so nothing has to be re-tokenized in C++.
 //
-// The interior is `unsafe`-free. Four sites use one construct, `Span(_unsafeCxxSpan:)`,
-// and all four are entry points receiving the source text from C++; two of those are on
-// the production path and two exist for the tests. Filings register §27 is the blocker
-// and each site names it.
+// The interior is `unsafe`-free. Two sites use one construct, `Span(_unsafeCxxSpan:)`,
+// and both are the production entry points receiving the source text from C++ —
+// `cssTokenizeSwiftAll8` and `cssTokenizeSwiftAll16`. Filings register §27 is the blocker
+// and each site names it. There were four until the two test-only entries they served
+// were deleted as dominated: a POD-walking validation entry that
+// `webCoreCSSTokenizerComparePaths` subsumes, and a scan-only benchmark entry that
+// `webCoreCSSTokenizerBenchIntegrated` subsumes.
 //
 // The trap-guarding branches the stdlib inlines here measured no throughput difference
 // under `-Ounchecked` (notes §11f), and the three that are compiler misses rather than
@@ -32,7 +35,22 @@ public import WebCore_Private.CSSTokenizerSwiftTypes
 // deficit are in ~/src/webkit-swift-ports/cssprobe and adoption notes §11.
 
 /// Mirrors CSSParserTokenType. Raw values match so C++ can cast directly.
-public enum CSSTokenTypeSwift: UInt8 {
+///
+/// `@c` (SE-0495) makes this the only *declaration* of the Swift side of that mirroring:
+/// it is emitted into WebCoreSwift-Generated.h as a `uint8_t`-backed C enum, so the
+/// static_asserts in CSSTokenizer.cpp can name `CSSTokenTypeSwiftIdent` and friends and
+/// therefore prove the two numberings agree, where before they could only pin the C++
+/// side and hope someone updated this file. C++ stays the original here, since
+/// `CSSParserTokenType` is what the rest of the CSS parser uses.
+///
+/// Internal rather than `public` deliberately: `@c` on a *resilient* enum crashes IRGen
+/// (`C enum with resilient payload?!`, GenEnum.cpp), and WebCore compiles Swift with
+/// -enable-library-evolution, so a public enum here is resilient. `@frozen` also avoids
+/// it; internal is the accurate answer, because nothing outside this file uses these.
+/// Recorded as a to-file item. The generated header is emitted at
+/// `-emit-clang-header-min-access internal`, so internal loses nothing.
+@c
+enum CSSTokenTypeSwift: UInt8 {
     case ident = 0, function, atKeyword, hash, url, badUrl, delimiter
     case number, percentage, dimension
     case includeMatch, dashMatch, prefixMatch, suffixMatch, substringMatch, column
@@ -42,8 +60,9 @@ public enum CSSTokenTypeSwift: UInt8 {
     case string, badString, endOfFile, comment
 }
 
-/// Mirrors CSSParserToken::BlockType.
-public enum CSSBlockTypeSwift: UInt8 {
+/// Mirrors CSSParserToken::BlockType. `@c` for the same reason as above.
+@c
+enum CSSBlockTypeSwift: UInt8 {
     case notBlock = 0, blockStart, blockEnd
 }
 
@@ -73,19 +92,31 @@ public struct CSSTokenSwift {
     public init() {}
 }
 
-/// `CSSTokenSwift.flags` bits. Kept out of the struct so it stays a plain
-/// aggregate for `@_expose(Cxx)`; CSSTokenizerSwiftBridge.cpp declares the same
-/// values.
-enum CSSTokenFlag {
-    static let nonInteger: UInt8 = 1 << 0 // NumberValueType, else IntegerValueType
-    static let plusSign: UInt8 = 1 << 1 // NumericSign
-    static let minusSign: UInt8 = 1 << 2
-    static let hashTokenId: UInt8 = 1 << 3 // HashTokenId, else HashTokenUnrestricted
+/// `CSSTokenSwift.flags` bits, and the *only* declaration of them.
+///
+/// They used to exist three times under three different names, with nothing asserting
+/// the three agreed: this, `SwiftFlagUnescaped` and friends in CSSTokenizer.cpp, and a
+/// third `FlagNeedsUnescape` set in CSSTokenizerSwiftBridge.cpp. `@c` (SE-0495) emits
+/// this into WebCoreSwift-Generated.h as a `uint8_t`-backed C enum, so CSSTokenizer.cpp
+/// reads `CSSTokenFlagBitsUnescaped` from here and both C++ copies are gone.
+///
+/// An enum rather than a namespace of `static let`s so `@c` can apply, which forces two
+/// things: the raw values are written as integer literals, because Swift rejects
+/// `1 << 0` as a raw value; and the Swift use sites spell `.rawValue`, since these are
+/// bits OR-ed into a `UInt8` and not a closed set of values.
+///
+/// Internal, not `public`, for the reason given on `CSSTokenTypeSwift` above.
+@c
+enum CSSTokenFlagBits: UInt8 {
+    case nonInteger = 1 // NumberValueType, else IntegerValueType
+    case plusSign = 2 // NumericSign
+    case minusSign = 4
+    case hashTokenId = 8 // HashTokenId, else HashTokenUnrestricted
     /// The value's range indexes the unescape buffer handed back alongside the
     /// tokens, rather than the input. Set when the value contained escapes, which
     /// this tokenizer resolves itself; the caller only has to turn the code units
     /// into whatever string type it wants.
-    static let unescaped: UInt8 = 1 << 4
+    case unescaped = 16
 }
 
 /// The tokenizer is generic over the code unit so one implementation serves both
@@ -364,7 +395,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         var t = token(type, start, data, block: block)
         t.valueStart = value.start
         t.valueLength = value.length
-        if value.unescaped { t.flags |= CSSTokenFlag.unescaped }
+        if value.unescaped { t.flags |= CSSTokenFlagBits.unescaped.rawValue }
         return t
     }
 
@@ -425,7 +456,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
                 let isId = nextCharsAreIdentifier(data)
                 let name = consumeName(data)
                 var t = valueToken(.hash, name, start, data)
-                if isId { t.flags |= CSSTokenFlag.hashTokenId }
+                if isId { t.flags |= CSSTokenFlagBits.hashTokenId.rawValue }
                 return t
             }
             return delimiter(cc, start, data)
@@ -556,10 +587,10 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         var next = peek(data, 0)
         if next == 0x2B {
             length &+= 1
-            signFlag = CSSTokenFlag.plusSign
+            signFlag = CSSTokenFlagBits.plusSign.rawValue
         } else if next == 0x2D {
             length &+= 1
-            signFlag = CSSTokenFlag.minusSign
+            signFlag = CSSTokenFlagBits.minusSign.rawValue
         }
 
         // Wrapping throughout: `length` counts characters of a number that has
@@ -591,7 +622,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         // which is also exactly the range C++ hands to charactersToDouble.
         t.numberStart = UInt32(truncatingIfNeeded: startOffset)
         t.numberLength = UInt32(truncatingIfNeeded: clampedOffset(data) &- startOffset)
-        if nonInteger { t.flags |= CSSTokenFlag.nonInteger }
+        if nonInteger { t.flags |= CSSTokenFlagBits.nonInteger.rawValue }
         t.flags |= signFlag
         return t
     }
@@ -616,7 +647,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             t.type = CSSTokenTypeSwift.dimension.rawValue
             t.valueStart = unit.start
             t.valueLength = unit.length
-            if unit.unescaped { t.flags |= CSSTokenFlag.unescaped }
+            if unit.unescaped { t.flags |= CSSTokenFlagBits.unescaped.rawValue }
         } else if consumeIfNext(data, 0x25) {
             t.type = CSSTokenTypeSwift.percentage.rawValue
         }
@@ -924,59 +955,9 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 //
 // POD in, POD out, so the C++ side needs no Swift type beyond the token struct
 // itself. `cssTokenizeSwiftAll8`/`16` are what CSSTokenizer's constructor drives
-// when `Scanner::Swift` is selected; `cssTokenizeSwiftSpan` and
-// `cssTokenizeSwiftNth` exist only for the benchmark and the validation test.
-
-/// Result of tokenizing a whole stylesheet.
-/// `@frozen` matters here, not just as documentation. WebCore compiles Swift with
-/// -enable-library-evolution, and without `@frozen` an exposed struct is resilient:
-/// the generated C++ class wraps a heap-allocated opaque box, so every value
-/// returned to C++ costs a malloc/free pair and its C++ sizeof() is meaningless.
-@frozen
-@_expose(Cxx)
-public struct CSSTokenizeResultSwift {
-    public var tokenCount: Int = 0
-    public var fold: UInt64 = 0
-    public init() {}
-}
-
-/// Folds only the token type, matching what webCoreCSSTokenizerBenchReal can
-/// fold from a CSSParserToken.
-///
-/// Do not "improve" this by folding every field. Measured on the standalone
-/// probe, folding all ten fields costs 90–164% on top of tokenization — it is
-/// the single largest term in the benchmark. Because it is identical work on
-/// both sides it does not bias the ratio in either direction, but it compresses
-/// every real difference toward 1.0 and made an earlier round of numbers look
-/// far better than the tokenizers actually are.
-@inline(always) private func foldToken(_ sum: UInt64, _ t: CSSTokenSwift) -> UInt64 {
-    sum &* 1000003 &+ UInt64(t.type)
-}
-
-/// TODO(unsafe): one of the island's four `Span(_unsafeCxxSpan:)` sites, and the
-/// blocker is filings register §27. `noescape` plus `__counted_by` does import a
-/// `std::span` as a `Span` — `CSSSwiftTokenSink.takeChunk` below relies on exactly
-/// that, at no cost — but only when the *callee* is C++. Here the callee is Swift, and
-/// an `@_expose(Cxx)` function's parameters have to be C++-representable, which `Span`
-/// is not, so the source text can only arrive as a `std::span`. The conversion is
-/// unchecked in two ways: the count is taken on trust, and the resulting `Span` carries
-/// no lifetime dependency on the `StringImpl` that owns the bytes. Both hold in fact —
-/// the span is `m_input.currentString()`, whose owner outlives the call — but neither is
-/// enforced. Only the tests reach this entry, so it costs a marker the shipping path
-/// does not.
-@_expose(Cxx)
-public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokenizeResultSwift {
-    let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
-    var tokenizer = CSSTokenizerSwift<UInt8>()
-    var result = CSSTokenizeResultSwift()
-    while true {
-        let t = tokenizer.nextToken(span)
-        if t.type == CSSTokenTypeSwift.endOfFile.rawValue { break }
-        result.tokenCount &+= 1
-        result.fold = foldToken(result.fold, t)
-    }
-    return result
-}
+// when `Scanner::Swift` is selected, and they are the only entry points: the two
+// test-only ones that used to sit here were deleted along with the C++ entries they
+// served, which took the island from four `Span(_unsafeCxxSpan:)` sites to two.
 
 /// Copies one of the island's tokens into the C++ boundary struct.
 ///
@@ -1052,8 +1033,8 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
 
 /// 8-bit input: the common case, a stylesheet that survives preprocessing as Latin-1.
 ///
-/// TODO(unsafe): one of the island's four `Span(_unsafeCxxSpan:)` sites, and one of the
-/// two on the production path. Blocker is filings register §27; `takeChunk` below is the
+/// TODO(unsafe): one of the island's two `Span(_unsafeCxxSpan:)` sites, both of them on
+/// the production path. Blocker is filings register §27; `takeChunk` below is the
 /// proof that the other direction is free. The count is taken on trust and the `Span`
 /// gets no lifetime dependency on the `StringImpl` that owns the bytes; both hold,
 /// because the span is `m_input.currentString()` and `CSSTokenizerInputStream` holds its
@@ -1078,27 +1059,4 @@ public func cssTokenizeSwiftAll16(
     _ sink: WebCore.CSSSwiftTokenSink
 ) -> Bool {
     tokenizeAll(unsafe Span<UInt16>(_unsafeCxxSpan: data), sink)
-}
-
-/// The `index`-th token, for the validation test to walk the stream alongside
-/// the real `CSSTokenizer`.
-///
-/// O(index): the island's state is a `~Copyable` Swift struct, which C++ cannot hold, so
-/// there is no way to expose a resumable cursor without either an opaque class handle
-/// (refcounting) or an output buffer C++ provides, which needs a `Span` parameter on an
-/// `@_expose(Cxx)` function — filings register §27 again, the same blocker in its
-/// mutable form. Quadratic is fine for a test over a few thousand tokens, and the shape
-/// of the workaround is itself worth recording.
-///
-/// TODO(unsafe): the fourth `Span(_unsafeCxxSpan:)` site, test-only, §27.
-@_expose(Cxx)
-public func cssTokenizeSwiftNth(_ data: WebCore.CSSTokenizerSpan8, _ index: Int) -> WebCore.CSSSwiftToken {
-    let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
-    var tokenizer = CSSTokenizerSwift<UInt8>()
-    var i = 0
-    while true {
-        let t = tokenizer.nextToken(span)
-        if i == index || t.type == CSSTokenTypeSwift.endOfFile.rawValue { return exported(t) }
-        i &+= 1
-    }
 }
