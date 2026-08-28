@@ -109,7 +109,15 @@ struct CSSSwiftToken {
 // See swift-cpp-interop-notes.md §67.
 class CSSSwiftTokenSink final : public ThreadSafeRefCounted<CSSSwiftTokenSink> {
 public:
+#if !defined(__swift__)
+    // Hidden from the importer deliberately. It returns +1 as a raw pointer, and every other
+    // SWIFT_SHARED_REFERENCE in WebKit pairs the annotation with SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT
+    // (Connection.h, APIObject.h and eight others) precisely so the importer knows what to do
+    // with a returned reference. Rather than assert a convention this factory does not follow,
+    // hide it: only CSSTokenizer creates the sink, Swift only ever receives one, and a
+    // constructor Swift cannot see is a question that cannot be got wrong.
     WEBCORE_EXPORT static CSSSwiftTokenSink* create(CSSTokenizer&, CSSParserObserverWrapper*);
+#endif
 
     // Materialises one chunk. `tokens` index `unescapedUnits` for values that
     // contained escapes, and index the input for everything else. Returns false on
