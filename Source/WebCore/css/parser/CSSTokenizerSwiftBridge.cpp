@@ -92,7 +92,11 @@ struct CSSTokenizerSwiftValidationResult {
     uint32_t actualType;
     uint64_t realTokenCount;
     uint64_t swiftTokenCount;
-    // 0 = types differ, 1 = value text differs, 2 = counts differ.
+    // What diverged, decoded by divergenceReason() in CSSTokenizerSwiftTest.cpp: 0 = the
+    // tokens compare unequal, 1 = block types, 2 = token counts, 3 = an observer token
+    // offset, 4 = the observer's end offset, 5 = a numeric field, 6 = the source was not
+    // valid UTF-8, 7 = a dimension's unit type, 8 = a dimension's value text, 9 = a
+    // dimension's non-unit prefix length. Add a case there too when adding a code.
     uint32_t reason;
 };
 
@@ -118,8 +122,10 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char*, size_t, bo
 // operator== covers more than it looks: the whitespace run length is compared, via
 // `case NonNewlineWhitespaceToken` in CSSParserToken.cpp. What it does not cover is
 // the numeric fields of NumberToken and PercentageToken -- for those it compares
-// originalText() and stops -- so those are compared here. What still goes uncompared
-// is m_nonUnitPrefixLength, and m_unit for a DimensionToken that has one.
+// originalText() and stops -- and, for a DimensionToken, anything but originalText()
+// whenever the *left* operand has a non-unit prefix. Both holes are filled below:
+// after this function returns nullopt, every field a DimensionToken carries has been
+// compared, m_nonUnitPrefixLength included, and none of it needed a new accessor.
 struct TokenDivergence {
     uint32_t reason;
     uint32_t expected;
@@ -150,6 +156,28 @@ static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expect
             agrees = expected.numericSign() == actual.numericSign();
         if (!agrees)
             return TokenDivergence { 5, static_cast<uint32_t>(expected.numericValueType()), static_cast<uint32_t>(actual.numericValueType()) };
+    }
+
+    // A DimensionToken's unit. operator== takes its `m_nonUnitPrefixLength == 0` branch off
+    // *this*, so with a prefix it falls through to `originalText()` and never compares
+    // `unitString()` or `m_unit` -- exactly the field a bad change could corrupt with every test
+    // still passing.
+    //
+    // value() plus unitString() together pin `m_nonUnitPrefixLength` too, since unitString() is
+    // value().substring(m_nonUnitPrefixLength) -- no new accessor needed. value() alone also
+    // catches convertToDimensionWithUnit's merge rule: `10px` keeps both parts in one view;
+    // `1\70x` (escaped) does not, so value() differs even though the unit type agrees.
+    //
+    // Still uncompared: a value whose text matches but whose backing StringImpl chose the other
+    // character width.
+    if (expected.type() == DimensionToken) {
+        if (expected.unitType() != actual.unitType())
+            return TokenDivergence { 7, static_cast<uint32_t>(expected.unitType()), static_cast<uint32_t>(actual.unitType()) };
+        if (expected.value() != actual.value())
+            return TokenDivergence { 8, expected.value().length(), actual.value().length() };
+        // value() agreed, so this is exactly a m_nonUnitPrefixLength divergence.
+        if (expected.unitString() != actual.unitString())
+            return TokenDivergence { 9, expected.value().length() - expected.unitString().length(), actual.value().length() - actual.unitString().length() };
     }
     return std::nullopt;
 }
