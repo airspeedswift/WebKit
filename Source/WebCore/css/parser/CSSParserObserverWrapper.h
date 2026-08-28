@@ -88,7 +88,13 @@ private:
 
     CSSParserObserver& m_observer;
     Vector<unsigned> m_tokenOffsets;
-    CSSParserToken* m_firstParserToken;
+    // Set by finalizeConstruction, and every accessor subtracts it from a token pointer to
+    // get an index into m_tokenOffsets. Initialised because an uninitialised raw pointer
+    // feeding a container index is the wrong shape even where it is unreachable: a caller
+    // that reads an offset before construction finished now gets a deterministic
+    // out-of-range index that Vector::at rejects, rather than one derived from stack
+    // contents.
+    CSSParserToken* m_firstParserToken { nullptr };
 
     struct CommentPosition {
         unsigned startOffset;

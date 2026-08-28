@@ -103,8 +103,22 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapp
     if (constructionSuccessPtr)
         *constructionSuccessPtr = true;
 
-    if (string.isEmpty())
+    // An empty sheet still has to finalise the observer wrapper, exactly as any other
+    // input that yields no tokens does. Returning before that left m_tokenOffsets empty
+    // and m_firstParserToken uninitialised, so endOffset() -- which computes
+    // m_tokenOffsets[range.end() - m_firstParserToken] -- indexed by whatever was on the
+    // stack. Non-empty zero-token inputs like "/* c */" or " " were fine, because they
+    // reach the loop below and fall out of it; only the truly empty string skipped this.
+    // No production caller reaches it today, since startOffset/endOffset run only once a
+    // rule has been found, but it is reachable from the validation bridge and the shape is
+    // wrong regardless.
+    if (string.isEmpty()) {
+        if (wrapper) {
+            wrapper->addToken(0);
+            wrapper->finalizeConstruction(m_tokens.begin());
+        }
         return;
+    }
 
     // The Swift scanner, when selected and when it accepts this input. Falls through
     // to the C++ state machine otherwise, including on allocation failure, so this
