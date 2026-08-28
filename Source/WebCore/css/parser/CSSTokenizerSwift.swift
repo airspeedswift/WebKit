@@ -981,8 +981,10 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 /// the cursor and block stack never need a rewind-and-grow protocol when a buffer fills
 /// up, and there is no fixed nesting cap.
 ///
-/// Returns false if the sink could not take a chunk, which means allocation failure; the
-/// caller then falls back to the C++ tokenizer.
+/// Returns false if the sink could not take a chunk, which means C++ could not allocate
+/// `m_tokens`. There is nothing to fall back to — the C++ scanner reserves the same size
+/// into the same vector, so it fails on the identical allocation — so the caller reports
+/// construction failure instead.
 @inline(always)
 private func tokenizeAll<Unit: CSSCodeUnit>(
     _ span: Span<Unit>,
@@ -1018,11 +1020,28 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
 /// 8-bit input: the common case, a stylesheet that survives preprocessing as Latin-1.
 ///
 /// TODO(unsafe): one of this file's two `Span(_unsafeCxxSpan:)` sites, both on the
-/// production path (rdar://186723514). `takeChunk` below shows the other direction is
-/// safe. The count is taken on trust and the `Span` gets no lifetime dependency on the
-/// `StringImpl` that owns the bytes; both hold in fact — the span is
-/// `m_input.currentString()`, and `CSSTokenizerInputStream` holds its own reference to
-/// that string for longer than this call — but neither is enforced by the compiler.
+/// production path (rdar://186723514). `takeChunk` below shows the other direction is safe.
+///
+/// Two things are on trust: the count, and the lifetime. The lifetime is worth stating
+/// precisely, because the initializer is `@lifetime(borrow span)` so there *is* a
+/// dependency — but it is on the imported `std::span` value, a pointer and a count with no
+/// relation to the `StringImpl` that owns the bytes, and `_cxxOverrideLifetime` inside the
+/// initializer makes it vacuous. Nothing ties the borrow to the owner, which is not the same
+/// as there being no dependency at all.
+///
+/// Both hold in fact: the span is `m_input.currentString()`, and
+/// `CSSTokenizerInputStream::m_string` is a `RefPtr<StringImpl>` — a strong reference — that
+/// outlives this call. That `RefPtr` is the whole lifetime argument and nothing asserts it;
+/// narrowing it to a `StringView` or a raw span to save eight bytes would silently invalidate
+/// this comment.
+///
+/// This span also *aliases* memory C++ still reaches, and C++ is re-entered inside the borrow
+/// via `takeChunk`. That is sound only because nothing on that path writes it: `takeChunk`
+/// touches `m_input` only through the `const` `rangeAt`, `StringImpl` character storage is
+/// immutable and never relocated, and growing `m_stringPool` moves eight-byte `RefPtr`s rather
+/// than character data. A future edit that preprocessed or case-folded the input in place from
+/// inside `takeChunk` would break it, and the compiler would not object — the `Span` arrived
+/// through `@_unsafeNonescapableResult`, so it has been told to stop reasoning about this memory.
 @_expose(Cxx)
 public func cssTokenizeSwiftAll8(
     _ data: WebCore.CSSTokenizerSpan8,
