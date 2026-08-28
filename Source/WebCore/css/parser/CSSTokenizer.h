@@ -42,10 +42,13 @@
 //
 // Off by default: the Swift scanner is validated against the C++ one and matches it
 // on everything measured (notes §11i–§11m), but the two are deliberately kept side
-// by side for now rather than one replacing the other. Build with
-// -DUSE_SWIFT_CSS_TOKENIZER=1 to select it, which is also how to run the layout
-// tests against it. If this outlives the experiment it should become a real USE()
-// macro rather than a local one.
+// by side for now rather than one replacing the other. Select it by building WebCore
+// with WK_USE_SWIFT_CSS_TOKENIZER=YES, which is where the choice lives
+// (Source/WebCore/Configurations/WebCore.xcconfig) and is also how to run the layout
+// tests against it. Confirm it took effect with
+// webCoreCSSTokenizerDefaultScannerIsSwift() rather than assuming, because every test
+// here names its scanner explicitly and so passes identically either way. If this
+// outlives the experiment it should become a real USE() macro rather than a local one.
 #if !defined(USE_SWIFT_CSS_TOKENIZER)
 #define USE_SWIFT_CSS_TOKENIZER 0
 #endif
