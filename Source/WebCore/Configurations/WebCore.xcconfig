@@ -33,8 +33,23 @@ ENABLE_LLVM_PROFILE_GENERATION_DEFINES_YES = ENABLE_LLVM_PROFILE_GENERATION=1;
 WK_PGO_GEN_FLAGS = $(WK_PGO_GEN_FLAGS_$(ENABLE_LLVM_PROFILE_GENERATION));
 WK_PGO_GEN_FLAGS_YES = -fprofile-generate;
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT));
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES);
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
+
+// Selects the Swift CSS tokenizer island (CSSTokenizerSwift.swift) as the scanner the
+// CSSTokenizer constructors use. Off by default: both scanners are compiled in either
+// way, and which one ships is a separate decision from whether the island is correct.
+//
+// This exists so the choice has one reproducible home. The macro was previously defaulted
+// in CSSTokenizer.h and set by no build file at all, which meant every measurement and
+// every layout-test pass that did not hand-edit the header was running the C++ scanner --
+// and because every in-tree test names the scanner explicitly, the whole suite passed
+// identically with the island switched off for the entire product. Build with
+// WK_USE_SWIFT_CSS_TOKENIZER=YES to select it, and confirm it took effect with
+// webCoreCSSTokenizerDefaultScannerIsSwift() rather than assuming: an ignored flag must
+// not be able to masquerade as a passing run.
+WK_USE_SWIFT_CSS_TOKENIZER_DEFINES = $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES_$(WK_USE_SWIFT_CSS_TOKENIZER));
+WK_USE_SWIFT_CSS_TOKENIZER_DEFINES_YES = USE_SWIFT_CSS_TOKENIZER=1;
 
 WK_OPTIMIZATION_PROFILE_FILE = $(BUILT_PRODUCTS_DIR)/DerivedSources/WebCore/Profiling/$(arch).profdata;
 WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER = $(WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER_$(USE_INTERNAL_SDK));
