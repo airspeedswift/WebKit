@@ -188,6 +188,70 @@ enum SwiftTokenFlag : uint8_t {
     SwiftFlagUnescaped = 1 << 4,
 };
 
+// The island reports a token's type and block type as bytes, and
+// appendTokensFromSwiftIsland casts them straight to the C++ enums. Nothing in either
+// language checks that the two numberings agree -- CSSTokenTypeSwift and
+// CSSBlockTypeSwift in CSSTokenizerSwift.swift are separate declarations, and neither is
+// visible to C++ -- so a reorder or an insertion in CSSParserTokenType, an ordinary
+// WebCore change, would silently retype every token above the insertion point.
+//
+// These pin the C++ side. They cannot see the Swift enum, so they do not prove the two
+// agree; what they do is make any change to this numbering fail to build, so that
+// whoever makes it has to go and update the Swift mirror. That is the whole intent, and
+// it is why the token names are spelled out one per line rather than counted.
+static_assert(numberOfCSSParserTokenTypes == 33, "CSSTokenTypeSwift in CSSTokenizerSwift.swift mirrors this enum case for case; add the new type there too, then update this count");
+static_assert(static_cast<uint8_t>(IdentToken) == 0);
+static_assert(static_cast<uint8_t>(FunctionToken) == 1);
+static_assert(static_cast<uint8_t>(AtKeywordToken) == 2);
+static_assert(static_cast<uint8_t>(HashToken) == 3);
+static_assert(static_cast<uint8_t>(UrlToken) == 4);
+static_assert(static_cast<uint8_t>(BadUrlToken) == 5);
+static_assert(static_cast<uint8_t>(DelimiterToken) == 6);
+static_assert(static_cast<uint8_t>(NumberToken) == 7);
+static_assert(static_cast<uint8_t>(PercentageToken) == 8);
+static_assert(static_cast<uint8_t>(DimensionToken) == 9);
+static_assert(static_cast<uint8_t>(IncludeMatchToken) == 10);
+static_assert(static_cast<uint8_t>(DashMatchToken) == 11);
+static_assert(static_cast<uint8_t>(PrefixMatchToken) == 12);
+static_assert(static_cast<uint8_t>(SuffixMatchToken) == 13);
+static_assert(static_cast<uint8_t>(SubstringMatchToken) == 14);
+static_assert(static_cast<uint8_t>(ColumnToken) == 15);
+static_assert(static_cast<uint8_t>(NonNewlineWhitespaceToken) == 16);
+static_assert(static_cast<uint8_t>(NewlineToken) == 17);
+static_assert(static_cast<uint8_t>(CDOToken) == 18);
+static_assert(static_cast<uint8_t>(CDCToken) == 19);
+static_assert(static_cast<uint8_t>(ColonToken) == 20);
+static_assert(static_cast<uint8_t>(SemicolonToken) == 21);
+static_assert(static_cast<uint8_t>(CommaToken) == 22);
+static_assert(static_cast<uint8_t>(LeftParenthesisToken) == 23);
+static_assert(static_cast<uint8_t>(RightParenthesisToken) == 24);
+static_assert(static_cast<uint8_t>(LeftBracketToken) == 25);
+static_assert(static_cast<uint8_t>(RightBracketToken) == 26);
+static_assert(static_cast<uint8_t>(LeftBraceToken) == 27);
+static_assert(static_cast<uint8_t>(RightBraceToken) == 28);
+static_assert(static_cast<uint8_t>(StringToken) == 29);
+static_assert(static_cast<uint8_t>(BadStringToken) == 30);
+static_assert(static_cast<uint8_t>(EOFToken) == 31);
+static_assert(static_cast<uint8_t>(CommentToken) == 32);
+
+// Same, for CSSBlockTypeSwift.
+static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == 0);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == 1);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
+
+// The shared boundary struct. Swift imports this definition rather than restating it, so
+// the two cannot disagree on the field layout; what is worth pinning is that it stays a
+// trivially default constructible aggregate of exactly this size, because both
+// properties are load-bearing and neither is obvious from the declaration. Losing
+// trivial default construction makes WTF's Vector zero the whole buffer before Swift
+// overwrites it, which on a large stylesheet is tens of megabytes of dead stores; growing
+// the struct costs chunk cache residency, and shrinking it to 24 bytes was measured and
+// refuted (notes §11p).
+static_assert(sizeof(CSSSwiftToken) == 32);
+static_assert(alignof(CSSSwiftToken) == 4);
+static_assert(std::is_trivially_default_constructible_v<CSSSwiftToken>);
+static_assert(std::is_trivially_copyable_v<CSSSwiftToken>);
+
 static std::atomic<unsigned> s_swiftIslandDeclineCount;
 
 unsigned CSSTokenizer::swiftIslandDeclineCountForTesting()
