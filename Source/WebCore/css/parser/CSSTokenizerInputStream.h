@@ -64,9 +64,8 @@ public:
 
     void advance(unsigned offset = 1) { m_offset += offset; }
 
-    // Repositions the cursor. Used by the Swift tokenizer path to re-tokenize a
-    // single token whose value contains escapes, with the C++ code below, rather
-    // than duplicating the unescaping rules.
+    // Repositions the cursor. Used when the Swift tokenizer path can't finish and
+    // the C++ scanner below restarts the input from here.
     void seek(size_t offset) { m_offset = offset; }
 
     void pushBack(char16_t cc)

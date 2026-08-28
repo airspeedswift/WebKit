@@ -4,16 +4,23 @@
 // compile on WTF::KeyValuePair instantiated over them. See CSSTokenizerSwiftTypes.h.
 public import WebCore_Private.CSSTokenizerSwiftTypes
 
-// Swift tokenizer for the CSS parser: a zero-`unsafe` port of CSSTokenizer.cpp
-// and CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
+// Swift tokenizer for the CSS parser: a port of CSSTokenizer.cpp and
+// CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
 //
 // Input is a `Span` over the preprocessed string, which C++ already owns and
 // hands out as a contiguous span. Output is a POD token returned by value,
 // carrying the value's *offsets* — `CSSParserToken` already stores a view
 // into the input, so this loses nothing. Numbers are not converted here, so
 // C++ keeps calling charactersToDouble and double rounding stays
-// bit-identical. Values containing escapes are unescaped here into a
-// caller-provided buffer, so nothing has to be re-tokenized in C++.
+// bit-identical. Values containing escapes are unescaped into a buffer this
+// file owns and hands to C++ alongside each chunk of tokens, so nothing has
+// to be re-tokenized in C++.
+//
+// The interior contains no `unsafe` code. Four sites use
+// `Span(_unsafeCxxSpan:)`, all of them entry points receiving the source
+// text from C++: two on the production path and two for tests. There is no
+// safe way yet to import a `std::span` where the callee is Swift
+// (rdar://186723514).
 //
 // Validated token-by-token against the real CSSTokenizer —
 // CSSTokenizerSwiftBridge.cpp and CSSTokenizerSwiftTest.cpp.
@@ -936,11 +943,16 @@ public struct CSSTokenizeResultSwift {
     sum &* 1000003 &+ UInt64(t.type)
 }
 
-/// TODO(unsafe): `Span(_unsafeCxxSpan:)` is the only `unsafe` here, and it is at the
-/// boundary rather than in the interior. It exists because there is no safe way to
-/// receive a `std::span` from C++: `WTF::BorrowedBytes` is the safe pattern for *bytes*
-/// but has no span-shaped equivalent (rdar://186723514). Shared with
-/// HTMLTokenizerSwift.swift, which has the identical line.
+/// TODO(unsafe): one of this file's four `Span(_unsafeCxxSpan:)` sites (rdar://186723514).
+/// `noescape` plus `__counted_by` does import a `std::span` as a `Span` —
+/// `CSSSwiftTokenSink.takeChunk` below relies on exactly that, at no cost — but only when
+/// the *callee* is C++. Here the callee is Swift, and an `@_expose(Cxx)` function's
+/// parameters have to be C++-representable, which `Span` is not, so the source text can
+/// only arrive as a `std::span`. The conversion is unchecked in two ways: the count is
+/// taken on trust, and the resulting `Span` carries no lifetime dependency on the
+/// `StringImpl` that owns the bytes. Both hold in fact — the span is
+/// `m_input.currentString()`, whose owner outlives the call — but neither is enforced.
+/// Only the tests reach this entry, so it costs a marker the shipping path does not.
 @_expose(Cxx)
 public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokenizeResultSwift {
     let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
@@ -957,7 +969,7 @@ public func cssTokenizeSwiftSpan(_ data: WebCore.CSSTokenizerSpan8) -> CSSTokeni
 
 /// Copies one of this file's tokens into the C++ boundary struct.
 ///
-/// The boundary type is defined in C++ (CSSTokenizerInputStream.h) rather than
+/// The boundary type is defined in C++ (CSSTokenizerSwiftTypes.h) rather than
 /// here, because WebCore compiles Swift with -enable-library-evolution: a Swift
 /// struct exposed with @_expose(Cxx) is resilient, so the generated C++ class is
 /// a heap-allocated opaque box with no default constructor and a sizeof() that is
@@ -1027,9 +1039,12 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
 
 /// 8-bit input: the common case, a stylesheet that survives preprocessing as Latin-1.
 ///
-/// TODO(unsafe): `Span(_unsafeCxxSpan:)` is the only `unsafe` here. This function's
-/// parameters have to be C++-representable, and Swift's `Span` is not, so the source
-/// text can only arrive as a `std::span` (rdar://186723514).
+/// TODO(unsafe): one of this file's four `Span(_unsafeCxxSpan:)` sites, and one of the two
+/// on the production path (rdar://186723514). `takeChunk` below shows the other direction
+/// is safe. The count is taken on trust and the `Span` gets no lifetime dependency on the
+/// `StringImpl` that owns the bytes; both hold in fact — the span is
+/// `m_input.currentString()`, and `CSSTokenizerInputStream` holds its own reference to that
+/// string for longer than this call — but neither is enforced by the compiler.
 @_expose(Cxx)
 public func cssTokenizeSwiftAll8(
     _ data: WebCore.CSSTokenizerSpan8,
@@ -1041,6 +1056,9 @@ public func cssTokenizeSwiftAll8(
 /// 16-bit input. The C++ tokenizer reads every character through
 /// `StringImpl::operator[]`, which branches on `is8Bit()` per read; here the two widths
 /// are separate specializations of one implementation, so neither pays for the other.
+///
+/// TODO(unsafe): the second production `Span(_unsafeCxxSpan:)` site, same cause as
+/// `cssTokenizeSwiftAll8` above (rdar://186723514).
 @_expose(Cxx)
 public func cssTokenizeSwiftAll16(
     _ data: WebCore.CSSTokenizerSpan16,
@@ -1052,11 +1070,13 @@ public func cssTokenizeSwiftAll16(
 /// The `index`-th token, for the validation test to walk the stream alongside
 /// the real `CSSTokenizer`.
 ///
-/// O(index): this type's state is a `~Copyable` Swift struct, which C++ cannot
-/// hold, so there is no way to expose a resumable cursor without either an
-/// opaque class handle (refcounting) or a caller-provided output buffer (which
-/// needs the `MutableBorrowedBytes` that does not exist). Quadratic is fine for
+/// O(index): this type's state is a `~Copyable` Swift struct, which C++ cannot hold, so
+/// there is no way to expose a resumable cursor without either an opaque class handle
+/// (refcounting) or an output buffer C++ provides — which needs a `Span` parameter on an
+/// `@_expose(Cxx)` function, the same std::span limitation as above. Quadratic is fine for
 /// a test over a few thousand tokens.
+///
+/// TODO(unsafe): the fourth `Span(_unsafeCxxSpan:)` site, test-only (rdar://186723514).
 @_expose(Cxx)
 public func cssTokenizeSwiftNth(_ data: WebCore.CSSTokenizerSpan8, _ index: Int) -> WebCore.CSSSwiftToken {
     let span = unsafe Span<UInt8>(_unsafeCxxSpan: data)
