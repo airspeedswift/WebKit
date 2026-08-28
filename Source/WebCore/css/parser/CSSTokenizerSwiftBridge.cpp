@@ -113,6 +113,7 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(const char*, size_t);
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char*, size_t);
 WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void);
+WEBCORE_EXPORT void webCoreCSSTokenizerSetForceSwiftIslandDecline(bool);
 WEBCORE_EXPORT bool webCoreCSSTokenizerDefaultScannerIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 
@@ -413,6 +414,14 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObser
 WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void)
 {
     return CSSTokenizer::swiftIslandDeclineCountForTesting();
+}
+
+// Makes the Swift path decline every input, after it has built a chunk, so a test can
+// reach the fallback. Production declines only when an allocation fails, which a test
+// cannot provoke, so without this the fallback is code nothing executes.
+WEBCORE_EXPORT void webCoreCSSTokenizerSetForceSwiftIslandDecline(bool force)
+{
+    CSSTokenizer::setForceSwiftIslandDeclineForTesting(force);
 }
 
 // Reports the compile-time choice, so a test can confirm that

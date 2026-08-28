@@ -96,6 +96,11 @@ public:
     // silently declined, so tests assert on this.
     WEBCORE_EXPORT static unsigned swiftIslandDeclineCountForTesting();
 
+    // Makes the Swift scanner decline every input, after it has built a chunk, so a
+    // test can reach the fallback. Nothing else does: production declines only on
+    // allocation failure.
+    WEBCORE_EXPORT static void setForceSwiftIslandDeclineForTesting(bool);
+
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
