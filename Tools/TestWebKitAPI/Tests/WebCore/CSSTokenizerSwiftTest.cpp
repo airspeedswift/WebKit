@@ -65,6 +65,7 @@ CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(cons
 unsigned webCoreCSSTokenizerSwiftDeclineCount(void);
 void webCoreCSSTokenizerSetForceSwiftIslandDecline(bool);
 bool webCoreCSSTokenizerTryCreateSucceeds(const char*, size_t);
+bool webCoreCSSTokenizerDefaultScannerIsSwift(void);
 
 } // extern "C"
 
@@ -80,6 +81,9 @@ static const char* divergenceReason(uint32_t reason)
     case 4: return "the observer's end offset differs";
     case 5: return "the numeric value, its type or its sign differs";
     case 6: return "the source was not valid UTF-8";
+    case 7: return "the dimension's unit type differs";
+    case 8: return "the dimension's value text differs (expected/actual are its lengths)";
+    case 9: return "the dimension's non-unit prefix length differs";
     default: return "unknown";
     }
 }
@@ -146,6 +150,43 @@ TEST(CSSTokenizerSwift, Numbers)
 {
     EXPECT_PATHS_AGREE("n { a: 1 23 4.56 -7.8e-9 +0.5 .25 1e3 1E+3 10px 50% 0 5e3px 1e 1.e3 }"_s);
     EXPECT_PATHS_AGREE("n { a: 00000000000000000001px 1.00000000000000000001px }"_s);
+}
+
+// A DimensionToken carries three things beyond its number: a unit type, a value view
+// whose extent depends on whether convertToDimensionWithUnit could merge the number and
+// the unit into one view, and the non-unit prefix length that records the merge.
+// CSSParserToken::operator== compares the unit only when its own prefix length is zero;
+// with a prefix it compares originalText() and stops, so before compareTokens grew its
+// dimension checks a wrong unit or a wrong prefix on a merged token compared equal.
+// These cases sit on both sides of the merge.
+TEST(CSSTokenizerSwift, Dimensions)
+{
+    // Number and unit adjacent in the input, so mergeIfAdjacent joins them: value() is
+    // "10px" and the non-unit prefix length is 2.
+    EXPECT_PATHS_AGREE("n { a: 10px }"_s);
+    // The same token with the unit written through an escape -- `\70` is 'p'. An
+    // unescaped value lives in the tokenizer's string pool rather than in the input, so
+    // the addresses are not adjacent, the merge cannot fire, value() is just "px" and the
+    // prefix length is 0. Same unit type, different value view: exactly the pair the
+    // oracle could not distinguish.
+    EXPECT_PATHS_AGREE("n { a: 1\\70x }"_s);
+    // The merge is capped at a 16-character number, so 15 digits merge (a prefix length of
+    // 15, the largest the 4-bit field holds) and 16 do not.
+    EXPECT_PATHS_AGREE("n { a: 123456789012345px 1234567890123456px }"_s);
+    EXPECT_PATHS_AGREE("n { a: 1e3px 0px -1.5E-3em +2.5Q .5s 0.0e0ms }"_s);
+    // Unit matching is case-insensitive (cssPrimitiveValueUnitFromTrie lowercases as it
+    // walks), so these are all CSSUnitType::Px while their unit text differs -- unitType()
+    // alone would not tell them apart.
+    EXPECT_PATHS_AGREE("n { a: 10PX 10Px 10pX }"_s);
+    // Not a CSS unit at all: unitType() is CSSUnitType::Unknown on both paths, so the unit
+    // text is the only thing separating one unknown dimension from another. The second
+    // reaches an unknown unit through an escape (`\7a` is 'z').
+    EXPECT_PATHS_AGREE("n { a: 10zz 10q\\7a }"_s);
+    // The unit is an ident, so it may begin with a dash and may carry escapes anywhere.
+    EXPECT_PATHS_AGREE("n { a: 5-px 5\\-px 5p\\78 }"_s);
+    // The same merge decision at 16-bit width, where mergeIfAdjacent takes its span16
+    // branch.
+    EXPECT_PATHS_AGREE_UTF8(".\xe6\xa0\xb9 { a: 10px 1\\70x 10zz }", 16);
 }
 
 TEST(CSSTokenizerSwift, StringsAndUrls)
