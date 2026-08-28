@@ -35,6 +35,7 @@
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
 #include "WebCoreSwift-Generated.h"
+#include <atomic>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/dtoa.h>
 #include <wtf/text/StringBuilder.h>
@@ -108,16 +109,25 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapp
     // The Swift scanner, when selected and when it accepts this input. Falls through
     // to the C++ state machine otherwise, including on allocation failure, so this
     // cannot make a previously-working parse fail. Everything the island appended has
-    // to be undone first: m_tokens, the cursor, and the strings a token with escapes
+    // to be undone first: m_tokens, the cursor, the strings a token with escapes
     // registered in the pool -- but only back to where the island started, because
     // preprocessString may itself have put the input string there and m_input holds a
-    // view into it.
+    // view into it -- and the offsets it fed the inspector's observer wrapper.
+    //
+    // m_tokens is cleared rather than shrunk: shrink() keeps the capacity the island
+    // reserved, and the retry below calls tryReserveInitialCapacity, which requires an
+    // inline-capacity buffer. It asserts that in debug and in release overwrites
+    // m_buffer, leaking what the island allocated (Vector.h's allocateBuffer carries a
+    // FIXME for exactly this).
     if (scanner == Scanner::Swift) {
         size_t stringPoolSizeBeforeIsland = m_stringPool.size();
+        auto observerPositionBeforeIsland = wrapper ? wrapper->position() : CSSParserObserverWrapper::Position { };
         if (tokenizeWithSwiftIsland(wrapper, constructionSuccessPtr))
             return;
-        m_tokens.shrink(0);
+        m_tokens.clear();
         m_stringPool.shrink(stringPoolSizeBeforeIsland);
+        if (wrapper)
+            wrapper->rewindTo(observerPositionBeforeIsland);
         m_input.seek(0);
     }
 
@@ -178,11 +188,23 @@ enum SwiftTokenFlag : uint8_t {
     SwiftFlagUnescaped = 1 << 4,
 };
 
-static unsigned s_swiftIslandDeclineCount;
+static std::atomic<unsigned> s_swiftIslandDeclineCount;
 
 unsigned CSSTokenizer::swiftIslandDeclineCountForTesting()
 {
-    return s_swiftIslandDeclineCount;
+    return s_swiftIslandDeclineCount.load(std::memory_order_relaxed);
+}
+
+// Test-only. The production path declines only when an allocation fails, which a test
+// cannot provoke, so the fallback's undo -- m_tokens, the string pool, the cursor and
+// the observer wrapper -- would otherwise be code no test executes. Read once per
+// chunk rather than once per token, and after the chunk has been appended, so that
+// setting it exercises a full undo without putting anything in the hot loop.
+static std::atomic<bool> s_forceSwiftIslandDeclineForTesting;
+
+void CSSTokenizer::setForceSwiftIslandDeclineForTesting(bool force)
+{
+    s_forceSwiftIslandDeclineForTesting.store(force, std::memory_order_relaxed);
 }
 
 // Counts declines, so a test comparing the two paths cannot pass by accident
@@ -191,7 +213,7 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bo
 {
     if (tokenizeWithSwiftIslandOrDecline(wrapper, constructionSuccessPtr))
         return true;
-    ++s_swiftIslandDeclineCount;
+    s_swiftIslandDeclineCount.fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
@@ -336,7 +358,7 @@ bool CSSTokenizer::appendTokensFromSwiftIsland(std::span<const CSSSwiftToken> po
             observerOffset = pod.end;
         }
     }
-    return true;
+    return !s_forceSwiftIslandDeclineForTesting.load(std::memory_order_relaxed);
 }
 
 unsigned CSSTokenizer::tokenCount()
