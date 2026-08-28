@@ -35,7 +35,21 @@
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
 #include "CSSTokenizerSwiftTypes.h"
+// FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops
+// handing C++ the Objective-C spelling. It treats C++11 as implying support for the
+// Objective-C fixed-enum forward declaration, so the C++ arm expands
+// `typedef SWIFT_ENUM(uint8_t, CSSTokenTypeSwift, closed) {` to
+// `enum CSSTokenTypeSwift : uint8_t CSSTokenTypeSwift;` -- a non-defining declaration of an
+// enumeration with a fixed underlying type, which only Objective-C accepts. Clang warns
+// -Welaborated-enum-base and WebCore's -Werror makes it fatal. `CF_ENUM` has the identical
+// bug, and JSC_CF_ENUM (JavaScriptCore's API/JSBase.h) already works around it the way the
+// generated header should: branch on `__cplusplus` and emit the plain `enum X : T { ... }`.
+// Recorded as a to-file item, filings register §26.
+//
+// Suppressing it here is what lets the three enums below be declared *once*, in Swift.
+IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
 #include "WebCoreSwift-Generated.h"
+IGNORE_CLANG_WARNINGS_END
 #include <atomic>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/dtoa.h>
@@ -192,65 +206,59 @@ CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
 // is the materialisation the island deliberately leaves in C++ — StringViews over
 // the input, double conversion, and the escaped-value string pool.
 
-// Must match CSSTokenFlag in CSSTokenizerSwift.swift.
-enum SwiftTokenFlag : uint8_t {
-    SwiftFlagNonInteger = 1 << 0,
-    SwiftFlagPlusSign = 1 << 1,
-    SwiftFlagMinusSign = 1 << 2,
-    SwiftFlagHashTokenId = 1 << 3,
-    SwiftFlagUnescaped = 1 << 4,
-};
-
 // The island reports a token's type and block type as bytes, and
-// appendTokensFromSwiftIsland casts them straight to the C++ enums. Nothing in either
-// language checks that the two numberings agree -- CSSTokenTypeSwift and
-// CSSBlockTypeSwift in CSSTokenizerSwift.swift are separate declarations, and neither is
-// visible to C++ -- so a reorder or an insertion in CSSParserTokenType, an ordinary
-// WebCore change, would silently retype every token above the insertion point.
+// appendTokensFromSwiftIsland casts them straight to the C++ enums, so the two
+// numberings have to agree: a reorder or an insertion in CSSParserTokenType, an ordinary
+// WebCore change, would otherwise silently retype every token above the insertion point.
 //
-// These pin the C++ side. They cannot see the Swift enum, so they do not prove the two
-// agree; what they do is make any change to this numbering fail to build, so that
-// whoever makes it has to go and update the Swift mirror. That is the whole intent, and
-// it is why the token names are spelled out one per line rather than counted.
+// These now *prove* it. CSSTokenTypeSwift and CSSBlockTypeSwift are `@c` (SE-0495), so
+// they are emitted into WebCoreSwift-Generated.h as uint8_t-backed C enums and each
+// assert below names the Swift case directly. Until that attribute went on, C++ could
+// not see the Swift enum at all and these could only pin the C++ side -- making a change
+// to this numbering fail to build, in the hope that whoever made it then went and updated
+// the Swift mirror by hand. C++ stays the original of the pair, since CSSParserTokenType
+// is what the rest of the CSS parser uses; Swift is the mirror. The names are spelled out
+// one per line rather than counted because that is what makes the mirroring checkable.
 static_assert(numberOfCSSParserTokenTypes == 33, "CSSTokenTypeSwift in CSSTokenizerSwift.swift mirrors this enum case for case; add the new type there too, then update this count");
-static_assert(static_cast<uint8_t>(IdentToken) == 0);
-static_assert(static_cast<uint8_t>(FunctionToken) == 1);
-static_assert(static_cast<uint8_t>(AtKeywordToken) == 2);
-static_assert(static_cast<uint8_t>(HashToken) == 3);
-static_assert(static_cast<uint8_t>(UrlToken) == 4);
-static_assert(static_cast<uint8_t>(BadUrlToken) == 5);
-static_assert(static_cast<uint8_t>(DelimiterToken) == 6);
-static_assert(static_cast<uint8_t>(NumberToken) == 7);
-static_assert(static_cast<uint8_t>(PercentageToken) == 8);
-static_assert(static_cast<uint8_t>(DimensionToken) == 9);
-static_assert(static_cast<uint8_t>(IncludeMatchToken) == 10);
-static_assert(static_cast<uint8_t>(DashMatchToken) == 11);
-static_assert(static_cast<uint8_t>(PrefixMatchToken) == 12);
-static_assert(static_cast<uint8_t>(SuffixMatchToken) == 13);
-static_assert(static_cast<uint8_t>(SubstringMatchToken) == 14);
-static_assert(static_cast<uint8_t>(ColumnToken) == 15);
-static_assert(static_cast<uint8_t>(NonNewlineWhitespaceToken) == 16);
-static_assert(static_cast<uint8_t>(NewlineToken) == 17);
-static_assert(static_cast<uint8_t>(CDOToken) == 18);
-static_assert(static_cast<uint8_t>(CDCToken) == 19);
-static_assert(static_cast<uint8_t>(ColonToken) == 20);
-static_assert(static_cast<uint8_t>(SemicolonToken) == 21);
-static_assert(static_cast<uint8_t>(CommaToken) == 22);
-static_assert(static_cast<uint8_t>(LeftParenthesisToken) == 23);
-static_assert(static_cast<uint8_t>(RightParenthesisToken) == 24);
-static_assert(static_cast<uint8_t>(LeftBracketToken) == 25);
-static_assert(static_cast<uint8_t>(RightBracketToken) == 26);
-static_assert(static_cast<uint8_t>(LeftBraceToken) == 27);
-static_assert(static_cast<uint8_t>(RightBraceToken) == 28);
-static_assert(static_cast<uint8_t>(StringToken) == 29);
-static_assert(static_cast<uint8_t>(BadStringToken) == 30);
-static_assert(static_cast<uint8_t>(EOFToken) == 31);
-static_assert(static_cast<uint8_t>(CommentToken) == 32);
+static_assert(static_cast<uint8_t>(IdentToken) == CSSTokenTypeSwiftIdent);
+static_assert(static_cast<uint8_t>(FunctionToken) == CSSTokenTypeSwiftFunction);
+static_assert(static_cast<uint8_t>(AtKeywordToken) == CSSTokenTypeSwiftAtKeyword);
+static_assert(static_cast<uint8_t>(HashToken) == CSSTokenTypeSwiftHash);
+static_assert(static_cast<uint8_t>(UrlToken) == CSSTokenTypeSwiftUrl);
+static_assert(static_cast<uint8_t>(BadUrlToken) == CSSTokenTypeSwiftBadUrl);
+static_assert(static_cast<uint8_t>(DelimiterToken) == CSSTokenTypeSwiftDelimiter);
+static_assert(static_cast<uint8_t>(NumberToken) == CSSTokenTypeSwiftNumber);
+static_assert(static_cast<uint8_t>(PercentageToken) == CSSTokenTypeSwiftPercentage);
+static_assert(static_cast<uint8_t>(DimensionToken) == CSSTokenTypeSwiftDimension);
+static_assert(static_cast<uint8_t>(IncludeMatchToken) == CSSTokenTypeSwiftIncludeMatch);
+static_assert(static_cast<uint8_t>(DashMatchToken) == CSSTokenTypeSwiftDashMatch);
+static_assert(static_cast<uint8_t>(PrefixMatchToken) == CSSTokenTypeSwiftPrefixMatch);
+static_assert(static_cast<uint8_t>(SuffixMatchToken) == CSSTokenTypeSwiftSuffixMatch);
+static_assert(static_cast<uint8_t>(SubstringMatchToken) == CSSTokenTypeSwiftSubstringMatch);
+static_assert(static_cast<uint8_t>(ColumnToken) == CSSTokenTypeSwiftColumn);
+static_assert(static_cast<uint8_t>(NonNewlineWhitespaceToken) == CSSTokenTypeSwiftNonNewlineWhitespace);
+static_assert(static_cast<uint8_t>(NewlineToken) == CSSTokenTypeSwiftNewline);
+static_assert(static_cast<uint8_t>(CDOToken) == CSSTokenTypeSwiftCdo);
+static_assert(static_cast<uint8_t>(CDCToken) == CSSTokenTypeSwiftCdc);
+static_assert(static_cast<uint8_t>(ColonToken) == CSSTokenTypeSwiftColon);
+static_assert(static_cast<uint8_t>(SemicolonToken) == CSSTokenTypeSwiftSemicolon);
+static_assert(static_cast<uint8_t>(CommaToken) == CSSTokenTypeSwiftComma);
+static_assert(static_cast<uint8_t>(LeftParenthesisToken) == CSSTokenTypeSwiftLeftParenthesis);
+static_assert(static_cast<uint8_t>(RightParenthesisToken) == CSSTokenTypeSwiftRightParenthesis);
+static_assert(static_cast<uint8_t>(LeftBracketToken) == CSSTokenTypeSwiftLeftBracket);
+static_assert(static_cast<uint8_t>(RightBracketToken) == CSSTokenTypeSwiftRightBracket);
+static_assert(static_cast<uint8_t>(LeftBraceToken) == CSSTokenTypeSwiftLeftBrace);
+static_assert(static_cast<uint8_t>(RightBraceToken) == CSSTokenTypeSwiftRightBrace);
+static_assert(static_cast<uint8_t>(StringToken) == CSSTokenTypeSwiftString);
+static_assert(static_cast<uint8_t>(BadStringToken) == CSSTokenTypeSwiftBadString);
+static_assert(static_cast<uint8_t>(EOFToken) == CSSTokenTypeSwiftEndOfFile);
+static_assert(static_cast<uint8_t>(CommentToken) == CSSTokenTypeSwiftComment);
 
-// Same, for CSSBlockTypeSwift.
-static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == 0);
-static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == 1);
-static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
+// Same, for CSSBlockTypeSwift, whose three cases the island reports in
+// CSSSwiftToken::blockType.
+static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == CSSBlockTypeSwiftNotBlock);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == CSSBlockTypeSwiftBlockStart);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == CSSBlockTypeSwiftBlockEnd);
 
 // The shared boundary struct. Swift imports this definition rather than restating it, so
 // the two cannot disagree on the field layout; what is worth pinning is that it stays a
@@ -374,7 +382,7 @@ bool CSSSwiftTokenSink::takeChunk(
         // so the two paths agree on the string's representation as well as its
         // contents.
         auto value = [&]() -> StringView {
-            if (pod.flags & SwiftFlagUnescaped) [[unlikely]] {
+            if (pod.flags & CSSTokenFlagBitsUnescaped) [[unlikely]] {
                 auto units = unescaped.subspan(pod.valueStart, pod.valueLength);
                 return registerString(String { StringImpl::create8BitIfPossible(units) });
             }
@@ -396,7 +404,7 @@ bool CSSSwiftTokenSink::takeChunk(
             appended = m_tokens.tryConstructAndAppend(type, value(), blockType);
             break;
         case HashToken:
-            appended = m_tokens.tryConstructAndAppend(pod.flags & SwiftFlagHashTokenId ? HashTokenId : HashTokenUnrestricted, value());
+            appended = m_tokens.tryConstructAndAppend(pod.flags & CSSTokenFlagBitsHashTokenId ? HashTokenId : HashTokenUnrestricted, value());
             break;
         case DelimiterToken:
             appended = m_tokens.tryConstructAndAppend(DelimiterToken, static_cast<char16_t>(pod.extra));
@@ -414,9 +422,9 @@ bool CSSSwiftTokenSink::takeChunk(
                 : charactersToDouble(numberText.span16(), &isResultOK);
             if (!isResultOK)
                 numericValue = 0;
-            auto numericValueType = pod.flags & SwiftFlagNonInteger ? NumberValueType : IntegerValueType;
-            auto sign = pod.flags & SwiftFlagPlusSign ? PlusSign
-                : pod.flags & SwiftFlagMinusSign ? MinusSign : NoSign;
+            auto numericValueType = pod.flags & CSSTokenFlagBitsNonInteger ? NumberValueType : IntegerValueType;
+            auto sign = pod.flags & CSSTokenFlagBitsPlusSign ? PlusSign
+                : pod.flags & CSSTokenFlagBitsMinusSign ? MinusSign : NoSign;
             appended = m_tokens.tryConstructAndAppend(numericValue, numericValueType, sign, numberText);
             // The conversions mutate, so they happen in place after appending.
             if (appended) [[likely]] {
