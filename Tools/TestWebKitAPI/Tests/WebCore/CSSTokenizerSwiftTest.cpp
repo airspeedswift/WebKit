@@ -32,10 +32,12 @@
 //
 // Two things make this a real comparison rather than a tautology:
 //
-//  * `EXPECT_NO_DECLINES` — the Swift path falls back to the C++ path for any input
-//    it cannot handle, so a comparison passes trivially if it declined and both
-//    sides ran C++. The tokenizer counts declines and every test asserts the count
-//    did not move.
+//  * there is no fallback. The Swift scanner finishes every input, and if it cannot
+//    allocate it fails construction rather than handing the work back to C++ — so a
+//    comparison can no longer pass because the island quietly stepped aside. That used to
+//    need a decline counter to catch; it is now structural, and
+//    IslandFailureFailsConstructionRatherThanFallingBack is what keeps it that way. The
+//    counter is still asserted as a cheap second check.
 //  * the UTF-8 tests assert which of StringImpl's representations was exercised, so
 //    a case meant to test the 16-bit specialization cannot pass by staying 8-bit.
 
@@ -62,6 +64,7 @@ CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char
 CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(const char*, size_t);
 unsigned webCoreCSSTokenizerSwiftDeclineCount(void);
 void webCoreCSSTokenizerSetForceSwiftIslandDecline(bool);
+bool webCoreCSSTokenizerTryCreateSucceeds(const char*, size_t);
 
 } // extern "C"
 
@@ -128,32 +131,6 @@ static const char* divergenceReason(uint32_t reason)
         << " (C++ " << result.expectedType << " vs Swift " << result.actualType << ")"; \
     EXPECT_EQ(declinesBefore, webCoreCSSTokenizerSwiftDeclineCount()) \
         << "the Swift path declined this input and fell back to C++"; \
-} while (0)
-
-// The inverse of the three above: forces the decline, then asserts that it happened and
-// that falling back still produced exactly what the C++ path produces, in the tokens and
-// in the observer offsets both. A rewind that misses something shows up here as a
-// divergence, because the C++ pass appends behind whatever the island left in place.
-#define EXPECT_FALLBACK_AGREES(css) do { \
-    auto utf8 = String { css }.utf8(); \
-    unsigned declinesBefore = webCoreCSSTokenizerSwiftDeclineCount(); \
-    webCoreCSSTokenizerSetForceSwiftIslandDecline(true); \
-    auto tokens = webCoreCSSTokenizerComparePaths(utf8.data(), utf8.length()); \
-    auto offsets = webCoreCSSTokenizerCompareObserverOffsets(utf8.data(), utf8.length()); \
-    unsigned declinesAfter = webCoreCSSTokenizerSwiftDeclineCount(); \
-    webCoreCSSTokenizerSetForceSwiftIslandDecline(false); \
-    EXPECT_LT(declinesBefore, declinesAfter) \
-        << "the Swift path was forced to decline, but no decline was counted, so the " \
-           "fallback did not run and this proved nothing"; \
-    EXPECT_EQ(-1, tokens.divergenceIndex) \
-        << "after falling back, diverged at token " << tokens.divergenceIndex << ": " \
-        << divergenceReason(tokens.reason) << " (C++ " << tokens.expectedType \
-        << " vs Swift " << tokens.actualType << "), " << tokens.realTokenCount \
-        << " tokens vs " << tokens.swiftTokenCount; \
-    EXPECT_EQ(-1, offsets.divergenceIndex) \
-        << "after falling back, the observer offsets diverged at token " \
-        << offsets.divergenceIndex << ": " << divergenceReason(offsets.reason) \
-        << " (C++ " << offsets.expectedType << " vs Swift " << offsets.actualType << ")"; \
 } while (0)
 
 TEST(CSSTokenizerSwift, Rules)
@@ -321,29 +298,39 @@ TEST(CSSTokenizerSwift, SyntheticStylesheet)
     EXPECT_OBSERVER_OFFSETS_AGREE(stylesheet);
 }
 
-// The fallback. In production the Swift path declines only when an allocation fails,
-// which a test cannot provoke, so the undo it performs -- m_tokens, the string pool,
-// the input cursor and the inspector's observer wrapper -- was code nothing executed.
-// Two things were wrong with it, and neither could have been caught without forcing the
-// decline: m_tokens was shrunk rather than cleared, so the retry's
-// tryReserveInitialCapacity met a heap buffer where it requires an inline one, and the
-// observer wrapper kept the offsets the island had already fed it, so the C++ pass
-// appended behind them and every source range the inspector reported was shifted.
+// There is no fallback, and this is the test that holds that line.
 //
-// Forcing the decline after a chunk has been built is what makes this exercise a full
-// undo rather than an empty one. The inputs deliberately include one over 96 characters,
-// since below that the island's reservation stays inside the inline capacity and the
-// capacity bug does not arise.
-TEST(CSSTokenizerSwift, DeclineFallsBackAndUndoesEverything)
+// The Swift scanner finishes every input; the only way it stops is a failed allocation of
+// m_tokens. The C++ scanner reserves the same size into the same vector, so it would fail on
+// the identical allocation -- which is why falling back to it was deleted rather than fixed.
+// What replaced it is the report the C++ path already made for itself: tryCreate returns null.
+//
+// Forcing the failure is the only way to reach that, since a test cannot provoke OOM. If this
+// ever fails by *succeeding*, something has reintroduced a second path.
+TEST(CSSTokenizerSwift, IslandFailureFailsConstructionRatherThanFallingBack)
 {
-    EXPECT_FALLBACK_AGREES("a { color: red }"_s);
-    EXPECT_FALLBACK_AGREES("a /* c1 */ { /* c2 */ color: \\72 ed } /* trailing */"_s);
-    EXPECT_FALLBACK_AGREES(".a { b: ( c [ d "_s);
+    auto css = "a { color: red } .b > #c:hover { margin: 0 auto -1.5px }"_s;
+    auto tryCreate = [&] { return webCoreCSSTokenizerTryCreateSucceeds(css.characters(), css.length()); };
 
-    StringBuilder builder;
-    for (unsigned i = 0; i < 60; ++i)
-        builder.append(".cls-"_s, i, " { margin: 0 auto -1.5px; content: \"\\41 "_s, i, "\" }\n"_s);
-    EXPECT_FALLBACK_AGREES(builder.toString());
+    EXPECT_TRUE(tryCreate()) << "the island should handle this input";
+
+    unsigned failuresBefore = webCoreCSSTokenizerSwiftDeclineCount();
+    webCoreCSSTokenizerSetForceSwiftIslandDecline(true);
+    bool succeeded = tryCreate();
+    unsigned failuresAfter = webCoreCSSTokenizerSwiftDeclineCount();
+    webCoreCSSTokenizerSetForceSwiftIslandDecline(false);
+
+    // Only meaningful when the island is the scanner tryCreate actually uses. With the C++
+    // default the forcing flag is never read, and asserting failure would fail for the wrong
+    // reason.
+    if (webCoreCSSTokenizerDefaultScannerIsSwift()) {
+        EXPECT_LT(failuresBefore, failuresAfter) << "the forced failure did not happen";
+        EXPECT_FALSE(succeeded)
+            << "the island failed but construction succeeded anyway, so something other than "
+               "the island produced the token stream -- a fallback has come back";
+    }
+
+    EXPECT_TRUE(tryCreate()) << "forcing should not be sticky";
 }
 
 } // namespace TestWebKitAPI
