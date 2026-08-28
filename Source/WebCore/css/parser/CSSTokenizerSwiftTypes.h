@@ -123,7 +123,7 @@ public:
 
 #ifdef __swift__
     // FIXME: rdar://165684636 means these have to be redeclared at this level of the
-    // hierarchy, as WTF::BorrowedBytes also has to.
+    // hierarchy for the importer to see them.
     void ref() const { ThreadSafeRefCounted<CSSSwiftTokenSink>::ref(); }
     void deref() const { ThreadSafeRefCounted<CSSSwiftTokenSink>::deref(); }
 #endif
