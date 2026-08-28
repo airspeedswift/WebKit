@@ -116,6 +116,7 @@ WEBCORE_EXPORT unsigned webCoreCSSTokenizerSwiftDeclineCount(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerSetForceSwiftIslandDecline(bool);
 WEBCORE_EXPORT bool webCoreCSSTokenizerDefaultScannerIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
+WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char*, size_t, bool, size_t*, uint64_t*, bool*);
 
 // Walks the real CSSTokenizer and the Swift island over the same stylesheet.
 //
@@ -477,6 +478,48 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char* text, size_t 
     }
     *outTokens = count;
     *outFold = fold;
+}
+
+// The same timing at 16-bit width. Every other bench entry builds its String from Latin-1
+// bytes, so all three were 8-bit-only and the island's UInt16 specialization -- a separate
+// body of generated code, reached by every stylesheet containing a character above U+00FF
+// -- had never been timed at all, only checked for correctness.
+//
+// The source is upconverted rather than decoded: each input byte becomes one UTF-16 code
+// unit, so the token stream is identical to the 8-bit entry's on the same input and the two
+// widths are directly comparable on one corpus. Decoding UTF-8 instead would change the
+// characters and therefore the tokens, which is right for a correctness oracle
+// (comparePathsUTF8 does exactly that) and wrong for a throughput comparison.
+// `outIs16Bit` reports what StringImpl actually chose, so a caller cannot assume a width it
+// did not get -- a 16-bit measurement that quietly ran 8-bit would be the same invisible
+// failure as a decline.
+WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char* text, size_t length, bool useSwift, size_t* outTokens, uint64_t* outFold, bool* outIs16Bit)
+{
+    auto bytes = unsafeMakeSpan(byteCast<Latin1Character>(text), length);
+    StringBuilder builder;
+    builder.reserveCapacity(length + 4);
+    for (auto byte : bytes)
+        builder.append(static_cast<char16_t>(byte));
+    // A run of pure Latin-1 would collapse back to 8-bit on toString(), so force the
+    // 16-bit representation with a character that cannot be represented in 8 bits, in a
+    // comment where it costs one token and no interned string. Appended as an explicit
+    // char16_t rather than in a literal: a non-ASCII character in a WebKit string literal
+    // breaks assertions builds.
+    builder.append("/*"_s);
+    builder.append(static_cast<char16_t>(0x2028));
+    builder.append("*/"_s);
+    String source = builder.toString();
+
+    WebCore::CSSTokenizer tokenizer(source, useSwift ? CSSTokenizer::Scanner::Swift : CSSTokenizer::Scanner::Cpp);
+    size_t count = 0;
+    uint64_t fold = 0;
+    for (auto range = tokenizer.tokenRange(); !range.atEnd(); range.consume()) {
+        ++count;
+        fold = fold * 1000003 + static_cast<uint64_t>(range.peek().type());
+    }
+    *outTokens = count;
+    *outFold = fold;
+    *outIs16Bit = !source.is8Bit();
 }
 
 } // extern "C"
