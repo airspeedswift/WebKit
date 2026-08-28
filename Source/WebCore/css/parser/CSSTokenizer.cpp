@@ -122,17 +122,41 @@ CSSTokenizer::CSSTokenizer(const String& string, CSSParserObserverWrapper* wrapp
 
     // The Swift scanner, when selected and when it accepts this input. Falls through
     // to the C++ state machine otherwise, including on allocation failure, so this
-    // cannot make a previously-working parse fail. Everything the island appended has
-    // to be undone first: m_tokens, the cursor, the strings a token with escapes
-    // registered in the pool -- but only back to where the island started, because
-    // preprocessString may itself have put the input string there and m_input holds a
-    // view into it -- and the offsets it fed the inspector's observer wrapper.
+    // cannot make a previously-working parse fail.
     //
-    // m_tokens is cleared rather than shrunk: shrink() keeps the capacity the island
-    // reserved, and the retry below calls tryReserveInitialCapacity, which requires an
-    // inline-capacity buffer. It asserts that in debug and in release overwrites
-    // m_buffer, leaking what the island allocated (Vector.h's allocateBuffer carries a
-    // FIXME for exactly this).
+    // This is speculative execution with rollback, so what makes it correct is an
+    // *enumeration*: every piece of mutable state the island pass can touch, and for each
+    // one either the undo or the reason it needs none. Getting this wrong is how both of
+    // the bugs this path used to have got in -- the first version undid m_tokens only, and
+    // a later commit whose whole subject was "undo the string pool" fixed one more item
+    // without listing the rest. The list is short; keep it checked off rather than
+    // re-derived.
+    //
+    //   m_tokens         cleared. Not shrunk: shrink() keeps the capacity the island
+    //                    reserved, and the retry below calls tryReserveInitialCapacity,
+    //                    which requires an inline-capacity buffer. It asserts that in
+    //                    debug and in release overwrites m_buffer, leaking what the island
+    //                    allocated (Vector.h's allocateBuffer carries a FIXME for this).
+    //   m_stringPool     shrunk to the watermark, not to zero: preprocessString may have
+    //                    registered the input string before the island ran, and m_input
+    //                    holds a view into it.
+    //   m_input          cursor rewound to 0.
+    //   wrapper's token and comment offsets
+    //                    rewound. The island feeds these per chunk, and
+    //                    startOffset/endOffset index them by a token's position in the
+    //                    stream, so leftovers shift every range the inspector reports.
+    //   m_blockStack     nothing to undo: the island keeps its own block stack in Swift
+    //                    and never writes this one.
+    //   wrapper's m_commentIndex
+    //                    nothing to undo: only the consumption-side methods advance it,
+    //                    and those run after tokenization. finalizeConstruction's
+    //                    ASSERT(!m_commentIndex) is the standing guard on that.
+    //   wrapper's m_firstParserToken
+    //                    nothing to undo: only finalizeConstruction sets it, and the
+    //                    island reaches that only on success.
+    //   wrapper's observer
+    //                    nothing to undo: addToken and addComment only append to the
+    //                    vectors above; no observer callback fires during tokenization.
     if (scanner == Scanner::Swift) {
         size_t stringPoolSizeBeforeIsland = m_stringPool.size();
         auto observerPositionBeforeIsland = wrapper ? wrapper->position() : CSSParserObserverWrapper::Position { };
