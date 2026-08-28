@@ -26,17 +26,30 @@
 // Bridge for the Swift CSS tokenizer island (CSSTokenizerSwift.swift), see
 // ~/Documents/webkit-swift-adoption-notes.md §11.
 //
-// Exposes three things to TestWebKitAPI, `extern "C"` so no header needs
-// exporting:
+// Exposes three things to TestWebKitAPI and the standalone harnesses, `extern "C"`
+// so no header needs exporting:
 //
-//   1. the Swift island, driven over a span;
-//   2. a validation entry that walks the *real* CSSTokenizer's token stream and
-//      the island's side by side and reports the first divergence. This is the
-//      gate that matters: the standalone probe only proves two of my own ports
-//      agree with each other, which a symmetric misreading of the spec would
-//      satisfy;
-//   3. a benchmark entry that times the island against the real CSSTokenizer's
-//      tokenization loop.
+//   1. comparison entries that build the whole CSSParserToken stream both ways in
+//      one process and compare the tokens themselves — at either character width,
+//      and with an observer wrapper attached. This is the gate that matters: the
+//      standalone probe only proves two of my own ports agree with each other,
+//      which a symmetric misreading of the spec would satisfy;
+//   2. benchmark entries that time a whole CSSTokenizer construction on one
+//      scanner or the other, at either width;
+//   3. diagnostics: the decline counter, the forced-decline switch for the
+//      failure-reporting path, and the compile-time scanner choice.
+//
+// Every entry here is WEBCORE_EXPORT and this file is in WebCore's own sources with
+// no `#if` guard, so it ships inside WebCore.framework: its size is interop cost,
+// not test overhead. Two families of entry were deleted for that reason, both
+// strictly dominated. A `webCoreCSSTokenizerSwiftValidate` walked the island's POD
+// output beside a real CSSParserTokenRange, but skipped escaped values entirely and
+// hand-reimplemented CSSParserToken::convertToDimensionWithUnit's merge rule, where
+// webCoreCSSTokenizerComparePaths below compares real CSSParserTokens including
+// their numeric fields and block types. A `webCoreCSSTokenizerBenchSwift` /
+// `...BenchReal` pair timed the island's scan against a control its own comment
+// admitted was "not a like-for-like control", where
+// webCoreCSSTokenizerBenchIntegrated does the same work on both sides.
 
 #include "config.h"
 
@@ -45,26 +58,20 @@
 #include "CSSParserToken.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizer.h"
-#include "CSSTokenizerInputStream.h"
 #include "CSSTokenizerSwiftTypes.h"
+// Same suppression, and the same FIXME, as CSSTokenizer.cpp: the generated header's
+// `SWIFT_ENUM` hands C++ an Objective-C-only non-defining fixed-underlying-type enum
+// declaration for each `@c` enum, which -Werror makes fatal. Filings register §26.
+IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
 #include "WebCoreSwift-Generated.h"
+IGNORE_CLANG_WARNINGS_END
 #include <optional>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/Latin1Character.h>
-#include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
 namespace WebCore {
 namespace {
-
-// Must match CSSTokenFlag in CSSTokenizerSwift.swift.
-enum SwiftTokenFlag : uint8_t {
-    FlagNonInteger = 1 << 0,
-    FlagPlusSign = 1 << 1,
-    FlagMinusSign = 1 << 2,
-    FlagHashTokenId = 1 << 3,
-    FlagNeedsUnescape = 1 << 4,
-};
 
 // A do-nothing observer, so a CSSParserObserverWrapper can be constructed and the
 // offsets the tokenizer feeds it compared between the two paths. The parser is
@@ -80,13 +87,6 @@ public:
     void observeProperty(unsigned, unsigned, bool, bool) final { }
     void observeComment(unsigned, unsigned) final { }
 };
-
-// The island reports comments; CSSTokenizer drops them from m_tokens. The
-// validation walk therefore skips them on the Swift side.
-bool isComment(const CSSSwiftToken& token)
-{
-    return token.type == static_cast<uint8_t>(CommentToken);
-}
 
 } // namespace
 } // namespace WebCore
@@ -107,9 +107,6 @@ struct CSSTokenizerSwiftValidationResult {
     uint32_t reason;
 };
 
-WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerSwiftValidate(const char*, size_t);
-WEBCORE_EXPORT void webCoreCSSTokenizerBenchSwift(const uint8_t*, size_t, size_t*, uint64_t*);
-WEBCORE_EXPORT void webCoreCSSTokenizerBenchReal(const char*, size_t, size_t*, uint64_t*);
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths(const char*, size_t);
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerCompareObserverOffsets(const char*, size_t);
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePathsUTF8(const char*, size_t);
@@ -119,159 +116,6 @@ WEBCORE_EXPORT bool webCoreCSSTokenizerTryCreateSucceeds(const char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSTokenizerDefaultScannerIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char*, size_t, bool, size_t*, uint64_t*, bool*);
-
-// Walks the real CSSTokenizer and the Swift island over the same stylesheet.
-//
-// Only 8-bit input is compared: the island's element type is `UInt8`, and a
-// stylesheet that survives preprocessing as Latin-1 is exactly the case it
-// handles. Callers pass Latin-1 text.
-WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerSwiftValidate(const char* text, size_t length)
-{
-    CSSTokenizerSwiftValidationResult result { -1, 0, 0, 0, 0, 0 };
-
-    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
-    WebCore::CSSTokenizer tokenizer(source);
-    auto range = tokenizer.tokenRange();
-
-    // The island sees what the real tokenizer sees: the *preprocessed* string.
-    // Reconstructing it here rather than reaching into the tokenizer keeps this
-    // bridge out of CSSTokenizer's internals; preprocessing is a no-op for
-    // Latin-1 input without NULs, which is what the tests feed.
-    auto preprocessed = source;
-    if (!preprocessed.is8Bit()) {
-        result.reason = 2;
-        result.divergenceIndex = 0;
-        return result;
-    }
-    auto span = preprocessed.span8();
-
-    size_t realCount = 0;
-    for (auto probe = range; !probe.atEnd(); probe.consume())
-        ++realCount;
-    result.realTokenCount = realCount;
-
-    size_t swiftIndex = 0;
-    size_t compared = 0;
-    for (auto cursor = range; !cursor.atEnd(); cursor.consume(), ++compared) {
-        const CSSParserToken& real = cursor.peek();
-
-        // Advance the island past any comments, which the real stream omits.
-        WebCore::CSSSwiftToken mine = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
-        while (WebCore::isComment(mine)) {
-            ++swiftIndex;
-            mine = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
-        }
-
-        if (static_cast<uint8_t>(real.type()) != mine.type) {
-            result.divergenceIndex = static_cast<int64_t>(compared);
-            result.expectedType = static_cast<uint32_t>(real.type());
-            result.actualType = mine.type;
-            result.reason = 0;
-            result.swiftTokenCount = swiftIndex;
-            return result;
-        }
-
-        // Value text, for the token kinds that carry one. Skipped when the
-        // island flagged the value as needing unescaping: there the real token
-        // holds the *unescaped* string from m_stringPool while the island
-        // reports the raw range, by design (the island cannot allocate a
-        // String). Escaped values are covered by the extent-level comparison in
-        // the standalone probe instead.
-        //
-        // The numeric kinds need care, because CSSParserToken does not store
-        // what the token grammar suggests:
-        //
-        //   NumberToken      value() is the number's original text.
-        //   PercentageToken  likewise — convertToPercentage() only retypes.
-        //   DimensionToken   convertToDimensionWithUnit() *merges* the number
-        //                    and the unit into one StringView when they are
-        //                    adjacent in the buffer and the number is shorter
-        //                    than 16 characters, and falls back to the unit
-        //                    alone otherwise.
-        //
-        // The island reports the number range and the unit range separately,
-        // which is strictly more information; reconstruct what the real token
-        // should hold and compare that.
-        std::optional<std::pair<uint32_t, uint32_t>> expectedRange;
-        switch (real.type()) {
-        case IdentToken:
-        case FunctionToken:
-        case AtKeywordToken:
-        case HashToken:
-        case UrlToken:
-        case StringToken:
-            expectedRange = { { mine.valueStart, mine.valueLength } };
-            break;
-        case NumberToken:
-        case PercentageToken:
-            expectedRange = { { mine.numberStart, mine.numberLength } };
-            break;
-        case DimensionToken: {
-            uint32_t numberLength = mine.numberLength;
-            if (numberLength && numberLength < 16) {
-                uint32_t end = mine.valueStart + mine.valueLength;
-                expectedRange = { { mine.numberStart, end - mine.numberStart } };
-            } else
-                expectedRange = { { mine.valueStart, mine.valueLength } };
-            break;
-        }
-        default:
-            break;
-        }
-        if (expectedRange && !(mine.flags & FlagNeedsUnescape)) {
-            auto mineValue = StringView { span.subspan(expectedRange->first, expectedRange->second) };
-            if (real.value() != mineValue) {
-                result.divergenceIndex = static_cast<int64_t>(compared);
-                result.expectedType = static_cast<uint32_t>(real.type());
-                result.actualType = mine.type;
-                result.reason = 1;
-                result.swiftTokenCount = swiftIndex;
-                return result;
-            }
-        }
-
-        ++swiftIndex;
-    }
-
-    // Whatever the island has left must be comments and then EOF.
-    WebCore::CSSSwiftToken tail = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
-    while (WebCore::isComment(tail)) {
-        ++swiftIndex;
-        tail = WebCore::cssTokenizeSwiftNth(span, swiftIndex);
-    }
-    result.swiftTokenCount = swiftIndex;
-    if (tail.type != static_cast<uint8_t>(EOFToken)) {
-        result.divergenceIndex = static_cast<int64_t>(compared);
-        result.reason = 2;
-    }
-    return result;
-}
-
-WEBCORE_EXPORT void webCoreCSSTokenizerBenchSwift(const uint8_t* data, size_t length, size_t* outTokens, uint64_t* outFold)
-{
-    auto result = WebCore::cssTokenizeSwiftSpan(unsafeMakeSpan(reinterpret_cast<const Latin1Character*>(data), length));
-    *outTokens = static_cast<size_t>(result.getTokenCount());
-    *outFold = result.getFold();
-}
-
-// The real tokenizer, for the same input. Not a like-for-like control — it also
-// builds CSSParserTokens, a string pool and a Vector, and converts numbers to
-// double — so it is an upper bound on the work the island does, not a
-// same-work comparison. The same-work control lives in the standalone probe.
-WEBCORE_EXPORT void webCoreCSSTokenizerBenchReal(const char* text, size_t length, size_t* outTokens, uint64_t* outFold)
-{
-    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
-    WebCore::CSSTokenizer tokenizer(source);
-    auto range = tokenizer.tokenRange();
-    size_t count = 0;
-    uint64_t fold = 0;
-    for (; !range.atEnd(); range.consume()) {
-        ++count;
-        fold = fold * 1000003 + static_cast<uint64_t>(range.peek().type());
-    }
-    *outTokens = count;
-    *outFold = fold;
-}
 
 // The integration gate: builds the whole CSSParserToken stream both ways, in one
 // process, and compares the tokens themselves rather than the island's POD output.
