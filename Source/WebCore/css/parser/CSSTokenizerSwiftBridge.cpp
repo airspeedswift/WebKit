@@ -276,9 +276,53 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchReal(const char* text, size_t length
 // default, because it is comparing what the rest of the CSS parser will actually
 // see: values, numeric values, units, hash types and block types.
 //
-// The whitespace run length is not compared, because CSSParserToken keeps it in a
-// private union member with no accessor. The POD-level comparison in the
-// standalone probe covers it.
+// One token's worth of that comparison, shared by the 8-bit and the UTF-8 entry below
+// so that the two cannot drift apart. Returns nothing when the tokens agree.
+//
+// operator== covers more than it looks: the whitespace run length is compared, via
+// `case NonNewlineWhitespaceToken` in CSSParserToken.cpp. What it does not cover is
+// the numeric fields of NumberToken and PercentageToken -- for those it compares
+// originalText() and stops -- so those are compared here. What still goes uncompared
+// is m_nonUnitPrefixLength, and m_unit for a DimensionToken that has one.
+struct TokenDivergence {
+    uint32_t reason;
+    uint32_t expected;
+    uint32_t actual;
+};
+
+static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expected, const CSSParserToken& actual)
+{
+    if (!(expected == actual))
+        return TokenDivergence { 0, static_cast<uint32_t>(expected.type()), static_cast<uint32_t>(actual.type()) };
+    if (expected.getBlockType() != actual.getBlockType())
+        return TokenDivergence { 1, static_cast<uint32_t>(expected.getBlockType()), static_cast<uint32_t>(actual.getBlockType()) };
+
+    // The island's nonInteger, plusSign and minusSign flags become numericValueType and
+    // numericSign, and for NumberToken and PercentageToken nothing above compares them:
+    // a wrong flag would pass every test here while breaking <integer> validation and
+    // nth-child(An+B) sign handling.
+    //
+    // Compared as bit patterns rather than as doubles, so that +0 and -0 are
+    // distinguished -- that is exactly the difference a sign flag makes, and == would
+    // hide it. Both paths run the same charactersToDouble over the same range, so
+    // anything but an identical pattern is a real divergence.
+    if (expected.type() == NumberToken || expected.type() == PercentageToken || expected.type() == DimensionToken) {
+        bool agrees = std::bit_cast<uint64_t>(expected.numericValue()) == std::bit_cast<uint64_t>(actual.numericValue())
+            && expected.numericValueType() == actual.numericValueType();
+        // numericSign() asserts on NumberToken: it is the only type <an+b> reads it for.
+        if (agrees && expected.type() == NumberToken)
+            agrees = expected.numericSign() == actual.numericSign();
+        if (!agrees)
+            return TokenDivergence { 5, static_cast<uint32_t>(expected.numericValueType()), static_cast<uint32_t>(actual.numericValueType()) };
+    }
+    return std::nullopt;
+}
+
+// The integration gate: builds the whole CSSParserToken stream both ways, in one
+// process, and compares the tokens themselves rather than the island's POD output.
+// This is what has to hold before the Swift path could ever be turned on by
+// default, because it is comparing what the rest of the CSS parser will actually
+// see: values, numeric values, units, hash types and block types.
 WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths(const char* text, size_t length)
 {
     CSSTokenizerSwiftValidationResult result { -1, 0, 0, 0, 0, 0 };
@@ -296,20 +340,11 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths
 
     size_t index = 0;
     for (; !cppRange.atEnd() && !swiftRange.atEnd(); cppRange.consume(), swiftRange.consume(), ++index) {
-        const CSSParserToken& expected = cppRange.peek();
-        const CSSParserToken& actual = swiftRange.peek();
-        if (!(expected == actual)) {
+        if (auto divergence = compareTokens(cppRange.peek(), swiftRange.peek())) {
             result.divergenceIndex = static_cast<int64_t>(index);
-            result.expectedType = static_cast<uint32_t>(expected.type());
-            result.actualType = static_cast<uint32_t>(actual.type());
-            result.reason = 0;
-            return result;
-        }
-        if (expected.getBlockType() != actual.getBlockType()) {
-            result.divergenceIndex = static_cast<int64_t>(index);
-            result.expectedType = static_cast<uint32_t>(expected.getBlockType());
-            result.actualType = static_cast<uint32_t>(actual.getBlockType());
-            result.reason = 1;
+            result.expectedType = divergence->expected;
+            result.actualType = divergence->actual;
+            result.reason = divergence->reason;
             return result;
         }
     }
@@ -346,16 +381,12 @@ WEBCORE_EXPORT CSSTokenizerSwiftValidationResult webCoreCSSTokenizerComparePaths
 
     size_t index = 0;
     for (; !cppRange.atEnd() && !swiftRange.atEnd(); cppRange.consume(), swiftRange.consume(), ++index) {
-        if (!(cppRange.peek() == swiftRange.peek())) {
+        if (auto divergence = compareTokens(cppRange.peek(), swiftRange.peek())) {
             result.divergenceIndex = static_cast<int64_t>(index);
-            result.actualType = static_cast<uint32_t>(cppRange.peek().type());
-            result.reason = 0;
-            return result;
-        }
-        if (cppRange.peek().getBlockType() != swiftRange.peek().getBlockType()) {
-            result.divergenceIndex = static_cast<int64_t>(index);
-            result.actualType = static_cast<uint32_t>(cppRange.peek().getBlockType());
-            result.reason = 1;
+            // expectedType stays the character width the caller asserts on, so only the
+            // actual value is reported here.
+            result.actualType = divergence->actual;
+            result.reason = divergence->reason;
             return result;
         }
     }
