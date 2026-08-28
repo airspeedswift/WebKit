@@ -40,8 +40,10 @@
 // either way — the comparison tests need both — but only one is reachable from the
 // constructors the rest of WebCore calls.
 //
-// Off by default. Build with -DUSE_SWIFT_CSS_TOKENIZER=1 to select the Swift
-// scanner, which is also how to run the layout tests against it.
+// Off by default. Select it by building WebCore with
+// WK_USE_SWIFT_CSS_TOKENIZER=YES (Source/WebCore/Configurations/WebCore.xcconfig).
+// Tests name their scanner explicitly; use webCoreCSSTokenizerDefaultScannerIsSwift()
+// to check which one this build defaulted to.
 #if !defined(USE_SWIFT_CSS_TOKENIZER)
 #define USE_SWIFT_CSS_TOKENIZER 0
 #endif
