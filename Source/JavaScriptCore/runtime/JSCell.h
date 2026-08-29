@@ -37,6 +37,7 @@
 #include <JavaScriptCore/SubspaceAccess.h>
 #include <JavaScriptCore/TypedArrayType.h>
 #include <JavaScriptCore/WriteBarrier.h>
+#include <wtf/SwiftBridging.h>
 
 namespace JSC {
 
@@ -90,7 +91,21 @@ template<typename T> void* tryAllocateCell(VM&, GCDeferralContext*, size_t = siz
     using Base::finishCreation
 #endif
 
-class JSCell : public HeapCell {
+// SWIFT_UNSAFE_REFERENCE, not SWIFT_IMMORTAL_REFERENCE: a cell's lifetime is the
+// collector's business and nothing keeps one alive across a Swift frame, so claiming
+// immortality would silently disclaim the exact hazard a Swift caller has to handle.
+//
+// Without an annotation of *some* kind this class does not exist in Swift at all: the
+// WTF_MAKE_NONCOPYABLE and WTF_MAKE_NONMOVABLE below leave it with no Swift value
+// representation, so the importer drops it — and the note that would say so is
+// suppressed because JavaScriptCore_Private.modulemap marks the module [system].
+//
+// `import_reference` is inherited by derived classes but `unsafe` is *not*; it attaches
+// per declaration. So this annotation alone makes the whole cell hierarchy nameable in
+// Swift, while a derived class's own members stay safe-looking until it carries the
+// annotation too. That is why JSObject and Structure repeat it instead of relying on
+// this one.
+class SWIFT_UNSAFE_REFERENCE JSCell : public HeapCell {
     WTF_ALLOW_COMPACT_POINTERS;
     WTF_MAKE_NONCOPYABLE(JSCell);
     WTF_MAKE_NONMOVABLE(JSCell);
