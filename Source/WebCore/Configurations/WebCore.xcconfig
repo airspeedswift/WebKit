@@ -68,7 +68,14 @@ WK_PGO_USE_CFLAGS_YES = -fprofile-use=$(WK_OPTIMIZATION_PROFILE_FILE) -Wno-error
 WK_PGO_USE_LDFLAGS = $(WK_PGO_USE_LDFLAGS_$(WK_ENABLE_PGO_USE));
 WK_PGO_USE_LDFLAGS_YES = -fprofile-use=$(WK_OPTIMIZATION_PROFILE_FILE) -Wno-error=backend-plugin;
 
-OTHER_CFLAGS = $(inherited) $(WK_PGO_USE_CFLAGS) $(WK_PGO_GEN_FLAGS);
+// Switches on the Swift CSS tokenizer island's validation and benchmark bridge. Off by
+// default so it does not ship; see wtf/PlatformEnable.h. Appended to OTHER_CFLAGS rather than
+// added to GCC_PREPROCESSOR_DEFINITIONS because an xcodebuild command-line override of that
+// setting would replace the whole list rather than extend it.
+WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS = $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_$(WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE));
+WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_YES = -DENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=1;
+
+OTHER_CFLAGS = $(inherited) $(WK_PGO_USE_CFLAGS) $(WK_PGO_GEN_FLAGS) $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS);
 
 // Remove below workaround once fix from rdar://146134116 is universally available in all supported configurations.
 LLVM_PROFILE_GENERATION_OTHER_LD_FLAGS = $(LLVM_PROFILE_GENERATION_OTHER_LD_FLAGS_$(ENABLE_LLVM_PROFILE_GENERATION))
