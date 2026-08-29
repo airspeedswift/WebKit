@@ -1013,7 +1013,20 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
 
     var tokenizer = CSSTokenizerSwift<Unit>()
     var tokens = UniqueArray<WebCore.CSSSwiftToken>()
-    tokens.reserveCapacity(chunkCapacity)
+    // Capped by the input's length, because a stylesheet is not the only thing that gets
+    // tokenized. `CSSTokenizer` is also constructed per property value -- by
+    // `CSSPropertyParser::parseStylePropertyLonghand(CSSPropertyID, const String&)`
+    // whenever `CSSParserFastPaths` declines, and directly by nine more callers including
+    // `SVGLengthValue`, `IntersectionObserver` and the font/timeline/animation consumers.
+    // Reserving the full chunk unconditionally asked the allocator for 32,768 bytes to
+    // tokenize `10px`, an 8,192x over-allocation on a 4-byte input, measured (notes R96).
+    //
+    // `count` is an exact upper bound on the number of tokens, not a heuristic: every
+    // token consumes at least one code unit -- a token that consumed none would spin the
+    // loop below forever -- and the EOF token breaks rather than being appended. So this
+    // introduces no growth at either size. Under the cap, tokens can never exceed the
+    // reservation; over it, the chunk flush at `chunkCapacity` still lands first.
+    tokens.reserveCapacity(min(chunkCapacity, span.count))
 
     while true {
         let token = tokenizer.nextToken(span)
