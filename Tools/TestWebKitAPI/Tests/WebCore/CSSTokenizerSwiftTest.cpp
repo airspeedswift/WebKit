@@ -43,6 +43,9 @@
 
 #include "config.h"
 
+// These link against the bridge's extern "C" entries, so they compile only when it does.
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+
 #include "Test.h"
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
@@ -375,3 +378,5 @@ TEST(CSSTokenizerSwift, IslandFailureFailsConstructionRatherThanFallingBack)
 }
 
 } // namespace TestWebKitAPI
+
+#endif // ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)

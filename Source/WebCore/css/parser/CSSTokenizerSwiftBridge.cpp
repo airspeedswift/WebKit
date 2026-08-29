@@ -53,6 +53,14 @@
 
 #include "config.h"
 
+// Off unless ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=1. Everything below is WEBCORE_EXPORT and
+// exists only to validate the island against the C++ scanner and to measure it, so it has no
+// business in a shipping WebCore.framework -- which is where it was going, since this file is
+// in WebCore's own sources build phase with no guard at all. Switch it on with
+// WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=YES, which appends the define for both WebCore and
+// TestWebKitAPI; the flag has to reach both, because TestWebKitAPI links these symbols.
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+
 #include "CSSParserObserver.h"
 #include "CSSParserObserverWrapper.h"
 #include "CSSParserToken.h"
@@ -420,3 +428,5 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char* text, size_
 }
 
 } // extern "C"
+
+#endif // ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
