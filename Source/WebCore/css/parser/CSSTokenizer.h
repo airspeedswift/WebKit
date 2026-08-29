@@ -34,6 +34,18 @@
 #include <climits>
 #include <wtf/text/StringView.h>
 
+// Which scanner CSSTokenizer uses, chosen at compile time. Both are compiled in either way,
+// since the comparison tests need both, but only one is reachable from the constructors the
+// rest of WebCore calls.
+//
+// Off by default. Select the Swift scanner by building WebCore with
+// WK_USE_SWIFT_CSS_TOKENIZER=YES (Source/WebCore/Configurations/WebCore.xcconfig).
+// Tests name their scanner explicitly; webCoreCSSTokenizerDefaultScannerIsSwift() reports which
+// one this build defaulted to.
+#if !defined(USE_SWIFT_CSS_TOKENIZER)
+#define USE_SWIFT_CSS_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
 class CSSTokenizerInputStream;
@@ -48,20 +60,53 @@ public:
     static std::unique_ptr<CSSTokenizer> tryCreate(StringView string LIFETIME_BOUND);
     static std::unique_ptr<CSSTokenizer> tryCreate(StringView string LIFETIME_BOUND, CSSParserObserverWrapper&); // For the inspector
 
+    // Which scanner builds the token stream. Both are compiled in; this chooses which one
+    // CSSTokenizer uses.
+    enum class Scanner : bool { Cpp, Swift };
+
+    static constexpr Scanner defaultScanner =
+#if USE_SWIFT_CSS_TOKENIZER
+        Scanner::Swift;
+#else
+        Scanner::Cpp;
+#endif
+
     WEBCORE_EXPORT explicit CSSTokenizer(StringView string LIFETIME_BOUND);
     CSSTokenizer(StringView string LIFETIME_BOUND, CSSParserObserverWrapper&); // For the inspector
+
+    // Builds with a named scanner regardless of `defaultScanner`, so that a test can build both
+    // token streams from one source and compare them.
+    WEBCORE_EXPORT CSSTokenizer(StringView string LIFETIME_BOUND, Scanner);
+    CSSTokenizer(StringView string LIFETIME_BOUND, CSSParserObserverWrapper&, Scanner);
 
     WEBCORE_EXPORT CSSParserTokenRange NODELETE tokenRange() const LIFETIME_BOUND;
     unsigned NODELETE tokenCount() const;
 
     static bool NODELETE isWhitespace(CSSParserTokenType);
 
+    // Number of times the Swift scanner failed to allocate. An allocation failure already fails
+    // construction directly; this is a cheap second check for tests.
+    WEBCORE_EXPORT static unsigned swiftScannerFailureCountForTesting();
+
+    // Forces the Swift scanner to fail after building a chunk, which is the only way to reach
+    // the failure-reporting path: in production it is reached only on allocation failure.
+    WEBCORE_EXPORT static void setForceSwiftScannerFailureForTesting(bool);
+
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
-    CSSTokenizer(StringView string LIFETIME_BOUND, CSSParserObserverWrapper*, bool* constructionSuccess);
+    friend class CSSSwiftTokenSink;
+
+    CSSTokenizer(StringView string LIFETIME_BOUND, CSSParserObserverWrapper*, bool* constructionSuccess, Scanner = defaultScanner);
 
     CSSParserToken nextToken();
+
+    // Fills m_tokens by driving the Swift tokenizer (CSSTokenizerSwift.swift) and converting
+    // its tokens, instead of running the C++ state machine below. It handles every input, both
+    // of StringImpl's widths, every escape form and unbounded block nesting, and returns false
+    // only if m_tokens could not be allocated, which fails construction the same way the C++
+    // path's allocation failure does.
+    bool tokenizeWithSwiftScanner(CSSParserObserverWrapper*, bool* constructionSuccess);
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);
@@ -116,7 +161,6 @@ private:
     CSSParserToken commercialAt(char16_t);
     CSSParserToken reverseSolidus(char16_t);
     CSSParserToken asciiDigit(char16_t);
-    CSSParserToken letterU(char16_t);
     CSSParserToken nameStart(char16_t);
     CSSParserToken stringStart(char16_t);
     CSSParserToken endOfFile(char16_t);
@@ -133,5 +177,6 @@ private:
     Vector<String> m_stringPool;
     CSSTokenizerInputStream m_input;
 };
+
 
 } // namespace WebCore

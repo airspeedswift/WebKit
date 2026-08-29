@@ -61,6 +61,7 @@ public:
     }
 
     void advance(unsigned offset = 1) { m_offset += offset; }
+
     void pushBack(char16_t cc)
     {
         --m_offset;
@@ -89,6 +90,10 @@ public:
 
     unsigned length() const { return m_stringLength; }
     unsigned offset() const { return std::min(m_offset, m_stringLength); }
+
+    // The whole preprocessed input, for the Swift tokenizer, which takes a contiguous span
+    // rather than driving this stream.
+    StringView currentString() const LIFETIME_BOUND { return m_string; }
 
     StringView rangeAt(unsigned start, unsigned length) const
     {

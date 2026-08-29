@@ -565,6 +565,16 @@
 #define ENABLE_TOUCH_EVENTS 0
 #endif
 
+
+/* Validation and benchmark bridge for the Swift CSS tokenizer
+   (CSSTokenizerSwiftBridge.cpp). Off by default: every entry point in it is WEBCORE_EXPORT,
+   so unguarded the whole file ships inside WebCore.framework. Defined here rather than in a
+   WebCore build setting because TestWebKitAPI links those symbols too and both targets have
+   to agree. */
+#if !defined(ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE)
+#define ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE 0
+#endif
+
 #if !defined(ENABLE_CSS_TAP_HIGHLIGHT_COLOR) && ENABLE(TOUCH_EVENTS)
 #define ENABLE_CSS_TAP_HIGHLIGHT_COLOR 1
 #endif

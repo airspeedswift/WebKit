@@ -34,7 +34,24 @@
 #include "CSSParserObserverWrapper.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
+#include "CSSTokenizerSwiftTypes.h"
+// FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops
+// handing C++ the Objective-C spelling. It treats C++11 as implying support for the
+// Objective-C fixed-enum forward declaration, so the C++ arm expands
+// `typedef SWIFT_ENUM(uint8_t, CSSTokenTypeSwift, closed) {` to
+// `enum CSSTokenTypeSwift : uint8_t CSSTokenTypeSwift;` -- a non-defining declaration of an
+// enumeration with a fixed underlying type, which only Objective-C accepts. Clang warns
+// -Welaborated-enum-base and WebCore's -Werror makes it fatal. `CF_ENUM` has the identical
+// bug, and JSC_CF_ENUM (JavaScriptCore's API/JSBase.h) already works around it the way the
+// generated header should: branch on `__cplusplus` and emit the plain `enum X : T { ... }`.
+//
+// Suppressing it here is what lets the three enums below be declared *once*, in Swift.
+IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
+#include "WebCoreSwift-Generated.h"
+IGNORE_CLANG_WARNINGS_END
+#include <atomic>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/dtoa.h>
 #include <wtf/text/CodePointIterator.h>
 #include <wtf/text/StringBuilder.h>
 #include <wtf/unicode/CharacterNames.h>
@@ -126,14 +143,49 @@ CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper& wrapper)
 {
 }
 
-CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
+CSSTokenizer::CSSTokenizer(StringView string, Scanner scanner)
+    : CSSTokenizer(string, nullptr, nullptr, scanner)
+{
+}
+
+CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper& wrapper, Scanner scanner)
+    : CSSTokenizer(string, &wrapper, nullptr, scanner)
+{
+}
+
+CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr, Scanner scanner)
     : m_input(preprocessString(string))
 {
     if (constructionSuccessPtr)
         *constructionSuccessPtr = true;
 
-    if (string.isEmpty())
+    // An empty sheet still has to finalise the observer wrapper, exactly as any other input
+    // that yields no tokens does: endOffset() computes
+    // m_tokenOffsets[range.end() - m_firstParserToken], so returning early would leave it
+    // indexing by an unset m_firstParserToken. Non-empty zero-token inputs such as "/* c */"
+    // or " " reach the loop below and fall out of it.
+    if (string.isEmpty()) {
+        if (wrapper) {
+            wrapper->addToken(0);
+            wrapper->finalizeConstruction(m_tokens.begin());
+        }
         return;
+    }
+
+    // The Swift scanner, when selected. It handles every input: all 33 token types, both of
+    // StringImpl's widths, every escape form, unbounded block nesting. The only way it returns
+    // false is a failed allocation of m_tokens, either the reservation or a per-token append,
+    // and the C++ scanner below reserves the same size into the same vector, so it would fail
+    // on the identical allocation. This therefore reports the failure the way the C++ path
+    // reports its own rather than re-running the tokenization.
+    if (scanner == Scanner::Swift) {
+        if (!tokenizeWithSwiftScanner(wrapper, constructionSuccessPtr)) [[unlikely]] {
+            // Same policy as the C++ path below: crash if the caller did not ask to be told.
+            RELEASE_ASSERT(constructionSuccessPtr);
+            *constructionSuccessPtr = false;
+        }
+        return;
+    }
 
     // To avoid resizing we err on the side of reserving too much space.
     // Most strings we tokenize have about 3.5 to 5 characters per token.
@@ -174,6 +226,253 @@ CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper* wrapper,
 CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
 {
     return m_tokens;
+}
+
+// MARK: - Swift tokenizer path
+//
+// See CSSTokenizerSwift.swift. Swift decides token types, extents and block structure;
+// everything below materialises that into CSSParserTokens -- StringViews over the input,
+// double conversion, and the escaped-value string pool.
+
+// A token's type and block type are reported as bytes, and
+// appendTokensFromSwiftIsland casts them straight to the C++ enums, so the two
+// numberings have to agree: a reorder or an insertion in CSSParserTokenType, an ordinary
+// WebCore change, would otherwise silently retype every token above the insertion point.
+//
+// These now *prove* it. CSSTokenTypeSwift and CSSBlockTypeSwift are `@c` (SE-0495), so
+// they are emitted into WebCoreSwift-Generated.h as uint8_t-backed C enums and each
+// assert below names the Swift case directly. Until that attribute went on, C++ could
+// not see the Swift enum at all and these could only pin the C++ side -- making a change
+// to this numbering fail to build, in the hope that whoever made it then went and updated
+// the Swift mirror by hand. C++ stays the original of the pair, since CSSParserTokenType
+// is what the rest of the CSS parser uses; Swift is the mirror. The names are spelled out
+// one per line rather than counted because that is what makes the mirroring checkable.
+static_assert(numberOfCSSParserTokenTypes == 33, "CSSTokenTypeSwift in CSSTokenizerSwift.swift mirrors this enum case for case; add the new type there too, then update this count");
+static_assert(static_cast<uint8_t>(IdentToken) == CSSTokenTypeSwiftIdent);
+static_assert(static_cast<uint8_t>(FunctionToken) == CSSTokenTypeSwiftFunction);
+static_assert(static_cast<uint8_t>(AtKeywordToken) == CSSTokenTypeSwiftAtKeyword);
+static_assert(static_cast<uint8_t>(HashToken) == CSSTokenTypeSwiftHash);
+static_assert(static_cast<uint8_t>(UrlToken) == CSSTokenTypeSwiftUrl);
+static_assert(static_cast<uint8_t>(BadUrlToken) == CSSTokenTypeSwiftBadUrl);
+static_assert(static_cast<uint8_t>(DelimiterToken) == CSSTokenTypeSwiftDelimiter);
+static_assert(static_cast<uint8_t>(NumberToken) == CSSTokenTypeSwiftNumber);
+static_assert(static_cast<uint8_t>(PercentageToken) == CSSTokenTypeSwiftPercentage);
+static_assert(static_cast<uint8_t>(DimensionToken) == CSSTokenTypeSwiftDimension);
+static_assert(static_cast<uint8_t>(IncludeMatchToken) == CSSTokenTypeSwiftIncludeMatch);
+static_assert(static_cast<uint8_t>(DashMatchToken) == CSSTokenTypeSwiftDashMatch);
+static_assert(static_cast<uint8_t>(PrefixMatchToken) == CSSTokenTypeSwiftPrefixMatch);
+static_assert(static_cast<uint8_t>(SuffixMatchToken) == CSSTokenTypeSwiftSuffixMatch);
+static_assert(static_cast<uint8_t>(SubstringMatchToken) == CSSTokenTypeSwiftSubstringMatch);
+static_assert(static_cast<uint8_t>(ColumnToken) == CSSTokenTypeSwiftColumn);
+static_assert(static_cast<uint8_t>(NonNewlineWhitespaceToken) == CSSTokenTypeSwiftNonNewlineWhitespace);
+static_assert(static_cast<uint8_t>(NewlineToken) == CSSTokenTypeSwiftNewline);
+static_assert(static_cast<uint8_t>(CDOToken) == CSSTokenTypeSwiftCdo);
+static_assert(static_cast<uint8_t>(CDCToken) == CSSTokenTypeSwiftCdc);
+static_assert(static_cast<uint8_t>(ColonToken) == CSSTokenTypeSwiftColon);
+static_assert(static_cast<uint8_t>(SemicolonToken) == CSSTokenTypeSwiftSemicolon);
+static_assert(static_cast<uint8_t>(CommaToken) == CSSTokenTypeSwiftComma);
+static_assert(static_cast<uint8_t>(LeftParenthesisToken) == CSSTokenTypeSwiftLeftParenthesis);
+static_assert(static_cast<uint8_t>(RightParenthesisToken) == CSSTokenTypeSwiftRightParenthesis);
+static_assert(static_cast<uint8_t>(LeftBracketToken) == CSSTokenTypeSwiftLeftBracket);
+static_assert(static_cast<uint8_t>(RightBracketToken) == CSSTokenTypeSwiftRightBracket);
+static_assert(static_cast<uint8_t>(LeftBraceToken) == CSSTokenTypeSwiftLeftBrace);
+static_assert(static_cast<uint8_t>(RightBraceToken) == CSSTokenTypeSwiftRightBrace);
+static_assert(static_cast<uint8_t>(StringToken) == CSSTokenTypeSwiftString);
+static_assert(static_cast<uint8_t>(BadStringToken) == CSSTokenTypeSwiftBadString);
+static_assert(static_cast<uint8_t>(EOFToken) == CSSTokenTypeSwiftEndOfFile);
+static_assert(static_cast<uint8_t>(CommentToken) == CSSTokenTypeSwiftComment);
+
+// Same, for CSSBlockTypeSwift, whose three cases are reported in
+    // CSSSwiftToken::blockType.
+static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == CSSBlockTypeSwiftNotBlock);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == CSSBlockTypeSwiftBlockStart);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == CSSBlockTypeSwiftBlockEnd);
+
+// The shared boundary struct. Swift imports this definition rather than restating it, so
+// the two cannot disagree on the field layout; what is worth pinning is that it stays a
+// trivially default constructible aggregate of exactly this size, because both
+// properties are load-bearing and neither is obvious from the declaration. Losing
+// trivial default construction makes WTF's Vector zero the whole buffer before Swift
+// overwrites it, which on a large stylesheet is tens of megabytes of dead stores; growing
+// the struct costs chunk cache residency, and shrinking it to 24 bytes was measured and
+// refuted.
+static_assert(sizeof(CSSSwiftToken) == 32);
+static_assert(alignof(CSSSwiftToken) == 4);
+static_assert(std::is_trivially_default_constructible_v<CSSSwiftToken>);
+static_assert(std::is_trivially_copyable_v<CSSSwiftToken>);
+
+// Counts allocation failures during Swift tokenization. A failure makes construction fail
+// outright, through RELEASE_ASSERT for the direct constructor and a null return for tryCreate,
+// so correctness does not depend on this counter; the test harnesses assert on it as a cheap
+// second check.
+static std::atomic<unsigned> s_swiftScannerFailureCount;
+
+unsigned CSSTokenizer::swiftScannerFailureCountForTesting()
+{
+    return s_swiftScannerFailureCount.load(std::memory_order_relaxed);
+}
+
+// Test-only. This path fails only when an allocation does, which a test cannot provoke, so this
+// is the only way to reach the failure-reporting path. Read once per chunk, after the chunk has
+// been appended, so nothing lands in the hot loop.
+static std::atomic<bool> s_forceSwiftScannerFailureForTesting;
+
+void CSSTokenizer::setForceSwiftScannerFailureForTesting(bool force)
+{
+    s_forceSwiftScannerFailureForTesting.store(force, std::memory_order_relaxed);
+}
+
+bool CSSTokenizer::tokenizeWithSwiftScanner(CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
+{
+    auto string = m_input.currentString();
+
+    // Same reservation the C++ path uses.
+    if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]] {
+        s_swiftScannerFailureCount.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // Swift owns its buffers and hands each chunk to this sink, so there is nothing to
+    // allocate, size, grow or retry here. Both of StringImpl's representations are handled, by
+    // two specializations of one Swift implementation; the C++ scanner below instead reads every
+    // character through StringImpl::operator[], paying an is8Bit() branch per character.
+    Ref sink = adoptRef(*CSSSwiftTokenSink::create(*this, wrapper));
+    bool tokenized = string.is8Bit()
+        ? cssTokenizeSwiftAll8(string.span8(), sink.ptr())
+        : cssTokenizeSwiftAll16(string.span16(), sink.ptr());
+    if (!tokenized) [[unlikely]] {
+        s_swiftScannerFailureCount.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    if (constructionSuccessPtr)
+        *constructionSuccessPtr = true;
+    return true;
+}
+
+CSSSwiftTokenSink* CSSSwiftTokenSink::create(CSSTokenizer& tokenizer, CSSParserObserverWrapper* wrapper)
+{
+    return new CSSSwiftTokenSink(tokenizer, wrapper);
+}
+
+// The annotations have to be repeated on the definition: an unannotated definition is a
+// different type in C++, with a different mangled name.
+//
+// unsafeMakeSpan, and not std::span's two-argument constructor, even though __counted_by has
+// declared each pointer's extent: clang rejects that spelling under
+// -Wunsafe-buffer-usage-in-container, which WebCore builds as an error, without consulting the
+// annotation. unsafeMakeSpan is the sanctioned spelling, and the annotations are what make the
+// bound true rather than merely asserted.
+
+void CSSSwiftTokenSink::finish()
+{
+    if (m_wrapper) {
+        m_wrapper->addToken(m_observerOffset);
+        m_wrapper->finalizeConstruction(m_tokenizer.m_tokens.begin());
+    }
+}
+
+// Converts one chunk of Swift's tokens into CSSParserTokens, and feeds the
+// inspector's observer wrapper the same offsets the C++ loop would have.
+bool CSSSwiftTokenSink::takeChunk(
+    const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
+    const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount)
+{
+    auto podTokens = unsafeMakeSpan(tokens, tokenCount);
+    auto unescaped = unsafeMakeSpan(unescapedUnits, unitCount);
+    auto& wrapper = m_wrapper;
+    auto& observerOffset = m_observerOffset;
+    auto& m_tokens = m_tokenizer.m_tokens;
+    auto& m_input = m_tokenizer.m_input;
+    auto registerString = [&](const String& s) { return m_tokenizer.registerString(s); };
+    for (const auto& pod : podTokens) {
+        auto type = static_cast<CSSParserTokenType>(pod.type);
+
+        // Comments are not kept, matching the C++ path, but the inspector wants
+        // their extent and where they sat in the token stream.
+        if (type == CommentToken) {
+            if (wrapper) {
+                wrapper->addComment(pod.start, pod.end, m_tokens.size());
+                observerOffset = pod.end;
+            }
+            continue;
+        }
+
+        // A value Swift unescaped: its range indexes the unescape buffer, not
+        // the input, and it has to become a real String in m_stringPool. Built with
+        // create8BitIfPossible to match what the C++ path's StringBuilder produces,
+        // so the two paths agree on the string's representation as well as its
+        // contents.
+        auto value = [&]() -> StringView {
+            if (pod.flags & CSSTokenFlagBitsUnescaped) [[unlikely]] {
+                auto units = unescaped.subspan(pod.valueStart, pod.valueLength);
+                return registerString(String { StringImpl::create8BitIfPossible(units) });
+            }
+            return m_input.rangeAt(pod.valueStart, pod.valueLength);
+        };
+        auto blockType = static_cast<CSSParserToken::BlockType>(pod.blockType);
+
+        // Constructed straight into m_tokens rather than staged in a local and
+        // copied: this loop runs once per token, and a CSSParserToken is 24 bytes.
+        bool appended;
+        switch (type) {
+        case IdentToken:
+        case AtKeywordToken:
+        case UrlToken:
+        case StringToken:
+            appended = m_tokens.tryConstructAndAppend(type, value());
+            break;
+        case FunctionToken:
+            appended = m_tokens.tryConstructAndAppend(type, value(), blockType);
+            break;
+        case HashToken:
+            appended = m_tokens.tryConstructAndAppend(pod.flags & CSSTokenFlagBitsHashTokenId ? HashTokenId : HashTokenUnrestricted, value());
+            break;
+        case DelimiterToken:
+            appended = m_tokens.tryConstructAndAppend(DelimiterToken, static_cast<char16_t>(pod.extra));
+            break;
+        case NonNewlineWhitespaceToken:
+            appended = m_tokens.tryConstructAndAppend(pod.extra);
+            break;
+        case NumberToken:
+        case PercentageToken:
+        case DimensionToken: {
+            auto numberText = m_input.rangeAt(pod.numberStart, pod.numberLength);
+            bool isResultOK = false;
+            double numericValue = numberText.is8Bit()
+                ? charactersToDouble(numberText.span8(), &isResultOK)
+                : charactersToDouble(numberText.span16(), &isResultOK);
+            if (!isResultOK)
+                numericValue = 0;
+            auto numericValueType = pod.flags & CSSTokenFlagBitsNonInteger ? NumberValueType : IntegerValueType;
+            auto sign = pod.flags & CSSTokenFlagBitsPlusSign ? PlusSign
+                : pod.flags & CSSTokenFlagBitsMinusSign ? MinusSign : NoSign;
+            appended = m_tokens.tryConstructAndAppend(numericValue, numericValueType, sign, numberText);
+            // The conversions mutate, so they happen in place after appending.
+            if (appended) [[likely]] {
+                if (type == PercentageToken)
+                    m_tokens.last().convertToPercentage();
+                else if (type == DimensionToken)
+                    m_tokens.last().convertToDimensionWithUnit(value());
+            }
+            break;
+        }
+        default:
+            // Everything else carries no value: the punctuation, the match
+            // tokens, CDO/CDC, newline, the bad-token types, and the block
+            // delimiters, whose block type was already determined.
+            appended = m_tokens.tryConstructAndAppend(type, blockType);
+            break;
+        }
+
+        if (!appended) [[unlikely]]
+            return false;
+        if (wrapper) {
+            wrapper->addToken(pod.start);
+            observerOffset = pod.end;
+        }
+    }
+    return !s_forceSwiftScannerFailureForTesting.load(std::memory_order_relaxed);
 }
 
 unsigned CSSTokenizer::tokenCount() const

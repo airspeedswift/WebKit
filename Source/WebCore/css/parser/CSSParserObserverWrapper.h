@@ -69,7 +69,11 @@ private:
 
     CSSParserObserver& m_observer;
     Vector<unsigned> m_tokenOffsets;
-    CSSParserToken* m_firstParserToken;
+    // Set by finalizeConstruction; every accessor subtracts it from a token pointer to get an
+    // index into m_tokenOffsets. Initialised so that an accessor reached before construction
+    // finished computes a deterministic out-of-range index that Vector::at rejects, rather than
+    // one derived from stack contents.
+    CSSParserToken* m_firstParserToken { nullptr };
 
     struct CommentPosition {
         unsigned startOffset;
