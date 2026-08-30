@@ -132,7 +132,7 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char*, size_t, bo
 // originalText() and stops -- and, for a DimensionToken, anything but originalText()
 // whenever the *left* operand has a non-unit prefix. Both holes are filled below:
 // after this function returns nullopt, every field a DimensionToken carries has been
-// compared, m_nonUnitPrefixLength included, and none of it needed a new accessor.
+// compared, m_bits.nonUnitPrefixLength included, and none of it needed a new accessor.
 struct TokenDivergence {
     uint32_t reason;
     uint32_t expected;
@@ -165,14 +165,14 @@ static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expect
             return TokenDivergence { 5, static_cast<uint32_t>(expected.numericValueType()), static_cast<uint32_t>(actual.numericValueType()) };
     }
 
-    // A DimensionToken's unit. operator== takes its `m_nonUnitPrefixLength == 0` branch off
+    // A DimensionToken's unit. operator== takes its `m_bits.nonUnitPrefixLength == 0` branch off
     // *this*, so with a prefix it falls through to `originalText()` and never compares
-    // `unitString()` or `m_unit` -- exactly the field a bad change could corrupt with every test
-    // still passing.
+    // `unitString()` or `m_bits.unit` -- exactly the field a bad change could corrupt with every
+    // test still passing.
     //
-    // value() plus unitString() together pin `m_nonUnitPrefixLength` too, since unitString() is
-    // value().substring(m_nonUnitPrefixLength) -- no new accessor needed. value() alone also
-    // catches convertToDimensionWithUnit's merge rule: `10px` keeps both parts in one view;
+    // value() plus unitString() together pin `m_bits.nonUnitPrefixLength` too, since unitString()
+    // is value().substring(m_bits.nonUnitPrefixLength) -- no new accessor needed. value() alone
+    // also catches convertToDimensionWithUnit's merge rule: `10px` keeps both parts in one view;
     // `1\70x` (escaped) does not, so value() differs even though the unit type agrees.
     //
     // Still uncompared: a value whose text matches but whose backing StringImpl chose the other
@@ -182,7 +182,7 @@ static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expect
             return TokenDivergence { 7, static_cast<uint32_t>(expected.unitType()), static_cast<uint32_t>(actual.unitType()) };
         if (expected.value() != actual.value())
             return TokenDivergence { 8, expected.value().length(), actual.value().length() };
-        // value() agreed, so this is exactly a m_nonUnitPrefixLength divergence.
+        // value() agreed, so this is exactly a m_bits.nonUnitPrefixLength divergence.
         if (expected.unitString() != actual.unitString())
             return TokenDivergence { 9, expected.value().length() - expected.unitString().length(), actual.value().length() - actual.unitString().length() };
     }
