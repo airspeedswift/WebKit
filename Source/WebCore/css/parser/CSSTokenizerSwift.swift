@@ -1076,3 +1076,4 @@ public func cssTokenizeSwiftAll16(
 ) -> Bool {
     tokenizeAll(unsafe Span<UInt16>(_unsafeCxxSpan: data), sink)
 }
+

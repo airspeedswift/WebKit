@@ -58,6 +58,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		DEADBEEF00000000000000F4 /* CSSParserTokenBits.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000F3 /* CSSParserTokenBits.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DEADBEEF00000000000000F2 /* CSSTokenizerSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000F1 /* CSSTokenizerSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DEADBEEF00000000000000D2 /* CSSTokenizerSwiftBridge.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000D1 /* CSSTokenizerSwiftBridge.cpp */; };
 		DEADBEEF00000000000000C2 /* CSSTokenizerSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000C1 /* CSSTokenizerSwift.swift */; };
@@ -7768,6 +7769,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		DEADBEEF00000000000000F3 /* CSSParserTokenBits.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = css/parser/CSSParserTokenBits.h; sourceTree = "<group>"; };
 		DEADBEEF00000000000000F1 /* CSSTokenizerSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = css/parser/CSSTokenizerSwiftTypes.h; sourceTree = "<group>"; };
 		DEADBEEF00000000000000D1 /* CSSTokenizerSwiftBridge.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = css/parser/CSSTokenizerSwiftBridge.cpp; sourceTree = "<group>"; };
 		DEADBEEF00000000000000C1 /* CSSTokenizerSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSTokenizerSwift.swift; sourceTree = "<group>"; };
@@ -45214,6 +45216,7 @@
 				BC05ACCE2CEE610300750CB1 /* CSSSymbol.h in Headers */,
 				BC3CC2282DE79F6D0032971C /* CSSTextShadow.h in Headers */,
 				318210D92C59B17E00C334B4 /* CSSTokenizer.h in Headers */,
+				DEADBEEF00000000000000F4 /* CSSParserTokenBits.h in Headers */,
 				DEADBEEF00000000000000F2 /* CSSTokenizerSwiftTypes.h in Headers */,
 				3169B7DA2C63091700024DBA /* CSSTokenizerInputStream.h in Headers */,
 				9AB1F38018E2489A00534743 /* CSSToLengthConversionData.h in Headers */,
