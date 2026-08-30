@@ -8,11 +8,22 @@ public import WebCore_Private.CSSTokenizerSwiftTypes
 // CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
 //
 // Input is a `Span` over the preprocessed string, which C++ already owns and already
-// hands out as a contiguous span. Output is a POD token returned by value, carrying
-// the value's *offsets* — which loses nothing, since `CSSParserToken` already stores
-// a view into the input. Numbers are not converted here, so C++ keeps calling
-// charactersToDouble and double rounding stays bit-identical for free. Values
-// containing escapes are unescaped into a buffer this island owns and hands to C++
+// hands out as a contiguous span. Output is a *finished* token: `CSSParserTokenBits`, which is
+// `CSSParserToken`'s own storage, written through the one factory per token kind in
+// CSSParserTokenBits.h. The island used to emit a tagged description of a token instead, and
+// `CSSSwiftTokenSink::takeChunk` cast the tag back and ran a seven-arm switch on it to reach a
+// typed constructor -- recovering, once per token, a dispatch that is free here because every
+// construction site knows its kind statically.
+//
+// What crosses in place of a pointer is an *offset*, which is why none of this needs `~Escapable`:
+// `CSSParserToken` already stores a view into the input, so the pointer slot can carry the offset
+// until `resolveValuePointer` runs on the C++ side, and Swift never forms or dereferences a
+// pointer. The offset's top bit says whether it indexes the input or the chunk's unescape buffer.
+//
+// Numbers are not converted here, so C++ keeps calling charactersToDouble and double rounding
+// stays bit-identical for free; until it runs, the union carries the number's own range, because
+// after a dimension's number and unit have been merged the number is not recoverable from the
+// value. Values containing escapes are unescaped into a buffer this island owns and hands to C++
 // alongside each chunk of tokens, so nothing has to be re-tokenized in C++.
 //
 // The interior is `unsafe`-free. Two sites use one construct, `Span(_unsafeCxxSpan:)`,
@@ -66,57 +77,29 @@ enum CSSBlockTypeSwift: UInt8 {
     case notBlock = 0, blockStart, blockEnd
 }
 
-/// A tokenizer result. POD by construction: no references, no allocation, no
-/// lifetime dependence on the input, so it crosses to C++ as a plain struct.
-public struct CSSTokenSwift {
+/// A finished token, on its way out of the island.
+///
+/// `bits` is `CSSParserToken`'s own storage: the island writes it through the factories in
+/// `CSSParserTokenBits.h`, which are one per token kind, so a construction site that knows its
+/// kind statically -- and all 43 of them do -- never encodes it for the consumer to decode
+/// again. That is the difference from what this used to be. The boundary struct was a
+/// *description* of a token carrying a type tag, and `CSSSwiftTokenSink::takeChunk` cast the tag
+/// back and ran a seven-arm switch on it, calling a different out-of-line constructor per arm,
+/// once per token. The tag existed only so that the dispatch could be recovered on the side of
+/// the boundary where it was expensive.
+///
+/// The two offsets are the observer's, not the token's: `CSSParserTokenBits` has no room for a
+/// token's extent and must not grow, since it is the object the whole CSS parser stores. They
+/// leave this struct again immediately -- into the observer record buffer, and only when there is
+/// an observer -- and they are here rather than returned separately because 24 + 4 + 4 is
+/// 32 bytes, exactly the size the old boundary struct was, so the return convention does not get
+/// worse.
+struct EmittedToken {
+    var bits: WebCore.CSSParserTokenBits
     /// Input offset of the token's first character.
-    public var start: UInt32 = 0
+    var start: UInt32
     /// Input offset just past the token.
-    public var end: UInt32 = 0
-    /// The token's value text (ident/at-keyword/hash/string/url name, or the
-    /// unit of a dimension), as a range of the input.
-    public var valueStart: UInt32 = 0
-    public var valueLength: UInt32 = 0
-    /// For numeric tokens, the number's text — CSSParserToken's `originalText`,
-    /// and the range C++ converts to a double.
-    public var numberStart: UInt32 = 0
-    public var numberLength: UInt32 = 0
-    /// Delimiter code point for `.delimiter`; whitespace run length for
-    /// `.nonNewlineWhitespace` (CSSParserToken's nonNewlineWhitespaceCount).
-    public var extra: UInt32 = 0
-
-    public var type: UInt8 = CSSTokenTypeSwift.endOfFile.rawValue
-    public var blockType: UInt8 = CSSBlockTypeSwift.notBlock.rawValue
-    public var flags: UInt8 = 0
-
-    public init() {}
-}
-
-/// `CSSTokenSwift.flags` bits, and the *only* declaration of them.
-///
-/// They used to exist three times under three different names, with nothing asserting
-/// the three agreed: this, `SwiftFlagUnescaped` and friends in CSSTokenizer.cpp, and a
-/// third `FlagNeedsUnescape` set in CSSTokenizerSwiftBridge.cpp. `@c` (SE-0495) emits
-/// this into WebCoreSwift-Generated.h as a `uint8_t`-backed C enum, so CSSTokenizer.cpp
-/// reads `CSSTokenFlagBitsUnescaped` from here and both C++ copies are gone.
-///
-/// An enum rather than a namespace of `static let`s so `@c` can apply, which forces two
-/// things: the raw values are written as integer literals, because Swift rejects
-/// `1 << 0` as a raw value; and the Swift use sites spell `.rawValue`, since these are
-/// bits OR-ed into a `UInt8` and not a closed set of values.
-///
-/// Internal, not `public`, for the reason given on `CSSTokenTypeSwift` above.
-@c
-enum CSSTokenFlagBits: UInt8 {
-    case nonInteger = 1 // NumberValueType, else IntegerValueType
-    case plusSign = 2 // NumericSign
-    case minusSign = 4
-    case hashTokenId = 8 // HashTokenId, else HashTokenUnrestricted
-    /// The value's range indexes the unescape buffer handed back alongside the
-    /// tokens, rather than the input. Set when the value contained escapes, which
-    /// this tokenizer resolves itself; the caller only has to turn the code units
-    /// into whatever string type it wants.
-    case unescaped = 16
+    var end: UInt32
 }
 
 /// The tokenizer is generic over the code unit so one implementation serves both
@@ -247,6 +230,24 @@ private struct ScannedValue {
     var unescaped = false
 }
 
+/// The sign a number carried. The mapping onto `NumericSign`'s enumerators is written down in
+/// `makeNumericTokenBits`, not here: `NumericSign` has three values and no static_assert bridge
+/// the way `CSSParserTokenType` and `CSSUnitType` do, so mirroring its numbering in Swift would
+/// be a mirror nothing checks.
+private enum ScannedSign {
+    case none, plus, minus
+}
+
+/// The result of scanning a number: its own range in the input — `CSSParserToken`'s
+/// `originalText`, and the range C++ hands to `charactersToDouble` — plus the two
+/// classifications the token keeps.
+private struct ScannedNumber {
+    var start: UInt32 = 0
+    var length: UInt32 = 0
+    var isNonInteger = false
+    var sign = ScannedSign.none
+}
+
 struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// The input cursor. As in C++ this may advance past the end — `consume()`
     /// on an exhausted input returns the EOF marker and still advances — so
@@ -369,34 +370,70 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     }
 
     // MARK: Token construction helpers
+    //
+    // Each of these calls the factory in CSSParserTokenBits.h that mirrors the CSSParserToken
+    // constructor this token kind would have gone through, so the kind is spent here, where it is
+    // a literal, rather than encoded for C++ to decode. `@inline(always)` on all of them, which
+    // is what makes the factories fold: with the kind constant the switch inside each factory
+    // disappears entirely, none of the six is emitted out of line, and the type constant is
+    // shared with the store that writes it (measured on the reference probe, all 43 sites).
+
+    /// Whether this specialization's code unit is one byte, which is `valueIs8Bit` for any value
+    /// that is a range of the input. A per-specialization constant, not a runtime test.
+    private static var valueIs8Bit: Bool { Unit.bitWidth == 8 }
+
+    @inline(always) private func emit(
+        _ bits: WebCore.CSSParserTokenBits, _ start: Int, _ data: Span<Unit>
+    ) -> EmittedToken {
+        EmittedToken(
+            bits: bits,
+            start: UInt32(truncatingIfNeeded: start),
+            end: UInt32(truncatingIfNeeded: clampedOffset(data)))
+    }
 
     @inline(always) private func token(
         _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
-    ) -> CSSTokenSwift {
-        var t = CSSTokenSwift()
-        t.type = type.rawValue
-        t.blockType = block.rawValue
-        t.start = UInt32(truncatingIfNeeded: start)
-        t.end = UInt32(truncatingIfNeeded: clampedOffset(data))
-        return t
+    ) -> EmittedToken {
+        emit(WebCore.makeSimpleTokenBits(UInt32(type.rawValue), UInt32(block.rawValue)), start, data)
     }
 
-    @inline(always) private func delimiter(_ c: Unit, _ start: Int, _ data: Span<Unit>) -> CSSTokenSwift {
-        var t = token(.delimiter, start, data)
-        t.extra = UInt32(truncatingIfNeeded: c)
-        return t
+    @inline(always) private func delimiter(_ c: Unit, _ start: Int, _ data: Span<Unit>) -> EmittedToken {
+        emit(
+            WebCore.makeDelimiterTokenBits(
+                UInt32(CSSTokenTypeSwift.delimiter.rawValue), UInt32(truncatingIfNeeded: c)),
+            start, data)
+    }
+
+    @inline(always) private func whitespace(
+        _ count: Int, _ start: Int, _ data: Span<Unit>
+    ) -> EmittedToken {
+        emit(
+            WebCore.makeWhitespaceTokenBits(
+                UInt32(CSSTokenTypeSwift.nonNewlineWhitespace.rawValue),
+                UInt32(truncatingIfNeeded: count)),
+            start, data)
     }
 
     @inline(always) private func valueToken(
         _ type: CSSTokenTypeSwift, _ value: ScannedValue, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
-    ) -> CSSTokenSwift {
-        var t = token(type, start, data, block: block)
-        t.valueStart = value.start
-        t.valueLength = value.length
-        if value.unescaped { t.flags |= CSSTokenFlagBits.unescaped.rawValue }
-        return t
+    ) -> EmittedToken {
+        emit(
+            WebCore.makeValueTokenBits(
+                UInt32(type.rawValue), UInt32(block.rawValue),
+                value.start, value.length, value.unescaped, Self.valueIs8Bit),
+            start, data)
+    }
+
+    @inline(always) private func hashToken(
+        _ value: ScannedValue, isId: Bool, _ start: Int, _ data: Span<Unit>
+    ) -> EmittedToken {
+        emit(
+            WebCore.makeHashTokenBits(
+                UInt32(CSSTokenTypeSwift.hash.rawValue), isId,
+                value.start, value.length, value.unescaped, Self.valueIs8Bit),
+            start, data)
     }
 
     @inline(always) private mutating func pushBlock(_ type: CSSTokenTypeSwift) {
@@ -405,14 +442,14 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     private mutating func blockStart(
         _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>
-    ) -> CSSTokenSwift {
+    ) -> EmittedToken {
         pushBlock(type)
         return token(type, start, data, block: .blockStart)
     }
 
     private mutating func blockEnd(
         _ type: CSSTokenTypeSwift, _ startType: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>
-    ) -> CSSTokenSwift {
+    ) -> EmittedToken {
         // The unsigned compare both bounds-checks and tests for an empty stack.
         let top = blockStack.count &- 1
         if UInt(bitPattern: top) < UInt(bitPattern: blockStack.count),
@@ -427,7 +464,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     /// Returns the next token; `.endOfFile` when the input is exhausted.
     /// Mirrors CSSTokenizer::nextToken.
-    mutating func nextToken(_ data: Span<Unit>) -> CSSTokenSwift {
+    mutating func nextToken(_ data: Span<Unit>) -> EmittedToken {
         let start = clampedOffset(data)
         let cc = consume(data)
 
@@ -440,9 +477,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             // consumed, and stops at a newline so newlines tokenize separately.
             let runStart = clampedOffset(data)
             advanceUntilNewlineOrNonWhitespace(data)
-            var t = token(.nonNewlineWhitespace, start, data)
-            t.extra = UInt32(truncatingIfNeeded: 1 &+ (clampedOffset(data) &- runStart))
-            return t
+            return whitespace(1 &+ (clampedOffset(data) &- runStart), start, data)
 
         case .newline:
             return token(.newline, start, data)
@@ -455,9 +490,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             if isNameByte(next) || twoCharsAreValidEscape(next, peek(data, 1)) {
                 let isId = nextCharsAreIdentifier(data)
                 let name = consumeName(data)
-                var t = valueToken(.hash, name, start, data)
-                if isId { t.flags |= CSSTokenFlagBits.hashTokenId.rawValue }
-                return t
+                return hashToken(name, isId: isId, start, data)
             }
             return delimiter(cc, start, data)
 
@@ -577,20 +610,19 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// Mirrors CSSTokenizer::consumeNumber, which merges the spec's
     /// consume-a-number with convert-a-string-to-a-number. The conversion
     /// itself is deliberately left to C++ (see the file comment).
-    private mutating func consumeNumber(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
+    private mutating func consumeNumber(_ data: Span<Unit>) -> ScannedNumber {
         let startOffset = clampedOffset(data)
 
-        var nonInteger = false
-        var signFlag: UInt8 = 0
+        var number = ScannedNumber()
         var length = 0
 
         var next = peek(data, 0)
         if next == 0x2B {
             length &+= 1
-            signFlag = CSSTokenFlagBits.plusSign.rawValue
+            number.sign = .plus
         } else if next == 0x2D {
             length &+= 1
-            signFlag = CSSTokenFlagBits.minusSign.rawValue
+            number.sign = .minus
         }
 
         // Wrapping throughout: `length` counts characters of a number that has
@@ -599,7 +631,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         length = skipDigits(data, from: length)
         next = peek(data, length)
         if next == 0x2E, isASCIIDigitByte(peek(data, length &+ 1)) {
-            nonInteger = true
+            number.isNonInteger = true
             length = skipDigits(data, from: length &+ 2)
             next = peek(data, length)
         }
@@ -607,24 +639,21 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         if next == 0x45 || next == 0x65 { // E e
             next = peek(data, length &+ 1)
             if isASCIIDigitByte(next) {
-                nonInteger = true
+                number.isNonInteger = true
                 length = skipDigits(data, from: length &+ 1)
             } else if next == 0x2B || next == 0x2D, isASCIIDigitByte(peek(data, length &+ 2)) {
-                nonInteger = true
+                number.isNonInteger = true
                 length = skipDigits(data, from: length &+ 3)
             }
         }
 
         advance(length)
 
-        var t = token(.number, start, data)
         // CSSParserToken's originalText for a number is the whole consumed run,
         // which is also exactly the range C++ hands to charactersToDouble.
-        t.numberStart = UInt32(truncatingIfNeeded: startOffset)
-        t.numberLength = UInt32(truncatingIfNeeded: clampedOffset(data) &- startOffset)
-        if nonInteger { t.flags |= CSSTokenFlagBits.nonInteger.rawValue }
-        t.flags |= signFlag
-        return t
+        number.start = UInt32(truncatingIfNeeded: startOffset)
+        number.length = UInt32(truncatingIfNeeded: clampedOffset(data) &- startOffset)
+        return number
     }
 
     /// CSSTokenizerInputStream::skipWhilePredicate<isASCIIDigit>: `from` and the
@@ -639,26 +668,90 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         return relative
     }
 
-    /// Mirrors CSSTokenizer::consumeNumericToken.
-    private mutating func consumeNumericToken(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
-        var t = consumeNumber(data, start)
+    /// Mirrors CSSTokenizer::consumeNumericToken, and — for a dimension — also the
+    /// `convertToDimensionWithUnit(StringView)` post-pass that C++ used to run on the finished
+    /// token, because there is nothing in it the island does not already know.
+    ///
+    /// That post-pass is two things. It resolves the unit's text to a `CSSUnitType`, which is
+    /// `cssPrimitiveValueUnitFromTrie`, transcribed at the end of this file. And it
+    /// decides the token's value: `mergeIfAdjacent` joins the number and the unit into one view
+    /// when they are physically adjacent in the input and the number is shorter than sixteen
+    /// characters, so that `10px` has value `"10px"` and round-trips verbatim through custom
+    /// property serialization, while `1\70x` — the same unit written with an escape, whose text is
+    /// a pooled String rather than a range of the input — has value `"px"`.
+    ///
+    /// `nonUnitPrefixLength` records which of those happened, and it is not merely a length:
+    /// `unitString()` is `value().substring(nonUnitPrefixLength)`, `CSSParserToken::operator==`
+    /// selects which comparison a DimensionToken gets on whether it is zero, and custom property
+    /// serialization reserializes from `value()`. Getting it wrong is the one thing here that a
+    /// differential over valid input would not necessarily catch, which is why the adjacency test
+    /// below is *computed* rather than assumed. It does hold structurally for every input either
+    /// scanner can produce — `consumeNumber` ends the number's range at the cursor and
+    /// `consumeName`'s fast path starts there, and `nextCharsAreIdentifier` only peeks — but a
+    /// structural invariant restated as a comment is exactly the kind of claim this project has
+    /// been wrong about, and the compare is free.
+    private mutating func consumeNumericToken(_ data: Span<Unit>, _ start: Int) -> EmittedToken {
+        let number = consumeNumber(data)
+
         if nextCharsAreIdentifier(data) {
             let unit = consumeName(data)
-            t.type = CSSTokenTypeSwift.dimension.rawValue
-            t.valueStart = unit.start
-            t.valueLength = unit.length
-            if unit.unescaped { t.flags |= CSSTokenFlagBits.unescaped.rawValue }
-        } else if consumeIfNext(data, 0x25) {
-            t.type = CSSTokenTypeSwift.percentage.rawValue
+            let unitRange = Int(unit.start)..<Int(unit.start &+ unit.length)
+            let unitType = unit.unescaped
+                ? cssPrimitiveValueUnitFromTrie(unescaped.span.extracting(unitRange))
+                : cssPrimitiveValueUnitFromTrie(data.extracting(unitRange))
+
+            // mergeIfAdjacent's own conditions: both views the same width, which they are unless
+            // the unit came out of the unescape buffer, physically adjacent, and the number
+            // shorter than sixteen characters. `nonUnitPrefixLength` is four bits wide, and the
+            // last condition is what keeps the number's length inside it.
+            let merged = !unit.unescaped
+                && number.length >= 1 && number.length < 16
+                && unit.start == number.start &+ number.length
+            return emit(
+                WebCore.makeNumericTokenBits(
+                    UInt32(CSSTokenTypeSwift.dimension.rawValue),
+                    number.isNonInteger, number.sign == .plus, number.sign == .minus,
+                    UInt32(unitType.rawValue),
+                    merged ? number.start : unit.start,
+                    merged ? number.length &+ unit.length : unit.length,
+                    unit.unescaped,
+                    merged ? number.length : 0,
+                    number.start, number.length,
+                    Self.valueIs8Bit),
+                start, data)
         }
-        t.end = UInt32(truncatingIfNeeded: clampedOffset(data))
-        return t
+
+        if consumeIfNext(data, 0x25) {
+            // convertToPercentage: the type and the unit change and nothing else does, so the
+            // value stays the number's own range and the prefix length stays zero.
+            return numericToken(.percentage, unit: .percentage, number, start, data)
+        }
+
+        return numericToken(.number, unit: .number, number, start, data)
+    }
+
+    /// A NumberToken or a PercentageToken: `value()` is `originalText()` is the number, so there
+    /// is no unit text and no merge to decide.
+    @inline(always) private func numericToken(
+        _ type: CSSTokenTypeSwift, unit: CSSUnitTypeSwift, _ number: ScannedNumber,
+        _ start: Int, _ data: Span<Unit>
+    ) -> EmittedToken {
+        emit(
+            WebCore.makeNumericTokenBits(
+                UInt32(type.rawValue),
+                number.isNonInteger, number.sign == .plus, number.sign == .minus,
+                UInt32(unit.rawValue),
+                number.start, number.length, false,
+                0,
+                number.start, number.length,
+                Self.valueIs8Bit),
+            start, data)
     }
 
     // MARK: Identifiers
 
     /// Mirrors CSSTokenizer::consumeIdentLikeToken.
-    private mutating func consumeIdentLikeToken(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
+    private mutating func consumeIdentLikeToken(_ data: Span<Unit>, _ start: Int) -> EmittedToken {
         let name = consumeName(data)
         if consumeIfNext(data, 0x28) { // (
             if nameIsURL(data, name) {
@@ -742,7 +835,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// Mirrors CSSTokenizer::consumeStringTokenUntil.
     private mutating func consumeStringTokenUntil(
         _ data: Span<Unit>, _ endingCodePoint: Unit, _ start: Int
-    ) -> CSSTokenSwift {
+    ) -> EmittedToken {
         // Fast path: no escapes, so the value is a range of the input.
         var size = 0
         while true {
@@ -792,7 +885,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     // MARK: URLs
 
     /// Mirrors CSSTokenizer::consumeURLToken.
-    private mutating func consumeURLToken(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
+    private mutating func consumeURLToken(_ data: Span<Unit>, _ start: Int) -> EmittedToken {
         advanceUntilNonWhitespace(data)
 
         var size = 0
@@ -953,44 +1046,31 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
 // MARK: - C++ entry points
 //
-// POD in, POD out, so the C++ side needs no Swift type beyond the token struct
-// itself. `cssTokenizeSwiftAll8`/`16` are what CSSTokenizer's constructor drives
-// when `Scanner::Swift` is selected, and they are the only entry points: the two
-// test-only ones that used to sit here were deleted along with the C++ entries they
-// served, which took the island from four `Span(_unsafeCxxSpan:)` sites to two.
+// `cssTokenizeSwiftAll8`/`16` are what CSSTokenizer's constructor drives when
+// `Scanner::Swift` is selected, and they are the only entry points: the two test-only ones
+// that used to sit here were deleted along with the C++ entries they served, which took the
+// island from four `Span(_unsafeCxxSpan:)` sites to two.
 
-/// Copies one of the island's tokens into the C++ boundary struct.
-///
-/// The boundary type is defined in C++ (CSSTokenizerSwiftTypes.h) rather than
-/// here, because WebCore compiles Swift with -enable-library-evolution: a Swift
-/// struct exposed with @_expose(Cxx) is resilient, so the generated C++ class is
-/// a heap-allocated opaque box with no default constructor and a sizeof() that is
-/// not the struct's size. Usable for a single returned value, unusable as the
-/// element type of a shared buffer.
-@inline(always) private func exported(_ token: CSSTokenSwift) -> WebCore.CSSSwiftToken {
-    var out = WebCore.CSSSwiftToken()
-    out.start = token.start
-    out.end = token.end
-    out.valueStart = token.valueStart
-    out.valueLength = token.valueLength
-    out.numberStart = token.numberStart
-    out.numberLength = token.numberLength
-    out.extra = token.extra
-    out.type = token.type
-    out.blockType = token.blockType
-    out.flags = token.flags
-    return out
+/// One entry of the observer record buffer. A free function rather than a closure over the buffer,
+/// so nothing captures a `~Copyable` container.
+@inline(always) private func observerRecord(
+    _ token: EmittedToken, isComment: Bool
+) -> WebCore.CSSSwiftObserverRecord {
+    var entry = WebCore.CSSSwiftObserverRecord()
+    entry.start = token.start
+    entry.end = token.end
+    entry.isComment = isComment ? 1 : 0
+    return entry
 }
 
 /// Tokenizes a whole stylesheet, handing the tokens to `sink` a chunk at a time.
 ///
-/// Every buffer here belongs to Swift, and each chunk crosses to C++ as a pair of
-/// `Span`s. That is the direction a buffer handover can be made safe in
-/// (SafeInteropWrappers transforms *parameters*), and the receiver is a refcounted
-/// shared reference, which is how a directly-named callee reaches C++ state without a
-/// pointer parameter. The result is that this function contains exactly one `unsafe`:
-/// the input span, which has to arrive *from* C++ and so cannot be fixed by any
-/// annotation. See swift-cpp-interop-notes.md §67.
+/// Every buffer here belongs to Swift, and each chunk crosses to C++ as three `Span`s. That is
+/// the direction a buffer handover can be made safe in (SafeInteropWrappers transforms
+/// *parameters*), and the receiver is a refcounted shared reference, which is how a
+/// directly-named callee reaches C++ state without a pointer parameter. The result is that this
+/// function contains exactly one `unsafe`: the input span, which has to arrive *from* C++ and so
+/// cannot be fixed by any annotation. See swift-cpp-interop-notes.md §67.
 ///
 /// The previous design was the mirror image — C++ owned the buffers and passed
 /// pointers in, the cursor and block stack travelled in a state struct, and buffers
@@ -1006,13 +1086,19 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
     _ span: Span<Unit>,
     _ sink: WebCore.CSSSwiftTokenSink
 ) -> Bool {
+    // A value offset is parked in the token's pointer slot with its top bit saying which buffer
+    // it indexes, so an input at or above 2 GB cannot have its offsets represented. Nothing real
+    // is within three orders of magnitude of that, but the island has no fallback, so it reports
+    // failure rather than truncating -- and the check is once per tokenization, not per token.
+    guard WebCore.cssParserTokenBitsCanRepresentOffsets(numericCast(span.count)) else { return false }
+
     // Chunked so the buffer stays cache-resident: one entry per token for a whole
     // document is tens of megabytes, and writing that and reading it back costs more
     // than the scan (notes §11i).
     let chunkCapacity = 1024
 
     var tokenizer = CSSTokenizerSwift<Unit>()
-    var tokens = UniqueArray<WebCore.CSSSwiftToken>()
+    var tokens = UniqueArray<WebCore.CSSParserTokenBits>()
     // Capped by the input's length, because a stylesheet is not the only thing that gets
     // tokenized. `CSSTokenizer` is also constructed per property value -- by
     // `CSSPropertyParser::parseStylePropertyLonghand(CSSPropertyID, const String&)`
@@ -1028,19 +1114,55 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
     // reservation; over it, the chunk flush at `chunkCapacity` still lands first.
     tokens.reserveCapacity(min(chunkCapacity, span.count))
 
+    // The web inspector's offsets, which a finished token no longer carries. Asked once, here,
+    // and not per token or per chunk: with no observer this stays at capacity zero, which
+    // `_RigidArray` represents with a dangling pointer and a `deinit` that returns early, so the
+    // production path pays three words of stack and no allocation for it.
+    let wantsObserverRecords = sink.wantsObserverRecords()
+    var observerRecords = UniqueArray<WebCore.CSSSwiftObserverRecord>()
+    if wantsObserverRecords {
+        // One record per token plus one per comment, so `chunkCapacity` is the floor rather than
+        // a bound; reserving it beats crawling up from capacity one.
+        observerRecords.reserveCapacity(chunkCapacity)
+    }
+
+    let endOfFileType = UInt32(CSSTokenTypeSwift.endOfFile.rawValue)
+    let commentType = UInt32(CSSTokenTypeSwift.comment.rawValue)
+
     while true {
         let token = tokenizer.nextToken(span)
-        if token.type == CSSTokenTypeSwift.endOfFile.rawValue { break }
-        tokens.append(exported(token))
+        // The one thing Swift has to read back off a finished token, because it cannot name a
+        // bitfield. `tokenBitsType` is a one-line accessor in CSSParserTokenBits.h, next to the
+        // factories that wrote the field, so the packing is still stated exactly once.
+        let type = WebCore.tokenBitsType(token.bits)
+        if type == endOfFileType { break }
+
+        // Comments never enter `m_tokens` -- the C++ scanner drops them too, and
+        // CSSParserToken::serialize has an ASSERT_NOT_REACHED for one -- so with no observer to
+        // report the extent to there is nothing to do with a comment at all. That is strictly
+        // less work than before, when every comment was appended to the chunk and then skipped
+        // on the C++ side.
+        if type == commentType {
+            if wantsObserverRecords { observerRecords.append(observerRecord(token, isComment: true)) }
+            continue
+        }
+
+        tokens.append(token.bits)
+        if wantsObserverRecords { observerRecords.append(observerRecord(token, isComment: false)) }
+
         if tokens.count == chunkCapacity {
-            guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits) else { return false }
+            guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits, observerRecords.span) else { return false }
             tokens.removeAll()
+            observerRecords.removeAll()
             tokenizer.startChunk()
         }
     }
 
-    if !tokens.isEmpty {
-        guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits) else { return false }
+    // `observerRecords` and not just `tokens`: a comment produces a record and no token, so an
+    // input whose tail is a comment -- or which is nothing but comments -- has records left to
+    // hand over with an empty token chunk.
+    if !tokens.isEmpty || !observerRecords.isEmpty {
+        guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits, observerRecords.span) else { return false }
     }
     sink.finish()
     return true
@@ -1095,3 +1217,640 @@ public func cssTokenizeSwiftAll16(
     tokenizeAll(unsafe Span<UInt16>(_unsafeCxxSpan: data), sink)
 }
 
+// MARK: - The CSS unit-type trie
+//
+// In this file, and not in one of its own, for a measured reason. WebCore compiles Swift with
+// `-incremental -enable-batch-mode` and *not* whole-module optimization, so nothing crosses a
+// Swift file boundary: no inlining and, worse here, no generic specialization. With the trie one
+// file away, `consumeNumericToken` did not call the 943-instruction `UInt8` specialization that
+// was sitting in the same binary. Per dimension token it called a lazy
+// protocol-conformance-witness-table accessor, then the *unspecialized* generic trie -- 17,898
+// instructions, every `Span` access through a witness -- then `CSSUnitTypeSwift.rawValue` out of
+// line, twice. Moving it here is worth 10.7 points of the 8-bit real-corpus median (0.879 split,
+// 0.992 merged, each against its own interleaved C++ control), and it takes the island's total
+// instruction count back to within 0.1% of where it was.
+//
+// The build change that would let the split stand is `-wmo` on WebCore's Swift step. It is
+// recorded as a to-file item rather than made here, because it changes every WebCore Swift file
+// at once and this commit is not the place to find out what that does.
+
+// The CSS unit-type trie, in Swift.
+//
+//   Source/WebCore/css/parser/CSSParserToken.cpp  cssPrimitiveValueUnitFromTrie (304 lines)
+//   Source/WebCore/css/CSSUnits.h                 enum class CSSUnitType
+//
+// Why this is here. `CSSParserToken::stringToUnitType` is the only reason a DimensionToken's
+// *unit text* has to reach C++ at all: the island hands back the unit's range so that C++ can
+// run the trie over it. `CSSParserTokenBits` has room for exactly one value range, and a
+// dimension needs two -- the number's text and the unit's text -- so for as long as the unit
+// is resolved on the far side, the island cannot emit a finished token for the one token type
+// that carries the most information. Resolving the unit here collapses that: the unit range
+// stops crossing, and only the resolved `CSSUnitType` does, in the seven bits
+// `CSSParserTokenBits::unit` already reserves for it.
+//
+// FAITHFULNESS. This is a transcription, not a redesign: the length dispatch, the per-index
+// nesting and the order of the comparisons are the C++'s. There is exactly one structural
+// change, and it is the one that lets a single body serve both widths:
+//
+//   The C++ writes `switch (toASCIILower(data[i]))`, where `toASCIILower` is
+//   `character | (isASCIIUpper(character) << 5)` for char16_t (ASCIICType.h:189) and a
+//   256-entry `asciiCaseFoldTable` lookup for Latin1Character (ASCIICType.h:199). That table
+//   (ASCIICType.cpp:30) is the identity outside 'A'-'Z', so BOTH spellings fold 'A'-'Z' and
+//   nothing else -- in particular Latin-1 uppercase 0xC0-0xDE is NOT folded, and neither is
+//   any non-ASCII UTF-16 code unit. Here that becomes `trieSymbol`, which folds 'A'-'Z',
+//   passes the rest of ASCII through, and collapses everything >= 0x80 to a single sentinel.
+//   Collapsing is behaviour-preserving because every edge in the trie is 'a'-'z' or '_', so
+//   no code unit >= 0x80 can match one either before or after folding.
+//
+// PROOF. Not argued, measured. `~/src/webkit-swift-ports/css-unit-trie` compares this body
+// against a verbatim extraction of the tree's own function over 873,806,013 distinct inputs
+// (922,068,940 comparisons, 0 mismatches, all 63 reachable units produced), and five
+// deliberately wrong ports are each caught by the phase aimed at them. The in-tree copies are
+// then compared against each other by the unit-trie phase of
+// `~/src/webkit-swift-ports/cssprobe/validate/csscheck.cpp`, through the entry points at the
+// bottom of this file -- because two of my own extractions agreeing is not the claim; the
+// claim is that the function WebCore ships and the function this island runs agree.
+//
+// SAFETY. Zero `unsafe` markers. Every read is a bounds-checked `Span` subscript. The C++ has
+// an `ASSERT(data.data())` that is a no-op in Release, so a null span there is unchecked;
+// here the empty case is just `count == 0`, which is a real check rather than an assertion.
+
+/// Mirrors `WebCore::CSSUnitType` (`Source/WebCore/css/CSSUnits.h`).
+///
+/// A mirror rather than the imported enum, and the reason is the boundary module rather than
+/// anything about the type. The island imports `WebCore_Private.CSSTokenizerSwiftTypes`, whose
+/// whole point is that it is *not* the WebCore umbrella (see CSSTokenizerSwiftTypes.h), and
+/// `CSSUnits.h` cannot join it: it has no `#include`s at all and leans on its includer for
+/// `uint8_t`, `std::optional`, `ASCIILiteral` and `NODELETE`, so it is not self-contained; and
+/// it is a Private header, so putting it in the island's module means excluding it from the
+/// `Core` umbrella and taking `CSSUnitType` away from every other Swift file that imports
+/// WebCore_Private. Mirroring costs 70 lines and no build risk.
+///
+/// `@c` (SE-0495) is what makes the mirror checkable rather than hopeful. It emits this into
+/// WebCoreSwift-Generated.h as a `uint8_t`-backed C enum, so CSSTokenizer.cpp can `static_assert`
+/// each C++ enumerator against `CSSUnitTypeSwift<Name>` **by name**, for all 70. That is not
+/// pedantry: `CSSUnitType` interleaves the aliases `FirstViewportCSSUnitType = Vw` and
+/// `LastViewportCSSUnitType = Dvi` into the enumerator list, and the enumerator after an alias
+/// continues from the *alias*, so moving either one silently renumbers everything below it.
+/// The trie can only return 63 of the 70, so a behavioural differential -- however exhaustive --
+/// would never catch a mis-transcribed `Calc`, `Percentage` or `Integer`. The aliases are not
+/// cases here; Swift enums cannot carry duplicate raw values, and the asserts cover them
+/// against `Vw` and `Dvi` directly.
+///
+/// Internal rather than `public` for the reason given on `CSSTokenTypeSwift`: `@c` on a
+/// *resilient* enum crashes IRGen, and WebCore compiles Swift with -enable-library-evolution.
+/// The generated header is emitted at `-emit-clang-header-min-access internal`, so internal
+/// loses nothing.
+@c
+enum CSSUnitTypeSwift: UInt8 {
+    case unknown = 0
+    case number = 1
+    case integer = 2
+    case percentage = 3
+    case em = 4
+    case ex = 5
+    case px = 6
+    case cm = 7
+    case mm = 8
+    case `in` = 9
+    case pt = 10
+    case pc = 11
+    case deg = 12
+    case rad = 13
+    case grad = 14
+    case ms = 15
+    case s = 16
+    case hz = 17
+    case khz = 18
+
+    case vw = 19
+    case vh = 20
+    case vmin = 21
+    case vmax = 22
+    case vb = 23
+    case vi = 24
+    case svw = 25
+    case svh = 26
+    case svmin = 27
+    case svmax = 28
+    case svb = 29
+    case svi = 30
+    case lvw = 31
+    case lvh = 32
+    case lvmin = 33
+    case lvmax = 34
+    case lvb = 35
+    case lvi = 36
+    case dvw = 37
+    case dvh = 38
+    case dvmin = 39
+    case dvmax = 40
+    case dvb = 41
+    case dvi = 42
+
+    case cqw = 43
+    case cqh = 44
+    case cqi = 45
+    case cqb = 46
+    case cqmin = 47
+    case cqmax = 48
+
+    case dppx = 49
+    case x = 50
+    case dpi = 51
+    case dpcm = 52
+    case fr = 53
+    case q = 54
+    case lh = 55
+    case rlh = 56
+
+    case turn = 57
+    case rem = 58
+    case rex = 59
+    case cap = 60
+    case rcap = 61
+    case ch = 62
+    case rch = 63
+    case ic = 64
+    case ric = 65
+
+    case calc = 66
+    case calcPercentageWithAngle = 67
+    case calcPercentageWithLength = 68
+
+    /// `__qem`, the quirky-em unit. See the comment on the C++ enumerator.
+    case quirkyEm = 69
+}
+
+/// The ASCII code units the trie's edges are drawn from, plus the sentinel every non-ASCII
+/// code unit folds to.
+///
+/// Named constants rather than character literals because `trieSymbol` returns a `UInt8` for
+/// both widths, and `case "q"` in a switch over `UInt8` is not a thing Swift will write for
+/// you. The alphabet is 'a'-'z' minus j, o and y, plus '_'.
+private enum Sym {
+    static let a = UInt8(ascii: "a")
+    static let b = UInt8(ascii: "b")
+    static let c = UInt8(ascii: "c")
+    static let d = UInt8(ascii: "d")
+    static let e = UInt8(ascii: "e")
+    static let f = UInt8(ascii: "f")
+    static let g = UInt8(ascii: "g")
+    static let h = UInt8(ascii: "h")
+    static let i = UInt8(ascii: "i")
+    static let k = UInt8(ascii: "k")
+    static let l = UInt8(ascii: "l")
+    static let m = UInt8(ascii: "m")
+    static let n = UInt8(ascii: "n")
+    static let p = UInt8(ascii: "p")
+    static let q = UInt8(ascii: "q")
+    static let r = UInt8(ascii: "r")
+    static let s = UInt8(ascii: "s")
+    static let t = UInt8(ascii: "t")
+    static let u = UInt8(ascii: "u")
+    static let v = UInt8(ascii: "v")
+    static let w = UInt8(ascii: "w")
+    static let x = UInt8(ascii: "x")
+    static let z = UInt8(ascii: "z")
+    static let underscore = UInt8(ascii: "_")
+
+    /// Stands in for every code unit >= 0x80. Must not collide with any edge above; all of
+    /// those are 'a'-'z' (0x61-0x7A) or '_' (0x5F).
+    static let nonASCII: UInt8 = 0x80
+}
+
+/// `WTF::toASCIILower`, folded into "the symbol this code unit can match in the trie".
+///
+/// Folds 'A'-'Z' to 'a'-'z' and nothing else -- matching both `toASCIILower` overloads, which
+/// agree because `asciiCaseFoldTable` is the identity outside 'A'-'Z'.
+///
+/// This is the *checked* fold, and the distinction is load-bearing for exactly one unit. WTF
+/// also has `toASCIILowerUnchecked` (`character | 0x20`), and ASCIICType.h:82 explicitly
+/// recommends it "in the CSS tokenizer, for example" -- but it maps '_' (0x5F) to 0x7F, and
+/// '_' is the alphabet of `__qem`, the one unit that is not spelled in letters. The unchecked
+/// fold would also map '@'->'`' and '['->'{'. Reaching for the faster fold here would pass
+/// every test that does not contain a quirky-em; the standalone differential's `unchecked-fold`
+/// mutant is exactly that bug, and it fails on 13 inputs, all of them spellings of `__qem`.
+@inline(always) private func trieSymbol(_ character: some CSSCodeUnit) -> UInt8 {
+    if character >= 0x41 && character <= 0x5A {
+        return UInt8(truncatingIfNeeded: character) &+ 0x20
+    }
+    if character <= 0x7F {
+        return UInt8(truncatingIfNeeded: character)
+    }
+    return Sym.nonASCII
+}
+
+/// `WebCore::cssPrimitiveValueUnitFromTrie`.
+///
+/// `CSSParserToken::stringToUnitType` is a two-line width dispatch onto the C++ template
+/// (`CSSParserToken.cpp`); it has no counterpart here because the island already knows
+/// statically which width it holds.
+func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSSUnitTypeSwift {
+    switch data.count {
+    case 1:
+        switch trieSymbol(data[0]) {
+        case Sym.q:
+            return .q
+        case Sym.s:
+            return .s
+        case Sym.x:
+            return .x
+        default:
+            break
+        }
+
+    case 2:
+        switch trieSymbol(data[0]) {
+        case Sym.c:
+            switch trieSymbol(data[1]) {
+            case Sym.h:
+                return .ch
+            case Sym.m:
+                return .cm
+            default:
+                break
+            }
+        case Sym.e:
+            switch trieSymbol(data[1]) {
+            case Sym.m:
+                return .em
+            case Sym.x:
+                return .ex
+            default:
+                break
+            }
+        case Sym.f:
+            if trieSymbol(data[1]) == Sym.r {
+                return .fr
+            }
+        case Sym.h:
+            if trieSymbol(data[1]) == Sym.z {
+                return .hz
+            }
+        case Sym.i:
+            switch trieSymbol(data[1]) {
+            case Sym.c:
+                return .ic
+            case Sym.n:
+                return .in
+            default:
+                break
+            }
+        case Sym.l:
+            if trieSymbol(data[1]) == Sym.h {
+                return .lh
+            }
+        case Sym.m:
+            switch trieSymbol(data[1]) {
+            case Sym.m:
+                return .mm
+            case Sym.s:
+                return .ms
+            default:
+                break
+            }
+        case Sym.p:
+            switch trieSymbol(data[1]) {
+            case Sym.c:
+                return .pc
+            case Sym.t:
+                return .pt
+            case Sym.x:
+                return .px
+            default:
+                break
+            }
+        case Sym.v:
+            switch trieSymbol(data[1]) {
+            case Sym.b:
+                return .vb
+            case Sym.h:
+                return .vh
+            case Sym.i:
+                return .vi
+            case Sym.w:
+                return .vw
+            default:
+                break
+            }
+        default:
+            break
+        }
+
+    case 3:
+        switch trieSymbol(data[0]) {
+        case Sym.c:
+            // The C++ spells these as two consecutive `if`s rather than a switch, with no
+            // `break` between them; they are mutually exclusive, so this is the same trie.
+            // Copied as it stands, because the shape is a latent bug worth leaving visible:
+            // a future `ca?` unit added under the first `if` without a break would be
+            // reachable from the second test's failure path.
+            if trieSymbol(data[1]) == Sym.a {
+                if trieSymbol(data[2]) == Sym.p {
+                    return .cap
+                }
+            }
+            if trieSymbol(data[1]) == Sym.q {
+                switch trieSymbol(data[2]) {
+                case Sym.b:
+                    return .cqb
+                case Sym.h:
+                    return .cqh
+                case Sym.i:
+                    return .cqi
+                case Sym.w:
+                    return .cqw
+                default:
+                    break
+                }
+            }
+        case Sym.d:
+            switch trieSymbol(data[1]) {
+            case Sym.e:
+                if trieSymbol(data[2]) == Sym.g {
+                    return .deg
+                }
+            case Sym.p:
+                if trieSymbol(data[2]) == Sym.i {
+                    return .dpi
+                }
+            case Sym.v:
+                switch trieSymbol(data[2]) {
+                case Sym.b:
+                    return .dvb
+                case Sym.h:
+                    return .dvh
+                case Sym.i:
+                    return .dvi
+                case Sym.w:
+                    return .dvw
+                default:
+                    break
+                }
+            default:
+                break
+            }
+        case Sym.l:
+            if trieSymbol(data[1]) == Sym.v {
+                switch trieSymbol(data[2]) {
+                case Sym.b:
+                    return .lvb
+                case Sym.h:
+                    return .lvh
+                case Sym.i:
+                    return .lvi
+                case Sym.w:
+                    return .lvw
+                default:
+                    break
+                }
+            }
+        case Sym.k:
+            if trieSymbol(data[1]) == Sym.h && trieSymbol(data[2]) == Sym.z {
+                return .khz
+            }
+        case Sym.r:
+            switch trieSymbol(data[1]) {
+            case Sym.a:
+                if trieSymbol(data[2]) == Sym.d {
+                    return .rad
+                }
+            case Sym.c:
+                if trieSymbol(data[2]) == Sym.h {
+                    return .rch
+                }
+            case Sym.e:
+                if trieSymbol(data[2]) == Sym.m {
+                    return .rem
+                }
+                if trieSymbol(data[2]) == Sym.x {
+                    return .rex
+                }
+            case Sym.i:
+                if trieSymbol(data[2]) == Sym.c {
+                    return .ric
+                }
+            case Sym.l:
+                if trieSymbol(data[2]) == Sym.h {
+                    return .rlh
+                }
+            default:
+                break
+            }
+        case Sym.s:
+            if trieSymbol(data[1]) == Sym.v {
+                switch trieSymbol(data[2]) {
+                case Sym.b:
+                    return .svb
+                case Sym.h:
+                    return .svh
+                case Sym.i:
+                    return .svi
+                case Sym.w:
+                    return .svw
+                default:
+                    break
+                }
+            }
+        default:
+            break
+        }
+
+    case 4:
+        switch trieSymbol(data[0]) {
+        case Sym.d:
+            switch trieSymbol(data[1]) {
+            case Sym.p:
+                switch trieSymbol(data[2]) {
+                case Sym.c:
+                    if trieSymbol(data[3]) == Sym.m {
+                        return .dpcm
+                    }
+                case Sym.p:
+                    if trieSymbol(data[3]) == Sym.x {
+                        return .dppx
+                    }
+                default:
+                    break
+                }
+            default:
+                break
+            }
+        case Sym.g:
+            if trieSymbol(data[1]) == Sym.r && trieSymbol(data[2]) == Sym.a && trieSymbol(data[3]) == Sym.d {
+                return .grad
+            }
+        case Sym.r:
+            if trieSymbol(data[1]) == Sym.c && trieSymbol(data[2]) == Sym.a && trieSymbol(data[3]) == Sym.p {
+                return .rcap
+            }
+        case Sym.t:
+            if trieSymbol(data[1]) == Sym.u && trieSymbol(data[2]) == Sym.r && trieSymbol(data[3]) == Sym.n {
+                return .turn
+            }
+        case Sym.v:
+            switch trieSymbol(data[1]) {
+            case Sym.m:
+                switch trieSymbol(data[2]) {
+                case Sym.a:
+                    if trieSymbol(data[3]) == Sym.x {
+                        return .vmax
+                    }
+                case Sym.i:
+                    if trieSymbol(data[3]) == Sym.n {
+                        return .vmin
+                    }
+                default:
+                    break
+                }
+            default:
+                break
+            }
+        default:
+            break
+        }
+
+    case 5:
+        switch trieSymbol(data[0]) {
+        case Sym.underscore:
+            if trieSymbol(data[1]) == Sym.underscore && trieSymbol(data[2]) == Sym.q
+                && trieSymbol(data[3]) == Sym.e && trieSymbol(data[4]) == Sym.m {
+                return .quirkyEm
+            }
+        case Sym.c:
+            if trieSymbol(data[1]) == Sym.q && trieSymbol(data[2]) == Sym.m {
+                switch trieSymbol(data[3]) {
+                case Sym.a:
+                    if trieSymbol(data[4]) == Sym.x {
+                        return .cqmax
+                    }
+                case Sym.i:
+                    if trieSymbol(data[4]) == Sym.n {
+                        return .cqmin
+                    }
+                default:
+                    break
+                }
+            }
+        case Sym.d:
+            if trieSymbol(data[1]) == Sym.v && trieSymbol(data[2]) == Sym.m {
+                switch trieSymbol(data[3]) {
+                case Sym.a:
+                    if trieSymbol(data[4]) == Sym.x {
+                        return .dvmax
+                    }
+                case Sym.i:
+                    if trieSymbol(data[4]) == Sym.n {
+                        return .dvmin
+                    }
+                default:
+                    break
+                }
+            }
+        case Sym.l:
+            if trieSymbol(data[1]) == Sym.v && trieSymbol(data[2]) == Sym.m {
+                switch trieSymbol(data[3]) {
+                case Sym.a:
+                    if trieSymbol(data[4]) == Sym.x {
+                        return .lvmax
+                    }
+                case Sym.i:
+                    if trieSymbol(data[4]) == Sym.n {
+                        return .lvmin
+                    }
+                default:
+                    break
+                }
+            }
+        case Sym.s:
+            if trieSymbol(data[1]) == Sym.v && trieSymbol(data[2]) == Sym.m {
+                switch trieSymbol(data[3]) {
+                case Sym.a:
+                    if trieSymbol(data[4]) == Sym.x {
+                        return .svmax
+                    }
+                case Sym.i:
+                    if trieSymbol(data[4]) == Sym.n {
+                        return .svmin
+                    }
+                default:
+                    break
+                }
+            }
+        default:
+            break
+        }
+
+    default:
+        break
+    }
+    return .unknown
+}
+
+#if ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE
+
+// MARK: - Validation entry points
+//
+// Reachable only from CSSTokenizerSwiftBridge.cpp, and compiled only when
+// WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=YES, which is off by default -- so none of this is in a
+// shipping WebCore.framework, and `nm` on a default build shows no new symbol. Same rule as
+// the bridge's C++ side, for the same reason: an entry point that exists only to prove the
+// island right has no business in the product.
+//
+// WHY THE INPUT ARRIVES PACKED INTO WORDS. A Swift *callee* cannot take a `Span`. The
+// `__counted_by` + `noescape` recipe that gives `CSSSwiftTokenSink::takeChunk` a safe `Span`
+// parameter works in the C++-callee direction only; there is no annotation that makes a
+// C++ caller hand a Swift function a bounds-checked buffer, and the alternatives -- an
+// `UnsafeRawBufferPointer` parameter, or `Span(_unsafeCxxSpan:)` on a `std::span` -- are the
+// `unsafe` constructs this file is required not to contain. Filings register §27, seen from
+// the argument side rather than the return side.
+//
+// So the harness passes up to 16 code units by value, little-endian within each word, and the
+// entry point rebuilds them into an `InlineArray` on the stack: no allocation, no pointer, no
+// `unsafe`, and the exact length the caller asked for via `Span.extracting`. 16 is enough for
+// every phase the differential runs (the longest unit is 5 characters; the fuzz phase reaches
+// 12), and the cap is a `precondition` rather than a silent clamp, because a truncated input
+// silently agreeing with a truncated oracle is precisely the vacuous pass this harness exists
+// to rule out.
+
+/// The most code units a validation call can carry. See the note above.
+private let maximumPackedCodeUnits = 16
+
+/// `cssPrimitiveValueUnitFromTrie` over Latin-1 text, for the differential.
+///
+/// Bytes are packed eight to a word, least significant byte first: byte `i` is
+/// `(i < 8 ? packed0 : packed1) >> (8 * (i % 8))`.
+@_expose(Cxx)
+public func cssUnitTrieSwiftLookup8(_ packed0: UInt64, _ packed1: UInt64, _ count: Int) -> UInt8 {
+    precondition(count >= 0 && count <= maximumPackedCodeUnits)
+    var units = InlineArray<16, UInt8>(repeating: 0)
+    for i in 0..<count {
+        let word = i < 8 ? packed0 : packed1
+        units[i] = UInt8(truncatingIfNeeded: word >> (8 * UInt64(i % 8)))
+    }
+    return cssPrimitiveValueUnitFromTrie(units.span.extracting(0..<count)).rawValue
+}
+
+/// `cssPrimitiveValueUnitFromTrie` over UTF-16 text, for the differential.
+///
+/// Code units are packed four to a word, least significant first: unit `i` comes from
+/// `packed[i / 4] >> (16 * (i % 4))`.
+@_expose(Cxx)
+public func cssUnitTrieSwiftLookup16(_ packed0: UInt64, _ packed1: UInt64, _ packed2: UInt64, _ packed3: UInt64, _ count: Int) -> UInt8 {
+    precondition(count >= 0 && count <= maximumPackedCodeUnits)
+    var units = InlineArray<16, UInt16>(repeating: 0)
+    for i in 0..<count {
+        let word: UInt64
+        switch i / 4 {
+        case 0: word = packed0
+        case 1: word = packed1
+        case 2: word = packed2
+        default: word = packed3
+        }
+        units[i] = UInt16(truncatingIfNeeded: word >> (16 * UInt64(i % 4)))
+    }
+    return cssPrimitiveValueUnitFromTrie(units.span.extracting(0..<count)).rawValue
+}
+
+#endif // ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE

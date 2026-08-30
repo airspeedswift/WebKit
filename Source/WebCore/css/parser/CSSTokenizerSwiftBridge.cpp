@@ -435,7 +435,7 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char* text, size_
 
 // MARK: - The CSS unit-type trie
 //
-// CSSUnitTrieSwift.swift is a transcription of cssPrimitiveValueUnitFromTrie, and these two
+// The island's trie is a transcription of cssPrimitiveValueUnitFromTrie, and these two
 // entries are what prove the transcription right against the *in-tree* original rather than
 // against an extraction of it. The standalone harness in ~/src/webkit-swift-ports/css-unit-trie
 // compares the Swift against a verbatim copy of the C++ over 873,806,013 inputs, which is the
