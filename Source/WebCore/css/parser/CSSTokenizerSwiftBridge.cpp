@@ -63,6 +63,8 @@
 
 #include "CSSParserObserver.h"
 #include "CSSParserObserverWrapper.h"
+#include "CSSParserContext.h"
+#include "CSSParserFastPaths.h"
 #include "CSSParserToken.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizer.h"
@@ -76,6 +78,7 @@ IGNORE_CLANG_WARNINGS_END
 #include <array>
 #include <atomic>
 #include <optional>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/Latin1Character.h>
 #include <wtf/text/WTFString.h>
@@ -503,6 +506,167 @@ WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare16(const uint16_t* dat
     auto swiftUnit = static_cast<uint32_t>(cssUnitTrieSwiftLookup16(packed[0], packed[1], packed[2], packed[3], static_cast<ptrdiff_t>(length)));
 
     return (cppUnit << 8) | swiftUnit;
+}
+
+// MARK: - The colour fast-path island's differential (CSSParserFastPathsSwift.swift)
+//
+// Phase A's input domain is small enough to sweep properly rather than sample, so these entries
+// exist to be called tens of millions of times: every 3-, 4- and 6-digit hex string, every
+// length from 0 to 70 over an adversarial alphabet, and all 152 named colours in every case
+// variation. Both answers come back from one call, for the reason the unit-trie entries above
+// give -- it halves the cross-library call count, and it makes it impossible for the harness to
+// pair a C++ answer for one input with a Swift answer for another.
+//
+// The scanner is named explicitly on each side rather than taken from the build's default, so
+// the sweep measures the island against the C++ whatever WK_USE_SWIFT_CSS_COLOR_FAST_PATHS was
+// set to. `webCoreCSSColorFastPathsAreSwift` reports the default separately, because that is a
+// different question and conflating the two is how an ignored build flag reads as a pass.
+
+// Both scanners' answers for one candidate. `found` is 0 or 1; `argb` is meaningful only when
+// `found`, and is zeroed otherwise so a harness comparing whole structs cannot pass on garbage.
+struct CSSColorSwiftComparison {
+    uint32_t cppARGB;
+    uint32_t swiftARGB;
+    uint8_t cppFound;
+    uint8_t swiftFound;
+};
+
+// Which fast path to compare. Mirrors the three public entry points.
+enum CSSColorSwiftScanKind : unsigned {
+    CSSColorSwiftScanHex = 0,
+    CSSColorSwiftScanNamed = 1,
+    CSSColorSwiftScanSimple = 2,
+};
+
+WEBCORE_EXPORT CSSColorSwiftComparison webCoreCSSColorCompare(const uint16_t*, size_t, unsigned characterSize, unsigned kind, bool quirksMode);
+WEBCORE_EXPORT bool webCoreCSSColorFastPathsAreSwift(void);
+WEBCORE_EXPORT void webCoreCSSColorSetForceDecline(bool);
+WEBCORE_EXPORT unsigned webCoreCSSColorDeclineCount(void);
+WEBCORE_EXPORT uint64_t webCoreCSSColorCallCount(void);
+WEBCORE_EXPORT size_t webCoreCSSColorTextCapacity(void);
+WEBCORE_EXPORT uint64_t webCoreCSSColorBench(const uint16_t*, size_t, unsigned characterSize, unsigned kind, bool quirksMode, bool useSwift, uint64_t repetitions);
+
+// How many times WebCore was actually asked. The anti-vacuity guard that matters most here: a
+// sweep whose calls the optimizer elided, or whose loop bounds were wrong, would otherwise print
+// a clean pass over inputs that never reached this framework. The harness asserts its own total
+// against this.
+static std::atomic<uint64_t> s_colorScanCalls;
+
+static std::optional<SRGBA<uint8_t>> scanOneColor(StringView text, unsigned kind, const CSSParserContext& context, CSSParserFastPaths::ColorScanner scanner)
+{
+    switch (kind) {
+    case CSSColorSwiftScanHex:
+        return CSSParserFastPaths::parseHexColor(text, scanner);
+    case CSSColorSwiftScanNamed:
+        return CSSParserFastPaths::parseNamedColor(text, scanner);
+    default:
+        return CSSParserFastPaths::parseSimpleColor(text, context, scanner);
+    }
+}
+
+// The two contexts, built once. A `CSSParserContext` carries a URL and a settings snapshot, and
+// constructing one per call dominated a sweep that makes tens of millions of them -- which would
+// have made the differential's cost a property of the harness rather than of the scanners, and
+// pushed the exhaustive phases out of the time budget. Function-local statics rather than globals
+// because WebCore links with -no_inits.
+static const CSSParserContext& colorScanContext(bool quirksMode)
+{
+    static NeverDestroyed<CSSParserContext> quirks { HTMLQuirksMode };
+    static NeverDestroyed<CSSParserContext> standard { HTMLStandardMode };
+    return quirksMode ? quirks.get() : standard.get();
+}
+
+// Runs `kind` both ways over the same characters. `characterSize` picks which of StringImpl's
+// two representations the StringView carries: the harness always hands over 16-bit units, and a
+// `characterSize` of 1 narrows them, which is the only way to reach the 8-bit template
+// instantiation for text that a String built from these bytes would have stored 8-bit anyway.
+WEBCORE_EXPORT CSSColorSwiftComparison webCoreCSSColorCompare(const uint16_t* units, size_t length, unsigned characterSize, unsigned kind, bool quirksMode)
+{
+    s_colorScanCalls.fetch_add(1, std::memory_order_relaxed);
+
+    auto wide = unsafeMakeSpan(reinterpret_cast<const char16_t*>(units), length);
+    auto& context = colorScanContext(quirksMode);
+
+    std::optional<SRGBA<uint8_t>> cpp;
+    std::optional<SRGBA<uint8_t>> swift;
+    if (characterSize == 1) {
+        std::array<Latin1Character, 256> narrowed;
+        RELEASE_ASSERT(length <= narrowed.size());
+        for (size_t i = 0; i < length; ++i) {
+            RELEASE_ASSERT(wide[i] < 256);
+            narrowed[i] = static_cast<Latin1Character>(wide[i]);
+        }
+        auto narrow = std::span<const Latin1Character> { narrowed }.first(length);
+        cpp = scanOneColor(StringView { narrow }, kind, context, CSSParserFastPaths::ColorScanner::Cpp);
+        swift = scanOneColor(StringView { narrow }, kind, context, CSSParserFastPaths::ColorScanner::Swift);
+    } else {
+        cpp = scanOneColor(StringView { wide }, kind, context, CSSParserFastPaths::ColorScanner::Cpp);
+        swift = scanOneColor(StringView { wide }, kind, context, CSSParserFastPaths::ColorScanner::Swift);
+    }
+
+    return CSSColorSwiftComparison {
+        cpp ? PackedColor::ARGB { *cpp }.value : 0u,
+        swift ? PackedColor::ARGB { *swift }.value : 0u,
+        static_cast<uint8_t>(cpp ? 1 : 0),
+        static_cast<uint8_t>(swift ? 1 : 0),
+    };
+}
+
+// The compile-time default, so a build that ignored WK_USE_SWIFT_CSS_COLOR_FAST_PATHS cannot
+// pass as one that honoured it.
+WEBCORE_EXPORT bool webCoreCSSColorFastPathsAreSwift(void)
+{
+    return CSSParserFastPaths::defaultColorScanner == CSSParserFastPaths::ColorScanner::Swift;
+}
+
+// Makes every island answer read as a decline, so the C++ fall-through runs. Phase A declines
+// for no input at all -- hex and named are covered at both widths -- so this is the only way the
+// fall-through gets executed, and a path that is never executed is not a path that works.
+WEBCORE_EXPORT void webCoreCSSColorSetForceDecline(bool force)
+{
+    webCoreCSSColorFastPathSetForceDecline(force);
+}
+
+WEBCORE_EXPORT unsigned webCoreCSSColorDeclineCount(void)
+{
+    return webCoreCSSColorFastPathDeclineCount();
+}
+
+WEBCORE_EXPORT uint64_t webCoreCSSColorCallCount(void)
+{
+    return s_colorScanCalls.load(std::memory_order_relaxed);
+}
+
+// Reported rather than duplicated in the harness, so a sweep cannot quietly stay inside the
+// capacity while claiming to have crossed it.
+WEBCORE_EXPORT size_t webCoreCSSColorTextCapacity(void)
+{
+    return cssSwiftColorTextCapacity;
+}
+
+// One scanner, timed. The `CSSParserContext` and the character narrowing are hoisted out of the
+// loop so that what is timed is the scan, and the checksum is returned so the loop cannot be
+// optimized away -- the same arrangement as webCoreCSSTokenizerBenchIntegrated above.
+WEBCORE_EXPORT uint64_t webCoreCSSColorBench(const uint16_t* units, size_t length, unsigned characterSize, unsigned kind, bool quirksMode, bool useSwift, uint64_t repetitions)
+{
+    auto wide = unsafeMakeSpan(reinterpret_cast<const char16_t*>(units), length);
+    auto& context = colorScanContext(quirksMode);
+    auto scanner = useSwift ? CSSParserFastPaths::ColorScanner::Swift : CSSParserFastPaths::ColorScanner::Cpp;
+
+    std::array<Latin1Character, 256> narrowed;
+    RELEASE_ASSERT(length <= narrowed.size());
+    for (size_t i = 0; i < length; ++i)
+        narrowed[i] = static_cast<Latin1Character>(wide[i] & 0xFF);
+    auto narrow = std::span<const Latin1Character> { narrowed }.first(length);
+
+    uint64_t checksum = 0;
+    for (uint64_t i = 0; i < repetitions; ++i) {
+        auto result = characterSize == 1
+            ? scanOneColor(StringView { narrow }, kind, context, scanner)
+            : scanOneColor(StringView { wide }, kind, context, scanner);
+        checksum = checksum * 31 + (result ? PackedColor::ARGB { *result }.value : 1u);
+    }
+    return checksum;
 }
 
 } // extern "C"
