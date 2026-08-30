@@ -23,8 +23,9 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// Everything the Swift CSS tokenizer island (CSSTokenizerSwift.swift) is allowed to
-// see of WebCore, and nothing else.
+// Everything WebCore's Swift CSS islands are allowed to see of WebCore, and nothing else:
+// the tokenizer island (CSSTokenizerSwift.swift) and the colour fast-path island
+// (CSSParserFastPathsSwift.swift).
 //
 // Kept in its own header because it is also its own Clang module
 // (WebCore_Private.modulemap). The island used to `import WebCore_Private`, which is
@@ -40,6 +41,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -159,5 +161,93 @@ private:
     // Mirrors the C++ loop's `offset`: where the next token starts.
     unsigned m_observerOffset { 0 };
 } SWIFT_SHARED_REFERENCE(.ref, .deref);
+
+// MARK: - The colour fast-path island's boundary (CSSParserFastPathsSwift.swift)
+
+// How many code units of a candidate colour string the island is shown.
+//
+// Bounded below by coverage and above by the calling convention, and both bounds are tight.
+//
+// It must be at least 21, because the longest CSS named colour is `lightgoldenrodyellow` at 20 --
+// which is not a guess but the `MAX_WORD_LENGTH = 20` gperf computes from ColorData.gperf's 152
+// keys, visible in the generated DerivedSources/WebCore/ColorData.cpp. A hex colour needs only
+// nine (`#` plus eight digits). So a candidate longer than this is not a colour of either kind,
+// which is why the island answers `notAColor` rather than declining for one; the C++ glue ASSERTs
+// that against parseNamedColorInternal on every debug run, and colorcheck sweeps every length
+// from 0 to 70 against the C++ to prove it.
+//
+// It must be at most 24, and that is a *measured* bound rather than a taste. A
+// `CSSSwiftColorText<Latin1Character>` at capacity 24 is 28 bytes and the interop ABI hands it to
+// Swift in registers; at capacity 32 it is 36 bytes, crosses by address, and the island copies it
+// onto its own frame -- `ldp q0, q1` / `stp q0, q1` in the entry's prologue, a second copy on top
+// of the one makeSwiftColorText already made. That cost 0.63-0.68 of the C++ on the colour
+// micro-benchmark. Probe and the full matrix: cssprobe/probes/colorboundary/matrix.sh.
+static constexpr size_t cssSwiftColorTextCapacity = 24;
+
+// A candidate colour string, crossing into Swift *by value*.
+//
+// This is why the colour island has no `unsafe` marker at all, where the tokenizer island
+// has two. An island entry point is a Swift *callee*, and `@_expose(Cxx)` cannot express a
+// `Span<T>` parameter -- the generated header emits "Parameter is not representable in C++"
+// in place of the function (filings register §27) -- so an entry that receives a *buffer*
+// has to take an imported `std::span` and convert it with `Span(_unsafeCxxSpan:)`, which is
+// `@unsafe` and `@_unsafeNonescapableResult`. `std::span` is itself an `@unsafe` imported
+// type, so even indexing one costs a marker; there is no spelling of a borrowed buffer that
+// crosses this direction safely today.
+//
+// A value carries no lifetime, so the whole question disappears. `std::array<T, N>` holds no
+// pointer, is therefore not an unsafe imported type, and its `operator[]` imports as an
+// ordinary Swift subscript -- so the island reads `text.units[i]` with no marker, and the
+// index is provably below the *constant* capacity rather than below something the importer
+// has to be trusted about. Nothing is asserted that is not true: the input really is a
+// value here.
+//
+// `length` is the string's true length, which may exceed the capacity; `units` holds its
+// first `min(length, capacity)` code units and is zero-filled beyond them, so no index below
+// the capacity is indeterminate and the boundary carries no fill-length convention. The island
+// spells the capacity as a literal, because `InlineArray`'s count must be one and a `let` global
+// initialised from this constant would be lazily initialised behind a `swift_once` on a hot path;
+// CSSParserFastPaths.cpp static_asserts the two together.
+// A template so one definition serves both of StringImpl's widths, since a colour string
+// reaches the fast path before any tokenizer exists and is whatever width the property value
+// was stored at.
+template<typename CharacterType> struct CSSSwiftColorText {
+    std::array<CharacterType, cssSwiftColorTextCapacity> units;
+    uint32_t length;
+};
+
+// Named aliases, because Swift cannot spell a C++ template instantiation directly.
+using CSSSwiftColorText8 = CSSSwiftColorText<Latin1Character>;
+using CSSSwiftColorText16 = CSSSwiftColorText<char16_t>;
+
+// What a colour scan produces: a packed sRGB colour and which of three things happened.
+//
+// `argb` is `PackedColor::ARGB`'s representation -- 0xAARRGGBB -- for every outcome the
+// island produces, including the 8-digit hex form whose input order is RGBA, so the C++ side
+// has exactly one conversion (`asSRGBA(PackedColor::ARGB { argb })`) rather than one per
+// form. `outcome` is a `CSSSwiftColorOutcome` raw value; the numbering is declared once, in
+// Swift, and static_asserted against these names in CSSParserFastPaths.cpp.
+struct CSSSwiftColor {
+    uint32_t argb;
+    uint8_t outcome;
+};
+
+// The named-colour table lookup, which stays in C++ because it is generated.
+//
+// `findColor` is gperf output over ColorData.gperf's 152 keys (HashTools.h:29) and returns a
+// pointer into a static table, so the island calls it rather than copying it -- a duplicated
+// table is exactly the kind of hand-transcribed goop this port exists to avoid. This wrapper
+// is the safe shape of that call: `__counted_by` plus `noescape` makes the importer hand
+// Swift a single `Span<Latin1Character>` parameter, so the island passes its folded buffer
+// down with no pointer, no length beside it and no `unsafe`.
+//
+// It also drops a NUL the callee never needed. `finishParsingNamedColor` writes
+// `buffer.back() = '\0'` and passes `buffer.size() - 1`, but gperf's `findColorImpl` reads
+// only `str[0 .. len-1]` -- the `s[len] == '\0'` it tests is the *table* entry's terminator,
+// not the argument's -- so the terminator, the +1 on the span it is written into, and the
+// `size() - 1` that undoes it are all dead. Taking a plain span removes an unchecked
+// decrement and a `back()` on a span whose non-emptiness only the caller's arithmetic
+// established.
+CSSSwiftColor cssSwiftFindNamedColor(const Latin1Character *__counted_by(length) name __attribute__((noescape)), size_t length);
 
 } // namespace WebCore
