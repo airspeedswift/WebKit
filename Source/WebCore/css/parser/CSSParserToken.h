@@ -75,6 +75,33 @@ enum CSSParserTokenType {
 
 constexpr std::underlying_type_t<CSSParserTokenType> numberOfCSSParserTokenTypes = LastCSSParserTokenType + 1;
 
+// CSSParserTokenBits states this range as literals because CSSParserTokenBits.h cannot
+// include this header and still be importable on its own. Contiguity is asserted along with
+// the endpoints: the range check is equivalent to the three-way test only while nothing else
+// sits between them.
+static_assert(firstNumericCSSParserTokenType == NumberToken);
+static_assert(lastNumericCSSParserTokenType == DimensionToken);
+static_assert(PercentageToken == NumberToken + 1);
+static_assert(DimensionToken == PercentageToken + 1);
+
+// And the predicate itself, over every token type, because a range check written the wrong way
+// round still compiles and still returns a bool. This walks the whole enumeration and compares
+// against the three-way test the range check stands in for, so it is a proof rather than a
+// sample, and it costs nothing at runtime.
+static_assert([] {
+    auto bitsWithType = [](unsigned type) {
+        CSSParserTokenBits bits;
+        bits.type = type;
+        return bits;
+    };
+    for (unsigned type = 0; type < static_cast<unsigned>(numberOfCSSParserTokenTypes); ++type) {
+        bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
+        if (bitsCarryPendingNumber(bitsWithType(type)) != isNumeric)
+            return false;
+    }
+    return true;
+}());
+
 
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSParserToken);
 class CSSParserToken {
@@ -94,6 +121,15 @@ public:
     CSSParserToken(double, NumericValueType, NumericSign, StringView originalText); // for NumberToken
 
     CSSParserToken(HashTokenType, StringView);
+
+    // Adopts storage already written by Swift, so a chunk of tokens can be appended in bulk
+    // without being taken apart and reassembled through the constructors above. The bits must
+    // already have been through resolveValuePointer: while Swift holds them, the pointer slot
+    // carries an offset rather than a real pointer.
+    explicit CSSParserToken(CSSParserTokenBits bits)
+        : m_bits(bits)
+    {
+    }
 
     static CSSUnitType NODELETE stringToUnitType(StringView);
 
