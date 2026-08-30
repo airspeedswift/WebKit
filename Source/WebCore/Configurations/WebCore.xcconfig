@@ -75,6 +75,15 @@ WK_PGO_USE_LDFLAGS_YES = -fprofile-use=$(WK_OPTIMIZATION_PROFILE_FILE) -Wno-erro
 WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS = $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_$(WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE));
 WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_YES = -DENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=1;
 
+// The same switch on the Swift side, so the island's validation entry points
+// (CSSUnitTrieSwift.swift) are compiled only when the bridge is. Without it the `@_expose(Cxx)`
+// functions would be emitted into every WebCore.framework, which is the thing this flag exists
+// to prevent -- an entry point that ships is interop cost whichever language it is written in.
+// SWIFT_ACTIVE_COMPILATION_CONDITIONS rather than OTHER_SWIFT_FLAGS because builds routinely
+// override the latter on the xcodebuild command line.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CONDITIONS_$(WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE));
+WK_CSS_TOKENIZER_SWIFT_BRIDGE_CONDITIONS_YES = ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE;
+
 OTHER_CFLAGS = $(inherited) $(WK_PGO_USE_CFLAGS) $(WK_PGO_GEN_FLAGS) $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS);
 
 // Remove below workaround once fix from rdar://146134116 is universally available in all supported configurations.

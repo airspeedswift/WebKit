@@ -260,6 +260,111 @@ static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == CSSBlockTypeSwif
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == CSSBlockTypeSwiftBlockStart);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == CSSBlockTypeSwiftBlockEnd);
 
+// The CSS unit-type trie's enum mirror. CSSUnitTrieSwift.swift resolves a dimension's unit
+// itself, and it has to spell CSSUnitType out rather than import it: CSSUnits.h has no
+// #includes of its own -- it takes uint8_t, std::optional, ASCIILiteral and NODELETE from
+// whoever includes it -- so it cannot join the island's self-contained boundary module, and it
+// is a Private header, so moving it there would take CSSUnitType away from every other Swift
+// file that imports the WebCore_Private umbrella.
+//
+// A mirror is only as good as its check, and behaviour is not the check here. The trie can
+// return 63 of these 70 enumerators, so no differential -- not even an exhaustive one -- can
+// see a mis-transcribed Calc, Percentage or Integer. Worse, CSSUnits.h interleaves
+// `FirstViewportCSSUnitType = Vw` and `LastViewportCSSUnitType = Dvi` into the enumerator list,
+// and in C++ the enumerator after an alias continues from the *alias*: Cqw is 43 only because
+// `LastViewportCSSUnitType = Dvi` happens to name the value immediately before it. Move either
+// alias and all 27 enumerators below it renumber, in silence.
+//
+// So all 70 are pinned here by name, which `@c` (SE-0495) on the Swift enum makes possible:
+// the Swift cases are emitted into WebCoreSwift-Generated.h as CSSUnitTypeSwift<Name>. The two
+// aliases are not Swift cases -- Swift enums cannot carry duplicate raw values -- so they are
+// checked against the enumerators they name. Note these asserts are NOT behind
+// ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE): the mirror is compiled into every build, so its check
+// has to be too, and a static_assert costs no bytes.
+static_assert(static_cast<uint8_t>(CSSUnitType::Unknown) == CSSUnitTypeSwiftUnknown);
+static_assert(static_cast<uint8_t>(CSSUnitType::Number) == CSSUnitTypeSwiftNumber);
+static_assert(static_cast<uint8_t>(CSSUnitType::Integer) == CSSUnitTypeSwiftInteger);
+static_assert(static_cast<uint8_t>(CSSUnitType::Percentage) == CSSUnitTypeSwiftPercentage);
+static_assert(static_cast<uint8_t>(CSSUnitType::Em) == CSSUnitTypeSwiftEm);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ex) == CSSUnitTypeSwiftEx);
+static_assert(static_cast<uint8_t>(CSSUnitType::Px) == CSSUnitTypeSwiftPx);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cm) == CSSUnitTypeSwiftCm);
+static_assert(static_cast<uint8_t>(CSSUnitType::Mm) == CSSUnitTypeSwiftMm);
+static_assert(static_cast<uint8_t>(CSSUnitType::In) == CSSUnitTypeSwiftIn);
+static_assert(static_cast<uint8_t>(CSSUnitType::Pt) == CSSUnitTypeSwiftPt);
+static_assert(static_cast<uint8_t>(CSSUnitType::Pc) == CSSUnitTypeSwiftPc);
+static_assert(static_cast<uint8_t>(CSSUnitType::Deg) == CSSUnitTypeSwiftDeg);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rad) == CSSUnitTypeSwiftRad);
+static_assert(static_cast<uint8_t>(CSSUnitType::Grad) == CSSUnitTypeSwiftGrad);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ms) == CSSUnitTypeSwiftMs);
+static_assert(static_cast<uint8_t>(CSSUnitType::S) == CSSUnitTypeSwiftS);
+static_assert(static_cast<uint8_t>(CSSUnitType::Hz) == CSSUnitTypeSwiftHz);
+static_assert(static_cast<uint8_t>(CSSUnitType::Khz) == CSSUnitTypeSwiftKhz);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Vw) == CSSUnitTypeSwiftVw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vh) == CSSUnitTypeSwiftVh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vmin) == CSSUnitTypeSwiftVmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vmax) == CSSUnitTypeSwiftVmax);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vb) == CSSUnitTypeSwiftVb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vi) == CSSUnitTypeSwiftVi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svw) == CSSUnitTypeSwiftSvw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svh) == CSSUnitTypeSwiftSvh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svmin) == CSSUnitTypeSwiftSvmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svmax) == CSSUnitTypeSwiftSvmax);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svb) == CSSUnitTypeSwiftSvb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svi) == CSSUnitTypeSwiftSvi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvw) == CSSUnitTypeSwiftLvw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvh) == CSSUnitTypeSwiftLvh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvmin) == CSSUnitTypeSwiftLvmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvmax) == CSSUnitTypeSwiftLvmax);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvb) == CSSUnitTypeSwiftLvb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvi) == CSSUnitTypeSwiftLvi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvw) == CSSUnitTypeSwiftDvw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvh) == CSSUnitTypeSwiftDvh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvmin) == CSSUnitTypeSwiftDvmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvmax) == CSSUnitTypeSwiftDvmax);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvb) == CSSUnitTypeSwiftDvb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvi) == CSSUnitTypeSwiftDvi);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqw) == CSSUnitTypeSwiftCqw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqh) == CSSUnitTypeSwiftCqh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqi) == CSSUnitTypeSwiftCqi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqb) == CSSUnitTypeSwiftCqb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqmin) == CSSUnitTypeSwiftCqmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqmax) == CSSUnitTypeSwiftCqmax);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Dppx) == CSSUnitTypeSwiftDppx);
+static_assert(static_cast<uint8_t>(CSSUnitType::X) == CSSUnitTypeSwiftX);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dpi) == CSSUnitTypeSwiftDpi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dpcm) == CSSUnitTypeSwiftDpcm);
+static_assert(static_cast<uint8_t>(CSSUnitType::Fr) == CSSUnitTypeSwiftFr);
+static_assert(static_cast<uint8_t>(CSSUnitType::Q) == CSSUnitTypeSwiftQ);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lh) == CSSUnitTypeSwiftLh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rlh) == CSSUnitTypeSwiftRlh);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Turn) == CSSUnitTypeSwiftTurn);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rem) == CSSUnitTypeSwiftRem);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rex) == CSSUnitTypeSwiftRex);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cap) == CSSUnitTypeSwiftCap);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rcap) == CSSUnitTypeSwiftRcap);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ch) == CSSUnitTypeSwiftCh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rch) == CSSUnitTypeSwiftRch);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ic) == CSSUnitTypeSwiftIc);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ric) == CSSUnitTypeSwiftRic);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Calc) == CSSUnitTypeSwiftCalc);
+static_assert(static_cast<uint8_t>(CSSUnitType::CalcPercentageWithAngle) == CSSUnitTypeSwiftCalcPercentageWithAngle);
+static_assert(static_cast<uint8_t>(CSSUnitType::CalcPercentageWithLength) == CSSUnitTypeSwiftCalcPercentageWithLength);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::QuirkyEm) == CSSUnitTypeSwiftQuirkyEm);
+
+// The aliases, which have no Swift case of their own.
+static_assert(static_cast<uint8_t>(CSSUnitType::FirstViewportCSSUnitType) == CSSUnitTypeSwiftVw);
+static_assert(static_cast<uint8_t>(CSSUnitType::LastViewportCSSUnitType) == CSSUnitTypeSwiftDvi);
+// A new enumerator appended to CSSUnitType would be invisible to every assert above, since
+// each names a value that already exists. This is the one that fails.
+static_assert(static_cast<uint8_t>(CSSUnitType::QuirkyEm) == 69, "CSSUnitTypeSwift in CSSUnitTrieSwift.swift mirrors CSSUnitType case for case; add the new unit there too, then update this value");
+
 // The shared boundary struct. Swift imports this definition rather than restating it, so
 // the two cannot disagree on the field layout; what is worth pinning is that it stays a
 // trivially default constructible aggregate of exactly this size, because both
