@@ -477,6 +477,9 @@ bool CSSSwiftTokenSink::takeChunk(
     auto unescaped = unsafeMakeSpan(unescapedUnits, unitCount);
     auto observerRecords = unsafeMakeSpan(records, recordCount);
     auto& parserTokens = m_tokenizer.m_tokens;
+    // The input's length in code units: the number rangeAt's compiled-out ASSERT names, and what
+    // the parked number range below is bounded against.
+    unsigned inputLength = m_tokenizer.m_input.length();
 
     // Where this chunk's first token lands, which is what addComment's `tokensBefore` counts.
     // Read before anything is appended, because the observer walk below runs afterwards.
@@ -503,19 +506,48 @@ bool CSSSwiftTokenSink::takeChunk(
             // after a dimension's number and unit have been merged into one view the number is no
             // longer recoverable from value(). Reading it and overwriting it in place is free: the
             // slot the double will occupy is dead until the double exists.
-            auto numberText = m_tokenizer.m_input.rangeAt(bits.pendingNumberRange.offset, bits.pendingNumberRange.length);
+            //
+            // Both halves of that read are checked here, and neither was before. The union's
+            // active member is a phase of the crossing, so bitsCarryPendingNumber -- a function of
+            // the token's *type* -- cannot on its own tell a token makeNumericTokenBits produced
+            // from one whose numeric type came from another factory, whose numericValue would then
+            // be read out as an offset and a length. hasParkedNumberRange is that missing
+            // writer-side half, written beside the member it discriminates. And the range is a
+            // pair of offsets the island computed, so it is bounded against the input the way
+            // every other offset crossing this boundary is: rangeAt's own check is an ASSERT that
+            // is compiled out and StringView::substring merely clamps, which turns a bad range
+            // into a silently wrong number rather than a caught one. The island has no fallback,
+            // so a violation fails the tokenization. Ledger R2, and S13's shape applied to the
+            // second offset pair that crosses here.
+            if (!bits.hasParkedNumberRange) [[unlikely]]
+                return false;
+            auto range = bits.pendingNumberRange;
+            if (range.length > inputLength || range.offset > inputLength - range.length) [[unlikely]]
+                return false;
+            auto numberText = m_tokenizer.m_input.rangeAt(range.offset, range.length);
             bool isResultOK = false;
             double numericValue = numberText.is8Bit()
                 ? charactersToDouble(numberText.span8(), &isResultOK)
                 : charactersToDouble(numberText.span16(), &isResultOK);
             bits.numericValue = isResultOK ? numericValue : 0;
+            // The range is gone the moment the double exists, so the discriminant has to say so:
+            // a finished token in m_tokens carries numericValue, and a flag left set would be a
+            // claim about the union that is no longer true.
+            bits.hasParkedNumberRange = 0;
         }
 
         // No reservation here beyond the one tokenizeWithSwiftIsland already made:
         // Vector::reserveCapacity reserves exactly what it is asked for, so a per-chunk
         // `size() + tokenCount` would reallocate every 1024 tokens on any input denser than the
         // three-characters-per-token estimate, where tryAppend's own growth is geometric.
-        if (!parserTokens.tryConstructAndAppend(bits)) [[unlikely]]
+        //
+        // tryAppend of a temporary rather than tryConstructAndAppend(bits), because the
+        // bits-taking constructor is private to this class: Vector constructs in place, so the
+        // access check for tryConstructAndAppend is made inside Vector and friendship would have
+        // had to name Vector. Building the token here is what makes this the only reachable caller
+        // of a constructor whose precondition -- resolveValuePointer has run -- cannot be put in
+        // the type. Ledger R1.
+        if (!parserTokens.tryAppend(CSSParserToken { bits })) [[unlikely]]
             return false;
     }
 
@@ -526,6 +558,26 @@ bool CSSSwiftTokenSink::takeChunk(
     // token index here rather than in a per-token field is the reason a comment needs a record at
     // all: it is the one thing about a comment that survives it not being a token.
     if (auto* wrapper = m_wrapper) {
+        // The tokens and the records are two parallel buffers, appended in lockstep by the island
+        // -- one record per token plus one per comment, in source order -- and nothing about either
+        // buffer's shape says so. So check the relation instead of trusting it. A desync hands
+        // addToken and addComment the offsets belonging to a different token, which is silently
+        // wrong source ranges in Web Inspector: exactly the failure ledger entry S7 records, on the
+        // path with the least test pressure, and S7 shipped. The only thing standing between this
+        // and a repeat was that the island's two appends sit next to each other.
+        //
+        // Checked before the walk, so a violation never reaches the wrapper at all, and it fails
+        // the tokenization rather than asserting -- the island has no fallback, and an ASSERT is
+        // compiled out of exactly the builds where this would matter. Costs one pass over a buffer
+        // that is empty on every production tokenization. Ledger R3.
+        size_t recordedTokens = 0;
+        for (auto& record : observerRecords) {
+            if (!record.isComment)
+                ++recordedTokens;
+        }
+        if (recordedTokens != tokenCount) [[unlikely]]
+            return false;
+
         unsigned tokenIndex = firstTokenIndex;
         for (auto& record : observerRecords) {
             if (record.isComment)
@@ -536,6 +588,12 @@ bool CSSSwiftTokenSink::takeChunk(
             }
             m_observerOffset = record.end;
         }
+    } else if (recordCount) [[unlikely]] {
+        // wantsObserverRecords() is m_wrapper, and the island asks once per tokenization, so
+        // records arriving without a wrapper mean it ignored the answer. There is nothing here that
+        // could consume them, and appending the tokens while dropping their offsets is the same
+        // desync seen from the other side.
+        return false;
     }
 
     return !s_forceSwiftIslandFailureForTesting.load(std::memory_order_relaxed);
