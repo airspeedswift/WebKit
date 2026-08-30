@@ -234,10 +234,9 @@ CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
 // everything below materialises that into CSSParserTokens -- StringViews over the input,
 // double conversion, and the escaped-value string pool.
 
-// A token's type and block type are reported as bytes, and
-// appendTokensFromSwiftIsland casts them straight to the C++ enums, so the two
-// numberings have to agree: a reorder or an insertion in CSSParserTokenType, an ordinary
-// WebCore change, would otherwise silently retype every token above the insertion point.
+// Swift writes a token's type and block type straight into CSSParserTokenBits' bitfields,
+// so the two numberings have to agree: a reorder or an insertion in CSSParserTokenType, an
+// ordinary WebCore change, would otherwise silently retype every token above the insertion point.
 //
 // These now *prove* it. CSSTokenTypeSwift and CSSBlockTypeSwift are `@c` (SE-0495), so
 // they are emitted into WebCoreSwift-Generated.h as uint8_t-backed C enums and each
@@ -282,24 +281,125 @@ static_assert(static_cast<uint8_t>(BadStringToken) == CSSTokenTypeSwiftBadString
 static_assert(static_cast<uint8_t>(EOFToken) == CSSTokenTypeSwiftEndOfFile);
 static_assert(static_cast<uint8_t>(CommentToken) == CSSTokenTypeSwiftComment);
 
-// Same, for CSSBlockTypeSwift, whose three cases are reported in
-    // CSSSwiftToken::blockType.
+// Same, for CSSBlockTypeSwift, whose three cases are written into
+    // CSSParserTokenBits::blockType.
 static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == CSSBlockTypeSwiftNotBlock);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == CSSBlockTypeSwiftBlockStart);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == CSSBlockTypeSwiftBlockEnd);
 
-// The shared boundary struct. Swift imports this definition rather than restating it, so
-// the two cannot disagree on the field layout; what is worth pinning is that it stays a
-// trivially default constructible aggregate of exactly this size, because both
-// properties are load-bearing and neither is obvious from the declaration. Losing
-// trivial default construction makes WTF's Vector zero the whole buffer before Swift
-// overwrites it, which on a large stylesheet is tens of megabytes of dead stores; growing
-// the struct costs chunk cache residency, and shrinking it to 24 bytes was measured and
-// refuted.
-static_assert(sizeof(CSSSwiftToken) == 32);
-static_assert(alignof(CSSSwiftToken) == 4);
-static_assert(std::is_trivially_default_constructible_v<CSSSwiftToken>);
-static_assert(std::is_trivially_copyable_v<CSSSwiftToken>);
+// The CSS unit-type trie's enum mirror. Swift resolves a dimension's unit
+// itself, and it has to spell CSSUnitType out rather than import it: CSSUnits.h has no
+// #includes of its own -- it takes uint8_t, std::optional, ASCIILiteral and NODELETE from
+// whoever includes it -- so it cannot join the boundary module, and it
+// is a Private header, so moving it there would take CSSUnitType away from every other Swift
+// file that imports the WebCore_Private umbrella.
+//
+// A mirror is only as good as its check, and behaviour is not the check here. The trie can
+// return 63 of these 70 enumerators, so no behavioral comparison -- not even an exhaustive one -- can
+// see a mis-transcribed Calc, Percentage or Integer. Worse, CSSUnits.h interleaves
+// `FirstViewportCSSUnitType = Vw` and `LastViewportCSSUnitType = Dvi` into the enumerator list,
+// and in C++ the enumerator after an alias continues from the *alias*: Cqw is 43 only because
+// `LastViewportCSSUnitType = Dvi` happens to name the value immediately before it. Move either
+// alias and all 27 enumerators below it renumber, in silence.
+//
+// So all 70 are pinned here by name, which `@c` (SE-0495) on the Swift enum makes possible:
+// the Swift cases are emitted into WebCoreSwift-Generated.h as CSSUnitTypeSwift<Name>. The two
+// aliases are not Swift cases -- Swift enums cannot carry duplicate raw values -- so they are
+// checked against the enumerators they name. These asserts are not behind
+// ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE): the mirror is compiled into every build, so its check
+// has to be too, and a static_assert costs no bytes.
+static_assert(static_cast<uint8_t>(CSSUnitType::Unknown) == CSSUnitTypeSwiftUnknown);
+static_assert(static_cast<uint8_t>(CSSUnitType::Number) == CSSUnitTypeSwiftNumber);
+static_assert(static_cast<uint8_t>(CSSUnitType::Integer) == CSSUnitTypeSwiftInteger);
+static_assert(static_cast<uint8_t>(CSSUnitType::Percentage) == CSSUnitTypeSwiftPercentage);
+static_assert(static_cast<uint8_t>(CSSUnitType::Em) == CSSUnitTypeSwiftEm);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ex) == CSSUnitTypeSwiftEx);
+static_assert(static_cast<uint8_t>(CSSUnitType::Px) == CSSUnitTypeSwiftPx);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cm) == CSSUnitTypeSwiftCm);
+static_assert(static_cast<uint8_t>(CSSUnitType::Mm) == CSSUnitTypeSwiftMm);
+static_assert(static_cast<uint8_t>(CSSUnitType::In) == CSSUnitTypeSwiftIn);
+static_assert(static_cast<uint8_t>(CSSUnitType::Pt) == CSSUnitTypeSwiftPt);
+static_assert(static_cast<uint8_t>(CSSUnitType::Pc) == CSSUnitTypeSwiftPc);
+static_assert(static_cast<uint8_t>(CSSUnitType::Deg) == CSSUnitTypeSwiftDeg);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rad) == CSSUnitTypeSwiftRad);
+static_assert(static_cast<uint8_t>(CSSUnitType::Grad) == CSSUnitTypeSwiftGrad);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ms) == CSSUnitTypeSwiftMs);
+static_assert(static_cast<uint8_t>(CSSUnitType::S) == CSSUnitTypeSwiftS);
+static_assert(static_cast<uint8_t>(CSSUnitType::Hz) == CSSUnitTypeSwiftHz);
+static_assert(static_cast<uint8_t>(CSSUnitType::Khz) == CSSUnitTypeSwiftKhz);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Vw) == CSSUnitTypeSwiftVw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vh) == CSSUnitTypeSwiftVh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vmin) == CSSUnitTypeSwiftVmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vmax) == CSSUnitTypeSwiftVmax);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vb) == CSSUnitTypeSwiftVb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Vi) == CSSUnitTypeSwiftVi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svw) == CSSUnitTypeSwiftSvw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svh) == CSSUnitTypeSwiftSvh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svmin) == CSSUnitTypeSwiftSvmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svmax) == CSSUnitTypeSwiftSvmax);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svb) == CSSUnitTypeSwiftSvb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Svi) == CSSUnitTypeSwiftSvi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvw) == CSSUnitTypeSwiftLvw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvh) == CSSUnitTypeSwiftLvh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvmin) == CSSUnitTypeSwiftLvmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvmax) == CSSUnitTypeSwiftLvmax);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvb) == CSSUnitTypeSwiftLvb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lvi) == CSSUnitTypeSwiftLvi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvw) == CSSUnitTypeSwiftDvw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvh) == CSSUnitTypeSwiftDvh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvmin) == CSSUnitTypeSwiftDvmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvmax) == CSSUnitTypeSwiftDvmax);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvb) == CSSUnitTypeSwiftDvb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dvi) == CSSUnitTypeSwiftDvi);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqw) == CSSUnitTypeSwiftCqw);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqh) == CSSUnitTypeSwiftCqh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqi) == CSSUnitTypeSwiftCqi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqb) == CSSUnitTypeSwiftCqb);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqmin) == CSSUnitTypeSwiftCqmin);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cqmax) == CSSUnitTypeSwiftCqmax);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Dppx) == CSSUnitTypeSwiftDppx);
+static_assert(static_cast<uint8_t>(CSSUnitType::X) == CSSUnitTypeSwiftX);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dpi) == CSSUnitTypeSwiftDpi);
+static_assert(static_cast<uint8_t>(CSSUnitType::Dpcm) == CSSUnitTypeSwiftDpcm);
+static_assert(static_cast<uint8_t>(CSSUnitType::Fr) == CSSUnitTypeSwiftFr);
+static_assert(static_cast<uint8_t>(CSSUnitType::Q) == CSSUnitTypeSwiftQ);
+static_assert(static_cast<uint8_t>(CSSUnitType::Lh) == CSSUnitTypeSwiftLh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rlh) == CSSUnitTypeSwiftRlh);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Turn) == CSSUnitTypeSwiftTurn);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rem) == CSSUnitTypeSwiftRem);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rex) == CSSUnitTypeSwiftRex);
+static_assert(static_cast<uint8_t>(CSSUnitType::Cap) == CSSUnitTypeSwiftCap);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rcap) == CSSUnitTypeSwiftRcap);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ch) == CSSUnitTypeSwiftCh);
+static_assert(static_cast<uint8_t>(CSSUnitType::Rch) == CSSUnitTypeSwiftRch);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ic) == CSSUnitTypeSwiftIc);
+static_assert(static_cast<uint8_t>(CSSUnitType::Ric) == CSSUnitTypeSwiftRic);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::Calc) == CSSUnitTypeSwiftCalc);
+static_assert(static_cast<uint8_t>(CSSUnitType::CalcPercentageWithAngle) == CSSUnitTypeSwiftCalcPercentageWithAngle);
+static_assert(static_cast<uint8_t>(CSSUnitType::CalcPercentageWithLength) == CSSUnitTypeSwiftCalcPercentageWithLength);
+
+static_assert(static_cast<uint8_t>(CSSUnitType::QuirkyEm) == CSSUnitTypeSwiftQuirkyEm);
+
+// The aliases, which have no Swift case of their own.
+static_assert(static_cast<uint8_t>(CSSUnitType::FirstViewportCSSUnitType) == CSSUnitTypeSwiftVw);
+static_assert(static_cast<uint8_t>(CSSUnitType::LastViewportCSSUnitType) == CSSUnitTypeSwiftDvi);
+// A new enumerator appended to CSSUnitType would be invisible to every assert above, since
+// each names a value that already exists. This is the one that fails.
+static_assert(static_cast<uint8_t>(CSSUnitType::QuirkyEm) == 69, "CSSUnitTypeSwift in CSSTokenizerSwift.swift mirrors CSSUnitType case for case; add the new unit there too, then update this value");
+
+// The shared boundary struct. Swift imports CSSParserTokenBits itself, so there is nothing left
+// here that could disagree with C++ about a token's layout; what is still restated here is the
+// observer record, which is small enough to pin outright. Twelve bytes and trivially copyable,
+// because the whole point of taking it out of the token was that production tokenization -- which
+// has no observer -- writes none of them.
+static_assert(sizeof(CSSSwiftObserverRecord) == 12);
+static_assert(alignof(CSSSwiftObserverRecord) == 4);
+static_assert(std::is_trivially_copyable_v<CSSSwiftObserverRecord>);
 
 // Counts allocation failures during Swift tokenization. A failure makes construction fail
 // outright, through RELEASE_ASSERT for the direct constructor and a null return for tryCreate,
@@ -352,7 +452,14 @@ bool CSSTokenizer::tokenizeWithSwiftScanner(CSSParserObserverWrapper* wrapper, b
 
 CSSSwiftTokenSink* CSSSwiftTokenSink::create(CSSTokenizer& tokenizer, CSSParserObserverWrapper* wrapper)
 {
-    return new CSSSwiftTokenSink(tokenizer, wrapper);
+    // The width is decided once here, not per chunk and not per token: it is the same branch
+    // tokenizeWithSwiftScanner takes to pick which of the two specializations to run. The bytes
+    // stay valid because m_input holds a RefPtr<StringImpl> for the whole tokenization, which is
+    // the lifetime the Swift entry points document.
+    auto string = tokenizer.m_input.currentString();
+    if (string.is8Bit())
+        return new CSSSwiftTokenSink(tokenizer, wrapper, asBytes(string.span8()), 1);
+    return new CSSSwiftTokenSink(tokenizer, wrapper, asBytes(string.span16()), 2);
 }
 
 // The annotations have to be repeated on the definition: an unannotated definition is a
@@ -372,106 +479,120 @@ void CSSSwiftTokenSink::finish()
     }
 }
 
-// Converts one chunk of Swift's tokens into CSSParserTokens, and feeds the
-// inspector's observer wrapper the same offsets the C++ loop would have.
+// Materialises one chunk of Swift's finished tokens, and feeds the inspector's observer wrapper
+// the same offsets the C++ loop would have.
+//
+// There is no dispatch on a token's kind here: every construction site on the Swift side already
+// knows its kind statically. What is left is the work Swift cannot do: an offset becomes a
+// pointer, an escaped value becomes a pooled String, and charactersToDouble runs where it always
+// ran, so that double rounding matches the C++ scanner's bit for bit.
 bool CSSSwiftTokenSink::takeChunk(
-    const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
-    const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount)
+    const CSSParserTokenBits *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
+    const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount,
+    const CSSSwiftObserverRecord *__counted_by(recordCount) records __attribute__((noescape)), size_t recordCount)
 {
-    auto podTokens = unsafeMakeSpan(tokens, tokenCount);
+    auto tokenBits = unsafeMakeSpan(tokens, tokenCount);
     auto unescaped = unsafeMakeSpan(unescapedUnits, unitCount);
-    auto& wrapper = m_wrapper;
-    auto& observerOffset = m_observerOffset;
-    auto& m_tokens = m_tokenizer.m_tokens;
-    auto& m_input = m_tokenizer.m_input;
-    auto registerString = [&](const String& s) { return m_tokenizer.registerString(s); };
-    for (const auto& pod : podTokens) {
-        auto type = static_cast<CSSParserTokenType>(pod.type);
+    auto observerRecords = unsafeMakeSpan(records, recordCount);
+    auto& parserTokens = m_tokenizer.m_tokens;
+    // The input's length in code units, which is what the parked number range below is bounded
+    // against.
+    unsigned inputLength = m_tokenizer.m_input.length();
 
-        // Comments are not kept, matching the C++ path, but the inspector wants
-        // their extent and where they sat in the token stream.
-        if (type == CommentToken) {
-            if (wrapper) {
-                wrapper->addComment(pod.start, pod.end, m_tokens.size());
-                observerOffset = pod.end;
-            }
-            continue;
-        }
+    // Where this chunk's first token lands, which is what addComment's `tokensBefore` counts.
+    // Read before anything is appended, because the observer walk below runs afterwards.
+    unsigned firstTokenIndex = parserTokens.size();
 
-        // A value Swift unescaped: its range indexes the unescape buffer, not
-        // the input, and it has to become a real String in m_stringPool. Built with
-        // create8BitIfPossible to match what the C++ path's StringBuilder produces,
-        // so the two paths agree on the string's representation as well as its
-        // contents.
-        auto value = [&]() -> StringView {
-            if (pod.flags & CSSTokenFlagBitsUnescaped) [[unlikely]] {
-                auto units = unescaped.subspan(pod.valueStart, pod.valueLength);
-                return registerString(String { StringImpl::create8BitIfPossible(units) });
-            }
-            return m_input.rangeAt(pod.valueStart, pod.valueLength);
-        };
-        auto blockType = static_cast<CSSParserToken::BlockType>(pod.blockType);
+    for (auto bits : tokenBits) {
+        auto parkedOffset = bitsParkedValueOffset(bits);
+        if (parkedOffset & cssParserTokenBitsUnescapedValueTag) [[unlikely]] {
+            // A value Swift unescaped: its range indexes the unescape buffer rather than the
+            // input, and it has to become a real String in m_stringPool. create8BitIfPossible to
+            // match what the C++ path's StringBuilder produces, so that the two paths agree on
+            // the string's representation as well as on its contents. Necessarily inside this
+            // call: the unescape buffer is per chunk, and Swift clears it on return.
+            auto units = unescaped.subspan(parkedOffset & ~cssParserTokenBitsUnescapedValueTag, bits.valueLength);
+            auto value = m_tokenizer.registerString(String { StringImpl::create8BitIfPossible(units) });
+            bits.valueLength = value.length();
+            bits.valueIs8Bit = value.is8Bit();
+            bits.valueDataCharRaw = value.rawCharacters();
+        } else
+            resolveValuePointer(bits, m_inputBytes, m_characterSize);
 
-        // Constructed straight into m_tokens rather than staged in a local and
-        // copied: this loop runs once per token, and a CSSParserToken is 24 bytes.
-        bool appended;
-        switch (type) {
-        case IdentToken:
-        case AtKeywordToken:
-        case UrlToken:
-        case StringToken:
-            appended = m_tokens.tryConstructAndAppend(type, value());
-            break;
-        case FunctionToken:
-            appended = m_tokens.tryConstructAndAppend(type, value(), blockType);
-            break;
-        case HashToken:
-            appended = m_tokens.tryConstructAndAppend(pod.flags & CSSTokenFlagBitsHashTokenId ? HashTokenId : HashTokenUnrestricted, value());
-            break;
-        case DelimiterToken:
-            appended = m_tokens.tryConstructAndAppend(DelimiterToken, static_cast<char16_t>(pod.extra));
-            break;
-        case NonNewlineWhitespaceToken:
-            appended = m_tokens.tryConstructAndAppend(pod.extra);
-            break;
-        case NumberToken:
-        case PercentageToken:
-        case DimensionToken: {
-            auto numberText = m_input.rangeAt(pod.numberStart, pod.numberLength);
+        if (bitsCarryPendingNumber(bits)) {
+            // The number's own range is parked in the union instead of a double, because after
+            // a dimension's number and unit have been merged into one view the number is not
+            // recoverable from value(). Both the discriminant and the range are checked before
+            // the read: bitsCarryPendingNumber is a function of the token's type, so on its own
+            // it cannot tell a token makeNumericTokenBits produced from one whose numeric type
+            // came from another factory, whose numericValue would then be read out as an offset
+            // and a length. The range itself is bounded against the input the way every other
+            // offset crossing this boundary is, since rangeAt's own check is an ASSERT that is
+            // compiled out and StringView::substring merely clamps, which would turn a bad range
+            // into a silently wrong number rather than a caught one.
+            if (!bits.hasParkedNumberRange) [[unlikely]]
+                return false;
+            auto range = bits.pendingNumberRange;
+            if (range.length > inputLength || range.offset > inputLength - range.length) [[unlikely]]
+                return false;
+            auto numberText = m_tokenizer.m_input.rangeAt(range.offset, range.length);
             bool isResultOK = false;
             double numericValue = numberText.is8Bit()
                 ? charactersToDouble(numberText.span8(), &isResultOK)
                 : charactersToDouble(numberText.span16(), &isResultOK);
-            if (!isResultOK)
-                numericValue = 0;
-            auto numericValueType = pod.flags & CSSTokenFlagBitsNonInteger ? NumberValueType : IntegerValueType;
-            auto sign = pod.flags & CSSTokenFlagBitsPlusSign ? PlusSign
-                : pod.flags & CSSTokenFlagBitsMinusSign ? MinusSign : NoSign;
-            appended = m_tokens.tryConstructAndAppend(numericValue, numericValueType, sign, numberText);
-            // The conversions mutate, so they happen in place after appending.
-            if (appended) [[likely]] {
-                if (type == PercentageToken)
-                    m_tokens.last().convertToPercentage();
-                else if (type == DimensionToken)
-                    m_tokens.last().convertToDimensionWithUnit(value());
-            }
-            break;
-        }
-        default:
-            // Everything else carries no value: the punctuation, the match
-            // tokens, CDO/CDC, newline, the bad-token types, and the block
-            // delimiters, whose block type was already determined.
-            appended = m_tokens.tryConstructAndAppend(type, blockType);
-            break;
+            bits.numericValue = isResultOK ? numericValue : 0;
+            // The range is gone once the double exists, so the discriminant has to say so.
+            bits.hasParkedNumberRange = 0;
         }
 
-        if (!appended) [[unlikely]]
+        // No reservation here beyond the one tokenizeWithSwiftScanner already made:
+        // Vector::reserveCapacity reserves exactly what it is asked for, so a per-chunk
+        // `size() + tokenCount` would reallocate every 1024 tokens on any input denser than the
+        // three-characters-per-token estimate, whereas tryAppend's own growth is geometric.
+        //
+        // tryAppend of a temporary rather than tryConstructAndAppend(bits), because the
+        // bits-taking constructor is private to this class: Vector constructs in place, so the
+        // access check for tryConstructAndAppend is made inside Vector and friendship would have
+        // to name Vector.
+        if (!parserTokens.tryAppend(CSSParserToken { bits })) [[unlikely]]
             return false;
-        if (wrapper) {
-            wrapper->addToken(pod.start);
-            observerOffset = pod.end;
-        }
     }
+
+    // The observer walk. Empty unless wantsObserverRecords() said otherwise, so production
+    // tokenization does not reach it. addToken and addComment append to two separate vectors and
+    // need not interleave, but m_tokenOffsets has to be in strict token order and
+    // m_commentOffsets ascending by tokensBefore, which source order gives for free.
+    if (auto* wrapper = m_wrapper) {
+        // The tokens and the observer records are two parallel buffers, appended in lockstep by
+        // Swift, one record per token plus one per comment, in source order, and nothing about
+        // either buffer's shape enforces that. A desync hands addToken and addComment the offsets
+        // belonging to a different token, producing silently wrong source ranges in Web
+        // Inspector, so the relation is checked before the walk rather than asserted: an ASSERT
+        // is compiled out of exactly the builds where this would matter.
+        size_t recordedTokens = 0;
+        for (auto& record : observerRecords) {
+            if (!record.isComment)
+                ++recordedTokens;
+        }
+        if (recordedTokens != tokenCount) [[unlikely]]
+            return false;
+
+        unsigned tokenIndex = firstTokenIndex;
+        for (auto& record : observerRecords) {
+            if (record.isComment)
+                wrapper->addComment(record.start, record.end, tokenIndex);
+            else {
+                wrapper->addToken(record.start);
+                ++tokenIndex;
+            }
+            m_observerOffset = record.end;
+        }
+    } else if (recordCount) [[unlikely]] {
+        // wantsObserverRecords() is m_wrapper, and Swift asks once per tokenization, so records
+        // arriving without a wrapper mean it ignored the answer.
+        return false;
+    }
+
     return !s_forceSwiftScannerFailureForTesting.load(std::memory_order_relaxed);
 }
 

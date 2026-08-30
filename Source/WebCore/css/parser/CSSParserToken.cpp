@@ -352,51 +352,47 @@ CSSUnitType CSSParserToken::stringToUnitType(StringView stringView)
 }
 
 CSSParserToken::CSSParserToken(CSSParserTokenType type, BlockType blockType)
-    : m_type(type)
-    , m_blockType(blockType)
 {
+    m_bits.type = type;
+    m_bits.blockType = blockType;
 }
 
 CSSParserToken::CSSParserToken(unsigned nonNewlineWhitespaceCount)
-    : m_type(NonNewlineWhitespaceToken)
-    , m_blockType(NotBlock)
-    , m_whitespaceCount(nonNewlineWhitespaceCount)
+    : m_bits { .type = NonNewlineWhitespaceToken, .blockType = NotBlock, .whitespaceCount = nonNewlineWhitespaceCount }
 {
 }
 
 // Just a helper used for Delimiter tokens.
 CSSParserToken::CSSParserToken(CSSParserTokenType type, char16_t c)
-    : m_type(type)
-    , m_blockType(NotBlock)
-    , m_delimiter(c)
+    : m_bits { .type = type, .blockType = NotBlock, .delimiter = c }
 {
-    ASSERT(m_type == DelimiterToken);
+    ASSERT(m_bits.type == DelimiterToken);
 }
 
 CSSParserToken::CSSParserToken(CSSParserTokenType type, StringView value, BlockType blockType)
-    : m_type(type)
-    , m_blockType(blockType)
-    , m_id(-1)
 {
+    m_bits.type = type;
+    m_bits.blockType = blockType;
+    m_bits.id = -1;
     initValueFromStringView(value);
 }
 
 CSSParserToken::CSSParserToken(double numericValue, NumericValueType numericValueType, NumericSign sign, StringView originalText)
-    : m_type(NumberToken)
-    , m_blockType(NotBlock)
-    , m_numericValueType(numericValueType)
-    , m_numericSign(sign)
-    , m_unit(static_cast<unsigned>(CSSUnitType::Number))
-    , m_numericValue(numericValue)
 {
+    m_bits.type = NumberToken;
+    m_bits.blockType = NotBlock;
+    m_bits.numericValueType = numericValueType;
+    m_bits.numericSign = sign;
+    m_bits.unit = static_cast<unsigned>(CSSUnitType::Number);
+    m_bits.numericValue = numericValue;
     initValueFromStringView(originalText);
 }
 
 CSSParserToken::CSSParserToken(HashTokenType type, StringView value)
-    : m_type(HashToken)
-    , m_blockType(NotBlock)
-    , m_hashTokenType(type)
 {
+    m_bits.type = HashToken;
+    m_bits.blockType = NotBlock;
+    m_bits.hashTokenType = type;
     initValueFromStringView(value);
 }
 
@@ -416,7 +412,7 @@ static StringView NODELETE mergeIfAdjacent(StringView a, StringView b)
 
 void CSSParserToken::convertToDimensionWithUnit(CSSUnitType unit)
 {
-    ASSERT(m_type == NumberToken);
+    ASSERT(m_bits.type == NumberToken);
     auto originalNumberText = originalText();
     auto originalNumberTextLength = originalNumberText.length();
     auto unitString = unitTypeString(unit);
@@ -425,15 +421,15 @@ void CSSParserToken::convertToDimensionWithUnit(CSSUnitType unit)
         if (auto merged = mergeIfAdjacent(originalNumberText, unitString))
             string = merged;
     }
-    m_type = DimensionToken;
-    m_unit = static_cast<unsigned>(unit);
-    m_nonUnitPrefixLength = string == unitString ? 0 : originalNumberTextLength;
+    m_bits.type = DimensionToken;
+    m_bits.unit = static_cast<unsigned>(unit);
+    m_bits.nonUnitPrefixLength = string == unitString ? 0 : originalNumberTextLength;
     initValueFromStringView(string);
 }
 
 void CSSParserToken::convertToDimensionWithUnit(StringView unit)
 {
-    ASSERT(m_type == NumberToken);
+    ASSERT(m_bits.type == NumberToken);
     auto originalNumberText = originalText();
     auto originalNumberTextLength = originalNumberText.length();
     auto string = unit;
@@ -441,83 +437,83 @@ void CSSParserToken::convertToDimensionWithUnit(StringView unit)
         if (auto merged = mergeIfAdjacent(originalNumberText, unit))
             string = merged;
     }
-    m_type = DimensionToken;
-    m_unit = static_cast<unsigned>(stringToUnitType(unit));
-    m_nonUnitPrefixLength = string == unit ? 0 : originalNumberTextLength;
+    m_bits.type = DimensionToken;
+    m_bits.unit = static_cast<unsigned>(stringToUnitType(unit));
+    m_bits.nonUnitPrefixLength = string == unit ? 0 : originalNumberTextLength;
     initValueFromStringView(string);
 }
 
 void CSSParserToken::convertToPercentage()
 {
-    ASSERT(m_type == NumberToken);
-    m_type = PercentageToken;
-    m_unit = static_cast<unsigned>(CSSUnitType::Percentage);
+    ASSERT(m_bits.type == NumberToken);
+    m_bits.type = PercentageToken;
+    m_bits.unit = static_cast<unsigned>(CSSUnitType::Percentage);
 }
 
 StringView CSSParserToken::originalText() const
 {
-    ASSERT(m_type == NumberToken || m_type == DimensionToken || m_type == PercentageToken);
+    ASSERT(m_bits.type == NumberToken || m_bits.type == DimensionToken || m_bits.type == PercentageToken);
     return value();
 }
 
 StringView CSSParserToken::unitString() const
 {
-    ASSERT(m_type == DimensionToken);
-    return value().substring(m_nonUnitPrefixLength);
+    ASSERT(m_bits.type == DimensionToken);
+    return value().substring(m_bits.nonUnitPrefixLength);
 }
 
 char16_t CSSParserToken::delimiter() const
 {
-    ASSERT(m_type == DelimiterToken);
-    return m_delimiter;
+    ASSERT(m_bits.type == DelimiterToken);
+    return m_bits.delimiter;
 }
 
 NumericSign CSSParserToken::numericSign() const
 {
     // This is valid for DimensionToken and PercentageToken, but only used
     // in <an+b> parsing on NumberTokens.
-    ASSERT(m_type == NumberToken);
-    return static_cast<NumericSign>(m_numericSign);
+    ASSERT(m_bits.type == NumberToken);
+    return static_cast<NumericSign>(m_bits.numericSign);
 }
 
 NumericValueType CSSParserToken::numericValueType() const
 {
-    ASSERT(m_type == NumberToken || m_type == PercentageToken || m_type == DimensionToken);
-    return static_cast<NumericValueType>(m_numericValueType);
+    ASSERT(m_bits.type == NumberToken || m_bits.type == PercentageToken || m_bits.type == DimensionToken);
+    return static_cast<NumericValueType>(m_bits.numericValueType);
 }
 
 double CSSParserToken::numericValue() const
 {
-    ASSERT(m_type == NumberToken || m_type == PercentageToken || m_type == DimensionToken);
-    return m_numericValue;
+    ASSERT(m_bits.type == NumberToken || m_bits.type == PercentageToken || m_bits.type == DimensionToken);
+    return m_bits.numericValue;
 }
 
 CSSPropertyID CSSParserToken::parseAsCSSPropertyID() const
 {
-    ASSERT(m_type == IdentToken);
+    ASSERT(m_bits.type == IdentToken);
     return cssPropertyID(value());
 }
 
 CSSValueID CSSParserToken::id() const
 {
-    if (m_type != IdentToken)
+    if (m_bits.type != IdentToken)
         return CSSValueInvalid;
     return identOrFunctionId();
 }
 
 CSSValueID CSSParserToken::functionId() const
 {
-    if (m_type != FunctionToken)
+    if (m_bits.type != FunctionToken)
         return CSSValueInvalid;
     return identOrFunctionId();
 }
 
 CSSValueID CSSParserToken::identOrFunctionId() const
 {
-    ASSERT(m_type == IdentToken || m_type == FunctionToken);
-    if (m_id < 0)
-        m_id = cssValueKeywordID(value());
-    return static_cast<CSSValueID>(m_id);
+    ASSERT(m_bits.type == IdentToken || m_bits.type == FunctionToken);
+    if (m_bits.id < 0)
+        m_bits.id = cssValueKeywordID(value());
+    return static_cast<CSSValueID>(m_bits.id);
 }
 
 bool CSSParserToken::hasStringBacking() const
@@ -565,10 +561,10 @@ bool CSSParserToken::hasStringBacking() const
 
 bool CSSParserToken::tryUseStringLiteralBacking()
 {
-    if (m_type != IdentToken && m_type != FunctionToken)
+    if (m_bits.type != IdentToken && m_bits.type != FunctionToken)
         return false;
 
-    if (!m_isBackedByStringLiteral) {
+    if (!m_bits.isBackedByStringLiteral) {
         auto valueId = identOrFunctionId();
         if (valueId == CSSValueInvalid)
             return false;
@@ -581,20 +577,20 @@ bool CSSParserToken::tryUseStringLiteralBacking()
 
         updateCharacters(literal.span8());
 
-        m_isBackedByStringLiteral = true;
+        m_bits.isBackedByStringLiteral = true;
     }
     return true;
 }
 
 bool CSSParserToken::operator==(const CSSParserToken& other) const
 {
-    if (m_type != other.m_type)
+    if (m_bits.type != other.m_bits.type)
         return false;
-    switch (m_type) {
+    switch (m_bits.type) {
     case DelimiterToken:
         return delimiter() == other.delimiter();
     case HashToken:
-        if (m_hashTokenType != other.m_hashTokenType)
+        if (m_bits.hashTokenType != other.m_bits.hashTokenType)
             return false;
         [[fallthrough]];
     case IdentToken:
@@ -603,18 +599,18 @@ bool CSSParserToken::operator==(const CSSParserToken& other) const
     case UrlToken:
         return value() == other.value();
     case DimensionToken:
-        if (!m_nonUnitPrefixLength) {
+        if (!m_bits.nonUnitPrefixLength) {
             // The spec wants equality comparison of the original text but in some rare dimension cases we don't have it. Fall back to parsed values.
             if (unitString() != other.unitString())
                 return false;
-            return m_numericSign == other.m_numericSign && m_numericValue == other.m_numericValue && m_numericValueType == other.m_numericValueType;
+            return m_bits.numericSign == other.m_bits.numericSign && m_bits.numericValue == other.m_bits.numericValue && m_bits.numericValueType == other.m_bits.numericValueType;
         }
         [[fallthrough]];
     case NumberToken:
     case PercentageToken:
         return originalText() == other.originalText();
     case NonNewlineWhitespaceToken:
-        return m_whitespaceCount == other.m_whitespaceCount;
+        return m_bits.whitespaceCount == other.m_bits.whitespaceCount;
     default:
         return true;
     }
@@ -713,7 +709,7 @@ void CSSParserToken::serialize(StringBuilder& builder, const CSSParserToken* nex
         if (mode == SerializationMode::CustomProperty)
             builder.append(originalText());
         else {
-            if (m_numericSign == PlusSign)
+            if (m_bits.numericSign == PlusSign)
                 builder.append('+');
             builder.append(numericValue());
         }
@@ -726,7 +722,7 @@ void CSSParserToken::serialize(StringBuilder& builder, const CSSParserToken* nex
             builder.append(numericValue(), '%');
         break;
     case DimensionToken:
-        if (mode == SerializationMode::CustomProperty && m_nonUnitPrefixLength)
+        if (mode == SerializationMode::CustomProperty && m_bits.nonUnitPrefixLength)
             builder.append(originalText());
         else {
             builder.append(numericValue());
@@ -769,7 +765,7 @@ void CSSParserToken::serialize(StringBuilder& builder, const CSSParserToken* nex
         builder.append("url(()"_s);
         break;
     case NonNewlineWhitespaceToken: {
-        auto count = mode == SerializationMode::CustomProperty ? m_whitespaceCount : 1;
+        auto count = mode == SerializationMode::CustomProperty ? m_bits.whitespaceCount : 1;
         for (decltype(count) i = 0; i < count; ++i)
             builder.append(' ');
         break;

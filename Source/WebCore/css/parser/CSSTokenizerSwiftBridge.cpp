@@ -46,6 +46,8 @@
 IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
 #include "WebCoreSwift-Generated.h"
 IGNORE_CLANG_WARNINGS_END
+#include <array>
+#include <atomic>
 #include <optional>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/Latin1Character.h>
@@ -99,23 +101,18 @@ WEBCORE_EXPORT bool webCoreCSSTokenizerTryCreateSucceeds(const char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSTokenizerDefaultScannerIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char*, size_t, bool, size_t*, uint64_t*, bool*);
+WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare8(const uint8_t*, size_t);
+WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare16(const uint16_t*, size_t);
+WEBCORE_EXPORT uint64_t webCoreCSSTokenizerUnitTrieCxxCallCount(void);
+WEBCORE_EXPORT size_t webCoreCSSTokenizerUnitTrieMaximumLength(void);
 
-// The integration gate: builds the whole CSSParserToken stream both ways, in one
-// process, and compares the tokens themselves rather than just the POD-level
-// output. This has to hold before the Swift path could ever be turned on by
-// default, because it compares what the rest of the CSS parser will actually
-// see: values, numeric values, units, hash types and block types.
+// One token's worth of the integration comparison, shared by the 8-bit and the UTF-8 entries
+// below so that the two cannot drift apart. Returns nothing when the tokens agree.
 //
-// One token's worth of that comparison, shared by the 8-bit and the UTF-8 entry below
-// so that the two cannot drift apart. Returns nothing when the tokens agree.
-//
-// operator== covers more than it looks: the whitespace run length is compared, via
-// `case NonNewlineWhitespaceToken` in CSSParserToken.cpp. What it does not cover is
-// the numeric fields of NumberToken and PercentageToken -- for those it compares
-// originalText() and stops -- and, for a DimensionToken, anything but originalText()
-// whenever the *left* operand has a non-unit prefix. Both holes are filled below:
-// after this function returns nullopt, every field a DimensionToken carries has been
-// compared, m_nonUnitPrefixLength included, and none of it needed a new accessor.
+// `operator==` covers more than it looks: the whitespace run length is compared, via `case
+// NonNewlineWhitespaceToken` in CSSParserToken.cpp. What it does not cover is the numeric fields
+// of NumberToken and PercentageToken, and, for a DimensionToken, anything but `originalText()`
+// whenever the left operand has a non-unit prefix. Both holes are filled below.
 struct TokenDivergence {
     uint32_t reason;
     uint32_t expected;
@@ -145,15 +142,11 @@ static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expect
             return TokenDivergence { 5, static_cast<uint32_t>(expected.numericValueType()), static_cast<uint32_t>(actual.numericValueType()) };
     }
 
-    // A DimensionToken's unit. operator== takes its `m_nonUnitPrefixLength == 0` branch off
-    // *this*, so with a prefix it falls through to `originalText()` and never compares
-    // `unitString()` or `m_unit` -- exactly the field a bad change could corrupt with every test
-    // still passing.
-    //
-    // value() plus unitString() together pin `m_nonUnitPrefixLength` too, since unitString() is
-    // value().substring(m_nonUnitPrefixLength) -- no new accessor needed. value() alone also
-    // catches convertToDimensionWithUnit's merge rule: `10px` keeps both parts in one view;
-    // `1\70x` (escaped) does not, so value() differs even though the unit type agrees.
+    // A DimensionToken's unit. `operator==` takes its `m_bits.nonUnitPrefixLength == 0` branch off
+    // `this`, so with a prefix it falls through to `originalText()` and never compares
+    // `unitString()` or `m_bits.unit`. `value()` plus `unitString()` together pin
+    // `m_bits.nonUnitPrefixLength` too, since `unitString()` is
+    // `value().substring(m_bits.nonUnitPrefixLength)`.
     //
     // Still uncompared: a value whose text matches but whose backing StringImpl chose the other
     // character width.
@@ -162,7 +155,7 @@ static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expect
             return TokenDivergence { 7, static_cast<uint32_t>(expected.unitType()), static_cast<uint32_t>(actual.unitType()) };
         if (expected.value() != actual.value())
             return TokenDivergence { 8, expected.value().length(), actual.value().length() };
-        // value() agreed, so this is exactly a m_nonUnitPrefixLength divergence.
+        // value() agreed, so this is exactly a m_bits.nonUnitPrefixLength divergence.
         if (expected.unitString() != actual.unitString())
             return TokenDivergence { 9, expected.value().length() - expected.unitString().length(), actual.value().length() - actual.unitString().length() };
     }
@@ -362,6 +355,63 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char* text, size_
     *outTokens = count;
     *outFold = fold;
     *outIs16Bit = !source.is8Bit();
+}
+
+// MARK: - The CSS unit-type trie
+//
+// CSSUnitTrieSwift.swift is a transcription of cssPrimitiveValueUnitFromTrie. These two entries
+// compare it against the C++ original linked into this same framework, packed into one call so
+// that a C++ answer for one input cannot be paired with a Swift answer for another. The
+// parameters are packed into 64-bit words because a Swift callee cannot take a `Span`.
+
+static std::atomic<uint64_t> s_unitTrieCxxCalls;
+
+// The cap the Swift entries enforce with a precondition, reported rather than duplicated so that
+// a harness cannot sweep longer strings than the entry point can carry.
+static constexpr size_t maximumUnitTrieLength = 16;
+
+WEBCORE_EXPORT size_t webCoreCSSTokenizerUnitTrieMaximumLength(void)
+{
+    return maximumUnitTrieLength;
+}
+
+WEBCORE_EXPORT uint64_t webCoreCSSTokenizerUnitTrieCxxCallCount(void)
+{
+    return s_unitTrieCxxCalls.load(std::memory_order_relaxed);
+}
+
+// Returns (C++ unit << 8) | Swift unit. Both are CSSUnitType underlying values; Unknown is 0.
+WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare8(const uint8_t* data, size_t length)
+{
+    RELEASE_ASSERT(length <= maximumUnitTrieLength);
+    auto text = unsafeMakeSpan(byteCast<Latin1Character>(data), length);
+    s_unitTrieCxxCalls.fetch_add(1, std::memory_order_relaxed);
+    auto cppUnit = static_cast<uint32_t>(CSSParserToken::stringToUnitType(StringView { text }));
+
+    std::array<uint64_t, 2> packed { 0, 0 };
+    for (size_t i = 0; i < length; ++i)
+        packed[i / 8] |= static_cast<uint64_t>(text[i]) << (8 * (i % 8));
+    auto swiftUnit = static_cast<uint32_t>(cssUnitTrieSwiftLookup8(packed[0], packed[1], static_cast<ptrdiff_t>(length)));
+
+    return (cppUnit << 8) | swiftUnit;
+}
+
+// The same at 16-bit width. A StringView built from a char16_t span keeps its 16-bit
+// representation whatever the text is, which is the only way to reach the C++ template's
+// char16_t instantiation on Latin-1 content.
+WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare16(const uint16_t* data, size_t length)
+{
+    RELEASE_ASSERT(length <= maximumUnitTrieLength);
+    auto text = unsafeMakeSpan(reinterpret_cast<const char16_t*>(data), length);
+    s_unitTrieCxxCalls.fetch_add(1, std::memory_order_relaxed);
+    auto cppUnit = static_cast<uint32_t>(CSSParserToken::stringToUnitType(StringView { text }));
+
+    std::array<uint64_t, 4> packed { 0, 0, 0, 0 };
+    for (size_t i = 0; i < length; ++i)
+        packed[i / 4] |= static_cast<uint64_t>(text[i]) << (16 * (i % 4));
+    auto swiftUnit = static_cast<uint32_t>(cssUnitTrieSwiftLookup16(packed[0], packed[1], packed[2], packed[3], static_cast<ptrdiff_t>(length)));
+
+    return (cppUnit << 8) | swiftUnit;
 }
 
 } // extern "C"

@@ -8,13 +8,25 @@ public import WebCore_Private.CSSTokenizerSwiftTypes
 // CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
 //
 // Input is a `Span` over the preprocessed string, which C++ already owns and
-// hands out as a contiguous span. Output is a POD token returned by value,
-// carrying the value's *offsets* — `CSSParserToken` already stores a view
-// into the input, so this loses nothing. Numbers are not converted here, so
-// C++ keeps calling charactersToDouble and double rounding stays
-// bit-identical. Values containing escapes are unescaped into a buffer this
-// file owns and hands to C++ alongside each chunk of tokens, so nothing has
-// to be re-tokenized in C++.
+// hands out as a contiguous span. Output is a *finished* token:
+// `CSSParserTokenBits`, which is `CSSParserToken`'s own storage, written
+// through the one factory per token kind in CSSParserTokenBits.h — each
+// construction site knows its token kind statically, so no dispatch tag has
+// to cross the boundary.
+//
+// What crosses in place of a pointer is an *offset*: `CSSParserToken`
+// already stores a view into the input, so the pointer slot can carry the
+// offset until `resolveValuePointer` runs on the C++ side, and Swift never
+// forms or dereferences a pointer. The offset's top bit says whether it
+// indexes the input or the chunk's unescape buffer.
+//
+// Numbers are not converted here, so C++ keeps calling charactersToDouble
+// and double rounding stays bit-identical; until it runs, the union carries
+// the number's own range, because once a dimension's number and unit have
+// been merged the number is not recoverable from the value. Values
+// containing escapes are unescaped into a buffer this file owns and hands
+// to C++ alongside each chunk of tokens, so nothing has to be re-tokenized
+// in C++.
 //
 // The interior contains no `unsafe` code. Two sites use
 // `Span(_unsafeCxxSpan:)`: the production entry points that receive the
@@ -57,55 +69,14 @@ enum CSSBlockTypeSwift: UInt8 {
     case notBlock = 0, blockStart, blockEnd
 }
 
-/// A tokenizer result. POD by construction: no references, no allocation, no
-/// lifetime dependence on the input, so it crosses to C++ as a plain struct.
-public struct CSSTokenSwift {
-    /// Input offset of the token's first character.
-    public var start: UInt32 = 0
-    /// Input offset just past the token.
-    public var end: UInt32 = 0
-    /// The token's value text (ident/at-keyword/hash/string/url name, or the
-    /// unit of a dimension), as a range of the input.
-    public var valueStart: UInt32 = 0
-    public var valueLength: UInt32 = 0
-    /// For numeric tokens, the number's text — CSSParserToken's `originalText`,
-    /// and the range C++ converts to a double.
-    public var numberStart: UInt32 = 0
-    public var numberLength: UInt32 = 0
-    /// Delimiter code point for `.delimiter`; whitespace run length for
-    /// `.nonNewlineWhitespace` (CSSParserToken's nonNewlineWhitespaceCount).
-    public var extra: UInt32 = 0
-
-    public var type: UInt8 = CSSTokenTypeSwift.endOfFile.rawValue
-    public var blockType: UInt8 = CSSBlockTypeSwift.notBlock.rawValue
-    public var flags: UInt8 = 0
-
-    public init() {}
-}
-
-/// `CSSTokenSwift.flags` bits, and the *only* declaration of them.
+/// A finished token, on its way out to C++.
 ///
-/// `@c` (SE-0495) emits this into WebCoreSwift-Generated.h as a `uint8_t`-backed C enum,
-/// so CSSTokenizer.cpp reads `CSSTokenFlagBitsUnescaped` from here rather than keeping its
-/// own copy.
-///
-/// An enum rather than a namespace of `static let`s so `@c` can apply, which forces two
-/// things: the raw values are written as integer literals, because Swift rejects
-/// `1 << 0` as a raw value; and the Swift use sites spell `.rawValue`, since these are
-/// bits OR-ed into a `UInt8` and not a closed set of values.
-///
-/// Internal, not `public`, for the reason given on `CSSTokenTypeSwift` above.
-@c
-enum CSSTokenFlagBits: UInt8 {
-    case nonInteger = 1 // NumberValueType, else IntegerValueType
-    case plusSign = 2 // NumericSign
-    case minusSign = 4
-    case hashTokenId = 8 // HashTokenId, else HashTokenUnrestricted
-    /// The value's range indexes the unescape buffer handed back alongside the
-    /// tokens, rather than the input. Set when the value contained escapes, which
-    /// this tokenizer resolves itself; the caller only has to turn the code units
-    /// into whatever string type it wants.
-    case unescaped = 16
+/// The two offsets are the observer's, not the token's: `CSSParserTokenBits` has no room for a
+/// token's extent and must not grow, since it is the object the whole CSS parser stores.
+struct EmittedToken {
+    var bits: WebCore.CSSParserTokenBits
+    var start: UInt32
+    var end: UInt32
 }
 
 /// Generic over the code unit so one implementation serves both of `StringImpl`'s
@@ -224,6 +195,22 @@ private struct ScannedValue {
     var unescaped = false
 }
 
+/// The sign a number carried. The mapping onto `NumericSign`'s enumerators is written down in
+/// `makeNumericTokenBits`, not here: `NumericSign` has no static_assert bridge the way
+/// `CSSParserTokenType` and `CSSUnitType` do, so mirroring its numbering here would be unchecked.
+private enum ScannedSign {
+    case none, plus, minus
+}
+
+/// The result of scanning a number: its own range in the input, which is `CSSParserToken`'s
+/// `originalText` and the range C++ hands to `charactersToDouble`.
+private struct ScannedNumber {
+    var start: UInt32 = 0
+    var length: UInt32 = 0
+    var isNonInteger = false
+    var sign = ScannedSign.none
+}
+
 struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// The input cursor. As in C++ it may advance past the end, so every read clamps and every
     /// report goes through `clampedOffset`.
@@ -325,34 +312,66 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     }
 
     // MARK: Token construction helpers
+    //
+    // Each of these calls the factory in CSSParserTokenBits.h for one token kind, so the kind is
+    // spent here, where it is a literal. `@inline(always)` is what makes the factories fold: with
+    // the kind constant, the switch inside each factory disappears.
+
+    /// `valueIs8Bit` for any value that is a range of the input.
+    private static var valueIs8Bit: Bool { Unit.bitWidth == 8 }
+
+    @inline(always) private func emit(
+        _ bits: WebCore.CSSParserTokenBits, _ start: Int, _ data: Span<Unit>
+    ) -> EmittedToken {
+        EmittedToken(
+            bits: bits,
+            start: UInt32(truncatingIfNeeded: start),
+            end: UInt32(truncatingIfNeeded: clampedOffset(data)))
+    }
 
     @inline(always) private func token(
         _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
-    ) -> CSSTokenSwift {
-        var t = CSSTokenSwift()
-        t.type = type.rawValue
-        t.blockType = block.rawValue
-        t.start = UInt32(truncatingIfNeeded: start)
-        t.end = UInt32(truncatingIfNeeded: clampedOffset(data))
-        return t
+    ) -> EmittedToken {
+        emit(WebCore.makeSimpleTokenBits(UInt32(type.rawValue), UInt32(block.rawValue)), start, data)
     }
 
-    @inline(always) private func delimiter(_ c: Unit, _ start: Int, _ data: Span<Unit>) -> CSSTokenSwift {
-        var t = token(.delimiter, start, data)
-        t.extra = UInt32(truncatingIfNeeded: c)
-        return t
+    @inline(always) private func delimiter(_ c: Unit, _ start: Int, _ data: Span<Unit>) -> EmittedToken {
+        emit(
+            WebCore.makeDelimiterTokenBits(
+                UInt32(CSSTokenTypeSwift.delimiter.rawValue), UInt32(truncatingIfNeeded: c)),
+            start, data)
+    }
+
+    @inline(always) private func whitespace(
+        _ count: Int, _ start: Int, _ data: Span<Unit>
+    ) -> EmittedToken {
+        emit(
+            WebCore.makeWhitespaceTokenBits(
+                UInt32(CSSTokenTypeSwift.nonNewlineWhitespace.rawValue),
+                UInt32(truncatingIfNeeded: count)),
+            start, data)
     }
 
     @inline(always) private func valueToken(
         _ type: CSSTokenTypeSwift, _ value: ScannedValue, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
-    ) -> CSSTokenSwift {
-        var t = token(type, start, data, block: block)
-        t.valueStart = value.start
-        t.valueLength = value.length
-        if value.unescaped { t.flags |= CSSTokenFlagBits.unescaped.rawValue }
-        return t
+    ) -> EmittedToken {
+        emit(
+            WebCore.makeValueTokenBits(
+                UInt32(type.rawValue), UInt32(block.rawValue),
+                value.start, value.length, value.unescaped, Self.valueIs8Bit),
+            start, data)
+    }
+
+    @inline(always) private func hashToken(
+        _ value: ScannedValue, isId: Bool, _ start: Int, _ data: Span<Unit>
+    ) -> EmittedToken {
+        emit(
+            WebCore.makeHashTokenBits(
+                UInt32(CSSTokenTypeSwift.hash.rawValue), isId,
+                value.start, value.length, value.unescaped, Self.valueIs8Bit),
+            start, data)
     }
 
     @inline(always) private mutating func pushBlock(_ type: CSSTokenTypeSwift) {
@@ -361,14 +380,14 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     private mutating func blockStart(
         _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>
-    ) -> CSSTokenSwift {
+    ) -> EmittedToken {
         pushBlock(type)
         return token(type, start, data, block: .blockStart)
     }
 
     private mutating func blockEnd(
         _ type: CSSTokenTypeSwift, _ startType: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>
-    ) -> CSSTokenSwift {
+    ) -> EmittedToken {
         // The unsigned compare both bounds-checks and tests for an empty stack.
         let top = blockStack.count &- 1
         if UInt(bitPattern: top) < UInt(bitPattern: blockStack.count),
@@ -383,7 +402,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     /// Returns the next token; `.endOfFile` when the input is exhausted.
     /// Mirrors CSSTokenizer::nextToken.
-    mutating func nextToken(_ data: Span<Unit>) -> CSSTokenSwift {
+    mutating func nextToken(_ data: Span<Unit>) -> EmittedToken {
         let start = clampedOffset(data)
         let cc = consume(data)
 
@@ -396,9 +415,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             // newlines tokenize separately.
             let runStart = clampedOffset(data)
             advanceUntilNewlineOrNonWhitespace(data)
-            var t = token(.nonNewlineWhitespace, start, data)
-            t.extra = UInt32(truncatingIfNeeded: 1 &+ (clampedOffset(data) &- runStart))
-            return t
+            return whitespace(1 &+ (clampedOffset(data) &- runStart), start, data)
 
         case .newline:
             return token(.newline, start, data)
@@ -411,9 +428,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             if isNameByte(next) || twoCharsAreValidEscape(next, peek(data, 1)) {
                 let isId = nextCharsAreIdentifier(data)
                 let name = consumeName(data)
-                var t = valueToken(.hash, name, start, data)
-                if isId { t.flags |= CSSTokenFlagBits.hashTokenId.rawValue }
-                return t
+                return hashToken(name, isId: isId, start, data)
             }
             return delimiter(cc, start, data)
 
@@ -530,23 +545,21 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     // MARK: Numbers
 
-    /// Mirrors CSSTokenizer::consumeNumber, which merges the spec's
-    /// consume-a-number with convert-a-string-to-a-number. The conversion
-    /// itself is deliberately left to C++ (see the file comment).
-    private mutating func consumeNumber(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
+    /// Mirrors CSSTokenizer::consumeNumber, which merges the spec's consume-a-number with
+    /// convert-a-string-to-a-number. The conversion itself is left to C++; see the file comment.
+    private mutating func consumeNumber(_ data: Span<Unit>) -> ScannedNumber {
         let startOffset = clampedOffset(data)
 
-        var nonInteger = false
-        var signFlag: UInt8 = 0
+        var number = ScannedNumber()
         var length = 0
 
         var next = peek(data, 0)
         if next == 0x2B {
             length &+= 1
-            signFlag = CSSTokenFlagBits.plusSign.rawValue
+            number.sign = .plus
         } else if next == 0x2D {
             length &+= 1
-            signFlag = CSSTokenFlagBits.minusSign.rawValue
+            number.sign = .minus
         }
 
         // Wrapping: `length` counts characters of a number already found to start at the cursor,
@@ -554,7 +567,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         length = skipDigits(data, from: length)
         next = peek(data, length)
         if next == 0x2E, isASCIIDigitByte(peek(data, length &+ 1)) {
-            nonInteger = true
+            number.isNonInteger = true
             length = skipDigits(data, from: length &+ 2)
             next = peek(data, length)
         }
@@ -562,24 +575,21 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         if next == 0x45 || next == 0x65 { // E e
             next = peek(data, length &+ 1)
             if isASCIIDigitByte(next) {
-                nonInteger = true
+                number.isNonInteger = true
                 length = skipDigits(data, from: length &+ 1)
             } else if next == 0x2B || next == 0x2D, isASCIIDigitByte(peek(data, length &+ 2)) {
-                nonInteger = true
+                number.isNonInteger = true
                 length = skipDigits(data, from: length &+ 3)
             }
         }
 
         advance(length)
 
-        var t = token(.number, start, data)
         // CSSParserToken's originalText for a number is the whole consumed run,
         // which is also exactly the range C++ hands to charactersToDouble.
-        t.numberStart = UInt32(truncatingIfNeeded: startOffset)
-        t.numberLength = UInt32(truncatingIfNeeded: clampedOffset(data) &- startOffset)
-        if nonInteger { t.flags |= CSSTokenFlagBits.nonInteger.rawValue }
-        t.flags |= signFlag
-        return t
+        number.start = UInt32(truncatingIfNeeded: startOffset)
+        number.length = UInt32(truncatingIfNeeded: clampedOffset(data) &- startOffset)
+        return number
     }
 
     /// CSSTokenizerInputStream::skipWhilePredicate<isASCIIDigit>: `from` and the
@@ -594,26 +604,78 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         return relative
     }
 
-    /// Mirrors CSSTokenizer::consumeNumericToken.
-    private mutating func consumeNumericToken(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
-        var t = consumeNumber(data, start)
+    /// Mirrors CSSTokenizer::consumeNumericToken, and, for a dimension, the
+    /// `convertToDimensionWithUnit(StringView)` post-pass C++ runs on the finished token. That
+    /// post-pass resolves the unit's text to a `CSSUnitType`, and decides the token's value:
+    /// `mergeIfAdjacent` joins the number and the unit into one view when they are physically
+    /// adjacent and the number is shorter than sixteen characters, so `10px` has value `"10px"`
+    /// and round-trips verbatim through custom property serialization, while `1\70x` has value
+    /// `"px"`.
+    ///
+    /// `nonUnitPrefixLength` records which of those happened, and is not merely a length:
+    /// `unitString()` is `value().substring(nonUnitPrefixLength)`, `CSSParserToken::operator==`
+    /// selects which comparison a DimensionToken gets on whether it is zero, and custom property
+    /// serialization reserializes from `value()`.
+    private mutating func consumeNumericToken(_ data: Span<Unit>, _ start: Int) -> EmittedToken {
+        let number = consumeNumber(data)
+
         if nextCharsAreIdentifier(data) {
             let unit = consumeName(data)
-            t.type = CSSTokenTypeSwift.dimension.rawValue
-            t.valueStart = unit.start
-            t.valueLength = unit.length
-            if unit.unescaped { t.flags |= CSSTokenFlagBits.unescaped.rawValue }
-        } else if consumeIfNext(data, 0x25) {
-            t.type = CSSTokenTypeSwift.percentage.rawValue
+            let unitRange = Int(unit.start)..<Int(unit.start &+ unit.length)
+            let unitType = unit.unescaped
+                ? cssPrimitiveValueUnitFromTrie(unescaped.span.extracting(unitRange))
+                : cssPrimitiveValueUnitFromTrie(data.extracting(unitRange))
+
+            // mergeIfAdjacent's own conditions: both views the same width, physically adjacent,
+            // and the number shorter than sixteen characters. `nonUnitPrefixLength` is four bits
+            // wide, and the last condition is what keeps the number's length inside it.
+            let merged = !unit.unescaped
+                && number.length >= 1 && number.length < 16
+                && unit.start == number.start &+ number.length
+            return emit(
+                WebCore.makeNumericTokenBits(
+                    UInt32(CSSTokenTypeSwift.dimension.rawValue),
+                    number.isNonInteger, number.sign == .plus, number.sign == .minus,
+                    UInt32(unitType.rawValue),
+                    merged ? number.start : unit.start,
+                    merged ? number.length &+ unit.length : unit.length,
+                    unit.unescaped,
+                    merged ? number.length : 0,
+                    number.start, number.length,
+                    Self.valueIs8Bit),
+                start, data)
         }
-        t.end = UInt32(truncatingIfNeeded: clampedOffset(data))
-        return t
+
+        if consumeIfNext(data, 0x25) {
+            // convertToPercentage: the type and the unit change and nothing else does, so the
+            // value stays the number's own range and the prefix length stays zero.
+            return numericToken(.percentage, unit: .percentage, number, start, data)
+        }
+
+        return numericToken(.number, unit: .number, number, start, data)
+    }
+
+    /// A NumberToken or a PercentageToken: `value()` is `originalText()` is the number, so there
+    /// is no unit text and no merge to decide.
+    @inline(always) private func numericToken(
+        _ type: CSSTokenTypeSwift, unit: CSSUnitTypeSwift, _ number: ScannedNumber,
+        _ start: Int, _ data: Span<Unit>
+    ) -> EmittedToken {
+        emit(
+            WebCore.makeNumericTokenBits(
+                UInt32(type.rawValue),
+                number.isNonInteger, number.sign == .plus, number.sign == .minus,
+                UInt32(unit.rawValue),
+                number.start, number.length, false,
+                0,
+                number.start, number.length,
+                Self.valueIs8Bit),
+            start, data)
     }
 
     // MARK: Identifiers
 
-    /// Mirrors CSSTokenizer::consumeIdentLikeToken.
-    private mutating func consumeIdentLikeToken(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
+    private mutating func consumeIdentLikeToken(_ data: Span<Unit>, _ start: Int) -> EmittedToken {
         let name = consumeName(data)
         if consumeIfNext(data, 0x28) { // (
             if nameIsURL(data, name) {
@@ -694,7 +756,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     private mutating func consumeStringTokenUntil(
         _ data: Span<Unit>, _ endingCodePoint: Unit, _ start: Int
-    ) -> CSSTokenSwift {
+    ) -> EmittedToken {
         // Fast path: no escapes, so the value is a range of the input.
         var size = 0
         while true {
@@ -742,8 +804,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     // MARK: URLs
 
-    /// Mirrors CSSTokenizer::consumeURLToken.
-    private mutating func consumeURLToken(_ data: Span<Unit>, _ start: Int) -> CSSTokenSwift {
+    private mutating func consumeURLToken(_ data: Span<Unit>, _ start: Int) -> EmittedToken {
         advanceUntilNonWhitespace(data)
 
         var size = 0
@@ -893,91 +954,97 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
 // MARK: - C++ entry points
 //
-// POD in, POD out, so the C++ side needs no Swift type beyond the token struct
-// itself. `cssTokenizeSwiftAll8`/`16` are what CSSTokenizer's constructor drives
-// when `Scanner::Swift` is selected, and they are the only entry points reachable
-// from the shipping parser.
+// `cssTokenizeSwiftAll8`/`16` are what CSSTokenizer's constructor drives when `Scanner::Swift`
+// is selected.
 
-/// Copies one of this file's tokens into the C++ boundary struct.
-///
-/// The boundary type is defined in C++ (CSSTokenizerSwiftTypes.h) rather than
-/// here, because WebCore compiles Swift with -enable-library-evolution: a Swift
-/// struct exposed with @_expose(Cxx) is resilient, so the generated C++ class is
-/// a heap-allocated opaque box with no default constructor and a sizeof() that is
-/// not the struct's size. Usable for a single returned value, unusable as the
-/// element type of a shared buffer.
-@inline(always) private func exported(_ token: CSSTokenSwift) -> WebCore.CSSSwiftToken {
-    var out = WebCore.CSSSwiftToken()
-    out.start = token.start
-    out.end = token.end
-    out.valueStart = token.valueStart
-    out.valueLength = token.valueLength
-    out.numberStart = token.numberStart
-    out.numberLength = token.numberLength
-    out.extra = token.extra
-    out.type = token.type
-    out.blockType = token.blockType
-    out.flags = token.flags
-    return out
+/// A free function rather than a closure over the buffer, so nothing captures a `~Copyable`
+/// container.
+@inline(always) private func observerRecord(
+    _ token: EmittedToken, isComment: Bool
+) -> WebCore.CSSSwiftObserverRecord {
+    var entry = WebCore.CSSSwiftObserverRecord()
+    entry.start = token.start
+    entry.end = token.end
+    entry.isComment = isComment ? 1 : 0
+    return entry
 }
 
 /// Tokenizes a whole stylesheet, handing the tokens to `sink` a chunk at a time.
 ///
-/// Every buffer here belongs to Swift, and each chunk crosses to C++ as a pair of
-/// `Span`s — the direction a buffer handover can be made safe in, since
-/// `SafeInteropWrappers` transforms *parameters*. The receiver is a refcounted shared
-/// reference, which is how a directly-named callee reaches C++ state without a pointer
-/// parameter. This function contains exactly one `unsafe`: the input span, which has to
-/// arrive *from* C++ and so cannot be fixed by any annotation.
-///
-/// Owning the buffers here, rather than having C++ own them and pass pointers in, means
-/// the cursor and block stack never need a rewind-and-grow protocol when a buffer fills
-/// up, and there is no fixed nesting cap.
+/// Every buffer here belongs to Swift, and each chunk crosses to C++ as three `Span`s, which is
+/// the direction a buffer handover can be made safe in. Owning them here rather than having C++
+/// pass pointers in means the cursor and block stack never need a rewind-and-grow protocol when a
+/// buffer fills up, and there is no fixed nesting cap.
 ///
 /// Returns false if the sink could not take a chunk, which means C++ could not allocate
-/// `m_tokens`. There is nothing to fall back to — the C++ scanner reserves the same size
-/// into the same vector, so it fails on the identical allocation — so the caller reports
-/// construction failure instead.
+/// `m_tokens`. There is nothing to fall back to, since the C++ scanner reserves the same size
+/// into the same vector.
 @inline(always)
 private func tokenizeAll<Unit: CSSCodeUnit>(
     _ span: Span<Unit>,
     _ sink: WebCore.CSSSwiftTokenSink
 ) -> Bool {
+    // A value offset is parked in the token's pointer slot with its top bit saying which buffer
+    // it indexes, so an input at or above 2 GB cannot have its offsets represented. Nothing real
+    // is within three orders of magnitude of that, but this tokenizer has no fallback, so it reports
+    // failure rather than truncating -- and the check is once per tokenization, not per token.
+    guard WebCore.cssParserTokenBitsCanRepresentOffsets(numericCast(span.count)) else { return false }
+
     // Chunked so the buffer stays cache-resident: one entry per token for a whole
     // document is tens of megabytes, and writing that and reading it back costs more
     // than the scan.
     let chunkCapacity = 1024
 
     var tokenizer = CSSTokenizerSwift<Unit>()
-    var tokens = UniqueArray<WebCore.CSSSwiftToken>()
-    // Capped by the input's length, because a stylesheet is not the only thing that gets
-    // tokenized. `CSSTokenizer` is also constructed per property value -- by
-    // `CSSPropertyParser::parseStylePropertyLonghand(CSSPropertyID, const String&)`
-    // whenever `CSSParserFastPaths` declines, and directly by nine more callers including
-    // `SVGLengthValue`, `IntersectionObserver` and the font/timeline/animation consumers.
-    // Reserving the full chunk unconditionally asked the allocator for 32,768 bytes to
-    // tokenize `10px`, an 8,192x over-allocation on a 4-byte input.
-    //
-    // `count` is an exact upper bound on the number of tokens, not a heuristic: every
-    // token consumes at least one code unit -- a token that consumed none would spin the
-    // loop below forever -- and the EOF token breaks rather than being appended. So this
-    // introduces no growth at either size. Under the cap, tokens can never exceed the
-    // reservation; over it, the chunk flush at `chunkCapacity` still lands first.
+    var tokens = UniqueArray<WebCore.CSSParserTokenBits>()
+    // Capped by the input's length: `CSSTokenizer` is also constructed per property value, where
+    // reserving the full chunk would ask the allocator for 32,768 bytes to tokenize `10px`.
+    // `count` is an exact upper bound on the number of tokens, not a heuristic, because every
+    // token consumes at least one code unit and the EOF token breaks rather than being appended.
     tokens.reserveCapacity(min(chunkCapacity, span.count))
+
+    // Asked once rather than per token or per chunk: with no observer this stays at capacity
+    // zero, which costs three words of stack and no allocation.
+    let wantsObserverRecords = sink.wantsObserverRecords()
+    var observerRecords = UniqueArray<WebCore.CSSSwiftObserverRecord>()
+    if wantsObserverRecords {
+        // One record per token plus one per comment, so `chunkCapacity` is a floor, not a bound.
+        observerRecords.reserveCapacity(chunkCapacity)
+    }
+
+    let endOfFileType = UInt32(CSSTokenTypeSwift.endOfFile.rawValue)
+    let commentType = UInt32(CSSTokenTypeSwift.comment.rawValue)
 
     while true {
         let token = tokenizer.nextToken(span)
-        if token.type == CSSTokenTypeSwift.endOfFile.rawValue { break }
-        tokens.append(exported(token))
+        // The one thing Swift has to read back off a finished token, because it cannot name a
+        // bitfield. `tokenBitsType` is a one-line accessor in CSSParserTokenBits.h, next to the
+        // factories that wrote the field, so the packing is still stated exactly once.
+        let type = WebCore.tokenBitsType(token.bits)
+        if type == endOfFileType { break }
+
+        // Comments never enter `m_tokens`: the C++ scanner drops them too, and
+        // CSSParserToken::serialize has an ASSERT_NOT_REACHED for one.
+        if type == commentType {
+            if wantsObserverRecords { observerRecords.append(observerRecord(token, isComment: true)) }
+            continue
+        }
+
+        tokens.append(token.bits)
+        if wantsObserverRecords { observerRecords.append(observerRecord(token, isComment: false)) }
+
         if tokens.count == chunkCapacity {
-            guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits) else { return false }
+            guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits, observerRecords.span) else { return false }
             tokens.removeAll()
+            observerRecords.removeAll()
             tokenizer.startChunk()
         }
     }
 
-    if !tokens.isEmpty {
-        guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits) else { return false }
+    // `observerRecords` and not just `tokens`: a comment produces a record and no token, so an
+    // input whose tail is a comment has records left to hand over with an empty token chunk.
+    if !tokens.isEmpty || !observerRecords.isEmpty {
+        guard sink.takeChunk(tokens.span, tokenizer.unescapedUnits, observerRecords.span) else { return false }
     }
     sink.finish()
     return true

@@ -83,6 +83,12 @@ WK_SWIFT_PGO_USE_FLAGS_YES = -Xfrontend -ir-profile-use=$(WK_OPTIMIZATION_PROFIL
 WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS = $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_$(WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE));
 WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_YES = -DENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=1;
 
+// The same switch for the Swift sources, so that CSSUnitTrieSwift.swift's validation entry
+// points are compiled only when the bridge is. A compilation condition rather than an
+// OTHER_SWIFT_FLAGS define, since builds routinely override that setting on the command line.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CONDITIONS_$(WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE));
+WK_CSS_TOKENIZER_SWIFT_BRIDGE_CONDITIONS_YES = ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE;
+
 OTHER_CFLAGS = $(inherited) $(WK_CLANG_PGO_USE_CFLAGS) $(WK_CLANG_PGO_GEN_FLAGS) $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS);
 
 // Remove below workaround once fix from rdar://146134116 is universally available in all supported configurations.

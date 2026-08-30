@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include <WebCore/CSSParserTokenBits.h>
+
 #include <WebCore/CSSPrimitiveValue.h>
 #include <wtf/text/StringView.h>
 
@@ -73,21 +75,31 @@ enum CSSParserTokenType {
 
 constexpr std::underlying_type_t<CSSParserTokenType> numberOfCSSParserTokenTypes = LastCSSParserTokenType + 1;
 
-enum NumericSign {
-    NoSign,
-    PlusSign,
-    MinusSign,
-};
+// CSSParserTokenBits states this range as literals because CSSParserTokenBits.h cannot
+// include this header and still be importable on its own. Contiguity is asserted along with
+// the endpoints: the range check is equivalent to the three-way test only while nothing else
+// sits between them.
+static_assert(firstNumericCSSParserTokenType == NumberToken);
+static_assert(lastNumericCSSParserTokenType == DimensionToken);
+static_assert(PercentageToken == NumberToken + 1);
+static_assert(DimensionToken == PercentageToken + 1);
 
-enum NumericValueType {
-    IntegerValueType,
-    NumberValueType,
-};
+// A range check written the wrong way round still compiles and still returns a bool, so check
+// bitsCarryPendingNumber against the three-way test it stands in for, over every token type.
+static_assert([] {
+    auto bitsWithType = [](unsigned type) {
+        CSSParserTokenBits bits;
+        bits.type = type;
+        return bits;
+    };
+    for (unsigned type = 0; type < static_cast<unsigned>(numberOfCSSParserTokenTypes); ++type) {
+        bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
+        if (bitsCarryPendingNumber(bitsWithType(type)) != isNumeric)
+            return false;
+    }
+    return true;
+}());
 
-enum HashTokenType {
-    HashTokenId,
-    HashTokenUnrestricted,
-};
 
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSParserToken);
 class CSSParserToken {
@@ -119,24 +131,24 @@ public:
     // Converts NumberToken to PercentageToken.
     void NODELETE convertToPercentage();
 
-    CSSParserTokenType type() const { return static_cast<CSSParserTokenType>(m_type); }
-    StringView value() const { return { m_valueDataCharRaw, m_valueLength, m_valueIs8Bit }; }
+    CSSParserTokenType type() const { return static_cast<CSSParserTokenType>(m_bits.type); }
+    StringView value() const { return { m_bits.valueDataCharRaw, m_bits.valueLength, m_bits.valueIs8Bit }; }
 
     char16_t NODELETE delimiter() const;
     NumericSign NODELETE numericSign() const;
     NumericValueType NODELETE numericValueType() const;
     double NODELETE numericValue() const;
     StringView NODELETE originalText() const;
-    HashTokenType getHashTokenType() const { ASSERT(m_type == HashToken); return m_hashTokenType; }
-    BlockType getBlockType() const { return static_cast<BlockType>(m_blockType); }
-    CSSUnitType unitType() const { return static_cast<CSSUnitType>(m_unit); }
+    HashTokenType getHashTokenType() const { ASSERT(m_bits.type == HashToken); return m_bits.hashTokenType; }
+    BlockType getBlockType() const { return static_cast<BlockType>(m_bits.blockType); }
+    CSSUnitType unitType() const { return static_cast<CSSUnitType>(m_bits.unit); }
     StringView NODELETE unitString() const;
     CSSValueID id() const;
     CSSValueID functionId() const;
 
     bool NODELETE hasStringBacking() const;
     bool tryUseStringLiteralBacking();
-    bool isBackedByStringLiteral() const { return m_isBackedByStringLiteral; }
+    bool isBackedByStringLiteral() const { return m_bits.isBackedByStringLiteral; }
 
     CSSPropertyID parseAsCSSPropertyID() const;
 
@@ -154,44 +166,50 @@ public:
     void updateCharacters(std::span<const CharacterType> characters);
 
 private:
+    // Adopts storage already written by Swift, so that a chunk of tokens can be appended in
+    // bulk rather than taken apart and reassembled through the constructors above. The bits
+    // must already have been through resolveValuePointer: while Swift holds them, the pointer
+    // slot carries an offset rather than a pointer.
+    //
+    // Private, with exactly one friend, because that precondition cannot be expressed in the
+    // type. Naming CSSSwiftTokenSink narrows the reachable callers to the resolve loop in
+    // CSSSwiftTokenSink::takeChunk, which is the only code that has run resolveValuePointer.
+    // That loop has to spell it `tryAppend(CSSParserToken { bits })` rather than
+    // `tryConstructAndAppend(bits)`: Vector constructs in place, so the access check is made in
+    // Vector's context and friendship would have to name Vector, widening the set of callers
+    // rather than narrowing it.
+    friend class CSSSwiftTokenSink;
+    explicit CSSParserToken(CSSParserTokenBits bits)
+        : m_bits(bits)
+    {
+    }
+
     void initValueFromStringView(StringView string)
     {
-        m_valueLength = string.length();
-        m_valueIs8Bit = string.is8Bit();
-        m_valueDataCharRaw = string.rawCharacters();
-        m_isBackedByStringLiteral = false;
+        m_bits.valueLength = string.length();
+        m_bits.valueIs8Bit = string.is8Bit();
+        m_bits.valueDataCharRaw = string.rawCharacters();
+        m_bits.isBackedByStringLiteral = false;
     }
     CSSValueID identOrFunctionId() const;
 
-    unsigned m_type : 6 { 0 }; // CSSParserTokenType
-    unsigned m_blockType : 2 { 0 }; // BlockType
-    unsigned m_numericValueType : 1 { 0 }; // NumericValueType
-    unsigned m_numericSign : 2 { 0 }; // NumericSign
-    unsigned m_unit : 7 { 0 }; // CSSUnitType
-    unsigned m_nonUnitPrefixLength : 4 { 0 }; // Only for DimensionType, only needs to be long enough for UnicodeRange parsing.
-
-    // m_value... is an unpacked StringView so that we can pack it
-    // tightly with the rest of this object for a smaller object size.
-    bool m_valueIs8Bit : 1 { false };
-    bool m_isBackedByStringLiteral : 1 { false };
-    unsigned m_valueLength { 0 };
-    const void* m_valueDataCharRaw { nullptr }; // Either Latin1Character* or char16_t*.
-
-    union {
-        char16_t m_delimiter;
-        HashTokenType m_hashTokenType;
-        double m_numericValue { 0 };
-        mutable int m_id;
-        unsigned m_whitespaceCount;
-    };
+    CSSParserTokenBits m_bits;
 };
+
+// The token is the CSS parser's bulk storage, one per token in every stylesheet's m_tokens, so
+// its size is a cache-residency property rather than an implementation detail. The union's
+// discriminant fits in CSSParserTokenBits' spare bitfield bits, which is a packing claim worth
+// asserting.
+static_assert(sizeof(CSSParserToken) == 24);
+static_assert(alignof(CSSParserToken) == 8);
+static_assert(sizeof(CSSParserTokenBits) == sizeof(CSSParserToken));
 
 template<typename CharacterType>
 inline void CSSParserToken::updateCharacters(std::span<const CharacterType> characters)
 {
-    m_valueLength = characters.size();
-    m_valueIs8Bit = (sizeof(CharacterType) == 1);
-    m_valueDataCharRaw = characters.data();
+    m_bits.valueLength = characters.size();
+    m_bits.valueIs8Bit = (sizeof(CharacterType) == 1);
+    m_bits.valueDataCharRaw = characters.data();
 }
 
 } // namespace WebCore

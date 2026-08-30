@@ -39,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <WebCore/CSSParserTokenBits.h>
 #include <WebCore/PlatformExportMacros.h>
 #include <wtf/SwiftBridging.h>
 #include <wtf/ThreadSafeRefCounted.h>
@@ -54,51 +55,22 @@ class CSSTokenizer;
 using CSSTokenizerSpan8 = std::span<const Latin1Character>;
 using CSSTokenizerSpan16 = std::span<const char16_t>;
 
-// One token as the Swift tokenizer reports it: offsets into the span above, plus
-// the small amount of classification CSSParserToken needs. Everything here is
-// resolved against the input by CSSTokenizer::tokenizeWithSwiftScanner.
-//
-// Defined in C++ rather than in Swift on purpose. WebCore compiles Swift with
-// -enable-library-evolution, so a Swift struct exposed with @_expose(Cxx) is
-// *resilient*: the generated C++ class wraps a heap-allocated opaque box, has no
-// default constructor, and its sizeof() is not the Swift struct's size. That is
-// fine for a value returned once, but it cannot be an element type of a buffer
-// the two languages share. A plain C++ aggregate can, and Swift imports it
-// directly.
-// Deliberately no default member initializers: with them the type is not
-// trivially default constructible, so WTF's Vector runs initialization over the
-// whole buffer (VectorTypeOperations::initializeIfNonPOD) before Swift overwrites
-// every byte of it. On a large stylesheet that is tens of megabytes of pointless
-// zero stores.
-struct CSSSwiftToken {
-    // Extent of the token in the input.
+// The source offsets the web inspector's observer wrapper needs, which a finished token does
+// not carry: CSSParserTokenBits stores no extent and must not grow. One record per thing the
+// wrapper is told about, in source order; a comment needs one too, because addComment wants its
+// extent and the number of tokens preceding it.
+struct CSSSwiftObserverRecord {
     uint32_t start;
     uint32_t end;
-    // The token's value text: an ident/at-keyword/hash/string/url name, or the
-    // unit of a dimension. Normally a range of the input; a range of the chunk's
-    // unescape buffer when `flags` has the unescaped bit set.
-    uint32_t valueStart;
-    uint32_t valueLength;
-    // For numeric tokens, the number's text, which is CSSParserToken's
-    // originalText and the range converted to a double.
-    uint32_t numberStart;
-    uint32_t numberLength;
-    // Delimiter code point, or the whitespace run length.
-    uint32_t extra;
-
-    uint8_t type;
-    uint8_t blockType;
-    uint8_t flags;
+    // Nonzero for a comment, which addComment reports without advancing the token index. Not a
+    // bool, so the record stays a 12-byte aggregate of one type.
+    uint32_t isComment;
 };
 
-// Receives each chunk of tokens the Swift tokenizer produces, and materialises them
-// into the CSSTokenizer that owns this sink.
-//
-// `__counted_by` plus `noescape` on the buffer parameters means Swift sees one method
-// taking two `Span`s, with no pointers and no `unsafe`. The receiver is a refcounted
-// shared reference, which Swift imports as an ordinary class reference -- the only way
-// for a directly-named callee to reach C++ state without a pointer parameter putting
-// `unsafe` back.
+// Receives each chunk of tokens the Swift tokenizer produces and materialises them into the
+// CSSTokenizer that owns this sink. `__counted_by` plus `noescape` on the buffer parameters is
+// what makes the importer present them to Swift as `Span`s; dropping either annotation puts a
+// pointer, and an `unsafe` marker, back on the Swift side.
 class CSSSwiftTokenSink final : public ThreadSafeRefCounted<CSSSwiftTokenSink> {
 public:
 #if !defined(__swift__)
@@ -108,12 +80,18 @@ public:
     WEBCORE_EXPORT static CSSSwiftTokenSink* create(CSSTokenizer&, CSSParserObserverWrapper*);
 #endif
 
-    // Materialises one chunk. `tokens` index `unescapedUnits` for values that
-    // contained escapes, and index the input for everything else. Returns false on
-    // allocation failure, which stops the tokenizer.
+    // Materialises one chunk of finished tokens. A token's parked value offset becomes a pointer
+    // here, and a numeric token's double is converted here so that rounding stays bit-identical
+    // with the C++ scanner. A value whose offset carries cssParserTokenBitsUnescapedValueTag
+    // indexes `unescapedUnits` rather than the input, and is interned into the string pool.
+    // `records` is empty unless wantsObserverRecords(). Returns false on allocation failure.
     WEBCORE_EXPORT bool takeChunk(
-        const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
-        const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount);
+        const CSSParserTokenBits *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
+        const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount,
+        const CSSSwiftObserverRecord *__counted_by(recordCount) records __attribute__((noescape)), size_t recordCount);
+
+    // Whether to fill the observer record buffer at all. Read once per tokenization.
+    bool wantsObserverRecords() const { return m_wrapper; }
 
     // Called after the last chunk, to give the observer wrapper its final offset.
     WEBCORE_EXPORT void finish();
@@ -126,14 +104,19 @@ public:
 #endif
 
 private:
-    CSSSwiftTokenSink(CSSTokenizer& tokenizer, CSSParserObserverWrapper* wrapper)
+    CSSSwiftTokenSink(CSSTokenizer& tokenizer, CSSParserObserverWrapper* wrapper, std::span<const uint8_t> inputBytes, unsigned characterSize)
         : m_tokenizer(tokenizer)
         , m_wrapper(wrapper)
+        , m_inputBytes(inputBytes)
+        , m_characterSize(characterSize)
     {
     }
 
     CSSTokenizer& m_tokenizer;
     CSSParserObserverWrapper* m_wrapper;
+    // The input as bytes, for resolveValuePointer, plus the width the offsets are counted in.
+    std::span<const uint8_t> m_inputBytes;
+    unsigned m_characterSize { 1 };
     // Where the next reported token starts.
     unsigned m_observerOffset { 0 };
 } SWIFT_SHARED_REFERENCE(.ref, .deref);
