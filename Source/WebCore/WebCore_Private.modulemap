@@ -17,6 +17,16 @@ framework module WebCore_Private [system] {
         export *
     }
 
+    // The calc serialization island's boundary, its own module for the same reason. Separate from
+    // the module above rather than folded into it, because the two islands' boundaries are
+    // unrelated and a module that stated both would let either island reach the other's types --
+    // the point of these modules is to say what each may see.
+    explicit module CSSCalcSwiftTypes {
+        header "CSSCalcSwiftTypes.h"
+        requires cplusplus
+        export *
+    }
+
     module Core {
         // Workaround for rdar://173516139: PrivateHeaders includes a header
         // "WorkAround173516139.h" that the build system regenerates whenever
@@ -41,9 +51,10 @@ framework module WebCore_Private [system] {
         // on iOS, so it needs the definition of the class excluded above.
         exclude header "WebCoreView.h"
 
-        // This header is already included via its dedicated module above.
+        // These headers are already included via their dedicated modules above.
         exclude header "CSSTokenizerSwiftTypes.h"
         exclude header "CSSParserTokenBits.h"
+        exclude header "CSSCalcSwiftTypes.h"
 
         module * {
             export *
