@@ -55,6 +55,16 @@
 #include "CSSParserFastPaths.h"
 #include "CSSParserToken.h"
 #include "CSSParserTokenRange.h"
+#include "CSSCalcSwiftTypes.h"
+#include "CSSCalcSymbolsAllowed.h"
+#include "CSSCalcTree+Parser.h"
+#include "CSSCalcTree+Serialization.h"
+#include "CSSCalcTree+Simplification.h"
+#include "CSSCalcTree.h"
+#include "CSSPrimitiveNumericCategory.h"
+#include "CSSPropertyParserState.h"
+#include "StyleRule.h"
+#include "CSSSerializationContext.h"
 #include "CSSTokenizer.h"
 #include "CSSTokenizerSwiftTypes.h"
 // Same suppression, and the same FIXME, as CSSTokenizer.cpp: the generated header's
@@ -88,6 +98,129 @@ public:
     void observeProperty(unsigned, unsigned, bool, bool) final { }
     void observeComment(unsigned, unsigned) final { }
 };
+
+// MARK: - Helpers for the calc serialization comparison entries below
+//
+// Declared in WebCore's own anonymous namespace rather than beside the entries they serve: those
+// entries have `extern "C"` linkage, and a C-linkage function may not return a user-defined type
+// (-Werror,-Wreturn-type-c-linkage rejects `const CSSParserContext&` and `ParsedCalc`).
+
+// The categories to try, in order. A calc expression is only parseable in a context that admits
+// its type -- `calc(1 + 2)` needs Number, `calc(1px + 1em)` needs Length -- so trying each in turn
+// avoids skipping an expression just because it was handed the wrong context. Integer is first
+// because it is the most restrictive.
+constexpr std::array<WebCore::CSS::Category, 11> calcCategories {
+    WebCore::CSS::Category::Integer,
+    WebCore::CSS::Category::Number,
+    WebCore::CSS::Category::Percentage,
+    WebCore::CSS::Category::Length,
+    WebCore::CSS::Category::Angle,
+    WebCore::CSS::Category::Time,
+    WebCore::CSS::Category::Frequency,
+    WebCore::CSS::Category::Resolution,
+    WebCore::CSS::Category::Flex,
+    WebCore::CSS::Category::LengthPercentage,
+    WebCore::CSS::Category::AnglePercentage,
+};
+
+// The parser context, built once. A `CSSParserContext` carries a URL and a settings snapshot, and
+// construction-per-call would dominate a sweep that makes millions of calls. A function-local
+// static rather than a global because WebCore links with -no_inits.
+const CSSParserContext& calcParserContext()
+{
+    static NeverDestroyed<CSSParserContext> context = [] {
+        CSSParserContext built { HTMLStandardMode };
+        // Without this, `sibling-count()` and `sibling-index()` are rejected at
+        // CSSCalcTree+Parser.cpp:1345, so the `SiblingCount` and `SiblingIndex` node kinds are
+        // unreachable through this entry.
+        built.cssTreeCountingFunctionsEnabled = true;
+        return built;
+    }();
+    return context.get();
+}
+
+// Symbols the calc parser will accept as unresolved `Symbol` leaves.
+//
+// Without a non-empty table the `Symbol` node kind is unreachable: a bare identifier inside calc()
+// is only a symbol if the caller said so, and every other parse rejects it. These four are the
+// relative-colour component symbols, matching the table CSSPropertyParserConsumer+Color.cpp:285
+// builds. `symbolTable` is left empty on the simplification side, so the symbol stays unresolved
+// and survives into the tree as a `Symbol` leaf.
+CSSCalcSymbolsAllowed calcAllowedSymbols()
+{
+    return CSSCalcSymbolsAllowed {
+        { CSSValueR, CSSUnitType::Number },
+        { CSSValueG, CSSUnitType::Number },
+        { CSSValueB, CSSUnitType::Number },
+        { CSSValueAlpha, CSSUnitType::Number },
+    };
+}
+
+struct ParsedCalc {
+    std::optional<CSSCalc::Tree> tree;
+    WebCore::CSS::Category category { WebCore::CSS::Category::Number };
+    WebCore::CSS::Range range { WebCore::CSS::All };
+};
+
+// Parses one expression, trying each category until one accepts it.
+//
+// `conversionData` is deliberately `std::nullopt`, matching the production parse at
+// CSSUnevaluatedCalc.cpp:167: with no conversion data, simplification cannot fold length units
+// into canonical form, so operator nodes survive into the tree instead of collapsing to a leaf.
+ParsedCalc parseCalcExpression(const String& source)
+{
+    for (auto category : calcCategories) {
+        CSSTokenizer tokenizer(source);
+        auto range = tokenizer.tokenRange();
+        if (range.atEnd())
+            return { };
+
+        // `currentRule` and `currentProperty` are both load-bearing, not boilerplate:
+        // CSSCalcTree+Parser.cpp:1346-1349 rejects the tree-counting functions unless the rule is a
+        // Style or Keyframe rule AND a real property is named. With the defaults
+        // (`currentProperty == CSSPropertyInvalid`) those two node kinds never appear.
+        auto parserState = WebCore::CSS::PropertyParserState {
+            .context = calcParserContext(),
+            .currentRule = StyleRuleType::Style,
+            .currentProperty = CSSPropertyWidth,
+        };
+        auto parserOptions = CSSCalc::ParserOptions {
+            .category = category,
+            .range = WebCore::CSS::All,
+            .allowedSymbols = calcAllowedSymbols(),
+            .propertyOptions = { },
+        };
+        auto simplificationOptions = CSSCalc::SimplificationOptions {
+            .category = category,
+            .range = WebCore::CSS::All,
+            .conversionData = std::nullopt,
+            .symbolTable = { },
+            .allowZeroValueLengthRemovalFromSum = false,
+        };
+
+        auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions);
+        // A trailing token means the expression was only partly consumed, which is not a parse.
+        if (tree && range.atEnd())
+            return { WTF::move(tree), category, WebCore::CSS::All };
+    }
+    return { };
+}
+
+// Copies a serialization out to the caller's buffer. Truncates rather than overflowing, and
+// reports the true length so a truncated compare cannot read as agreement.
+size_t copyOutSerialization(const String& text, char* out, size_t capacity)
+{
+    auto utf8 = text.utf8();
+    auto span = utf8.span();
+    if (out && capacity) {
+        size_t copied = span.size() < capacity - 1 ? span.size() : capacity - 1;
+        auto destination = unsafeMakeSpan(out, copied + 1);
+        memcpySpan(destination.first(copied), span.first(copied));
+        destination[copied] = '\0';
+    }
+    return span.size();
+}
+
 
 } // namespace
 } // namespace WebCore
@@ -622,6 +755,156 @@ WEBCORE_EXPORT uint64_t webCoreCSSColorBench(const uint16_t* units, size_t lengt
         checksum = checksum * 31 + (result ? PackedColor::ARGB { *result }.value : 1u);
     }
     return checksum;
+}
+
+// MARK: - calc() serialization comparison entries (CSSCalcSerializationSwift.swift)
+//
+// `CSSCalc::serializationForCSS` is a pure `(Tree, Range, SerializationContext) -> String`: parse a
+// calc expression, serialize the resulting tree both ways, compare. Both arms run on the same
+// `Tree` object inside one call, so a C++ answer for one expression can never be paired with a
+// Swift answer for another.
+//
+// The serializer is named explicitly on each side rather than taken from the build default, so the
+// comparison holds regardless of WK_USE_SWIFT_CSS_CALC_SERIALIZATION.
+// `webCoreCSSCalcSerializationIsSwift` reports the default separately.
+
+// One expression's worth of comparison, plus fields that let a caller confirm the comparison
+// actually exercised the Swift path.
+struct CSSCalcSerializationComparison {
+    // 1 if the text parsed as a calc value at some category. 0 means the case exercised nothing.
+    uint32_t parsed;
+    // 1 if the two serializations are byte-identical.
+    uint32_t agree;
+    // 1 if the Swift path declined this tree, so "agree" below is the C++ compared against itself.
+    uint32_t declined;
+    // How many nodes the Swift walk visited and which kinds it stood on, so a caller can confirm
+    // the walk actually descended into the tree rather than stopping at the root.
+    uint32_t nodeCount;
+    uint32_t kindMask;
+    uint32_t cppLength;
+    uint32_t swiftLength;
+    // Which CSS::Category the expression parsed at, so the harness can report the spread rather
+    // than assume one.
+    uint32_t category;
+};
+
+WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization(const char*, size_t, char*, size_t, char*, size_t);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcRoundTrip(const char*, size_t, unsigned, char*, size_t, char*, size_t);
+WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void);
+WEBCORE_EXPORT void webCoreCSSCalcSetForceDecline(bool);
+WEBCORE_EXPORT unsigned webCoreCSSCalcDeclineCount(void);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSwiftCallCount(void);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void);
+
+// How many times WebCore was actually asked to compare, so a caller can confirm its sweep really
+// reached this code rather than being elided or miscounted.
+static std::atomic<uint64_t> s_calcCompareCalls;
+
+// Reported here rather than duplicated by the caller, so a claim of reaching every node kind can't
+// be checked against a stale count.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void)
+{
+    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::Operation) + 1;
+}
+
+// Serializes one tree both ways and compares. The two arms see the same `Tree` object, in this
+// order, in this call.
+WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization(const char* text, size_t length, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
+{
+    s_calcCompareCalls.fetch_add(1, std::memory_order_relaxed);
+
+    CSSCalcSerializationComparison result { 0, 0, 0, 0, 0, 0, 0, 0 };
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    auto parsed = parseCalcExpression(source);
+    if (!parsed.tree)
+        return result;
+
+    result.parsed = 1;
+    result.category = static_cast<uint32_t>(parsed.category);
+
+    auto options = CSSCalc::SerializationOptions {
+        .range = parsed.range,
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+    auto cppText = CSSCalc::serializationForCSS(*parsed.tree, options, CSSCalc::Serializer::Cpp);
+    auto swiftText = CSSCalc::serializationForCSS(*parsed.tree, options, CSSCalc::Serializer::Swift);
+    auto declinesAfter = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+
+    result.declined = declinesAfter != declinesBefore ? 1 : 0;
+    result.nodeCount = CSSCalc::webCoreCSSCalcSerializationLastNodeCount();
+    result.kindMask = CSSCalc::webCoreCSSCalcSerializationLastKindMask();
+    result.agree = cppText == swiftText ? 1 : 0;
+    result.cppLength = static_cast<uint32_t>(copyOutSerialization(cppText, cppOut, cppCapacity));
+    result.swiftLength = static_cast<uint32_t>(copyOutSerialization(swiftText, swiftOut, swiftCapacity));
+    return result;
+}
+
+// The spec gives a reference-free check for free: serialization must be idempotent under
+// reparsing, i.e. serialize(parse(s)) == serialize(parse(serialize(parse(s)))). This can fail even
+// when the C++ and Swift serializers agree with each other -- a shared misreading of the spec
+// would pass a bare comparison between them but not this.
+//
+// `serializerKind` is 0 for C++ and 1 for Swift, so the property can be checked for each
+// independently. Returns 0 stable, 1 first parse failed, 2 reparse failed, 3 unstable.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcRoundTrip(const char* text, size_t length, unsigned serializerKind, char* firstOut, size_t firstCapacity, char* secondOut, size_t secondCapacity)
+{
+    auto serializer = serializerKind ? CSSCalc::Serializer::Swift : CSSCalc::Serializer::Cpp;
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    auto first = parseCalcExpression(source);
+    if (!first.tree)
+        return 1;
+    auto firstOptions = CSSCalc::SerializationOptions {
+        .range = first.range,
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+    auto firstText = CSSCalc::serializationForCSS(*first.tree, firstOptions, serializer);
+    copyOutSerialization(firstText, firstOut, firstCapacity);
+
+    auto second = parseCalcExpression(firstText);
+    if (!second.tree)
+        return 2;
+    auto secondOptions = CSSCalc::SerializationOptions {
+        .range = second.range,
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+    auto secondText = CSSCalc::serializationForCSS(*second.tree, secondOptions, serializer);
+    copyOutSerialization(secondText, secondOut, secondCapacity);
+
+    return firstText == secondText ? 0 : 3;
+}
+
+// The compile-time default, so a build that ignored WK_USE_SWIFT_CSS_CALC_SERIALIZATION cannot pass
+// as one that honoured it.
+WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void)
+{
+    return CSSCalc::defaultSerializer == CSSCalc::Serializer::Swift;
+}
+
+// Forces the Swift path to decline every tree, so the C++ fall-through runs even with the gate on.
+// A fall-through that is reachable only by input eventually ships untested.
+WEBCORE_EXPORT void webCoreCSSCalcSetForceDecline(bool force)
+{
+    CSSCalc::webCoreCSSCalcSerializationSetForceDecline(force);
+}
+
+WEBCORE_EXPORT unsigned webCoreCSSCalcDeclineCount(void)
+{
+    return CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+}
+
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSwiftCallCount(void)
+{
+    return CSSCalc::webCoreCSSCalcSerializationSwiftCallCount();
+}
+
+WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void)
+{
+    return s_calcCompareCalls.load(std::memory_order_relaxed);
 }
 
 } // extern "C"

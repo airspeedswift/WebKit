@@ -26,6 +26,7 @@
 #include "CSSCalcTree+Serialization.h"
 
 #include "AnchorPositionEvaluator.h"
+#include "CSSCalcSwiftTypes.h"
 #include "CSSCalcSymbolTable.h"
 #include "CSSCalcTree+Traversal.h"
 #include "CSSCalcTree.h"
@@ -33,6 +34,16 @@
 #include "CSSPrimitiveNumericTypes+Serialization.h"
 #include "CSSPrimitiveValue.h"
 #include "CSSUnits.h"
+// WebCoreSwift-Generated.h below is emitted once for the whole module, so a translation unit
+// that includes it must see every Swift boundary's types, not just the ones this file uses.
+#include "CSSTokenizerSwiftTypes.h"
+// Same suppression, and the same FIXME, as CSSTokenizer.cpp and CSSParserFastPaths.cpp: the
+// generated header's `SWIFT_ENUM` hands C++ an Objective-C-only non-defining
+// fixed-underlying-type enum declaration for each `@c` enum, which -Werror makes fatal.
+IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
+#include "WebCoreSwift-Generated.h"
+IGNORE_CLANG_WARNINGS_END
+#include <atomic>
 #include <limits>
 #include <ranges>
 #include <wtf/text/StringBuilder.h>
@@ -765,10 +776,221 @@ template<typename Op> void serializeCalculationTree(StringBuilder& builder, cons
     serializeMathFunction(builder, root, state);
 }
 
+// MARK: - Swift serialization support (CSSCalcSerializationSwift.swift)
+//
+// What C++ still does here is deliberately small: answer six questions about a node, append five
+// things to a builder, and hand the root over. Swift walks the real `CSSCalc::Child` graph in
+// place through these accessors, so there is no serialized copy to build, no buffer to own --
+// output goes into the caller's `StringBuilder` -- and no duplicated table or algorithm, since
+// number formatting and the CSSValueID name table are upcalls.
+//
+// `formatCSSNumberValue` must stay in C++: Swift's `Double.description` is shortest-round-trip, a
+// different algorithm from CSS number serialization. The two agree on common values but diverge
+// on subnormals and 17-significant-digit values.
+
+// The outcome numbering is declared once, in Swift, and reaches C++ through the generated header.
+// These pin it, so that a reordering of the Swift enum is a build failure here rather than a silent
+// reinterpretation of every calc() serialization: `declined` read as `serialized` would emit
+// nothing at all for every math function on the page.
+static_assert(!static_cast<uint8_t>(CSSCalcSwiftOutcomeSerialized));
+static_assert(static_cast<uint8_t>(CSSCalcSwiftOutcomeDeclined) == 1);
+
+// Walks the direct `Child`-typed children of a node, whatever alternative it holds.
+//
+// `forAllChildNodes` already does this for an operation, generically over the tuple conformance,
+// so the 34 `IndirectNode<Op>` alternatives need no per-op code here. It cannot be handed a
+// *leaf*: the `Child` overload at CSSCalcTree+Traversal.h:126 dereferences the alternative, which
+// only `IndirectNode` supports, so the `requires` below is what lets one spelling serve all 41
+// alternatives.
+//
+// `Anchor` and `AnchorSize` declare `tuple_size` 0 (CSSCalcTree.h:1317, FIXME webkit.org/b/280798:
+// make them tuple-like), so `forAllChildNodes` reports no children for them even though `Anchor`
+// holds an `AnchorSide` and an optional fallback `Child`. Both currently decline regardless of
+// child count, but `childCount()` is not authoritative for those two until that FIXME lands.
+template<typename Functor> static void forEachChildNodeOfChild(const Child& node, const Functor& functor)
+{
+    WTF::switchOn(node, [&](const auto& alternative) {
+        if constexpr (requires { *alternative; })
+            forAllChildNodes(*alternative, functor);
+    });
+}
+
+// Counts the direct `Child`-typed children. Shared by `info()` and `childAt()`.
+static uint32_t childNodeCount(const Child& node)
+{
+    uint32_t count = 0;
+    forEachChildNodeOfChild(node, [&](const Child&) { ++count; });
+    return count;
+}
+
+CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
+{
+    // One `switchOn` over the 41-alternative Variant, answering every question at once. The five
+    // separate accessors this replaced each ran their own, so a leaf cost up to five discriminant
+    // dispatches to produce four fields that come from the same alternative.
+    CSSCalcSwiftNodeInfo out {
+        .numericValue = 0,
+        .childCount = 0,
+        .valueID = static_cast<uint16_t>(CSSValueInvalid),
+        .unitType = static_cast<uint8_t>(CSSUnitType::Unknown),
+        .kind = CSSCalcSwiftNodeKind::Operation,
+    };
+
+    WTF::switchOn(*m_node,
+        [&]<Numeric T>(const T& leaf) {
+            if constexpr (std::same_as<T, Number>)
+                out.kind = CSSCalcSwiftNodeKind::Number;
+            else if constexpr (std::same_as<T, Percentage>)
+                out.kind = CSSCalcSwiftNodeKind::Percentage;
+            else if constexpr (std::same_as<T, CanonicalDimension>)
+                out.kind = CSSCalcSwiftNodeKind::CanonicalDimension;
+            else
+                out.kind = CSSCalcSwiftNodeKind::NonCanonicalDimension;
+            out.numericValue = leaf.value;
+            out.unitType = static_cast<uint8_t>(toCSSUnit(leaf));
+        },
+        [&](const Symbol& leaf) {
+            out.kind = CSSCalcSwiftNodeKind::Symbol;
+            out.valueID = static_cast<uint16_t>(leaf.id);
+        },
+        [&](const SiblingCount&) {
+            out.kind = CSSCalcSwiftNodeKind::SiblingCount;
+            out.valueID = static_cast<uint16_t>(SiblingCount::id);
+        },
+        [&](const SiblingIndex&) {
+            out.kind = CSSCalcSwiftNodeKind::SiblingIndex;
+            out.valueID = static_cast<uint16_t>(SiblingIndex::id);
+        },
+        // The remaining IndirectNode<Op> alternatives, none of which this file serializes yet.
+        [&](const auto&) {
+            out.kind = CSSCalcSwiftNodeKind::Operation;
+        }
+    );
+
+    out.childCount = childNodeCount(*m_node);
+    return out;
+}
+
+CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
+{
+    const Child* found = nullptr;
+    uint32_t current = 0;
+    forEachChildNodeOfChild(*m_node, [&](const Child& child) {
+        if (current++ == index)
+            found = &child;
+    });
+    // Not a clamp and not a null return: this only ever indexes below the `childCount` it was just
+    // given, so reaching here means the two disagree -- the tree changed under a borrow -- and a
+    // default-constructed handle would turn that into a silent wrong serialization instead of a stop.
+    RELEASE_ASSERT(found);
+    return CSSCalcSwiftNode { found };
+}
+
+void CSSCalcSwiftSink::appendCalcOpen()
+{
+    m_builder->append("calc("_s);
+}
+
+void CSSCalcSwiftSink::appendCloseParen()
+{
+    m_builder->append(')');
+}
+
+void CSSCalcSwiftSink::appendEmptyParens()
+{
+    m_builder->append("()"_s);
+}
+
+void CSSCalcSwiftSink::appendNumber(double value, uint8_t unitType)
+{
+    // The same call the C++ arm makes at serializeCalculationTree's Numeric overload, so the two
+    // arms share one number-formatting implementation by construction rather than by comparison.
+    CSS::serializationForCSS(*m_builder, *m_context, CSS::SerializableNumber { value, unitTypeString(static_cast<CSSUnitType>(unitType)) });
+}
+
+void CSSCalcSwiftSink::appendValueIDName(uint16_t valueID)
+{
+    m_builder->append(nameLiteralForSerialization(static_cast<CSSValueID>(valueID)));
+}
+
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// Test-only, and compiled out otherwise so the production path pays no load for them.
+//
+// `s_forceDecline` makes this file decline every tree, the only way to exercise the C++
+// fall-through while the gate is on. Without it, that path is reachable only by input and may
+// never run in practice -- a path that never executes is not a path that works.
+//
+// `s_declines` guards against a comparison test passing vacuously: a decline is invisible in an
+// output comparison, since the C++ output for a declined tree is the same C++ output the
+// comparison already trusts, so silently declining everything would read as perfect agreement.
+// `s_lastNodeCount` and `s_lastKindMask` prove the walk actually descended and say which node
+// kinds it reached, so "the comparison agreed" cannot mean "it looked at the root and stopped".
+static std::atomic<bool> s_forceDecline;
+static std::atomic<unsigned> s_declines;
+static std::atomic<uint32_t> s_lastNodeCount;
+static std::atomic<uint32_t> s_lastKindMask;
+static std::atomic<uint64_t> s_swiftCalls;
+
+void webCoreCSSCalcSerializationSetForceDecline(bool force)
+{
+    s_forceDecline.store(force, std::memory_order_relaxed);
+}
+
+unsigned webCoreCSSCalcSerializationDeclineCount(void)
+{
+    return s_declines.load(std::memory_order_relaxed);
+}
+
+uint32_t webCoreCSSCalcSerializationLastNodeCount(void)
+{
+    return s_lastNodeCount.load(std::memory_order_relaxed);
+}
+
+uint32_t webCoreCSSCalcSerializationLastKindMask(void)
+{
+    return s_lastKindMask.load(std::memory_order_relaxed);
+}
+
+uint64_t webCoreCSSCalcSerializationSwiftCallCount(void)
+{
+    return s_swiftCalls.load(std::memory_order_relaxed);
+}
+#endif
+
+// Whether the tree was serialized. Returns false to mean "run your own serializer", and in
+// that case guarantees nothing was appended: this decides before it emits, because a
+// StringBuilder cannot be truncated back.
+static bool trySerializeWithSwiftIsland(StringBuilder& builder, const Tree& tree, const SerializationOptions& options)
+{
+    CSSCalcSwiftSink sink { builder, options.serializationContext };
+    auto result = cssCalcSerializeSwift(CSSCalcSwiftNode { &tree.root }, sink, tree.stage == Stage::Computed);
+
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+    s_swiftCalls.fetch_add(1, std::memory_order_relaxed);
+    s_lastNodeCount.store(result.nodeCount, std::memory_order_relaxed);
+    s_lastKindMask.store(result.kindMask, std::memory_order_relaxed);
+    if (s_forceDecline.load(std::memory_order_relaxed)) {
+        s_declines.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+#endif
+
+    if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftOutcomeSerialized)) {
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+        s_declines.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return false;
+    }
+    return true;
+}
+
 // MARK: Exposed interface
 
-void serializationForCSS(StringBuilder& builder, const Tree& tree, const SerializationOptions& options)
+void serializationForCSS(StringBuilder& builder, const Tree& tree, const SerializationOptions& options, Serializer serializer)
 {
+    if (serializer == Serializer::Swift && trySerializeWithSwiftIsland(builder, tree, options))
+        return;
+
     SerializationState state {
         .stage = tree.stage,
         .range = options.range,
@@ -777,10 +999,10 @@ void serializationForCSS(StringBuilder& builder, const Tree& tree, const Seriali
     serializeMathFunction(builder, tree.root, state);
 }
 
-String serializationForCSS(const Tree& tree, const SerializationOptions& options)
+String serializationForCSS(const Tree& tree, const SerializationOptions& options, Serializer serializer)
 {
     StringBuilder builder;
-    serializationForCSS(builder, tree, options);
+    serializationForCSS(builder, tree, options, serializer);
     return builder.toString();
 }
 
