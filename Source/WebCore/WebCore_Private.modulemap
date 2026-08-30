@@ -12,6 +12,7 @@ framework module WebCore_Private [system] {
     // Swift does not build at all. See CSSTokenizerSwiftTypes.h.
     explicit module CSSTokenizerSwiftTypes {
         header "CSSTokenizerSwiftTypes.h"
+        header "CSSParserTokenBits.h"
         requires cplusplus
         export *
     }
@@ -42,6 +43,7 @@ framework module WebCore_Private [system] {
 
         // This header is already included via its dedicated module above.
         exclude header "CSSTokenizerSwiftTypes.h"
+        exclude header "CSSParserTokenBits.h"
 
         module * {
             export *
