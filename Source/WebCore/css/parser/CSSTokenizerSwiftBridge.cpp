@@ -61,6 +61,8 @@
 IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
 #include "WebCoreSwift-Generated.h"
 IGNORE_CLANG_WARNINGS_END
+#include <array>
+#include <atomic>
 #include <optional>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/Latin1Character.h>
@@ -116,6 +118,10 @@ WEBCORE_EXPORT bool webCoreCSSTokenizerTryCreateSucceeds(const char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSTokenizerDefaultScannerIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated(const char*, size_t, bool, size_t*, uint64_t*);
 WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char*, size_t, bool, size_t*, uint64_t*, bool*);
+WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare8(const uint8_t*, size_t);
+WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare16(const uint16_t*, size_t);
+WEBCORE_EXPORT uint64_t webCoreCSSTokenizerUnitTrieCxxCallCount(void);
+WEBCORE_EXPORT size_t webCoreCSSTokenizerUnitTrieMaximumLength(void);
 
 // The integration gate: builds the whole CSSParserToken stream both ways, in one
 // process, and compares the tokens themselves rather than just the POD-level
@@ -400,6 +406,67 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char* text, size_
     *outTokens = count;
     *outFold = fold;
     *outIs16Bit = !source.is8Bit();
+}
+
+// MARK: - The CSS unit-type trie
+//
+// CSSUnitTrieSwift.swift is a transcription of cssPrimitiveValueUnitFromTrie. These two entries
+// compare it against the C++ original linked into this same framework, packed into one call so
+// there is no way to pair a C++ answer for one input against a Swift answer for another.
+//
+// The Swift side is reached through the generated header's thunk, with parameters packed into
+// 64-bit words: a Swift *callee* cannot take a Span (the `__counted_by` plus `noescape` recipe
+// only works for a caller), and the alternatives all need an `unsafe` marker in a file that has
+// none.
+
+static std::atomic<uint64_t> s_unitTrieCxxCalls;
+
+// The cap the Swift entries enforce with a precondition. Reported rather than duplicated, so
+// the harness cannot quietly sweep longer strings than the entry point can carry.
+static constexpr size_t maximumUnitTrieLength = 16;
+
+WEBCORE_EXPORT size_t webCoreCSSTokenizerUnitTrieMaximumLength(void)
+{
+    return maximumUnitTrieLength;
+}
+
+WEBCORE_EXPORT uint64_t webCoreCSSTokenizerUnitTrieCxxCallCount(void)
+{
+    return s_unitTrieCxxCalls.load(std::memory_order_relaxed);
+}
+
+// Returns (C++ unit << 8) | Swift unit. Both are CSSUnitType underlying values; Unknown is 0.
+WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare8(const uint8_t* data, size_t length)
+{
+    RELEASE_ASSERT(length <= maximumUnitTrieLength);
+    auto text = unsafeMakeSpan(byteCast<Latin1Character>(data), length);
+    s_unitTrieCxxCalls.fetch_add(1, std::memory_order_relaxed);
+    auto cppUnit = static_cast<uint32_t>(CSSParserToken::stringToUnitType(StringView { text }));
+
+    std::array<uint64_t, 2> packed { 0, 0 };
+    for (size_t i = 0; i < length; ++i)
+        packed[i / 8] |= static_cast<uint64_t>(text[i]) << (8 * (i % 8));
+    auto swiftUnit = static_cast<uint32_t>(cssUnitTrieSwiftLookup8(packed[0], packed[1], static_cast<ptrdiff_t>(length)));
+
+    return (cppUnit << 8) | swiftUnit;
+}
+
+// Same, at 16-bit width. StringView built from a char16_t span keeps its 16-bit
+// representation whatever the text is, which is the only way to reach the C++ template's
+// char16_t instantiation on Latin-1 content -- a String built from Latin-1 bytes never would.
+WEBCORE_EXPORT uint32_t webCoreCSSTokenizerUnitTrieCompare16(const uint16_t* data, size_t length)
+{
+    RELEASE_ASSERT(length <= maximumUnitTrieLength);
+    auto text = unsafeMakeSpan(reinterpret_cast<const char16_t*>(data), length);
+    s_unitTrieCxxCalls.fetch_add(1, std::memory_order_relaxed);
+    auto cppUnit = static_cast<uint32_t>(CSSParserToken::stringToUnitType(StringView { text }));
+
+    std::array<uint64_t, 4> packed { 0, 0, 0, 0 };
+    for (size_t i = 0; i < length; ++i)
+        packed[i / 4] |= static_cast<uint64_t>(text[i]) << (16 * (i % 4));
+    auto swiftUnit = static_cast<uint32_t>(cssUnitTrieSwiftLookup16(packed[0], packed[1], packed[2], packed[3], static_cast<ptrdiff_t>(length)));
+
+    return (cppUnit << 8) | swiftUnit;
 }
 
 } // extern "C"
