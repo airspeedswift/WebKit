@@ -280,8 +280,17 @@ inline constexpr bool bitsCarryPendingNumber(const CSSParserTokenBits& bits)
 // zero. Testing the two fields together therefore separates the cases exactly, as an or, a
 // compare and a select rather than a branch: the resolved pointer is computed unconditionally
 // on both paths.
-inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_t> input, unsigned characterSize)
+// `characterSize` is a template parameter, not an argument, since it is a property of the
+// tokenization rather than of a token: CSSSwiftTokenSink::create decides it once, from the
+// same StringImpl::is8Bit that picks which specialization runs. Passing it as a value made
+// both scalings below runtime multiplies the compiler could not see through, since the value
+// reached them through a member. Specialized, the 8-bit instantiation has no multiply at all,
+// and the 16-bit one folds one doubling into the shifted-register operand of a compare and the
+// other into the address it already had to form.
+template<unsigned characterSize>
+inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_t> input)
 {
+    static_assert(characterSize == 1 || characterSize == 2, "the only two StringImpl widths");
     auto offset = reinterpret_cast<uintptr_t>(bits.valueDataCharRaw);
     // subspan rather than pointer arithmetic: libc++ hardening is on in this build, so this
     // is a real bounds check on a value that crossed a language boundary, which the raw form

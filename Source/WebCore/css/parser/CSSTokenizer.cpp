@@ -471,6 +471,14 @@ bool CSSSwiftTokenSink::takeChunk(
     // Read before anything is appended, because the observer walk below runs afterwards.
     unsigned firstTokenIndex = parserTokens.size();
 
+    // The input's width, read once for the whole chunk rather than once per token: it is fixed for
+    // the tokenization, so the resolve below can be *specialized* on it and neither of the two
+    // scalings a value offset needs survives as a multiply. Read from the sink and not from a
+    // token's own valueIs8Bit, which would be free -- it is already loaded -- but would make the
+    // scale factor of a bounds check a number Swift supplied, and a check must not take its
+    // dimensions from the thing it is checking.
+    bool inputIs8Bit = m_characterSize == 1;
+
     for (auto bits : tokenBits) {
         auto parkedOffset = bitsParkedValueOffset(bits);
         if (parkedOffset & cssParserTokenBitsUnescapedValueTag) [[unlikely]] {
@@ -484,8 +492,10 @@ bool CSSSwiftTokenSink::takeChunk(
             bits.valueLength = value.length();
             bits.valueIs8Bit = value.is8Bit();
             bits.valueDataCharRaw = value.rawCharacters();
-        } else
-            resolveValuePointer(bits, m_inputBytes, m_characterSize);
+        } else if (inputIs8Bit)
+            resolveValuePointer<1>(bits, m_inputBytes);
+        else
+            resolveValuePointer<2>(bits, m_inputBytes);
 
         if (bitsCarryPendingNumber(bits)) {
             // The number's own range is parked in the union instead of a double, because
