@@ -206,10 +206,9 @@ CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
 // is the materialisation the island deliberately leaves in C++ — StringViews over
 // the input, double conversion, and the escaped-value string pool.
 
-// The island reports a token's type and block type as bytes, and
-// appendTokensFromSwiftIsland casts them straight to the C++ enums, so the two
-// numberings have to agree: a reorder or an insertion in CSSParserTokenType, an ordinary
-// WebCore change, would otherwise silently retype every token above the insertion point.
+// The island writes a token's type and block type straight into CSSParserTokenBits' bitfields,
+// so the two numberings have to agree: a reorder or an insertion in CSSParserTokenType, an
+// ordinary WebCore change, would otherwise silently retype every token above the insertion point.
 //
 // These now *prove* it. CSSTokenTypeSwift and CSSBlockTypeSwift are `@c` (SE-0495), so
 // they are emitted into WebCoreSwift-Generated.h as uint8_t-backed C enums and each
@@ -254,13 +253,13 @@ static_assert(static_cast<uint8_t>(BadStringToken) == CSSTokenTypeSwiftBadString
 static_assert(static_cast<uint8_t>(EOFToken) == CSSTokenTypeSwiftEndOfFile);
 static_assert(static_cast<uint8_t>(CommentToken) == CSSTokenTypeSwiftComment);
 
-// Same, for CSSBlockTypeSwift, whose three cases the island reports in
-// CSSSwiftToken::blockType.
+// Same, for CSSBlockTypeSwift, whose three cases the island writes into
+// CSSParserTokenBits::blockType.
 static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == CSSBlockTypeSwiftNotBlock);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == CSSBlockTypeSwiftBlockStart);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == CSSBlockTypeSwiftBlockEnd);
 
-// The CSS unit-type trie's enum mirror. CSSUnitTrieSwift.swift resolves a dimension's unit
+// The CSS unit-type trie's enum mirror. The island resolves a dimension's unit
 // itself, and it has to spell CSSUnitType out rather than import it: CSSUnits.h has no
 // #includes of its own -- it takes uint8_t, std::optional, ASCIILiteral and NODELETE from
 // whoever includes it -- so it cannot join the island's self-contained boundary module, and it
@@ -363,20 +362,16 @@ static_assert(static_cast<uint8_t>(CSSUnitType::FirstViewportCSSUnitType) == CSS
 static_assert(static_cast<uint8_t>(CSSUnitType::LastViewportCSSUnitType) == CSSUnitTypeSwiftDvi);
 // A new enumerator appended to CSSUnitType would be invisible to every assert above, since
 // each names a value that already exists. This is the one that fails.
-static_assert(static_cast<uint8_t>(CSSUnitType::QuirkyEm) == 69, "CSSUnitTypeSwift in CSSUnitTrieSwift.swift mirrors CSSUnitType case for case; add the new unit there too, then update this value");
+static_assert(static_cast<uint8_t>(CSSUnitType::QuirkyEm) == 69, "CSSUnitTypeSwift in CSSTokenizerSwift.swift mirrors CSSUnitType case for case; add the new unit there too, then update this value");
 
-// The shared boundary struct. Swift imports this definition rather than restating it, so
-// the two cannot disagree on the field layout; what is worth pinning is that it stays a
-// trivially default constructible aggregate of exactly this size, because both
-// properties are load-bearing and neither is obvious from the declaration. Losing
-// trivial default construction makes WTF's Vector zero the whole buffer before Swift
-// overwrites it, which on a large stylesheet is tens of megabytes of dead stores; growing
-// the struct costs chunk cache residency, and shrinking it to 24 bytes was measured and
-// refuted (notes §11p).
-static_assert(sizeof(CSSSwiftToken) == 32);
-static_assert(alignof(CSSSwiftToken) == 4);
-static_assert(std::is_trivially_default_constructible_v<CSSSwiftToken>);
-static_assert(std::is_trivially_copyable_v<CSSSwiftToken>);
+// The shared boundary struct. Swift imports CSSParserTokenBits itself, so there is nothing left
+// here that could disagree with C++ about a token's layout; what the island still restates is the
+// observer record, which is small enough to pin outright. Twelve bytes and trivially copyable,
+// because the whole point of taking it out of the token was that production tokenization -- which
+// has no observer -- writes none of them.
+static_assert(sizeof(CSSSwiftObserverRecord) == 12);
+static_assert(alignof(CSSSwiftObserverRecord) == 4);
+static_assert(std::is_trivially_copyable_v<CSSSwiftObserverRecord>);
 
 // Counts the times the island could not allocate. Nothing depends on it for correctness
 // any more: with the fallback gone, a failure makes construction fail, which the direct
@@ -432,7 +427,14 @@ bool CSSTokenizer::tokenizeWithSwiftIsland(CSSParserObserverWrapper* wrapper, bo
 
 CSSSwiftTokenSink* CSSSwiftTokenSink::create(CSSTokenizer& tokenizer, CSSParserObserverWrapper* wrapper)
 {
-    return new CSSSwiftTokenSink(tokenizer, wrapper);
+    // The width is decided once here, not per chunk and certainly not per token: it is the same
+    // branch tokenizeWithSwiftIsland takes to pick which of the island's two specializations to
+    // run. The bytes stay valid because m_input holds a RefPtr<StringImpl> for the whole
+    // tokenization, which is the same lifetime argument the island's entry points document.
+    auto string = tokenizer.m_input.currentString();
+    if (string.is8Bit())
+        return new CSSSwiftTokenSink(tokenizer, wrapper, asBytes(string.span8()), 1);
+    return new CSSSwiftTokenSink(tokenizer, wrapper, asBytes(string.span16()), 2);
 }
 
 // The annotations have to be repeated here: an unannotated definition is a different
@@ -455,106 +457,87 @@ void CSSSwiftTokenSink::finish()
     }
 }
 
-// Converts one chunk of the island's tokens into CSSParserTokens, and feeds the
-// inspector's observer wrapper the same offsets the C++ loop would have.
+// Materialises one chunk of the island's finished tokens, and feeds the inspector's observer
+// wrapper the same offsets the C++ loop would have.
+//
+// There is no dispatch on a token's kind here, and that is the whole point of the change that
+// brought CSSParserTokenBits into being. This used to cast a type tag out of the island's boundary
+// struct and run a seven-arm switch on it, each arm calling a different out-of-line CSSParserToken
+// constructor and the numeric arm branching again -- once per token, to recover a dispatch that had
+// been free on the Swift side, where every construction site knows its kind statically. What is
+// left is the work the island genuinely cannot do: an offset becomes a pointer, an escaped value
+// becomes a pooled String, and charactersToDouble runs where it always ran so that double rounding
+// stays bit-identical with the C++ scanner.
 bool CSSSwiftTokenSink::takeChunk(
-    const CSSSwiftToken *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
-    const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount)
+    const CSSParserTokenBits *__counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
+    const char16_t *__counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount,
+    const CSSSwiftObserverRecord *__counted_by(recordCount) records __attribute__((noescape)), size_t recordCount)
 {
-    auto podTokens = unsafeMakeSpan(tokens, tokenCount);
+    auto tokenBits = unsafeMakeSpan(tokens, tokenCount);
     auto unescaped = unsafeMakeSpan(unescapedUnits, unitCount);
-    auto& wrapper = m_wrapper;
-    auto& observerOffset = m_observerOffset;
-    auto& m_tokens = m_tokenizer.m_tokens;
-    auto& m_input = m_tokenizer.m_input;
-    auto registerString = [&](const String& s) { return m_tokenizer.registerString(s); };
-    for (const auto& pod : podTokens) {
-        auto type = static_cast<CSSParserTokenType>(pod.type);
+    auto observerRecords = unsafeMakeSpan(records, recordCount);
+    auto& parserTokens = m_tokenizer.m_tokens;
 
-        // Comments are not kept, matching the C++ path, but the inspector wants
-        // their extent and where they sat in the token stream.
-        if (type == CommentToken) {
-            if (wrapper) {
-                wrapper->addComment(pod.start, pod.end, m_tokens.size());
-                observerOffset = pod.end;
-            }
-            continue;
-        }
+    // Where this chunk's first token lands, which is what addComment's `tokensBefore` counts.
+    // Read before anything is appended, because the observer walk below runs afterwards.
+    unsigned firstTokenIndex = parserTokens.size();
 
-        // A value the island unescaped: its range indexes the unescape buffer, not
-        // the input, and it has to become a real String in m_stringPool. Built with
-        // create8BitIfPossible to match what the C++ path's StringBuilder produces,
-        // so the two paths agree on the string's representation as well as its
-        // contents.
-        auto value = [&]() -> StringView {
-            if (pod.flags & CSSTokenFlagBitsUnescaped) [[unlikely]] {
-                auto units = unescaped.subspan(pod.valueStart, pod.valueLength);
-                return registerString(String { StringImpl::create8BitIfPossible(units) });
-            }
-            return m_input.rangeAt(pod.valueStart, pod.valueLength);
-        };
-        auto blockType = static_cast<CSSParserToken::BlockType>(pod.blockType);
+    for (auto bits : tokenBits) {
+        auto parkedOffset = bitsParkedValueOffset(bits);
+        if (parkedOffset & cssParserTokenBitsUnescapedValueTag) [[unlikely]] {
+            // A value the island unescaped: its range indexes the unescape buffer rather than the
+            // input, and it has to become a real String in m_stringPool. create8BitIfPossible to
+            // match what the C++ path's StringBuilder produces, so the two paths agree on the
+            // string's representation as well as on its contents. Necessarily inside this call:
+            // the unescape buffer is per chunk and the island clears it the moment we return.
+            auto units = unescaped.subspan(parkedOffset & ~cssParserTokenBitsUnescapedValueTag, bits.valueLength);
+            auto value = m_tokenizer.registerString(String { StringImpl::create8BitIfPossible(units) });
+            bits.valueLength = value.length();
+            bits.valueIs8Bit = value.is8Bit();
+            bits.valueDataCharRaw = value.rawCharacters();
+        } else
+            resolveValuePointer(bits, m_inputBytes, m_characterSize);
 
-        // Constructed straight into m_tokens rather than staged in a local and
-        // copied: this loop runs once per token, and a CSSParserToken is 24 bytes.
-        bool appended;
-        switch (type) {
-        case IdentToken:
-        case AtKeywordToken:
-        case UrlToken:
-        case StringToken:
-            appended = m_tokens.tryConstructAndAppend(type, value());
-            break;
-        case FunctionToken:
-            appended = m_tokens.tryConstructAndAppend(type, value(), blockType);
-            break;
-        case HashToken:
-            appended = m_tokens.tryConstructAndAppend(pod.flags & CSSTokenFlagBitsHashTokenId ? HashTokenId : HashTokenUnrestricted, value());
-            break;
-        case DelimiterToken:
-            appended = m_tokens.tryConstructAndAppend(DelimiterToken, static_cast<char16_t>(pod.extra));
-            break;
-        case NonNewlineWhitespaceToken:
-            appended = m_tokens.tryConstructAndAppend(pod.extra);
-            break;
-        case NumberToken:
-        case PercentageToken:
-        case DimensionToken: {
-            auto numberText = m_input.rangeAt(pod.numberStart, pod.numberLength);
+        if (bitsCarryPendingNumber(bits)) {
+            // The island parked the number's own range in the union instead of a double, because
+            // after a dimension's number and unit have been merged into one view the number is no
+            // longer recoverable from value(). Reading it and overwriting it in place is free: the
+            // slot the double will occupy is dead until the double exists.
+            auto numberText = m_tokenizer.m_input.rangeAt(bits.pendingNumberRange.offset, bits.pendingNumberRange.length);
             bool isResultOK = false;
             double numericValue = numberText.is8Bit()
                 ? charactersToDouble(numberText.span8(), &isResultOK)
                 : charactersToDouble(numberText.span16(), &isResultOK);
-            if (!isResultOK)
-                numericValue = 0;
-            auto numericValueType = pod.flags & CSSTokenFlagBitsNonInteger ? NumberValueType : IntegerValueType;
-            auto sign = pod.flags & CSSTokenFlagBitsPlusSign ? PlusSign
-                : pod.flags & CSSTokenFlagBitsMinusSign ? MinusSign : NoSign;
-            appended = m_tokens.tryConstructAndAppend(numericValue, numericValueType, sign, numberText);
-            // The conversions mutate, so they happen in place after appending.
-            if (appended) [[likely]] {
-                if (type == PercentageToken)
-                    m_tokens.last().convertToPercentage();
-                else if (type == DimensionToken)
-                    m_tokens.last().convertToDimensionWithUnit(value());
-            }
-            break;
-        }
-        default:
-            // Everything else carries no value: the punctuation, the match
-            // tokens, CDO/CDC, newline, the bad-token types, and the block
-            // delimiters, whose block type the island already decided.
-            appended = m_tokens.tryConstructAndAppend(type, blockType);
-            break;
+            bits.numericValue = isResultOK ? numericValue : 0;
         }
 
-        if (!appended) [[unlikely]]
+        // No reservation here beyond the one tokenizeWithSwiftIsland already made:
+        // Vector::reserveCapacity reserves exactly what it is asked for, so a per-chunk
+        // `size() + tokenCount` would reallocate every 1024 tokens on any input denser than the
+        // three-characters-per-token estimate, where tryAppend's own growth is geometric.
+        if (!parserTokens.tryConstructAndAppend(bits)) [[unlikely]]
             return false;
-        if (wrapper) {
-            wrapper->addToken(pod.start);
-            observerOffset = pod.end;
+    }
+
+    // The observer walk. Empty unless wantsObserverRecords() said otherwise, so production
+    // tokenization does not reach it at all. addToken and addComment append to two separate
+    // vectors and need not interleave, but m_tokenOffsets has to be in strict token order and
+    // m_commentOffsets ascending by tokensBefore, which source order gives for free. Keeping the
+    // token index here rather than in a per-token field is the reason a comment needs a record at
+    // all: it is the one thing about a comment that survives it not being a token.
+    if (auto* wrapper = m_wrapper) {
+        unsigned tokenIndex = firstTokenIndex;
+        for (auto& record : observerRecords) {
+            if (record.isComment)
+                wrapper->addComment(record.start, record.end, tokenIndex);
+            else {
+                wrapper->addToken(record.start);
+                ++tokenIndex;
+            }
+            m_observerOffset = record.end;
         }
     }
+
     return !s_forceSwiftIslandFailureForTesting.load(std::memory_order_relaxed);
 }
 
