@@ -76,7 +76,7 @@ WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS = $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_$(
 WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_YES = -DENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=1;
 
 // The same switch on the Swift side, so the island's validation entry points
-// (the trie's, in CSSTokenizerSwift.swift) are compiled only when the bridge is. Without it the `@_expose(Cxx)`
+// (CSSUnitTrieSwift.swift) are compiled only when the bridge is. Without it the `@_expose(Cxx)`
 // functions would be emitted into every WebCore.framework, which is the thing this flag exists
 // to prevent -- an entry point that ships is interop cost whichever language it is written in.
 // SWIFT_ACTIVE_COMPILATION_CONDITIONS rather than OTHER_SWIFT_FLAGS because builds routinely
@@ -258,6 +258,17 @@ WK_HAVE_URL_FORMATTING_xros = YES;
 WK_HAVE_URL_FORMATTING_xrsimulator = YES;
 WK_HAVE_URL_FORMATTING_maccatalyst = YES;
 WK_HAVE_URL_FORMATTING_macosx = YES;
+
+// Whole-module, matching JavaScriptCore.xcconfig:80. Without it Xcode compiles Swift
+// `-incremental -enable-batch-mode`, and nothing specializes across a Swift *file*
+// boundary: a call from one file to a generic function in another reaches the
+// unspecialized generic through a lazily-built conformance witness table, whatever
+// specializations already sit in the same binary. In the CSS tokenizer island that cost
+// 10.7 points, because `consumeNumericToken` called the unit trie's 17,898-instruction
+// unspecialized form rather than the 943-instruction UInt8 one next to it. JSC has had
+// this since its own island landed; WebCore inherited the common Swift settings and this
+// was not among them, so every CSS island measurement before this was taken without it.
+SWIFT_COMPILATION_MODE = wholemodule;
 
 SWIFT_INSTALL_OBJC_HEADER = NO;
 BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
