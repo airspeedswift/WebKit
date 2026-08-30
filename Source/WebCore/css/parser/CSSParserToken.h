@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include <WebCore/CSSParserTokenBits.h>
+
 #include <WebCore/CSSPrimitiveValue.h>
 #include <wtf/text/StringView.h>
 
@@ -73,53 +75,6 @@ enum CSSParserTokenType {
 
 constexpr std::underlying_type_t<CSSParserTokenType> numberOfCSSParserTokenTypes = LastCSSParserTokenType + 1;
 
-enum NumericSign {
-    NoSign,
-    PlusSign,
-    MinusSign,
-};
-
-enum NumericValueType {
-    IntegerValueType,
-    NumberValueType,
-};
-
-enum HashTokenType {
-    HashTokenId,
-    HashTokenUnrestricted,
-};
-
-// CSSParserToken's storage, lifted out of the class *unchanged* so one definition can be
-// compiled by both C++ and Swift. The island today emits a different struct carrying offsets
-// plus a type tag, which C++ decodes back into a typed constructor call -- a dispatch the
-// producer had already made for free. Sharing the real storage lets the island write finished
-// tokens instead, deleting that round trip.
-//
-// Same fields, same order, same bitfield widths, so the object's layout and every accessor's
-// codegen are unchanged. This is a pure refactor and is verified as one.
-struct CSSParserTokenBits {
-    unsigned type : 6 { 0 }; // CSSParserTokenType
-    unsigned blockType : 2 { 0 }; // BlockType
-    unsigned numericValueType : 1 { 0 }; // NumericValueType
-    unsigned numericSign : 2 { 0 }; // NumericSign
-    unsigned unit : 7 { 0 }; // CSSUnitType
-    unsigned nonUnitPrefixLength : 4 { 0 }; // Only for DimensionType, only needs to be long enough for UnicodeRange parsing.
-
-    // value... is an unpacked StringView so that we can pack it
-    // tightly with the rest of this object for a smaller object size.
-    bool valueIs8Bit : 1 { false };
-    bool isBackedByStringLiteral : 1 { false };
-    unsigned valueLength { 0 };
-    const void* valueDataCharRaw { nullptr }; // Either Latin1Character* or char16_t*.
-
-    union {
-        char16_t delimiter;
-        HashTokenType hashTokenType;
-        double numericValue { 0 };
-        mutable int id;
-        unsigned whitespaceCount;
-    };
-};
 
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSParserToken);
 class CSSParserToken {
