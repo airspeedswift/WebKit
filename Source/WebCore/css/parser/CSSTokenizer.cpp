@@ -34,6 +34,12 @@
 #include "CSSParserObserverWrapper.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
+// Not used by this file. WebCoreSwift-Generated.h below is emitted once for the whole module, so
+// every C++ translation unit that includes it must be able to see *every* island's boundary types --
+// the per-island Clang modules in WebCore_Private.modulemap isolate what Swift may reach, not what
+// C++ must declare. Without this the generated thunk for cssCalcSerializeSwift fails with "no member
+// named 'CSSCalcSwiftNode' in namespace 'WebCore::CSSCalc'".
+#include "CSSCalcSwiftTypes.h"
 #include "CSSTokenizerSwiftTypes.h"
 // FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops
 // handing C++ the Objective-C spelling. It treats C++11 as implying support for the

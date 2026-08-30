@@ -1,0 +1,247 @@
+/*
+ * Copyright (C) 2026 Apple Inc. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+ * THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// Everything the Swift calc serialization island (CSSCalcSerializationSwift.swift) is allowed to
+// see of WebCore, and nothing else. Same shape and same reason as CSSTokenizerSwiftTypes.h next
+// door: its own Clang module in WebCore_Private.modulemap, self-contained, so that importing it
+// cannot walk the ~3,500-header PrivateHeaders umbrella into JavaScriptCore's private headers.
+//
+// SELF-CONTAINED IS WHY THE TREE IS NOT IMPORTED. The probe matrix at
+// ~/src/webkit-swift-ports/cssprobe/calcimport/ was built to answer "can Swift hold a
+// CSSCalc::Child?", and its arm 8 answered yes -- hide the `Variant` member from the importer
+// behind `#if !defined(__swift__)` with same-size stand-in storage and a `static_assert` on it,
+// because the importer odr-uses the member's destructor over incomplete `UniqueRef<Op>`
+// alternatives (filings register §35). But Swift does not need `Child`'s *layout* to walk the
+// tree -- only its *identity*. A handle holding `const Child*` needs `Child` merely
+// forward-declared, which is what CSSCalcTree+Serialization.h has always done, and that shape is
+// strictly better on every axis this project scores:
+//
+//   - CSSCalcTree.h is not touched at all, so there is no stand-in storage to keep in sync and no
+//     `static_assert` that has to be right;
+//   - §35's importer bug is never reached, because no variant member is ever imported;
+//   - and the boundary header stays self-contained, where importing CSSCalcTree.h would drag in
+//     CSSPrimitiveNumeric.h, CSSCustomIdent.h, CSSValueKeywords.h, CSSCalcRandomSharing.h,
+//     wtf/Vector.h and wtf/TZoneMalloc.h.
+//
+// Probed end to end as arm 11 and arm 13 of that matrix before any of this was written: the
+// recursive walk plus the sink below import at **0 errors, 0 warnings and 0 `unsafe` markers**,
+// with anti-vacuity controls (arm 13C) confirming that removing `SWIFT_SAFE` puts the marker back.
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <WebCore/PlatformExportMacros.h>
+#include <wtf/SwiftBridging.h>
+
+// Forward declaration only, so this header stays self-contained. The sink writes into a builder
+// that C++ owns; Swift never sees StringBuilder's definition and never needs to.
+namespace WTF {
+class StringBuilder;
+}
+
+namespace WebCore {
+
+namespace CSS {
+struct SerializationContext;
+}
+
+namespace CSSCalc {
+
+struct Child;
+
+// What kind of node the walk is standing on.
+//
+// Declared here in C++ rather than in Swift with `@c`, which is the opposite of what the
+// tokenizer island does for its token types -- and deliberately. That numbering is declared in
+// Swift because *Swift* produces it and C++ consumes it, so a single Swift declaration removes a
+// transcription. Here C++ produces the kind and Swift consumes it, so the single declaration
+// belongs on the C++ side; an `enum class ... : uint8_t` imports as an ordinary Swift enum that
+// the island can `switch` over exhaustively, and there is nothing left to `static_assert`.
+//
+// `Operation` collapses all 34 `IndirectNode<Op>` alternatives into one case on purpose. S0
+// serializes no operator, so distinguishing them would be 34 names the island cannot yet use; S1
+// splits this case as it absorbs them. The walk still descends through an `Operation`, which is
+// what proves the child accessors work.
+enum class CSSCalcSwiftNodeKind : uint8_t {
+    Number,
+    Percentage,
+    CanonicalDimension,
+    NonCanonicalDimension,
+    Symbol,
+    SiblingCount,
+    SiblingIndex,
+    Operation,
+};
+
+// One node, described. A plain aggregate of trivial types, so it crosses in registers and needs no
+// annotation and no lifetime -- there is nothing here that points at the tree.
+//
+// Each field is meaningful only for the kinds that carry it, and the unused ones are given inert
+// values rather than left indeterminate (`CSSValueInvalid`, `CSSUnitType::Unknown`), so a Swift
+// reader that consults the wrong field for a kind gets a defined wrong answer rather than garbage.
+struct CSSCalcSwiftNodeInfo {
+    // For the four numeric kinds: the node's `value`.
+    double numericValue;
+    // How many `Child`-typed children this node has, counting through `ChildOrNone` and
+    // `std::optional<Child>` exactly as `forAllChildNodes` does -- so a `round()` with no second
+    // argument reports one child, not two, and the island never sees an absent one.
+    uint32_t childCount;
+    // For Symbol, SiblingCount and SiblingIndex: the CSSValueID underlying value.
+    uint16_t valueID;
+    // For the four numeric kinds: `toCSSUnit(node)`, i.e. the CSSUnitType underlying value.
+    // A unit *number* rather than a unit string, so the island names a unit and C++ owns how it is
+    // spelled -- the unit table is generated and must not be transcribed into Swift.
+    uint8_t unitType;
+    // The discriminant. Typed as the enum rather than as a raw value, so the island's `switch` is
+    // checked for exhaustiveness by the compiler.
+    CSSCalcSwiftNodeKind kind;
+};
+
+// A borrowed cursor onto one node of a live CSSCalc::Tree.
+//
+// `SWIFT_NONESCAPABLE` is the point: the handle borrows a node owned by a tree on the C++ stack,
+// and `~Escapable` is what makes the compiler enforce that it cannot outlive the borrow. Arm 13
+// showed the Escapable spelling also reaches zero `unsafe`, so this is a safety choice rather
+// than a necessity, and it is the stronger of the two.
+//
+// Three annotations are load-bearing and each was established with a control that fails without
+// it (arm 12's six-way spelling matrix, arm 13C):
+//
+//   - `SWIFT_SAFE` clears the residual unsafety of the private `const Child*` member. Without it
+//     every call site needs an `unsafe` marker; that is arm 13C.
+//   - the constructors' `@lifetime(immortal)` / `@lifetime(copy node)` are what make a method
+//     *returning* this type import at all rather than being silently dropped (filings register
+//     §33). The ingredient is on the returned type, not the accessor.
+//   - `[[clang::lifetimebound]]` on `childAt` is what makes it import *without a warning*. §33
+//     recorded that attribute as observably inert in this position, but that was measured where
+//     the returned type was a different view whose constructors were unannotated; with annotated
+//     constructors and a self-returning accessor it is the one spelling of six that is clean.
+//     The other five (`@lifetime(borrow self)` and `@lifetime(copy self)`, prefix and postfix,
+//     and the underscored form) all import but each leave one #ClangDeclarationImport warning.
+struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
+    __attribute__((swift_attr("@lifetime(immortal)")))
+    CSSCalcSwiftNode()
+        : m_node(nullptr)
+    {
+    }
+
+    __attribute__((swift_attr("@lifetime(copy node)")))
+    CSSCalcSwiftNode(const Child* node [[clang::lifetimebound]])
+        : m_node(node)
+    {
+    }
+
+    CSSCalcSwiftNode(const CSSCalcSwiftNode&) = default;
+
+    // Everything about this node, from ONE crossing.
+    //
+    // Five separate accessors (`kind`, `childCount`, `numericValue`, `unitType`, `valueID`) were
+    // written first and consolidated into this, for two reasons that point the same way. It is
+    // ~20 fewer lines of hand-written bridging, which is the metric this port is held to; and it
+    // turns four or five calls per leaf node into one, where each of those calls was a separate
+    // `WTF::switchOn` over the same 41-alternative `Variant` -- so C++ was re-deriving the same
+    // discriminant up to five times per node to answer questions it could answer together.
+    WEBCORE_EXPORT CSSCalcSwiftNodeInfo info() const;
+
+    // The `index`th child. Linear, so a full walk is quadratic in the node count;
+    // that is deliberate for S0 and priced rather than assumed. A calc expression's tree is a
+    // handful of nodes (the deepest in the whole WPT css-values corpus is single digits), and the
+    // alternative -- handing Swift a child *list* -- is either a buffer the boundary would have
+    // to own or a second representation of the tree, which is exactly the goop this design exists
+    // to avoid. If S1 measures it, the fix is an iterator handle, not a flattened array.
+    WEBCORE_EXPORT CSSCalcSwiftNode childAt(uint32_t index) const [[clang::lifetimebound]];
+
+private:
+    const Child* m_node;
+};
+
+// Where the island's output goes.
+//
+// C++ owns the buffer and the number formatting; Swift says what to append. That split is not a
+// convenience, it is the single most important correctness decision in this slice.
+// `formatCSSNumberValue` MUST be an upcall: Swift's `Double.description` is shortest-round-trip
+// and CSS number serialization is a different algorithm, so a Swift reimplementation would agree
+// on every common value -- passing every WPT test in the corpus -- and diverge on subnormals and
+// 17-significant-digit values. There is no test in this repository that would have caught it.
+//
+// A `SWIFT_SAFE` *value* struct taken `inout`, rather than the `SWIFT_SHARED_REFERENCE` over
+// `ThreadSafeRefCounted` that CSSSwiftTokenSink uses. Both reach zero `unsafe` (probe arms 13A
+// and 13B), and this one is better here: the sink lives on the C++ stack for exactly one
+// `serializationForCSS` call, so a refcounted sink would cost a heap allocation per call on a
+// path `cssText` and getComputedStyle reach, and "immortal" would be a claim that is not true.
+// A value struct claims nothing.
+struct SWIFT_SAFE CSSCalcSwiftSink {
+    CSSCalcSwiftSink(WTF::StringBuilder& builder [[clang::lifetimebound]], const CSS::SerializationContext& context [[clang::lifetimebound]])
+        : m_builder(&builder)
+        , m_context(&context)
+    {
+    }
+
+    // Every method is non-const, so the importer presents them as `mutating` and the island takes
+    // the sink `inout`. That is the honest shape: appending is a mutation.
+
+    // `calc(`, `)` and `()` -- the three fixed spellings S0 emits. Named rather than taking a
+    // string, so no text crosses the boundary and there is no second copy of any CSS literal.
+    WEBCORE_EXPORT void appendCalcOpen();
+    WEBCORE_EXPORT void appendCloseParen();
+    WEBCORE_EXPORT void appendEmptyParens();
+
+    // THE UPCALL. Routes to CSS::serializationForCSS over a CSS::SerializableNumber, which is
+    // what the C++ serializer at CSSCalcTree+Serialization.cpp:589 does, so the two arms share
+    // one number-formatting implementation by construction rather than by comparison.
+    WEBCORE_EXPORT void appendNumber(double value, uint8_t unitType);
+
+    // `nameLiteralForSerialization(CSSValueID)`, for Symbol, SiblingCount and SiblingIndex. The
+    // island names the id; C++ owns the table, which is generated and must not be transcribed.
+    WEBCORE_EXPORT void appendValueIDName(uint16_t valueID);
+
+private:
+    WTF::StringBuilder* m_builder;
+    const CSS::SerializationContext* m_context;
+};
+
+// What the island did, and what it saw doing it.
+//
+// `outcome` is the gate's answer: 0 serialized, 1 declined. The other two fields are what make
+// the walk *observable* rather than something the differential has to take on trust. A decline is
+// invisible -- it reads as parity, because it compares the C++ against itself -- and so is a walk
+// that never descended. `nodeCount` and `kindMask` come back from the same traversal that made
+// the decline decision, cost nothing (three registers), and let the harness assert that the tree
+// was really walked and that every kind it expected to reach was reached.
+//
+// A plain aggregate of trivial types, so it crosses in registers and needs no annotation.
+struct CSSCalcSwiftSerializationResult {
+    // Bit `1 << rawValue` set for each CSSCalcSwiftNodeKind the walk stood on.
+    uint32_t kindMask;
+    // How many nodes the walk visited, root included.
+    uint32_t nodeCount;
+    // 0 = serialized, 1 = declined. Not a `bool`, so adding a third outcome in S1 is not an ABI
+    // change; the numbering is pinned by static_assert against the Swift enum.
+    uint8_t outcome;
+};
+
+} // namespace CSSCalc
+} // namespace WebCore

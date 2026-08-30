@@ -33,7 +33,7 @@ ENABLE_LLVM_PROFILE_GENERATION_DEFINES_YES = ENABLE_LLVM_PROFILE_GENERATION=1;
 WK_PGO_GEN_FLAGS = $(WK_PGO_GEN_FLAGS_$(ENABLE_LLVM_PROFILE_GENERATION));
 WK_PGO_GEN_FLAGS_YES = -fprofile-generate;
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES) $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES);
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES) $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES);
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 
 // Selects the Swift CSS tokenizer island (CSSTokenizerSwift.swift) as the scanner the
@@ -63,6 +63,18 @@ WK_USE_SWIFT_CSS_TOKENIZER_DEFINES_YES = USE_SWIFT_CSS_TOKENIZER=1;
 // webCoreCSSColorFastPathsAreSwift() rather than assuming.
 WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES = $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES_$(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS));
 WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES_YES = USE_SWIFT_CSS_COLOR_FAST_PATHS=1;
+
+// Selects the Swift calc() serialization island (CSSCalcSerializationSwift.swift) as the serializer
+// CSSCalc::serializationForCSS uses. Off by default, both serializers compiled in either way -- the
+// same arrangement, and for the same reasons, as the two flags above.
+//
+// A third separate flag rather than a reuse of either, on the same grounds the colour flag gives:
+// the three islands sit on unrelated entry points, and calc serialization is reached from
+// `cssText` and getComputedStyle rather than from stylesheet parsing at all, so an A/B that could
+// only move two islands at once would charge each one's result to the other. Confirm it took
+// effect with the bridge's webCoreCSSCalcSerializationIsSwift() rather than assuming.
+WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES = $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES_$(WK_USE_SWIFT_CSS_CALC_SERIALIZATION));
+WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES_YES = USE_SWIFT_CSS_CALC_SERIALIZATION=1;
 
 WK_OPTIMIZATION_PROFILE_FILE = $(BUILT_PRODUCTS_DIR)/DerivedSources/WebCore/Profiling/$(arch).profdata;
 WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER = $(WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER_$(USE_INTERNAL_SDK));
