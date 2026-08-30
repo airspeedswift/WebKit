@@ -122,15 +122,6 @@ public:
 
     CSSParserToken(HashTokenType, StringView);
 
-    // Adopts storage already written by Swift, so a chunk of tokens can be appended in bulk
-    // without being taken apart and reassembled through the constructors above. The bits must
-    // already have been through resolveValuePointer: while Swift holds them, the pointer slot
-    // carries an offset rather than a real pointer.
-    explicit CSSParserToken(CSSParserTokenBits bits)
-        : m_bits(bits)
-    {
-    }
-
     static CSSUnitType NODELETE stringToUnitType(StringView);
 
     bool operator==(const CSSParserToken& other) const;
@@ -177,6 +168,27 @@ public:
     void updateCharacters(std::span<const CharacterType> characters);
 
 private:
+    // Adopts storage already written by Swift, so a chunk of tokens can be appended in bulk
+    // without being taken apart and reassembled through the constructors above. The bits must
+    // already have been through resolveValuePointer: while Swift holds them, the pointer slot
+    // carries an offset rather than a real pointer.
+    //
+    // Private, with exactly one friend, because that precondition cannot be put in the type. The
+    // design this replaced could not get it wrong -- Swift emitted a *different* struct with
+    // a `uint32_t valueStart`, so an offset was never a candidate for dereference -- and the one
+    // thing that stood in for that here was this comment. Naming CSSSwiftTokenSink narrows the
+    // reachable callers to the resolve loop in CSSSwiftTokenSink::takeChunk, which is the only
+    // code that has run resolveValuePointer. It has to be `tryAppend(CSSParserToken { bits })`
+    // there rather than `tryConstructAndAppend(bits)`: Vector's in-place construction happens
+    // inside Vector, where the access check is made in Vector's context, so a private constructor
+    // and friendship would have had to name Vector and would have widened rather than narrowed.
+    // Ledger R1.
+    friend class CSSSwiftTokenSink;
+    explicit CSSParserToken(CSSParserTokenBits bits)
+        : m_bits(bits)
+    {
+    }
+
     void initValueFromStringView(StringView string)
     {
         m_bits.valueLength = string.length();
@@ -188,6 +200,14 @@ private:
 
     CSSParserTokenBits m_bits;
 };
+
+// The token is the CSS parser's bulk storage -- one per token in every stylesheet's m_tokens --
+// so its size is a cache-residency property, not just an implementation detail. Asserted rather
+// than assumed: the union's discriminant fits in CSSParserTokenBits' spare bitfield bits, which
+// is a packing claim worth checking rather than trusting.
+static_assert(sizeof(CSSParserToken) == 24);
+static_assert(alignof(CSSParserToken) == 8);
+static_assert(sizeof(CSSParserTokenBits) == sizeof(CSSParserToken));
 
 template<typename CharacterType>
 inline void CSSParserToken::updateCharacters(std::span<const CharacterType> characters)

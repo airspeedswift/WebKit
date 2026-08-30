@@ -76,6 +76,16 @@ struct SWIFT_SAFE CSSParserTokenBits {
     // tightly with the rest of this object for a smaller object size.
     bool valueIs8Bit : 1 { false };
     bool isBackedByStringLiteral : 1 { false };
+    // Whether the union below carries `pendingNumberRange` rather than one of the other
+    // members. The active member is a phase of construction, not a function of `type`, so it is
+    // tracked explicitly here: set only by `makeNumericTokenBits`, cleared by every other
+    // factory and by every one of `CSSParserToken`'s own constructors, so a numeric token that
+    // did not go through that factory is distinguishable rather than read through the wrong
+    // member.
+    //
+    // Costs nothing: the bitfields above sum to 24 bits, so this lands in the eight free bits of
+    // the same 32-bit allocation unit. CSSParserToken.h static_asserts the size.
+    unsigned hasParkedNumberRange : 1 { 0 };
     unsigned valueLength { 0 };
     const void* valueDataCharRaw { nullptr }; // Either Latin1Character* or char16_t*.
 
@@ -88,7 +98,7 @@ struct SWIFT_SAFE CSSParserTokenBits {
 
         // While Swift still holds the token, the number's own range in the input.
         // `resolveNumericValue` reads it and overwrites it with `numericValue`; the range is
-        // dead once the double exists.
+        // dead once the double exists. Read only when `hasParkedNumberRange` is set.
         struct { unsigned offset; unsigned length; } pendingNumberRange;
     };
 };
@@ -116,6 +126,13 @@ constexpr unsigned cssParserTokenBitsUnescapedValueTag = 0x80000000u;
 
 // Called once per tokenization, not once per token. A stylesheet at or above 2 GB cannot
 // have its value offsets tagged, so tokenization reports failure instead of truncating.
+//
+// This is a memory-safety property, not just a representability check: while Swift owns a
+// token, the pointer slot holds the offset, so a CSSParserToken built from bits that never
+// went through resolveValuePointer would dereference a small integer. Darwin's __PAGEZERO is
+// 4 GB (`otool -l` reports `vmsize 0x100000000`), and this check keeps every parked offset
+// below 2^31 untagged and below 2^32 tagged, so an unresolved offset always lies inside that
+// guard page and a mis-sequenced resolve faults deterministically instead of reading live heap.
 inline bool cssParserTokenBitsCanRepresentOffsets(size_t inputLength)
 {
     return inputLength < cssParserTokenBitsUnescapedValueTag;
@@ -221,6 +238,12 @@ inline CSSParserTokenBits makeNumericTokenBits(unsigned type, bool isNonInteger,
     bits.valueIs8Bit = is8Bit;
     bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueIsUnescaped ? valueOffset | cssParserTokenBitsUnescapedValueTag : valueOffset));
     bits.pendingNumberRange = { numberOffset, numberLength };
+    // The union's discriminant, written together with the member it discriminates so the two
+    // cannot drift. `bitsCarryPendingNumber` below answers "does a token of this type owe a
+    // double", a property of the type, not of which factory produced it; a numeric type
+    // reaching any other factory leaves `numericValue` active. `takeChunk` requires this flag
+    // before it touches `pendingNumberRange`.
+    bits.hasParkedNumberRange = 1;
     return bits;
 }
 
@@ -229,6 +252,12 @@ inline CSSParserTokenBits makeNumericTokenBits(unsigned type, bool isNonInteger,
 constexpr unsigned firstNumericCSSParserTokenType = 7; // NumberToken
 constexpr unsigned lastNumericCSSParserTokenType = 9; // DimensionToken
 
+// The reader half of the pendingNumberRange discipline: answers "does a token of this type
+// still owe a double", from the type alone. CSSParserToken.h proves it against a three-way
+// test over all 33 types. It cannot say whether the token actually came from
+// `makeNumericTokenBits`, the only writer of that union member -- that is what
+// `CSSParserTokenBits::hasParkedNumberRange` is for, and `takeChunk` requires both to agree
+// before reading the range.
 inline constexpr bool bitsCarryPendingNumber(const CSSParserTokenBits& bits)
 {
     return bits.type - firstNumericCSSParserTokenType <= lastNumericCSSParserTokenType - firstNumericCSSParserTokenType;
@@ -257,7 +286,13 @@ inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_
     // subspan rather than pointer arithmetic: libc++ hardening is on in this build, so this
     // is a real bounds check on a value that crossed a language boundary, which the raw form
     // would not have been.
-    const void* resolved = input.subspan(offset * characterSize).data();
+    //
+    // The two-argument overload, because the extent crosses the boundary too: libc++ checks
+    // `offset <= size()` for `subspan(offset)` and additionally `count <= size() - offset` for
+    // `subspan(offset, count)`. `value()` is `StringView { valueDataCharRaw, valueLength,
+    // valueIs8Bit }` -- a raw pointer and a trusted count -- so a wrong `valueLength` is an
+    // out-of-bounds read for every later reader of the value, not just a mis-parse.
+    const void* resolved = input.subspan(offset * characterSize, size_t { bits.valueLength } * characterSize).data();
     bits.valueDataCharRaw = (offset | bits.valueLength) ? resolved : nullptr;
 }
 
