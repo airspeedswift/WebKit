@@ -23,19 +23,17 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// Everything the Swift CSS tokenizer is allowed to see of WebCore, and nothing else.
+// The WebCore declarations the Swift CSS code is allowed to see: the tokenizer
+// (CSSTokenizerSwift.swift) and the colour fast path (CSSParserFastPathsSwift.swift).
 //
-// This header is its own Clang module (WebCore_Private.modulemap), so it can state
-// exactly what Swift may reach. Importing all of WebCore_Private walks into
-// JavaScriptCore's private headers, where AbstractModuleRecord::ImportEntry and
-// JSModuleNamespaceObject::ExportEntry sit in explicit submodules nothing imports,
-// which breaks WTF::KeyValuePair's instantiation over them.
-//
-// Same shape as JavaScriptCore's LiteralParserSwiftTypes.h, for the same reason.
-// Self-contained, so it drags no WebCore internals into a module of its own.
+// This header is its own Clang module (WebCore_Private.modulemap) and must stay
+// self-contained: importing all of WebCore_Private instead walks into JavaScriptCore's private
+// headers, where two inner structs sit in explicit submodules nothing imports and
+// WTF::KeyValuePair fails to instantiate over them.
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -120,5 +118,51 @@ private:
     // Where the next reported token starts.
     unsigned m_observerOffset { 0 };
 } SWIFT_SHARED_REFERENCE(.ref, .deref);
+
+// MARK: - Colour fast-path types (CSSParserFastPathsSwift.swift)
+
+// How many code units of a candidate colour string Swift is shown.
+//
+// At least 20: the longest CSS named colour is `lightgoldenrodyellow` at 20 characters
+// (ColorData.gperf's MAX_WORD_LENGTH), and a hex colour is at most 8 once the `#` is consumed, so
+// anything longer cannot be a colour of either kind. At most 24: a
+// `CSSSwiftColorText<Latin1Character>` at that capacity is 28 bytes and passes to Swift in
+// registers, where at capacity 32 it is 36 bytes and crosses by address instead.
+static constexpr size_t cssSwiftColorTextCapacity = 24;
+
+// A candidate colour string, crossing into Swift by value.
+//
+// By value rather than as a buffer: `@_expose(Cxx)` cannot express a `Span<T>` parameter, so a
+// Swift entry point receiving one would have to take an imported `std::span` and convert it with
+// the `@unsafe` `Span(_unsafeCxxSpan:)`, where `std::array<T, N>` imports as an ordinary Swift
+// subscript.
+//
+// `length` is the string's true length, which may exceed the capacity; `units` holds its first
+// `min(length, capacity)` code units and is zero-filled beyond them, so no index below the
+// capacity is indeterminate. The capacity is a literal because `InlineArray`'s count must be one;
+// CSSParserFastPaths.cpp static_asserts the two together.
+template<typename CharacterType> struct CSSSwiftColorText {
+    std::array<CharacterType, cssSwiftColorTextCapacity> units;
+    uint32_t length;
+};
+
+// Named aliases, because Swift cannot spell a C++ template instantiation directly.
+using CSSSwiftColorText8 = CSSSwiftColorText<Latin1Character>;
+using CSSSwiftColorText16 = CSSSwiftColorText<char16_t>;
+
+// A packed sRGB colour and which of three things happened. `argb` is `PackedColor::ARGB`'s
+// 0xAARRGGBB representation for every outcome, including the 8-digit hex form whose input order
+// is RGBA. `outcome` is a `CSSSwiftColorOutcome` raw value, numbered in Swift and static_asserted
+// in CSSParserFastPaths.cpp.
+struct CSSSwiftColor {
+    uint32_t argb;
+    uint8_t outcome;
+};
+
+// The named-colour table lookup, which stays in C++ because `findColor` is gperf output over
+// ColorData.gperf (HashTools.h) and returns a pointer into a static table. `__counted_by` plus
+// `noescape` makes the importer hand Swift a single `Span<Latin1Character>`. The name needs no
+// NUL terminator: gperf's `findColorImpl` reads only `str[0 .. len-1]`.
+CSSSwiftColor cssSwiftFindNamedColor(const Latin1Character *__counted_by(length) name __attribute__((noescape)), size_t length);
 
 } // namespace WebCore

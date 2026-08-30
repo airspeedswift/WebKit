@@ -255,25 +255,27 @@ inline constexpr bool bitsCarryPendingNumber(const CSSParserTokenBits& bits)
     return bits.type - firstNumericCSSParserTokenType <= lastNumericCSSParserTokenType - firstNumericCSSParserTokenType;
 }
 
-// The branch-free half of the boundary: an offset becomes a pointer, with no reference to
-// the token's kind. Only for an offset into the input -- a caller that finds
-// cssParserTokenBitsUnescapedValueTag set has to intern the value first and set the three
-// value fields itself, since there is no input range to point at.
+// Turns a parked offset into a pointer. Only for an offset into the input: a caller that finds
+// cssParserTokenBitsUnescapedValueTag set has to intern the value first and set the three value
+// fields itself, since there is no input range to point at.
 //
-// A token that carries no value comes out with a *null* value pointer rather than a pointer
-// to the start of the input with length zero. Every constructor leaves the slot null for such
-// a token, so value() is a null StringView there, and null and empty are not interchangeable:
-// StringView::isNull distinguishes them, and toString turns one into a null String and the
-// other into an empty one.
+// A token that carries no value comes out with a null value pointer rather than a pointer to
+// the start of the input with length zero, matching the constructors, which leave the slot null
+// for such a token. Null and empty are not interchangeable: StringView::isNull distinguishes
+// them, and toString turns one into a null String and the other into an empty one. The
+// unresolved state of a valueless token is exactly offset zero with length zero, and no real
+// value can hold it, since a zero-length value only occurs inside a delimited token (`""` or
+// `url()`), whose range starts past the opening delimiter. Testing the two fields together
+// therefore separates the cases exactly.
 //
-// The unresolved state of a valueless token is exactly offset zero with length zero, and no
-// real value can hold it: a zero-length value only occurs inside a delimited token (`""` or
-// `url()`), so its range always starts past the opening delimiter and its offset is never
-// zero. Testing the two fields together therefore separates the cases exactly, as an or, a
-// compare and a select rather than a branch: the resolved pointer is computed unconditionally
-// on both paths.
-inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_t> input, unsigned characterSize)
+// `characterSize` is a template parameter, not an argument, because it is a property of the
+// tokenization rather than of a token: CSSSwiftTokenSink::create decides it once, from the same
+// StringImpl::is8Bit that picks which specialization runs. Specialized, the 8-bit instantiation
+// needs no multiply and the 16-bit one folds both doublings into operands it already forms.
+template<unsigned characterSize>
+inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_t> input)
 {
+    static_assert(characterSize == 1 || characterSize == 2, "the only two StringImpl widths");
     auto offset = reinterpret_cast<uintptr_t>(bits.valueDataCharRaw);
     // subspan rather than pointer arithmetic: libc++ hardening is on in this build, so this
     // is a real bounds check on a value that crossed a language boundary, which the raw form
