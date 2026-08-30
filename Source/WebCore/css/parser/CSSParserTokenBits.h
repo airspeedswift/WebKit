@@ -32,6 +32,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <wtf/SwiftBridging.h>
@@ -101,6 +102,38 @@ struct SWIFT_SAFE CSSParserTokenBits {
 // `valueOffset` is an offset into the input, parked in the pointer slot; resolveValuePointer
 // below turns it into a real pointer once the chunk lands in C++. Swift therefore never
 // holds, forms or dereferences a pointer.
+//
+// NumericValueType, NumericSign and HashTokenType take booleans here rather than encoded
+// values, since those enums have no static_assert bridge to Swift the way CSSParserTokenType
+// and CSSUnitType do. `type`, `blockType` and `unit` take encoded values directly.
+
+// Which buffer a parked value offset indexes. Set means the chunk's unescape buffer, clear
+// means the input. There is no room in CSSParserTokenBits for a flag of its own -- every bit
+// of it is CSSParserToken::m_bits, and adding one would change the object the whole CSS
+// parser stores -- but the pointer slot holds a 32-bit offset for as long as Swift owns the
+// token, so the top bit of that is free until resolveValuePointer runs.
+constexpr unsigned cssParserTokenBitsUnescapedValueTag = 0x80000000u;
+
+// Called once per tokenization, not once per token. A stylesheet at or above 2 GB cannot
+// have its value offsets tagged, so tokenization reports failure instead of truncating.
+inline bool cssParserTokenBitsCanRepresentOffsets(size_t inputLength)
+{
+    return inputLength < cssParserTokenBitsUnescapedValueTag;
+}
+
+// The offset Swift parked in the pointer slot, tag included. Only meaningful before
+// resolveValuePointer has run.
+inline unsigned bitsParkedValueOffset(const CSSParserTokenBits& bits)
+{
+    return static_cast<unsigned>(reinterpret_cast<uintptr_t>(bits.valueDataCharRaw));
+}
+
+// The only bitfield C++ has to read back off a finished token: end-of-file to stop the
+// loop, and CommentToken to keep comments out of the token buffer. One `ubfx`.
+inline unsigned tokenBitsType(const CSSParserTokenBits& bits)
+{
+    return bits.type;
+}
 
 inline CSSParserTokenBits makeSimpleTokenBits(unsigned type, unsigned blockType)
 {
@@ -110,14 +143,14 @@ inline CSSParserTokenBits makeSimpleTokenBits(unsigned type, unsigned blockType)
     return bits;
 }
 
-inline CSSParserTokenBits makeValueTokenBits(unsigned type, unsigned blockType, unsigned valueOffset, unsigned valueLength, bool is8Bit)
+inline CSSParserTokenBits makeValueTokenBits(unsigned type, unsigned blockType, unsigned valueOffset, unsigned valueLength, bool valueIsUnescaped, bool is8Bit)
 {
     CSSParserTokenBits bits;
     bits.type = type;
     bits.blockType = blockType;
     bits.valueLength = valueLength;
     bits.valueIs8Bit = is8Bit;
-    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueOffset));
+    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueIsUnescaped ? valueOffset | cssParserTokenBitsUnescapedValueTag : valueOffset));
     bits.id = -1;
     return bits;
 }
@@ -126,11 +159,11 @@ inline CSSParserTokenBits makeValueTokenBits(unsigned type, unsigned blockType, 
 // above the delimiter unspecified; this zeroes them via numericValue's default member
 // initialiser instead. Behaviourally identical, since nothing may read an unwritten union
 // member, and better defined.
-inline CSSParserTokenBits makeDelimiterTokenBits(unsigned type, char16_t character)
+inline CSSParserTokenBits makeDelimiterTokenBits(unsigned type, unsigned character)
 {
     CSSParserTokenBits bits;
     bits.type = type;
-    bits.delimiter = character;
+    bits.delimiter = static_cast<char16_t>(character);
     return bits;
 }
 
@@ -144,14 +177,14 @@ inline CSSParserTokenBits makeWhitespaceTokenBits(unsigned type, unsigned count)
     return bits;
 }
 
-inline CSSParserTokenBits makeHashTokenBits(unsigned type, unsigned hashTokenType, unsigned valueOffset, unsigned valueLength, bool is8Bit)
+inline CSSParserTokenBits makeHashTokenBits(unsigned type, bool isIdHashToken, unsigned valueOffset, unsigned valueLength, bool valueIsUnescaped, bool is8Bit)
 {
     CSSParserTokenBits bits;
     bits.type = type;
     bits.valueLength = valueLength;
     bits.valueIs8Bit = is8Bit;
-    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueOffset));
-    bits.hashTokenType = static_cast<HashTokenType>(hashTokenType);
+    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueIsUnescaped ? valueOffset | cssParserTokenBitsUnescapedValueTag : valueOffset));
+    bits.hashTokenType = isIdHashToken ? HashTokenId : HashTokenUnrestricted;
     return bits;
 }
 
@@ -162,12 +195,12 @@ inline CSSParserTokenBits makeHashTokenBits(unsigned type, unsigned hashTokenTyp
 //
 // The number's range and the value range are separate parameters because they are separate
 // things, and the first is not recoverable from the second. For a NumberToken they do coincide
-// -- value() is originalText() is the number. But convertToDimensionWithUnit merges the number
-// and the unit into one view when they are physically adjacent in the input and the number is
-// shorter than sixteen characters, and after that merge value() is "10px" and the number's own
-// range is only recoverable if you know the merge happened. In the two cases where it did not
-// -- a number of sixteen characters or more, and an escaped unit, whose text is a pooled String
-// rather than a range of the input -- value() is the unit alone and the number is nowhere in it.
+// -- value() is originalText() is the number. But a DimensionToken merges the number and the
+// unit into one view when they are physically adjacent in the input and the number is shorter
+// than sixteen characters, and after that merge value() is "10px" and the number's own range is
+// only recoverable if you know the merge happened. In the two cases where it did not -- a number
+// of sixteen characters or more, and an escaped unit, whose text is a pooled String rather than
+// a range of the input -- value() is the unit alone and the number is nowhere in it.
 //
 // nonUnitPrefixLength is the field that records which of those happened: zero when the value is
 // the bare unit, the number's length when the two were merged. It is not a detail the caller may
@@ -176,17 +209,17 @@ inline CSSParserTokenBits makeHashTokenBits(unsigned type, unsigned hashTokenTyp
 // property serialization reserializes from value(). A merged value with a zero prefix length is a
 // state convertToDimensionWithUnit can never produce, and every one of those three would read it
 // as a unit sixteen characters long.
-inline CSSParserTokenBits makeNumericTokenBits(unsigned type, unsigned numericValueType, unsigned numericSign, unsigned unit, unsigned valueOffset, unsigned valueLength, unsigned nonUnitPrefixLength, unsigned numberOffset, unsigned numberLength, bool is8Bit)
+inline CSSParserTokenBits makeNumericTokenBits(unsigned type, bool isNonInteger, bool hasPlusSign, bool hasMinusSign, unsigned unit, unsigned valueOffset, unsigned valueLength, bool valueIsUnescaped, unsigned nonUnitPrefixLength, unsigned numberOffset, unsigned numberLength, bool is8Bit)
 {
     CSSParserTokenBits bits;
     bits.type = type;
-    bits.numericValueType = numericValueType;
-    bits.numericSign = numericSign;
+    bits.numericValueType = isNonInteger ? NumberValueType : IntegerValueType;
+    bits.numericSign = hasMinusSign ? MinusSign : (hasPlusSign ? PlusSign : NoSign);
     bits.unit = unit;
     bits.nonUnitPrefixLength = nonUnitPrefixLength;
     bits.valueLength = valueLength;
     bits.valueIs8Bit = is8Bit;
-    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueOffset));
+    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueIsUnescaped ? valueOffset | cssParserTokenBitsUnescapedValueTag : valueOffset));
     bits.pendingNumberRange = { numberOffset, numberLength };
     return bits;
 }
@@ -202,7 +235,9 @@ inline constexpr bool bitsCarryPendingNumber(const CSSParserTokenBits& bits)
 }
 
 // The branch-free half of the boundary: an offset becomes a pointer, with no reference to
-// the token's kind.
+// the token's kind. Only for an offset into the input -- a caller that finds
+// cssParserTokenBitsUnescapedValueTag set has to intern the value first and set the three
+// value fields itself, since there is no input range to point at.
 //
 // A token that carries no value comes out with a *null* value pointer rather than a pointer
 // to the start of the input with length zero. Every constructor leaves the slot null for such
