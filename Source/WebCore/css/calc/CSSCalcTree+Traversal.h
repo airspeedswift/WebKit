@@ -118,6 +118,17 @@ template<typename F, typename Op> void forAllChildNodes(const Op& root, const F&
         void operator()(const Random::Sharing&)
         {
         }
+        // `CalcMix`'s single tuple element is a `Vector<CalcMix::Item>` rather than a `Children`,
+        // because each argument carries an optional weight beside its value. Without this overload
+        // `forAllChildNodes` does not compile for `CalcMix` at all -- which went unnoticed because
+        // nothing in the tree had ever instantiated the `Child` overload below over *every*
+        // alternative, only over the ones a particular caller reached. The weight is not a `Child`,
+        // so only the value is visited, which is what "child nodes" means here.
+        void operator()(const Vector<CalcMix::Item>& items)
+        {
+            for (auto& item : items)
+                functor(item.value);
+        }
     };
     auto caller = Caller { functor };
     WTF::apply([&](const auto& ...x) { (..., caller(x)); }, root);
