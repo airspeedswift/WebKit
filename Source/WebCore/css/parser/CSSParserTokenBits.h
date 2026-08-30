@@ -304,8 +304,23 @@ inline constexpr bool bitsCarryPendingNumber(const CSSParserTokenBits& bits)
 // zero. Testing the two fields together therefore separates the cases exactly, and it is an or,
 // a compare and a select rather than a branch: the resolved pointer is computed unconditionally
 // on both paths.
-inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_t> input, unsigned characterSize)
+// `characterSize` is a template parameter and not an argument, because it is a property of the
+// *tokenization* and not of a token: CSSSwiftTokenSink::create decides it once, from the same
+// StringImpl::is8Bit that picks which of the island's two specializations runs. Passing it as a
+// value made both scalings below runtime multiplies that the compiler could not see through, since
+// the value reached them through a member. Specialized, the 8-bit instantiation has no multiply at
+// all and the 16-bit one folds one doubling into the shifted-register operand of a compare and the
+// other into the address it already had to form. Measured at -O2 under
+// _LIBCPP_HARDENING_MODE_EXTENSIVE: 16 instructions with the width as an argument, 13 at 8-bit and
+// 14 at 16-bit specialized, against 13 for the *unchecked* one-argument version that shipped in
+// e5183bac37fd -- so the extent bound costs two instructions rather than three and the checked
+// resolve ties the unchecked one at the width that matters. Inlined into takeChunk, where the slot
+// load is shared with the tag test, the per-value-token path is 13 before and 12 after at both
+// widths. Revisit log R104, ledger S13.
+template<unsigned characterSize>
+inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_t> input)
 {
+    static_assert(characterSize == 1 || characterSize == 2, "the only two StringImpl widths");
     auto offset = reinterpret_cast<uintptr_t>(bits.valueDataCharRaw);
     // subspan rather than pointer arithmetic: libc++ hardening is on in this build, so this
     // is a real bounds check on a value that crossed a language boundary, which the raw form
