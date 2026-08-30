@@ -33,7 +33,7 @@ ENABLE_LLVM_PROFILE_GENERATION_DEFINES_YES = ENABLE_LLVM_PROFILE_GENERATION=1;
 WK_PGO_GEN_FLAGS = $(WK_PGO_GEN_FLAGS_$(ENABLE_LLVM_PROFILE_GENERATION));
 WK_PGO_GEN_FLAGS_YES = -fprofile-generate;
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES);
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES) $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES);
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 
 // Selects the Swift CSS tokenizer island (CSSTokenizerSwift.swift) as the scanner the
@@ -50,6 +50,19 @@ GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 // not be able to masquerade as a passing run.
 WK_USE_SWIFT_CSS_TOKENIZER_DEFINES = $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES_$(WK_USE_SWIFT_CSS_TOKENIZER));
 WK_USE_SWIFT_CSS_TOKENIZER_DEFINES_YES = USE_SWIFT_CSS_TOKENIZER=1;
+
+// Selects the Swift colour fast-path island (CSSParserFastPathsSwift.swift) as the scanner
+// CSSParserFastPaths uses for hex and named colours. Off by default, both scanners compiled in
+// either way -- the same arrangement, and for the same reasons, as the tokenizer flag above.
+//
+// A *separate* flag rather than a reuse of that one deliberately. The two islands sit on
+// unrelated entry points: `parseSimpleColor` short-circuits before a `CSSTokenizer` is ever
+// constructed (CSSPropertyParser.cpp:286 versus :289), so nothing the tokenizer gate does can
+// reach this code, and an A/B that could only move both at once would charge each island's
+// result to the other. Confirm it took effect with the bridge's
+// webCoreCSSColorFastPathsAreSwift() rather than assuming.
+WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES = $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES_$(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS));
+WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES_YES = USE_SWIFT_CSS_COLOR_FAST_PATHS=1;
 
 WK_OPTIMIZATION_PROFILE_FILE = $(BUILT_PRODUCTS_DIR)/DerivedSources/WebCore/Profiling/$(arch).profdata;
 WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER = $(WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER_$(USE_INTERNAL_SDK));
