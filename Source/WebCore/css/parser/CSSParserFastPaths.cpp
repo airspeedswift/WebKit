@@ -50,6 +50,15 @@
 #include "FloatConversion.h"
 #include "HashTools.h"
 #include "StylePropertyShorthand.h"
+// The colour fast-path island's boundary types, and the generated header carrying its
+// `@c CSSSwiftColorOutcome` numbering. Same warning suppression, and the same FIXME, as
+// CSSTokenizer.cpp: the generated header hands C++ an Objective-C-only non-defining
+// fixed-underlying-type enum declaration for each `@c` enum, which -Werror makes fatal.
+// Filings register §26.
+#include "CSSTokenizerSwiftTypes.h"
+IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
+#include "WebCoreSwift-Generated.h"
+IGNORE_CLANG_WARNINGS_END
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringParsingBuffer.h>
 
@@ -459,6 +468,109 @@ static inline bool NODELETE mightBeHSL(std::span<const CharacterType> characters
         && isASCIIAlphaCaselessEqual(characters[2], 'l');
 }
 
+// MARK: - The Swift colour fast-path island (CSSParserFastPathsSwift.swift)
+//
+// Everything C++ still does for the island is here, and it is deliberately little: fill a
+// by-value struct, pick the entry point for the width, and turn one packed answer back into an
+// `SRGBA<uint8_t>`. There is no representation to translate, because the island writes
+// `PackedColor::ARGB`'s own layout, and no buffer to own, because the candidate crosses as a
+// value. What is *not* here is the part that would have been: no per-character shim, no
+// duplicated table, and no C++ re-deriving a dispatch the Swift side already knew statically.
+
+// The island folds into an `InlineArray<32, UInt8>`, whose count has to be a literal. This is
+// the assert that makes the two views of that buffer unable to disagree; without it a change to
+// the capacity here would silently start trapping inside the island for candidates between 32
+// and the new capacity, which no correctness test names.
+static_assert(cssSwiftColorTextCapacity == 24, "CSSParserFastPathsSwift.swift spells this capacity as a literal, in colorTextCapacity and in InlineArray<24, UInt8>");
+
+// The outcome numbering is declared once, in Swift, and reaches C++ through the generated
+// header. These pin it, so that a reordering of the Swift enum is a build failure here rather
+// than a silent reinterpretation of every scan: `Parsed` read as `NotAColor` would turn every
+// colour in every stylesheet into a parse failure, and `NotAColor` read as `Declined` would
+// merely double the work and pass every test.
+static_assert(!static_cast<uint8_t>(CSSSwiftColorOutcomeNotAColor));
+static_assert(static_cast<uint8_t>(CSSSwiftColorOutcomeParsed) == 1);
+static_assert(static_cast<uint8_t>(CSSSwiftColorOutcomeDeclined) == 2);
+
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+#include <atomic>
+// Test-only, and compiled out otherwise so the production scan pays no load for them.
+// `s_forceColorScanDecline` makes every island answer read as a decline, which is the only way
+// to exercise the fall-through: phase A declines for nothing, so the path is unreachable by
+// input alone and would otherwise ship untested. `s_colorScanDeclines` is how a differential
+// asserts that -- a decline is invisible in an output comparison, because the C++ answer for a
+// declined input is the same C++ answer the comparison already trusts.
+static std::atomic<bool> s_forceColorScanDecline;
+static std::atomic<unsigned> s_colorScanDeclines;
+
+void webCoreCSSColorFastPathSetForceDecline(bool force)
+{
+    s_forceColorScanDecline.store(force, std::memory_order_relaxed);
+}
+
+unsigned webCoreCSSColorFastPathDeclineCount()
+{
+    return s_colorScanDeclines.load(std::memory_order_relaxed);
+}
+#endif
+
+// Fills the struct the island's entry points take.
+//
+// C++'s job is to *represent* the candidate, not to judge it: `length` is the true length even
+// when it exceeds the capacity, and the island decides what a longer candidate means. Zero-
+// filling the tail rather than tracking how much was written is what keeps that split honest --
+// every index below the capacity is defined, so the boundary carries no convention about which
+// ones are readable.
+//
+// The zero-fill was priced rather than assumed, because it is 28 bytes on a path that costs ~30
+// cycles. Removing it entirely (`text;` instead of `text { }`) moved the colour micro-benchmark
+// by at most a few points and *not consistently*: +4 on the 8-bit arms and -12 on six of the
+// eight 16-bit arms, i.e. removing work made it slower, which is layout noise rather than signal
+// on a 20-30 cycle workload. So this lever is worth <= ~4 points and the safe spelling is free.
+// Probe kept at cssprobe/probes/colorboundary/fastpaths-zerofill.bak.
+template<typename CharacterType>
+static CSSSwiftColorText<CharacterType> makeSwiftColorText(std::span<const CharacterType> characters)
+{
+    CSSSwiftColorText<CharacterType> text { };
+    text.length = static_cast<uint32_t>(characters.size());
+    auto visible = characters.first(characters.size() < cssSwiftColorTextCapacity ? characters.size() : cssSwiftColorTextCapacity);
+    memcpySpan(std::span { text.units }.first(visible.size()), visible);
+    return text;
+}
+
+// The width dispatch, as four overloads rather than a runtime flag. Each call site knows both
+// its width and which scanner it wants, statically, and writing either of those into a
+// parameter for the callee to switch on is the shape this port already measured a cost for.
+static CSSSwiftColor scanHexColorSwift(const CSSSwiftColorText8& text) { return cssParseHexColorSwift8(text); }
+static CSSSwiftColor scanHexColorSwift(const CSSSwiftColorText16& text) { return cssParseHexColorSwift16(text); }
+static CSSSwiftColor scanNamedColorSwift(const CSSSwiftColorText8& text) { return cssParseNamedColorSwift8(text); }
+static CSSSwiftColor scanNamedColorSwift(const CSSSwiftColorText16& text) { return cssParseNamedColorSwift16(text); }
+
+// Whether the island refused to answer, as opposed to answering that the string is not a colour
+// of this kind. The distinction is the whole point of the three-way outcome: `NotAColor` is a
+// finding the C++ must not repeat, and repeating it is not merely wasted work but the thing that
+// makes lost coverage unmeasurable.
+//
+// So an island answer resolves to a *nested* optional, which reads oddly and is exactly right:
+// the outer `nullopt` means "declined, run your own scanner", and `optional { nullopt }` means
+// "answered, and the answer is that this is not a colour". Both fast paths share this, because
+// the only thing that differs between them is which pair of functions is named -- and a runtime
+// flag choosing between them would re-derive per call a dispatch both call sites know statically.
+static std::optional<std::optional<SRGBA<uint8_t>>> resolveSwiftColorScan(CSSSwiftColor result)
+{
+    bool declined = result.outcome == CSSSwiftColorOutcomeDeclined;
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+    declined |= s_forceColorScanDecline.load(std::memory_order_relaxed);
+    if (declined)
+        s_colorScanDeclines.fetch_add(1, std::memory_order_relaxed);
+#endif
+    if (declined)
+        return std::nullopt;
+    if (result.outcome == CSSSwiftColorOutcomeParsed)
+        return std::optional { asSRGBA(PackedColor::ARGB { result.argb }) };
+    return std::optional<SRGBA<uint8_t>> { };
+}
+
 static std::optional<SRGBA<uint8_t>> NODELETE finishParsingHexColor(uint32_t value, unsigned length)
 {
     switch (length) {
@@ -486,8 +598,18 @@ static std::optional<SRGBA<uint8_t>> NODELETE finishParsingHexColor(uint32_t val
 }
 
 template<typename CharacterType>
-static std::optional<SRGBA<uint8_t>> NODELETE parseHexColorInternal(std::span<const CharacterType> characters)
+static std::optional<SRGBA<uint8_t>> NODELETE parseHexColorInternal(std::span<const CharacterType> characters, CSSParserFastPaths::ColorScanner scanner)
 {
+    // Asked at the top rather than through a wrapper around the C++ body, because there is
+    // nothing here the island's answer has to be reconciled with: it either answered, in which
+    // case its answer is the answer, or it declined and the C++ below runs untouched. The named
+    // path next door does keep a separate C++-only function, for the one reason that justifies
+    // the extra name -- its ASSERT has to call it.
+    if (scanner == CSSParserFastPaths::ColorScanner::Swift) {
+        if (auto answer = resolveSwiftColorScan(scanHexColorSwift(makeSwiftColorText(characters))))
+            return *answer;
+    }
+
     if (characters.size() != 3 && characters.size() != 4 && characters.size() != 6 && characters.size() != 8)
         return std::nullopt;
 
@@ -597,15 +719,15 @@ template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseHSL(s
 }
 
 template<typename CharacterType>
-static std::optional<SRGBA<uint8_t>> parseNumericColor(std::span<const CharacterType> characters, const CSSParserContext& context)
+static std::optional<SRGBA<uint8_t>> parseNumericColor(std::span<const CharacterType> characters, const CSSParserContext& context, CSSParserFastPaths::ColorScanner scanner)
 {
     if (characters.size() >= 4 && characters.front() == '#') {
-        if (auto hexColor = parseHexColorInternal(characters.subspan(1)))
+        if (auto hexColor = parseHexColorInternal(characters.subspan(1), scanner))
             return *hexColor;
     }
 
     if (isQuirksModeBehavior(context.mode) && (characters.size() == 3 || characters.size() == 6)) {
-        if (auto hexColor = parseHexColorInternal(characters))
+        if (auto hexColor = parseHexColorInternal(characters, scanner))
             return *hexColor;
     }
 
@@ -660,11 +782,11 @@ static std::optional<SRGBA<uint8_t>> parseNumericColor(std::span<const Character
     return std::nullopt;
 }
 
-static std::optional<SRGBA<uint8_t>> parseNumericColor(StringView string, const CSSParserContext& context)
+static std::optional<SRGBA<uint8_t>> parseNumericColor(StringView string, const CSSParserContext& context, CSSParserFastPaths::ColorScanner scanner)
 {
     if (string.is8Bit())
-        return parseNumericColor(string.span8(), context);
-    return parseNumericColor(string.span16(), context);
+        return parseNumericColor(string.span8(), context, scanner);
+    return parseNumericColor(string.span16(), context, scanner);
 }
 
 static RefPtr<CSSValue> parseColor(StringView string, const CSSParserContext& context)
@@ -676,9 +798,25 @@ static RefPtr<CSSValue> parseColor(StringView string, const CSSParserContext& co
             return nullptr;
         return CSSKeywordValue::create(valueID);
     }
-    if (auto color = parseNumericColor(string, context))
+    if (auto color = parseNumericColor(string, context, CSSParserFastPaths::defaultColorScanner))
         return CSSValuePool::singleton().createColorValue(*color);
     return nullptr;
+}
+
+// The island's half of the named-colour lookup. Declared in CSSTokenizerSwiftTypes.h, where the
+// reason it takes a bounded, non-escaping pointer rather than a NUL-terminated buffer is written
+// down: that pair of annotations is what makes the importer hand Swift a single `Span`, so the
+// island passes its folded buffer down without a marker.
+//
+// Both annotations are repeated here because `__counted_by` participates in the function's type:
+// spelling the definition as a plain `const Latin1Character*` is a "conflicting types" error, not
+// a redundancy.
+CSSSwiftColor cssSwiftFindNamedColor(const Latin1Character *__counted_by(length) name __attribute__((noescape)), size_t length)
+{
+    auto* namedColor = findColor(byteCast<char>(name), static_cast<unsigned>(length));
+    if (!namedColor)
+        return CSSSwiftColor { 0, static_cast<uint8_t>(CSSSwiftColorOutcomeNotAColor) };
+    return CSSSwiftColor { namedColor->ARGBValue, static_cast<uint8_t>(CSSSwiftColorOutcomeParsed) };
 }
 
 static std::optional<SRGBA<uint8_t>> finishParsingNamedColor(std::span<char> buffer)
@@ -690,7 +828,7 @@ static std::optional<SRGBA<uint8_t>> finishParsingNamedColor(std::span<char> buf
     return asSRGBA(PackedColor::ARGB { namedColor->ARGBValue });
 }
 
-template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseNamedColorInternal(std::span<const CharacterType> characters)
+template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseNamedColorInternalCpp(std::span<const CharacterType> characters)
 {
     std::array<char, 64> buffer; // Easily big enough for the longest color name.
     if (characters.size() > buffer.size() - 1)
@@ -704,32 +842,50 @@ template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseNamed
     return finishParsingNamedColor(std::span { buffer }.first(characters.size() + 1));
 }
 
-template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseSimpleColorInternal(std::span<const CharacterType> characters, const CSSParserContext& context)
+template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseNamedColorInternal(std::span<const CharacterType> characters, CSSParserFastPaths::ColorScanner scanner)
 {
-    if (auto color = parseNumericColor(characters, context))
+    if (scanner == CSSParserFastPaths::ColorScanner::Swift) {
+        // The island answers `NotAColor` rather than declining for a candidate longer than the
+        // crossing capacity, because gperf's own `MAX_WORD_LENGTH` over ColorData.gperf's 152
+        // keys is 20 and the longest name is `lightgoldenrodyellow`. That is the one claim in
+        // this island that rests on a generated file rather than on the code beside it, so it
+        // is checked rather than argued: every debug run of every test that reaches a colour
+        // compares it against the scanner it replaces, and colorcheck sweeps every length from
+        // 0 to 70 in release.
+        ASSERT(characters.size() <= cssSwiftColorTextCapacity || !parseNamedColorInternalCpp(characters));
+
+        if (auto answer = resolveSwiftColorScan(scanNamedColorSwift(makeSwiftColorText(characters))))
+            return *answer;
+    }
+    return parseNamedColorInternalCpp(characters);
+}
+
+template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseSimpleColorInternal(std::span<const CharacterType> characters, const CSSParserContext& context, CSSParserFastPaths::ColorScanner scanner)
+{
+    if (auto color = parseNumericColor(characters, context, scanner))
         return color;
-    return parseNamedColorInternal(characters);
+    return parseNamedColorInternal(characters, scanner);
 }
 
-std::optional<SRGBA<uint8_t>> CSSParserFastPaths::parseSimpleColor(StringView string, const CSSParserContext& context)
+std::optional<SRGBA<uint8_t>> CSSParserFastPaths::parseSimpleColor(StringView string, const CSSParserContext& context, ColorScanner scanner)
 {
     if (string.is8Bit())
-        return parseSimpleColorInternal(string.span8(), context);
-    return parseSimpleColorInternal(string.span16(), context);
+        return parseSimpleColorInternal(string.span8(), context, scanner);
+    return parseSimpleColorInternal(string.span16(), context, scanner);
 }
 
-std::optional<SRGBA<uint8_t>> CSSParserFastPaths::parseHexColor(StringView string)
+std::optional<SRGBA<uint8_t>> CSSParserFastPaths::parseHexColor(StringView string, ColorScanner scanner)
 {
     if (string.is8Bit())
-        return parseHexColorInternal(string.span8());
-    return parseHexColorInternal(string.span16());
+        return parseHexColorInternal(string.span8(), scanner);
+    return parseHexColorInternal(string.span16(), scanner);
 }
 
-std::optional<SRGBA<uint8_t>> CSSParserFastPaths::parseNamedColor(StringView string)
+std::optional<SRGBA<uint8_t>> CSSParserFastPaths::parseNamedColor(StringView string, ColorScanner scanner)
 {
     if (string.is8Bit())
-        return parseNamedColorInternal(string.span8());
-    return parseNamedColorInternal(string.span16());
+        return parseNamedColorInternal(string.span8(), scanner);
+    return parseNamedColorInternal(string.span16(), scanner);
 }
 
 static bool isUniversalKeyword(StringView string)

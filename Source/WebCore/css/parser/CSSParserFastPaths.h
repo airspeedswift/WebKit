@@ -47,6 +47,22 @@ enum CSSPropertyID : uint16_t;
 
 class CSSParserFastPaths {
 public:
+    // Which scanner runs the hex and named colour fast paths. Both are compiled in; this
+    // chooses which one the entry points below use, and the choice is made at compile time.
+    // Named explicitly by the validation bridge so that a differential does not depend on how
+    // the build was configured, and so that an ignored build flag cannot masquerade as a pass.
+    enum class ColorScanner : bool { Cpp, Swift };
+
+    // `defined() &&` rather than CSSTokenizer.h:51's `#if !defined / #define 0` prologue, which
+    // WebCore builds with -Werror,-Wundef would otherwise require: the flag is only ever defined
+    // as 1, by WK_USE_SWIFT_CSS_COLOR_FAST_PATHS=YES, and that is where the choice lives.
+    static constexpr ColorScanner defaultColorScanner =
+#if defined(USE_SWIFT_CSS_COLOR_FAST_PATHS) && USE_SWIFT_CSS_COLOR_FAST_PATHS
+        ColorScanner::Swift;
+#else
+        ColorScanner::Cpp;
+#endif
+
     // Parses simple values like '10px' or 'green', but makes no guarantees about handling any property completely.
     static RefPtr<CSSValue> maybeParseValue(CSSPropertyID, StringView, CSS::PropertyParserState&);
 
@@ -55,9 +71,18 @@ public:
     static std::optional<CSS::Range> NODELETE lengthValueRangeForPropertiesSupportingSimpleLengths(CSSPropertyID);
 
     // Parses numeric and named colors.
-    static WEBCORE_EXPORT std::optional<SRGBA<uint8_t>> parseSimpleColor(StringView, const CSSParserContext&);
-    static std::optional<SRGBA<uint8_t>> NODELETE parseHexColor(StringView); // Hex colors of length 3, 4, 6, or 8, without leading "#".
-    static std::optional<SRGBA<uint8_t>> parseNamedColor(StringView);
+    static WEBCORE_EXPORT std::optional<SRGBA<uint8_t>> parseSimpleColor(StringView, const CSSParserContext&, ColorScanner = defaultColorScanner);
+    static std::optional<SRGBA<uint8_t>> NODELETE parseHexColor(StringView, ColorScanner = defaultColorScanner); // Hex colors of length 3, 4, 6, or 8, without leading "#".
+    static std::optional<SRGBA<uint8_t>> parseNamedColor(StringView, ColorScanner = defaultColorScanner);
 };
+
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// Test-only, reached from CSSTokenizerSwiftBridge.cpp. The counter and the switch live beside the
+// scan they instrument rather than in the bridge, because a decline is invisible in an output
+// comparison -- the C++ answer for a declined candidate is the same answer the comparison already
+// trusts -- so the count has to come from the code that declined, not from the code that asked.
+void webCoreCSSColorFastPathSetForceDecline(bool);
+unsigned webCoreCSSColorFastPathDeclineCount();
+#endif
 
 } // namespace WebCore
