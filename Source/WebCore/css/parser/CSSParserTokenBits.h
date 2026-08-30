@@ -80,6 +80,17 @@ struct SWIFT_SAFE CSSParserTokenBits {
     // tightly with the rest of this object for a smaller object size.
     bool valueIs8Bit : 1 { false };
     bool isBackedByStringLiteral : 1 { false };
+    // Whether the union below carries pendingNumberRange rather than one of the other members:
+    // the union's active member is a *phase* of the crossing and not a function of `type`, so it
+    // is discriminated here explicitly instead of being inferred. Set by makeNumericTokenBits,
+    // which is the only writer of that member, and cleared by every other factory and by every
+    // one of CSSParserToken's own constructors, so a numeric token that did not come from that
+    // factory is distinguishable rather than being read through the wrong member. Ledger R2.
+    //
+    // Costs nothing: the bitfields above sum to 24 bits, so this lands in the eight free bits of
+    // the same 32-bit allocation unit. CSSParserToken.h static_asserts the size, and
+    // cssprobe/probes/bits-packing-probe.cpp is the standalone check that it packs.
+    unsigned hasParkedNumberRange : 1 { 0 };
     unsigned valueLength { 0 };
     const void* valueDataCharRaw { nullptr }; // Either Latin1Character* or char16_t*.
 
@@ -93,6 +104,7 @@ struct SWIFT_SAFE CSSParserTokenBits {
         // While the island still holds the token, the number's own range in the input.
         // resolveNumericValue reads it and overwrites it with numericValue -- the range is
         // dead the moment the double exists, and the double is the only thing that survives.
+        // Read only when hasParkedNumberRange says it was written; see that field.
         struct { unsigned offset; unsigned length; } pendingNumberRange;
     };
 };
@@ -126,6 +138,16 @@ constexpr unsigned cssParserTokenBitsUnescapedValueTag = 0x80000000u;
 // The island calls this once per tokenization, not once per token. A stylesheet at or above
 // 2 GB cannot have its value offsets tagged, and the island has no fallback, so it reports
 // failure instead of truncating. Nothing real comes close; "surely not" is not a bound.
+//
+// And this is a **memory-safety** property rather than the representability one the sentence
+// above describes, which is the reason it earns its keep beyond "no stylesheet is 2 GB". While
+// Swift owns a token the pointer slot holds the offset, so a CSSParserToken built from bits that
+// never went through resolveValuePointer would dereference a small integer. Darwin's __PAGEZERO
+// is 4 GB -- `otool -l` on this framework reports `vmsize 0x100000000` for it -- and this check
+// keeps every parked offset below 2^31 untagged and below 2^32 tagged, so every unresolved offset
+// lies strictly inside that guard page and a mis-sequenced resolve faults deterministically
+// instead of reading live heap. Drop the check and an offset could exceed 4 GB, at which point it
+// would not. Ledger R1.
 inline bool cssParserTokenBitsCanRepresentOffsets(size_t inputLength)
 {
     return inputLength < cssParserTokenBitsUnescapedValueTag;
@@ -232,6 +254,14 @@ inline CSSParserTokenBits makeNumericTokenBits(unsigned type, bool isNonInteger,
     bits.valueIs8Bit = is8Bit;
     bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueIsUnescaped ? valueOffset | cssParserTokenBitsUnescapedValueTag : valueOffset));
     bits.pendingNumberRange = { numberOffset, numberLength };
+    // The union's discriminant, written together with the member it discriminates so the two
+    // cannot drift. `bitsCarryPendingNumber` below answers "does a token of this *type* owe a
+    // double", which is a property of the type and therefore says nothing about whether this
+    // factory is the one that produced the token; a numeric type reaching any other factory
+    // leaves numericValue active and would have its double read out as an offset and a length.
+    // takeChunk requires this flag before it touches pendingNumberRange, so that read is no
+    // longer through a member nothing wrote. Ledger R2.
+    bits.hasParkedNumberRange = 1;
     return bits;
 }
 
@@ -245,6 +275,12 @@ inline CSSParserTokenBits makeNumericTokenBits(unsigned type, bool isNonInteger,
 constexpr unsigned firstNumericCSSParserTokenType = 7; // NumberToken
 constexpr unsigned lastNumericCSSParserTokenType = 9; // DimensionToken
 
+// The *reader* half of the pendingNumberRange discipline, and only that half: it answers "does a
+// token of this type still owe a double", from the type alone. CSSParserToken.h proves it against
+// a three-way test over all 33 types. What it cannot answer is whether the token came from
+// makeNumericTokenBits, which is the only writer of that union member -- that is what
+// CSSParserTokenBits::hasParkedNumberRange is for, and takeChunk requires both to agree before it
+// reads the range. Ledger R2.
 inline constexpr bool bitsCarryPendingNumber(const CSSParserTokenBits& bits)
 {
     return bits.type - firstNumericCSSParserTokenType <= lastNumericCSSParserTokenType - firstNumericCSSParserTokenType;
@@ -274,7 +310,17 @@ inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_
     // subspan rather than pointer arithmetic: libc++ hardening is on in this build, so this
     // is a real bounds check on a value that crossed a language boundary, which the raw form
     // would not have been.
-    const void* resolved = input.subspan(offset * characterSize).data();
+    //
+    // The **two**-argument overload, because the extent crossed the boundary too. libc++ checks
+    // `offset <= size()` for subspan(offset) and additionally `count <= size() - offset` for
+    // subspan(offset, count) (span:522-527), and value() is
+    // `StringView { valueDataCharRaw, valueLength, valueIs8Bit }` -- a raw pointer and a trusted
+    // count -- so with only the one-argument form a valueLength the island got wrong was an
+    // out-of-bounds read for every later reader of that value, not a mis-parse. The code this
+    // replaced, `CSSTokenizerInputStream::rangeAt`, clamped both through StringView::substring
+    // and so was structurally incapable of over-reading; this restores that property without
+    // restoring the silence. The pointer is identical either way. Ledger S13, revisit log R101.
+    const void* resolved = input.subspan(offset * characterSize, size_t { bits.valueLength } * characterSize).data();
     bits.valueDataCharRaw = (offset | bits.valueLength) ? resolved : nullptr;
 }
 
