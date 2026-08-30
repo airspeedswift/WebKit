@@ -89,6 +89,38 @@ enum HashTokenType {
     HashTokenUnrestricted,
 };
 
+// CSSParserToken's storage, lifted out of the class *unchanged* so one definition can be
+// compiled by both C++ and Swift. The island today emits a different struct carrying offsets
+// plus a type tag, which C++ decodes back into a typed constructor call -- a dispatch the
+// producer had already made for free. Sharing the real storage lets the island write finished
+// tokens instead, deleting that round trip.
+//
+// Same fields, same order, same bitfield widths, so the object's layout and every accessor's
+// codegen are unchanged. This is a pure refactor and is verified as one.
+struct CSSParserTokenBits {
+    unsigned type : 6 { 0 }; // CSSParserTokenType
+    unsigned blockType : 2 { 0 }; // BlockType
+    unsigned numericValueType : 1 { 0 }; // NumericValueType
+    unsigned numericSign : 2 { 0 }; // NumericSign
+    unsigned unit : 7 { 0 }; // CSSUnitType
+    unsigned nonUnitPrefixLength : 4 { 0 }; // Only for DimensionType, only needs to be long enough for UnicodeRange parsing.
+
+    // value... is an unpacked StringView so that we can pack it
+    // tightly with the rest of this object for a smaller object size.
+    bool valueIs8Bit : 1 { false };
+    bool isBackedByStringLiteral : 1 { false };
+    unsigned valueLength { 0 };
+    const void* valueDataCharRaw { nullptr }; // Either Latin1Character* or char16_t*.
+
+    union {
+        char16_t delimiter;
+        HashTokenType hashTokenType;
+        double numericValue { 0 };
+        mutable int id;
+        unsigned whitespaceCount;
+    };
+};
+
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSParserToken);
 class CSSParserToken {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED_WITH_HEAP_IDENTIFIER(CSSParserToken, CSSParserToken);
@@ -119,24 +151,24 @@ public:
     // Converts NumberToken to PercentageToken.
     void NODELETE convertToPercentage();
 
-    CSSParserTokenType type() const { return static_cast<CSSParserTokenType>(m_type); }
-    StringView value() const { return { m_valueDataCharRaw, m_valueLength, m_valueIs8Bit }; }
+    CSSParserTokenType type() const { return static_cast<CSSParserTokenType>(m_bits.type); }
+    StringView value() const { return { m_bits.valueDataCharRaw, m_bits.valueLength, m_bits.valueIs8Bit }; }
 
     char16_t NODELETE delimiter() const;
     NumericSign NODELETE numericSign() const;
     NumericValueType NODELETE numericValueType() const;
     double NODELETE numericValue() const;
     StringView NODELETE originalText() const;
-    HashTokenType getHashTokenType() const { ASSERT(m_type == HashToken); return m_hashTokenType; }
-    BlockType getBlockType() const { return static_cast<BlockType>(m_blockType); }
-    CSSUnitType unitType() const { return static_cast<CSSUnitType>(m_unit); }
+    HashTokenType getHashTokenType() const { ASSERT(m_bits.type == HashToken); return m_bits.hashTokenType; }
+    BlockType getBlockType() const { return static_cast<BlockType>(m_bits.blockType); }
+    CSSUnitType unitType() const { return static_cast<CSSUnitType>(m_bits.unit); }
     StringView NODELETE unitString() const;
     CSSValueID id() const;
     CSSValueID functionId() const;
 
     bool NODELETE hasStringBacking() const;
     bool tryUseStringLiteralBacking();
-    bool isBackedByStringLiteral() const { return m_isBackedByStringLiteral; }
+    bool isBackedByStringLiteral() const { return m_bits.isBackedByStringLiteral; }
 
     CSSPropertyID parseAsCSSPropertyID() const;
 
@@ -156,42 +188,22 @@ public:
 private:
     void initValueFromStringView(StringView string)
     {
-        m_valueLength = string.length();
-        m_valueIs8Bit = string.is8Bit();
-        m_valueDataCharRaw = string.rawCharacters();
-        m_isBackedByStringLiteral = false;
+        m_bits.valueLength = string.length();
+        m_bits.valueIs8Bit = string.is8Bit();
+        m_bits.valueDataCharRaw = string.rawCharacters();
+        m_bits.isBackedByStringLiteral = false;
     }
     CSSValueID identOrFunctionId() const;
 
-    unsigned m_type : 6 { 0 }; // CSSParserTokenType
-    unsigned m_blockType : 2 { 0 }; // BlockType
-    unsigned m_numericValueType : 1 { 0 }; // NumericValueType
-    unsigned m_numericSign : 2 { 0 }; // NumericSign
-    unsigned m_unit : 7 { 0 }; // CSSUnitType
-    unsigned m_nonUnitPrefixLength : 4 { 0 }; // Only for DimensionType, only needs to be long enough for UnicodeRange parsing.
-
-    // m_value... is an unpacked StringView so that we can pack it
-    // tightly with the rest of this object for a smaller object size.
-    bool m_valueIs8Bit : 1 { false };
-    bool m_isBackedByStringLiteral : 1 { false };
-    unsigned m_valueLength { 0 };
-    const void* m_valueDataCharRaw { nullptr }; // Either Latin1Character* or char16_t*.
-
-    union {
-        char16_t m_delimiter;
-        HashTokenType m_hashTokenType;
-        double m_numericValue { 0 };
-        mutable int m_id;
-        unsigned m_whitespaceCount;
-    };
+    CSSParserTokenBits m_bits;
 };
 
 template<typename CharacterType>
 inline void CSSParserToken::updateCharacters(std::span<const CharacterType> characters)
 {
-    m_valueLength = characters.size();
-    m_valueIs8Bit = (sizeof(CharacterType) == 1);
-    m_valueDataCharRaw = characters.data();
+    m_bits.valueLength = characters.size();
+    m_bits.valueIs8Bit = (sizeof(CharacterType) == 1);
+    m_bits.valueDataCharRaw = characters.data();
 }
 
 } // namespace WebCore

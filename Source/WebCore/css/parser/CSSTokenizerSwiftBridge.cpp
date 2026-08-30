@@ -145,7 +145,7 @@ WEBCORE_EXPORT void webCoreCSSTokenizerBenchIntegrated16(const char*, size_t, bo
 // originalText() and stops -- and, for a DimensionToken, anything but originalText()
 // whenever the *left* operand has a non-unit prefix. Both holes are filled below:
 // after this function returns nullopt, every field a DimensionToken carries has been
-// compared, m_nonUnitPrefixLength included, and none of it needed a new accessor.
+// compared, m_bits.nonUnitPrefixLength included, and none of it needed a new accessor.
 struct TokenDivergence {
     uint32_t reason;
     uint32_t expected;
@@ -178,10 +178,10 @@ static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expect
             return TokenDivergence { 5, static_cast<uint32_t>(expected.numericValueType()), static_cast<uint32_t>(actual.numericValueType()) };
     }
 
-    // A DimensionToken's unit. operator== takes its `m_nonUnitPrefixLength == 0` branch
+    // A DimensionToken's unit. operator== takes its `m_bits.nonUnitPrefixLength == 0` branch
     // off *this* -- the C++ token here -- and only that branch compares unitString();
     // with a prefix it falls through to `originalText() == other.originalText()`, so a
-    // wrong m_unit or a wrong prefix length on such a token compared equal. That is not
+    // wrong m_bits.unit or a wrong prefix length on such a token compared equal. That is not
     // hypothetical: it is the field a proposed change to this island would have
     // corrupted with every test still passing.
     //
@@ -194,8 +194,8 @@ static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expect
     // those happened is a property of where the island put the value, is invisible to the
     // numeric fields, and decides how a custom property reserializes.
     //
-    // m_nonUnitPrefixLength has no accessor and does not need one: unitString() is
-    // defined as value().substring(m_nonUnitPrefixLength), so with value() and
+    // m_bits.nonUnitPrefixLength has no accessor and does not need one: unitString() is
+    // defined as value().substring(m_bits.nonUnitPrefixLength), so with value() and
     // unitString() both equal the prefix length is equal too, being the difference of
     // their lengths. Comparing the two public views pins the private bit-field exactly,
     // which is why the check below adds no friend and no test-only getter.
@@ -209,7 +209,7 @@ static std::optional<TokenDivergence> compareTokens(const CSSParserToken& expect
             return TokenDivergence { 7, static_cast<uint32_t>(expected.unitType()), static_cast<uint32_t>(actual.unitType()) };
         if (expected.value() != actual.value())
             return TokenDivergence { 8, expected.value().length(), actual.value().length() };
-        // value() agreed, so this is exactly a m_nonUnitPrefixLength divergence.
+        // value() agreed, so this is exactly a m_bits.nonUnitPrefixLength divergence.
         if (expected.unitString() != actual.unitString())
             return TokenDivergence { 9, expected.value().length() - expected.unitString().length(), actual.value().length() - actual.unitString().length() };
     }
