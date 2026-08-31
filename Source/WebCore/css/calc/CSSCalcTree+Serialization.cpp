@@ -797,18 +797,36 @@ static_assert(static_cast<uint8_t>(CSSCalcSwiftOutcomeDeclined) == 1);
 
 // Walks the direct `Child`-typed children of a node, whatever alternative it holds.
 //
-// `forAllChildNodes` already does this for an operation, generically over the tuple conformance,
-// so the 34 `IndirectNode<Op>` alternatives need no per-op code here. It cannot be handed a
-// *leaf*: the `Child` overload at CSSCalcTree+Traversal.h:126 dereferences the alternative, which
-// only `IndirectNode` supports, so the `requires` below is what lets one spelling serve all 41
-// alternatives.
+// `forAllChildNodes` already does this for an operation, and does it generically over the tuple
+// conformance, so the 34 `IndirectNode<Op>` alternatives need no per-op code here. What it cannot
+// be handed is a *leaf*: the `Child` overload at CSSCalcTree+Traversal.h:126 dereferences the
+// alternative, which only `IndirectNode` supports, so the `requires` below is what makes one
+// spelling serve all 41 alternatives.
 //
 // `Anchor` and `AnchorSize` declare `tuple_size` 0 (CSSCalcTree.h:1317, FIXME webkit.org/b/280798:
-// make them tuple-like), so `forAllChildNodes` reports no children for them even though `Anchor`
-// holds an `AnchorSide` and an optional fallback `Child`. Both currently decline regardless of
-// child count, but `childCount()` is not authoritative for those two until that FIXME lands.
+// make them tuple-like), so `forAllChildNodes` reports no children for them even though an `Anchor`
+// holds an `AnchorSide` and an optional fallback `Child`. Fixing the FIXME at its source would also
+// change what simplification, evaluation and the computed-style-dependency walk see, since they all
+// traverse with `forAllChildNodes` too; answering for these two nodes here instead keeps the fix
+// local, so `childCount` and `childAt` are accurate without touching those other traversals.
 template<typename Functor> static void forEachChildNodeOfChild(const Child& node, const Functor& functor)
 {
+    if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
+        // In serialization order: the `<anchor-side>` when it is a `<percentage>` subtree rather
+        // than a keyword, then the fallback. `serializeMathFunctionArguments(IndirectNode<Anchor>)`
+        // writes them in exactly that order.
+        if (auto* side = get_if<Child>(&(*anchor)->side.value))
+            functor(*side);
+        if ((*anchor)->fallback)
+            functor(*(*anchor)->fallback);
+        return;
+    }
+    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
+        if ((*anchorSize)->fallback)
+            functor(*(*anchorSize)->fallback);
+        return;
+    }
+
     WTF::switchOn(node, [&](const auto& alternative) {
         if constexpr (requires { *alternative; })
             forAllChildNodes(*alternative, functor);
@@ -900,11 +918,17 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         [&](const IndirectNode<Invert>&) { out.kind = CSSCalcSwiftNodeKind::Invert; },
         // No CSS-level spelling: `serializeCalculationTree` emits this node's child in its place.
         [&](const IndirectNode<Deg2Rad>&) { out.kind = CSSCalcSwiftNodeKind::Transparent; },
-        // The two alternatives whose `childCount` below is not the truth, reported as their own kind
-        // so that this code has to decide about them rather than infer "leaf" from a 0.
-        // CSSCalcTree.h:1317, webkit.org/b/280798.
-        [&](const IndirectNode<Anchor>&) { out.kind = CSSCalcSwiftNodeKind::OpaqueOperation; },
-        [&](const IndirectNode<AnchorSize>&) { out.kind = CSSCalcSwiftNodeKind::OpaqueOperation; },
+        // These four each get their own kind because each has a different serialization shape and
+        // a different set of non-tree arguments; `valueID` is the function's own name in all four,
+        // exactly as for the generic ones, so none of them costs a name table on the Swift side.
+        [&](const IndirectNode<Anchor>&) {
+            out.kind = CSSCalcSwiftNodeKind::AnchorFunction;
+            out.valueID = static_cast<uint16_t>(Anchor::id);
+        },
+        [&](const IndirectNode<AnchorSize>&) {
+            out.kind = CSSCalcSwiftNodeKind::AnchorSizeFunction;
+            out.valueID = static_cast<uint16_t>(AnchorSize::id);
+        },
         // `clamp()`, and only because of its `none` bounds. `min` and `max` are `ChildOrNone`, so a
         // bound holding the keyword is an argument the serializer emits but not a child node the walk
         // can see -- the kind carries it, and `childCount` stays the number of subtrees. With both
@@ -923,12 +947,18 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
             else
                 out.kind = CSSCalcSwiftNodeKind::Function;
         },
-        // The two whose `serializeMathFunctionArguments` overload is not a list of calculation trees:
-        // `Random`'s `<random-cache-key>` and `CalcMix`'s per-item weights. Named explicitly rather
-        // than left to the fallback so that they are declined by *name*, and so that the fallback's
-        // allowlist is the only other thing that can decline.
-        [&](const IndirectNode<Random>&) { out.kind = CSSCalcSwiftNodeKind::Operation; },
-        [&](const IndirectNode<CalcMix>&) { out.kind = CSSCalcSwiftNodeKind::Operation; },
+        // The two whose `serializeMathFunctionArguments` overload is not a list of calculation
+        // trees: `Random`'s `<random-cache-key>` and `CalcMix`'s per-item weights. Both keep being
+        // named explicitly rather than falling into the generic lambda below, so that the allowlist
+        // there stays the only other thing that can decline.
+        [&](const IndirectNode<Random>&) {
+            out.kind = CSSCalcSwiftNodeKind::RandomFunction;
+            out.valueID = static_cast<uint16_t>(Random::id);
+        },
+        [&](const IndirectNode<CalcMix>&) {
+            out.kind = CSSCalcSwiftNodeKind::CalcMixFunction;
+            out.valueID = static_cast<uint16_t>(CalcMix::id);
+        },
         // Everything else, classified by the shape of its serialization rather than one case per
         // operation. These operations cost no name here or in Swift: `valueID` carries `Op::id` and
         // is handed back to `nameLiteralForSerialization`, generated from CSSValueKeywords.in, so
@@ -953,6 +983,96 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
     );
 
     out.childCount = childNodeCount(*m_node);
+    return out;
+}
+
+// The `<anchor-size>` dimension as a `CSSValueID`, so callers can hand it to
+// `appendValueIDName` and the generated keyword table spells it.
+//
+// Deliberately not shared with `serializeAnchorSizeDimension` above, which keeps its own six
+// hardcoded string literals: sharing one table would mean a wrong entry produces the same wrong
+// output on both the Swift and C++ serialization paths, so a test comparing them could no longer
+// catch it. Two independent spellings keep that comparison meaningful. The C++ literals go away
+// only once the C++ serializer itself is removed.
+static CSSValueID anchorSizeDimensionValueID(Style::AnchorSizeDimension dimension)
+{
+    switch (dimension) {
+    case Style::AnchorSizeDimension::Width:      return CSSValueWidth;
+    case Style::AnchorSizeDimension::Height:     return CSSValueHeight;
+    case Style::AnchorSizeDimension::Block:      return CSSValueBlock;
+    case Style::AnchorSizeDimension::Inline:     return CSSValueInline;
+    case Style::AnchorSizeDimension::SelfBlock:  return CSSValueSelfBlock;
+    case Style::AnchorSizeDimension::SelfInline: return CSSValueSelfInline;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
+{
+    CSSCalcSwiftOperationInfo out {
+        .valueID = static_cast<uint16_t>(CSSValueInvalid),
+        .randomSharingIsKey = false,
+        .randomSharingIsFixed = false,
+        .randomKeyHasName = false,
+        .randomKeyIsElementScoped = false,
+        .randomKeyHasPropertyScope = false,
+        .anchorSideIsKeyword = false,
+        .hasElementName = false,
+        .hasDimension = false,
+        .hasFallback = false,
+    };
+
+    // `get_if` on the three alternatives that carry anything, rather than a `WTF::switchOn` over
+    // all 41, for the reason `childInSerializationOrder` records: the `switchOn` spelling
+    // instantiates its generic fallback once per alternative and costs ~22 KB. `CalcMix` is absent
+    // because everything it needs is its child count and its per-item weights, and the weights are
+    // an upcall.
+    if (auto* random = get_if<IndirectNode<Random>>(m_node)) {
+        WTF::switchOn((*random)->sharing,
+            [&](const Random::SharingAuto&) {
+                // Serializes as omitted; both flags stay false and nothing is written.
+            },
+            [&](const Random::Key& key) {
+                out.randomSharingIsKey = true;
+                out.randomKeyHasName = key.name.has_value();
+                out.randomKeyIsElementScoped = key.elementScoped.has_value();
+                if (key.propertyScoped) {
+                    out.randomKeyHasPropertyScope = true;
+                    out.valueID = static_cast<uint16_t>(WTF::switchOn(*key.propertyScoped,
+                        [](const Random::Key::PropertyScoped&) { return CSSValuePropertyScoped; },
+                        [](const Random::Key::PropertyIndexScoped&) { return CSSValuePropertyIndexScoped; }
+                    ));
+                }
+            },
+            [&](const Random::SharingFixed&) {
+                out.randomSharingIsFixed = true;
+            }
+        );
+        return out;
+    }
+
+    if (auto* anchor = get_if<IndirectNode<Anchor>>(m_node)) {
+        out.hasElementName = (*anchor)->elementName.has_value();
+        out.hasFallback = (*anchor)->fallback.has_value();
+        if (auto* side = get_if<CSSValueID>(&(*anchor)->side.value)) {
+            out.anchorSideIsKeyword = true;
+            out.valueID = static_cast<uint16_t>(*side);
+        }
+        return out;
+    }
+
+    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(m_node)) {
+        out.hasElementName = (*anchorSize)->elementName.has_value();
+        out.hasFallback = (*anchorSize)->fallback.has_value();
+        if ((*anchorSize)->dimension) {
+            out.hasDimension = true;
+            out.valueID = static_cast<uint16_t>(anchorSizeDimensionValueID(*(*anchorSize)->dimension));
+        }
+        return out;
+    }
+
+    // Every other kind: this is not called for them, and an all-inert record is what would come
+    // back if it ever were.
     return out;
 }
 
@@ -1033,6 +1153,11 @@ void CSSCalcSwiftSink::appendLiteral(uint8_t literal)
     // `CSS::Keyword::None` is `Constant<CSSValueNone>`, whose `Serialize` specialization is exactly
     // `nameLiteralForSerialization(CSSValueNone)` (CSSValueTypes.h:178).
     case CSSCalcSwiftLiteralNoneKeyword: m_builder->append(nameLiteralForSerialization(CSSValueNone)); return;
+    // `element-scoped` and `fixed` are named through the generated table for the same reason
+    // `round(` is: one place in the program decides how each keyword is written.
+    case CSSCalcSwiftLiteralSpace: m_builder->append(' '); return;
+    case CSSCalcSwiftLiteralRandomFixedPrefix: m_builder->append(nameLiteralForSerialization(CSSValueFixed), ' '); return;
+    case CSSCalcSwiftLiteralElementScoped: m_builder->append(nameLiteralForSerialization(CSSValueElementScoped)); return;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -1047,6 +1172,59 @@ void CSSCalcSwiftSink::appendNumber(double value, uint8_t unitType)
 void CSSCalcSwiftSink::appendValueIDName(uint16_t valueID)
 {
     m_builder->append(nameLiteralForSerialization(static_cast<CSSValueID>(valueID)));
+}
+
+void CSSCalcSwiftSink::appendOperationArgument(const CSSCalcSwiftNode& node, uint8_t part, uint32_t index)
+{
+    // Selected by name, like `appendLiteral`, so the numbering `CSSCalcSwiftOperationPart` declares
+    // in Swift is never transcribed here.
+    //
+    // Every branch makes the same `CSS::serializationForCSS` call the C++ serializer makes for that
+    // argument, over the same typed CSS value, so the two cannot disagree about how a dashed-ident
+    // escapes or how a `<number [0,1]>` formats. That is why these are upcalls rather than doubles
+    // and strings crossing the boundary.
+    switch (part) {
+    case CSSCalcSwiftOperationPartDashedIdent: {
+        // `random()`'s `<random-cache-key>` name, or `anchor()`/`anchor-size()`'s
+        // `<anchor-element>`. Which one is unambiguous from the node's own alternative, and this is
+        // only asked when `operationInfo()` said there is one.
+        const CSS::CustomIdent* ident = nullptr;
+        if (auto* random = get_if<IndirectNode<Random>>(node.m_node)) {
+            if (auto* key = get_if<Random::Key>(&(*random)->sharing))
+                ident = key->name ? &*key->name : nullptr;
+        } else if (auto* anchor = get_if<IndirectNode<Anchor>>(node.m_node))
+            ident = (*anchor)->elementName ? &*(*anchor)->elementName : nullptr;
+        else if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(node.m_node))
+            ident = (*anchorSize)->elementName ? &*(*anchorSize)->elementName : nullptr;
+        RELEASE_ASSERT(ident);
+        CSS::serializationForCSS(*m_builder, *m_context, *ident);
+        return;
+    }
+    case CSSCalcSwiftOperationPartRandomFixedValue: {
+        auto* random = get_if<IndirectNode<Random>>(node.m_node);
+        RELEASE_ASSERT(random);
+        auto* fixed = get_if<Random::SharingFixed>(&(*random)->sharing);
+        RELEASE_ASSERT(fixed);
+        CSS::serializationForCSS(*m_builder, *m_context, fixed->value);
+        return;
+    }
+    case CSSCalcSwiftOperationPartCalcMixWeight: {
+        // The one presence test that stays in C++: the weight is per item, so exposing it here
+        // would need a per-index accessor beside `childAt` for a value that has nowhere else to be
+        // spelled anyway. The leading space belongs to the weight, exactly as in
+        // `serializeMathFunctionArguments(IndirectNode<CalcMix>)`.
+        auto* calcMix = get_if<IndirectNode<CalcMix>>(node.m_node);
+        RELEASE_ASSERT(calcMix);
+        RELEASE_ASSERT(index < (*calcMix)->children.size());
+        const auto& item = (*calcMix)->children[index];
+        if (!item.weight)
+            return;
+        m_builder->append(' ');
+        CSS::serializationForCSS(*m_builder, *m_context, *item.weight);
+        return;
+    }
+    }
+    RELEASE_ASSERT_NOT_REACHED();
 }
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)

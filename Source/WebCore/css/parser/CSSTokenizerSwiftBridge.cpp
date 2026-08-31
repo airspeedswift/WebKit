@@ -868,7 +868,8 @@ static std::atomic<uint64_t> s_calcCompareCalls;
 // be checked against a stale count.
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void)
 {
-    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::ClampWithNoneMaximum) + 1;
+    // The LAST case, so adding a kind without updating this line silently under-reports the count.
+    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::AnchorSizeFunction) + 1;
 }
 
 // Serializes one of the four directly-constructed root shapes, on the named arm. Returns the length,
