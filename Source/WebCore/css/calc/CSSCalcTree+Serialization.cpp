@@ -1304,7 +1304,11 @@ uint64_t webCoreCSSCalcSerializationSwiftCallCount(void)
 static bool trySerializeWithSwiftIsland(StringBuilder& builder, const Tree& tree, const SerializationOptions& options)
 {
     CSSCalcSwiftSink sink { builder, options.serializationContext };
-    auto result = cssCalcSerializeSwift(CSSCalcSwiftNode { &tree.root }, sink, tree.stage == Stage::Computed);
+    // The stage and the range are the whole of `SerializationState` the island cannot read for
+    // itself: `Stage` is on the `Tree` and the range is on the options, while the handle it takes is
+    // a cursor onto a `Child`. Two doubles rather than a `CSS::Range`, because `clampValue` reads
+    // `min` and `max` and the two `RangeParseTimeBehavior` members are the parser's.
+    auto result = cssCalcSerializeSwift(CSSCalcSwiftNode { &tree.root }, sink, tree.stage == Stage::Computed, options.range.min, options.range.max);
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
     s_swiftCalls.fetch_add(1, std::memory_order_relaxed);

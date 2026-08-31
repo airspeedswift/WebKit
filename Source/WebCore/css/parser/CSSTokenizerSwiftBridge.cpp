@@ -276,8 +276,11 @@ std::optional<CSSCalc::Tree> constructRootShape(unsigned shape)
     if (!parsed.tree)
         return std::nullopt;
 
-    // `calc(1px)` parses as a `Sum` wrapping the leaf (CSSCalcTree+Parser.cpp:921 keeps the calc()
-    // wrapper that way), so unwrap to the leaf itself before rebuilding.
+    // `calc(1px)` does NOT survive as a `Sum` wrapping the leaf: `parseAndSimplify` folds the
+    // one-child wrapper away and the root is the leaf itself. This unwrap is therefore inert today
+    // -- measured, not assumed, by `webCoreCSSCalcCompareSerializationStaged`'s C1 phase landing all
+    // 660 of its cases on a numeric root with no unwrap -- and it is kept only so that a future
+    // simplification change which stops folding cannot silently turn this into a `Sum` shape.
     auto leaf = WTF::move(parsed.tree->root);
     if (auto* sum = get_if<CSSCalc::IndirectNode<CSSCalc::Sum>>(&leaf); sum && (*sum)->children.size() == 1)
         leaf = WTF::move((*sum)->children[0]);
@@ -913,6 +916,7 @@ struct CSSCalcSerializationComparison {
 };
 
 WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization(const char*, size_t, char*, size_t, char*, size_t);
+WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerializationStaged(const char*, size_t, unsigned, double, double, char*, size_t, char*, size_t);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcRoundTrip(const char*, size_t, unsigned, char*, size_t, char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSCalcSetForceDecline(bool);
@@ -980,6 +984,71 @@ WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization
     auto declinesBefore = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
     auto cppText = CSSCalc::serializationForCSS(*parsed.tree, options, CSSCalc::Serializer::Cpp);
     auto swiftText = CSSCalc::serializationForCSS(*parsed.tree, options, CSSCalc::Serializer::Swift);
+    auto declinesAfter = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+
+    result.declined = declinesAfter != declinesBefore ? 1 : 0;
+    result.nodeCount = CSSCalc::webCoreCSSCalcSerializationLastNodeCount();
+    result.kindMask = CSSCalc::webCoreCSSCalcSerializationLastKindMask();
+    result.rootKind = CSSCalc::webCoreCSSCalcSerializationLastRootKind();
+    result.agree = cppText == swiftText ? 1 : 0;
+    result.cppLength = static_cast<uint32_t>(copyOutSerialization(cppText, cppOut, cppCapacity));
+    result.swiftLength = static_cast<uint32_t>(copyOutSerialization(swiftText, swiftOut, swiftCapacity));
+    return result;
+}
+
+// The same comparison at a caller-chosen `Stage` and `CSS::Range`.
+//
+// WHY THIS ENTRY HAS TO EXIST. A parse always produces `Stage::Specified` -- CSSCalcTree+Parser.cpp
+// builds the `Tree` that way and nothing on the parse path writes `Computed` -- so every case the
+// differential has ever run through `webCoreCSSCalcCompareSerialization` has exercised one of the
+// two stages, and for three phases of the port the island's blanket `Computed` decline was code
+// that had never once executed against the harness. `Stage::Computed` is written in exactly one
+// place in WebCore, StyleCalculationTree+Conversion.cpp:357 (`toCSS`, the getComputedStyle path),
+// and reaching it through that function needs a `Style::Calculation::Tree`, which needs the
+// conversion data this harness deliberately does not have. So the stage is set here, on a tree that
+// was parsed: the oracle is two serializers over one `Tree` object, and it does not care how the
+// object was built.
+//
+// AN UNWRAP-TO-LEAF PARAMETER WAS HERE AND IS NOT, BECAUSE IT WAS MEASURED INERT. The stage changes
+// the serialization for a NUMERIC ROOT and for nothing else, so the phase is worthless unless the
+// root really is one -- and `constructRootShape` above says `calc(1px)` parses to a one-child `Sum`
+// wrapping the leaf, which would mean it is not. It does not: `parseAndSimplify` folds the wrapper
+// away, and all 660 of calccheck's C1 cases land on a numeric root with no unwrap at all. That
+// comment on `constructRootShape` is stale, and it is corrected there. The harness asserts the
+// outcome instead of arranging it -- `Expect::Leaf` requires `nodeCount == 1` and a numeric
+// `rootKind` -- which fails loudly if simplification ever stops folding, where a silent unwrap
+// would have hidden it.
+WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerializationStaged(const char* text, size_t length, unsigned computedStage, double rangeMinimum, double rangeMaximum, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
+{
+    s_calcCompareCalls.fetch_add(1, std::memory_order_relaxed);
+
+    CSSCalcSerializationComparison result { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    auto parsed = parseCalcExpression(source);
+    if (!parsed.tree)
+        return result;
+
+    // The parsed tree with only its stage replaced. Rebuilt rather than mutated in place because
+    // `Tree::stage` is not something a caller of `parseCalcExpression` should be able to reach
+    // through the returned object.
+    auto tree = CSSCalc::Tree {
+        .root = WTF::move(parsed.tree->root),
+        .type = parsed.tree->type,
+        .stage = computedStage ? CSSCalc::Stage::Computed : CSSCalc::Stage::Specified,
+    };
+
+    result.parsed = 1;
+    result.category = static_cast<uint32_t>(parsed.category);
+
+    auto options = CSSCalc::SerializationOptions {
+        .range = WebCore::CSS::Range { rangeMinimum, rangeMaximum },
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+    auto cppText = CSSCalc::serializationForCSS(tree, options, CSSCalc::Serializer::Cpp);
+    auto swiftText = CSSCalc::serializationForCSS(tree, options, CSSCalc::Serializer::Swift);
     auto declinesAfter = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
 
     result.declined = declinesAfter != declinesBefore ? 1 : 0;
