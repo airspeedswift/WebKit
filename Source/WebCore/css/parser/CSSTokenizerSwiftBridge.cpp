@@ -207,7 +207,16 @@ ParsedCalc parseCalcExpression(const String& source)
             .category = category,
             .range = WebCore::CSS::All,
             .allowedSymbols = calcAllowedSymbols(),
-            .propertyOptions = { },
+            // Both policies default to `Forbid`, and with the defaults `anchor()` and
+            // `anchor-size()` are rejected outright at CSSCalcTree+Parser.cpp:1043 and :1136 --
+            // so the `Anchor` and `AnchorSize` alternatives are unreachable through this entry and
+            // the differential's coverage guard reports a node kind it never tested. They are the
+            // two alternatives whose reported child count is not the truth (`tuple_size` 0,
+            // webkit.org/b/280798), which makes them the last two that should go untested.
+            .propertyOptions = {
+                .anchorPolicy = AnchorPolicy::Allow,
+                .anchorSizePolicy = AnchorSizePolicy::Allow,
+            },
         };
         auto simplificationOptions = CSSCalc::SimplificationOptions {
             .category = category,
@@ -863,7 +872,7 @@ static std::atomic<uint64_t> s_calcCompareCalls;
 // while testing against a stale count of them.
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void)
 {
-    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::Operation) + 1;
+    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::OpaqueOperation) + 1;
 }
 
 // Serializes one tree both ways and compares. The two arms see the same `Tree` object, in this

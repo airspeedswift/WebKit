@@ -869,8 +869,20 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
             out.kind = CSSCalcSwiftNodeKind::SiblingIndex;
             out.valueID = static_cast<uint16_t>(SiblingIndex::id);
         },
-        // All 34 IndirectNode<Op> alternatives. S0 serializes none of them, so naming them
-        // individually would be 34 cases the island cannot use; S1 splits this as it absorbs them.
+        // The four calc-operator nodes, which are the four whose serialization is the
+        // grouping-parenthesis state machine and the four S1 absorbs.
+        [&](const IndirectNode<Sum>&) { out.kind = CSSCalcSwiftNodeKind::Sum; },
+        [&](const IndirectNode<Product>&) { out.kind = CSSCalcSwiftNodeKind::Product; },
+        [&](const IndirectNode<Negate>&) { out.kind = CSSCalcSwiftNodeKind::Negate; },
+        [&](const IndirectNode<Invert>&) { out.kind = CSSCalcSwiftNodeKind::Invert; },
+        // The two alternatives whose `childCount` below is not the truth, reported as their own kind
+        // so that the island has to decide about them rather than infer "leaf" from a 0.
+        // CSSCalcTree.h:1317, webkit.org/b/280798.
+        [&](const IndirectNode<Anchor>&) { out.kind = CSSCalcSwiftNodeKind::OpaqueOperation; },
+        [&](const IndirectNode<AnchorSize>&) { out.kind = CSSCalcSwiftNodeKind::OpaqueOperation; },
+        // The remaining 30 IndirectNode<Op> alternatives. S1 serializes none of them, so naming
+        // them individually would be 30 cases the island cannot use; S2 splits this as it absorbs
+        // them.
         [&](const auto&) {
             out.kind = CSSCalcSwiftNodeKind::Operation;
         }
@@ -880,14 +892,52 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
     return out;
 }
 
-CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
+// The children of `node` in the order the serializer must visit them.
+//
+// For `Sum` and `Product` that is the SORTED order, because css-values-4 steps 6 and 7 both begin
+// "Sort root's children" and the key is `sortPriority` above -- a 60-case unit order generated with
+// `__COUNTER__`. That table is exactly the kind of thing this port is not allowed to transcribe into
+// Swift, so C++ answers in sorted order and the island only ever names a position. Every other kind
+// answers in tree order, since no other kind sorts.
+//
+// `generateSortedChildrenMap` runs per access rather than once per node, which makes serializing an
+// n-child Sum O(n^2 log n). Priced rather than assumed, for the reason CSSCalcSwiftTypes.h gives at
+// `childAt`: real calc trees are a handful of nodes. Caching it would mean the boundary owning a
+// buffer, which is the goop this design exists not to have.
+//
+// `get_if` rather than `WTF::switchOn` for the two-alternative test, and that is a MEASURED choice
+// rather than a stylistic one. The `switchOn` spelling instantiates its generic fallback lambda once
+// per alternative, and each copy re-enters `forEachChildNodeOfChild` and its own `switchOn`: the
+// dispatcher came out at 10,252 instructions plus 38 leaf lambdas of 303 each, about 22 KB, against
+// 302 instructions for the whole of S0's `childAt`. `get_if` tests two alternatives and shares one
+// copy of the generic path.
+static const Child* childInSerializationOrder(const Child& node, uint32_t index)
 {
+    const Children* sorts = nullptr;
+    if (auto* sum = get_if<IndirectNode<Sum>>(&node))
+        sorts = &(*sum)->children;
+    else if (auto* product = get_if<IndirectNode<Product>>(&node))
+        sorts = &(*product)->children;
+
+    if (sorts) {
+        auto sortedChildrenMap = generateSortedChildrenMap(*sorts);
+        if (index >= sortedChildrenMap.size())
+            return nullptr;
+        return &(*sorts)[sortedChildrenMap[index].index];
+    }
+
     const Child* found = nullptr;
     uint32_t current = 0;
-    forEachChildNodeOfChild(*m_node, [&](const Child& child) {
+    forEachChildNodeOfChild(node, [&](const Child& child) {
         if (current++ == index)
             found = &child;
     });
+    return found;
+}
+
+CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
+{
+    auto* found = childInSerializationOrder(*m_node, index);
     // Not a clamp and not a null return. The island only ever indexes below the `childCount` it was
     // just given, so reaching here means the two disagree, which would mean the tree changed under a
     // borrow -- and returning a default-constructed handle would turn that into a silent wrong
@@ -896,19 +946,26 @@ CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
     return CSSCalcSwiftNode { found };
 }
 
-void CSSCalcSwiftSink::appendCalcOpen()
+void CSSCalcSwiftSink::appendLiteral(uint8_t literal)
 {
-    m_builder->append("calc("_s);
-}
-
-void CSSCalcSwiftSink::appendCloseParen()
-{
-    m_builder->append(')');
-}
-
-void CSSCalcSwiftSink::appendEmptyParens()
-{
-    m_builder->append("()"_s);
+    // Selected by NAME, not by index, so the numbering `CSSCalcSwiftLiteral` declares in Swift is
+    // never transcribed here: reordering those cases cannot change which spelling is emitted, and
+    // adding one without teaching this switch is a `RELEASE_ASSERT_NOT_REACHED` rather than a
+    // silently wrong stylesheet. That is why this is a switch and not a table indexed by the raw
+    // value. One line per case, matching `sortPriority` above.
+    switch (literal) {
+    case CSSCalcSwiftLiteralCalcOpen:   m_builder->append("calc("_s);  return;
+    case CSSCalcSwiftLiteralOpenParen:  m_builder->append('(');        return;
+    case CSSCalcSwiftLiteralCloseParen: m_builder->append(')');        return;
+    case CSSCalcSwiftLiteralEmptyParens: m_builder->append("()"_s);    return;
+    case CSSCalcSwiftLiteralPlus:       m_builder->append(" + "_s);    return;
+    case CSSCalcSwiftLiteralMinus:      m_builder->append(" - "_s);    return;
+    case CSSCalcSwiftLiteralTimes:      m_builder->append(" * "_s);    return;
+    case CSSCalcSwiftLiteralDividedBy:  m_builder->append(" / "_s);    return;
+    case CSSCalcSwiftLiteralNegateOpen: m_builder->append("-1 * "_s);  return;
+    case CSSCalcSwiftLiteralInvertOpen: m_builder->append("1 / "_s);   return;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
 }
 
 void CSSCalcSwiftSink::appendNumber(double value, uint8_t unitType)
