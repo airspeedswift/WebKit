@@ -118,6 +118,14 @@ template<typename F, typename Op> void forAllChildNodes(const Op& root, const F&
         void operator()(const Random::Sharing&)
         {
         }
+        // `CalcMix`'s single tuple element is a `Vector<CalcMix::Item>` rather than a `Children`,
+        // because each argument carries an optional weight beside its value. The weight is not a
+        // `Child`, so only the value is visited, which is what "child nodes" means here.
+        void operator()(const Vector<CalcMix::Item>& items)
+        {
+            for (auto& item : items)
+                functor(item.value);
+        }
     };
     auto caller = Caller { functor };
     WTF::apply([&](const auto& ...x) { (..., caller(x)); }, root);

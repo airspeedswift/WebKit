@@ -25,6 +25,7 @@
 #pragma once
 
 #include "CSSPrimitiveNumericRange.h"
+#include <cstdint>
 #include <wtf/Forward.h>
 
 namespace WebCore {
@@ -46,15 +47,80 @@ struct SerializationOptions {
     const CSS::SerializationContext& serializationContext;
 };
 
-// https://drafts.csswg.org/css-values-4/#serialize-a-math-function
-void serializationForCSS(StringBuilder&, const Tree&, const SerializationOptions&);
-String serializationForCSS(const Tree&, const SerializationOptions&);
+// Which implementation serializes the tree. Both are compiled in; this chooses which one the entry
+// points below use, decided at compile time.
+//
+// Named explicitly by the validation bridge rather than taken from `defaultSerializer`, so a test
+// can exercise both implementations whatever the build is configured with, and an ignored build
+// flag cannot masquerade as a pass. The same arrangement as `CSSTokenizer::Scanner` and
+// `CSSParserFastPaths::ColorScanner`.
+enum class Serializer : bool { Cpp, Swift };
 
+// `defined() &&` rather than a `#if !defined / #define 0` prologue, which WebCore builds with
+// -Werror,-Wundef would otherwise require: the flag is only ever defined as 1, by
+// WK_USE_SWIFT_CSS_CALC_SERIALIZATION=YES, and that is where the choice lives.
+static constexpr Serializer defaultSerializer =
+#if defined(USE_SWIFT_CSS_CALC_SERIALIZATION) && USE_SWIFT_CSS_CALC_SERIALIZATION
+    Serializer::Swift;
+#else
+    Serializer::Cpp;
+#endif
+
+// Whether the C++ serializer is compiled in at all. Off means the Swift implementation is the
+// only one, which lets a build be checked by the compiler for what code is still needed rather
+// than by inspecting a symbol table.
+//
+// Spelled once, here, as a named condition rather than repeated as a two-clause `#if` at each of the
+// guarded regions in CSSCalcTree+Serialization.cpp, so the condition cannot drift between them.
+#if defined(USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK) && USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK
+#if !defined(USE_SWIFT_CSS_CALC_SERIALIZATION) || !USE_SWIFT_CSS_CALC_SERIALIZATION
+// Diagnosed here rather than left to produce a pile of link errors naming `serializeMathFunction`,
+// which is what removing every serializer from a build that still selects one looks like.
+#error "WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK=YES requires WK_USE_SWIFT_CSS_CALC_SERIALIZATION=YES: it removes the only other serializer."
+#endif
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// The test bridge selects `Serializer::Cpp` explicitly, and this mode removes that implementation.
+// The two cannot be combined, and saying so here is cheaper than discovering it as a missing
+// overload inside a large bridge file.
+#error "WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK=YES is mutually exclusive with WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=YES: the differential needs the C++ arm this mode removes."
+#endif
+#define CSS_CALC_CPP_SERIALIZER_COMPILED_IN 0
+#else
+#define CSS_CALC_CPP_SERIALIZER_COMPILED_IN 1
+#endif
+
+// https://drafts.csswg.org/css-values-4/#serialize-a-math-function
+void serializationForCSS(StringBuilder&, const Tree&, const SerializationOptions&, Serializer = defaultSerializer);
+String serializationForCSS(const Tree&, const SerializationOptions&, Serializer = defaultSerializer);
+
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
+// These two overloads have no caller anywhere in WebCore; every production path goes through the
+// `Tree` overloads above.
 void serializationForCSS(StringBuilder&, const Child&, const SerializationOptions&);
 String serializationForCSS(const Child&, const SerializationOptions&);
+#endif
 
 // Serializes a `<calc-sum>` as a math function argument, omitting the grouping parentheses.
 void serializationForCSSAsFunctionArgument(StringBuilder&, const Tree&, const SerializationOptions&);
+
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// Test-only, reached from CSSTokenizerSwiftBridge.cpp. The counter and the switch live beside the
+// code that hands a tree back rather than in the bridge, for the same reason CSSParserFastPaths.h
+// gives: the C++ answer for such a tree is the answer the comparison already trusts, so it is
+// invisible in an output comparison and the count has to come from the code that made the
+// decision.
+void webCoreCSSCalcSerializationSetForceDecline(bool);
+unsigned webCoreCSSCalcSerializationDeclineCount(void);
+// The last walk's node count and kind mask, so a test can assert that the walk really descended
+// through the tree and really reached every node kind it claims coverage of.
+uint32_t webCoreCSSCalcSerializationLastNodeCount(void);
+uint32_t webCoreCSSCalcSerializationLastKindMask(void);
+// The kind of the last tree's root, which the kind mask cannot answer: the mask says a `Negate`
+// appeared somewhere, but not whether one appears as a root, which is the one position where the
+// C++ serializer drops step 4's `-1 * ` prefix.
+uint32_t webCoreCSSCalcSerializationLastRootKind(void);
+uint64_t webCoreCSSCalcSerializationSwiftCallCount(void);
+#endif
 
 } // namespace CSSCalc
 } // namespace WebCore
