@@ -66,9 +66,20 @@ struct Child;
 // it, so the single declaration belongs on the producing side, and an `enum class ... : uint8_t`
 // imports as an ordinary Swift enum that Swift can `switch` over exhaustively.
 //
-// `Operation` collapses all 34 `IndirectNode<Op>` alternatives into one case: none is serialized
-// yet, so distinguishing them would be 34 names not yet used. The walk still descends through an
-// `Operation`, which exercises the child accessors on the kinds a later phase will need.
+// A single `Operation` case is split into four operator kinds here -- the four whose
+// serialization is the grouping-parenthesis state machine (css-values-4 steps 4 to 7). The other
+// 30 `IndirectNode<Op>` alternatives stay collapsed into `Operation`, not yet named. The walk
+// still descends through an `Operation`, which exercises the child accessors on the kinds a later
+// phase will need.
+//
+// `OpaqueOperation` is `Anchor` and `AnchorSize`, and it exists because for exactly those two
+// `childCount` lies. Both declare `tuple_size` 0 (CSSCalcTree.h:1317, "FIXME
+// (webkit.org/b/280798): make Anchor and AnchorSize tuple-like"), so `forAllChildNodes` reports no
+// children even though an `Anchor` holds an `AnchorSide` and an optional fallback `Child`. Without
+// a separate kind, serializing operators generically would read `childCount == 0`, conclude "leaf",
+// and emit an anchor() with its arguments silently dropped. A separate kind forces the compiler to
+// make that a decision rather than leaving a trap in the data: the exhaustive `switch` has to say
+// something about it, and what it says is "decline".
 enum class CSSCalcSwiftNodeKind : uint8_t {
     Number,
     Percentage,
@@ -77,7 +88,12 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
     Symbol,
     SiblingCount,
     SiblingIndex,
+    Sum,
+    Product,
+    Negate,
+    Invert,
     Operation,
+    OpaqueOperation,
 };
 
 // One node, described. A plain aggregate of trivial types, so it crosses in registers and needs no
@@ -138,12 +154,23 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // times per node to answer questions this answers together.
     WEBCORE_EXPORT CSSCalcSwiftNodeInfo info() const;
 
-    // The `index`th child. Linear, so a full walk is quadratic in the node count; that is
-    // deliberate and priced rather than assumed. A calc expression's tree is a handful of nodes
-    // (the deepest in the whole WPT css-values corpus is single digits), and the alternative --
-    // handing Swift a child *list* -- is either a buffer the boundary would have to own or a
-    // second representation of the tree. If a later measurement finds this costly, the fix is an
-    // iterator handle, not a flattened array.
+    // The `index`th child, IN SERIALIZATION ORDER.
+    //
+    // For `Sum` and `Product` that is not tree order: css-values-4 steps 6 and 7 both begin "Sort
+    // root's children", and the sort key is `sortPriority`, a 60-case unit order generated with
+    // `__COUNTER__` (CSSCalcTree+Serialization.cpp:146). Transcribing that table into Swift is
+    // exactly the duplication this port is not allowed to do, and handing Swift a permutation to
+    // apply would need a buffer the boundary would have to own. So C++ answers in the sorted order
+    // it already computes, the same way it already answers `formatCSSNumberValue` -- a position is
+    // named here and C++ owns what that position means. Every other kind answers in tree order,
+    // because no other kind sorts.
+    //
+    // Linear, so a full walk is quadratic in the node count, and for Sum and Product it also
+    // re-sorts per access. That is deliberate and priced rather than assumed: a calc expression's
+    // tree is a handful of nodes (the deepest in the whole WPT css-values corpus is single digits),
+    // and the alternative -- handing Swift a child *list* -- is either a buffer the boundary would
+    // have to own or a second representation of the tree. If a measurement finds this costly, the
+    // fix is an iterator handle, not a flattened array.
     WEBCORE_EXPORT CSSCalcSwiftNode childAt(uint32_t index) const [[clang::lifetimebound]];
 
 private:
@@ -173,11 +200,20 @@ struct SWIFT_SAFE CSSCalcSwiftSink {
     // Every method is non-const, so the importer presents them as `mutating` and Swift takes the
     // sink `inout`. That is the honest shape: appending is a mutation.
 
-    // `calc(`, `)` and `()` -- the three fixed spellings emitted. Named rather than taking a
-    // string, so no text crosses the boundary and there is no second copy of any CSS literal.
-    WEBCORE_EXPORT void appendCalcOpen();
-    WEBCORE_EXPORT void appendCloseParen();
-    WEBCORE_EXPORT void appendEmptyParens();
+    // One entry for every fixed spelling this emits, selected by `CSSCalcSwiftLiteral` -- declared
+    // once, in Swift, and reaching C++ through WebCoreSwift-Generated.h. Ten fixed spellings
+    // (`calc(`, `)`, `()`, `(`, ` + `, ` - `, ` * `, ` / `, `-1 * `, `1 / `) share this one entry and
+    // a switch rather than ten named methods, so the numbering lives on the producing side and
+    // there is no table of spellings to keep in sync on the Swift side.
+    //
+    // This converts a compile-time choice into a run-time one, but the C++ code it replaces already
+    // made the same choice at run time -- `state.openGroup()` is a ternary returning one of two
+    // `ASCIILiteral`s, read per node -- and no text crosses the boundary either way, so there is
+    // still exactly one copy of every CSS literal in the program, and it is in C++.
+    //
+    // `uint8_t` rather than the imported enum type because this header is what the generated header
+    // is generated *from*; it cannot see the Swift enum's C name.
+    WEBCORE_EXPORT void appendLiteral(uint8_t literal);
 
     // Routes to CSS::serializationForCSS over a CSS::SerializableNumber, which is what the C++
     // serializer at CSSCalcTree+Serialization.cpp:589 does, so the two arms share one
