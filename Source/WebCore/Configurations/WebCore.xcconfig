@@ -33,7 +33,7 @@ ENABLE_LLVM_PROFILE_GENERATION_DEFINES_YES = ENABLE_LLVM_PROFILE_GENERATION=1;
 WK_PGO_GEN_FLAGS = $(WK_PGO_GEN_FLAGS_$(ENABLE_LLVM_PROFILE_GENERATION));
 WK_PGO_GEN_FLAGS_YES = -fprofile-generate;
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES) $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES);
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES) $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES);
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 
 // Selects the Swift CSS tokenizer island (CSSTokenizerSwift.swift) as the scanner the
@@ -75,6 +75,26 @@ WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES_YES = USE_SWIFT_CSS_COLOR_FAST_PATHS=1
 // effect with the bridge's webCoreCSSCalcSerializationIsSwift() rather than assuming.
 WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES = $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES_$(WK_USE_SWIFT_CSS_CALC_SERIALIZATION));
 WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES_YES = USE_SWIFT_CSS_CALC_SERIALIZATION=1;
+
+// Compiles the C++ calc() serializer OUT, leaving the island as the only implementation. This is a
+// MEASUREMENT MODE, not a shipping one, and it is what answers the question the LoC ledger asks:
+// *deletable* -- what could be dropped if the Swift permanently replaced the C++ path -- as opposed
+// to *deleted*, which stays 0 by decision because keeping the fallback is the schedule.
+//
+// It has to be a build mode rather than an `nm` inspection, and that is the correction R109 makes
+// to R107. The fallback in `serializationForCSS(Tree, ...)` is unconditional code, so every one of
+// those symbols links whatever the island's coverage is, and their presence says nothing. Guarding
+// the bodies out instead makes the COMPILER the oracle: it either links, in which case the guarded
+// lines are deletable and the set is enumerated by construction, or it names the reference that
+// keeps one alive. That is a constructive answer where a symbol diff is an inferential one.
+//
+// Mutually exclusive with WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE, necessarily: the differential names
+// `Serializer::Cpp` explicitly on one arm, which is the whole point of it, and that arm is what
+// this mode removes. So a build in this mode cannot run calccheck, and a build that runs calccheck
+// cannot be in this mode. Requires WK_USE_SWIFT_CSS_CALC_SERIALIZATION=YES, asserted in
+// CSSCalcTree+Serialization.h rather than left to produce a link error.
+WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES = $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES_$(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK));
+WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES_YES = USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK=1;
 
 WK_OPTIMIZATION_PROFILE_FILE = $(BUILT_PRODUCTS_DIR)/DerivedSources/WebCore/Profiling/$(arch).profdata;
 WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER = $(WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER_$(USE_INTERNAL_SDK));
