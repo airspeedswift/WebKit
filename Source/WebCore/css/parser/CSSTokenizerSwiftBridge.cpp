@@ -253,8 +253,10 @@ std::optional<CSSCalc::Tree> constructRootShape(unsigned shape)
     if (!parsed.tree)
         return std::nullopt;
 
-    // `calc(1px)` parses as a `Sum` wrapping the leaf (CSSCalcTree+Parser.cpp:921 keeps the calc()
-    // wrapper that way), so unwrap to the leaf itself before rebuilding.
+    // `calc(1px)` does NOT survive as a `Sum` wrapping the leaf: `parseAndSimplify` folds the
+    // one-child wrapper away and the root is the leaf itself, so this unwrap is inert today. It is
+    // kept so that a future simplification change which stops folding cannot silently turn this
+    // into a `Sum` shape.
     auto leaf = WTF::move(parsed.tree->root);
     if (auto* sum = get_if<CSSCalc::IndirectNode<CSSCalc::Sum>>(&leaf); sum && (*sum)->children.size() == 1)
         leaf = WTF::move((*sum)->children[0]);
@@ -851,6 +853,7 @@ struct CSSCalcSerializationComparison {
 };
 
 WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization(const char*, size_t, char*, size_t, char*, size_t);
+WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerializationStaged(const char*, size_t, unsigned, double, double, char*, size_t, char*, size_t);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcRoundTrip(const char*, size_t, unsigned, char*, size_t, char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSCalcSetForceDecline(bool);
@@ -913,6 +916,62 @@ WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization
     auto declinesBefore = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
     auto cppText = CSSCalc::serializationForCSS(*parsed.tree, options, CSSCalc::Serializer::Cpp);
     auto swiftText = CSSCalc::serializationForCSS(*parsed.tree, options, CSSCalc::Serializer::Swift);
+    auto declinesAfter = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+
+    result.declined = declinesAfter != declinesBefore ? 1 : 0;
+    result.nodeCount = CSSCalc::webCoreCSSCalcSerializationLastNodeCount();
+    result.kindMask = CSSCalc::webCoreCSSCalcSerializationLastKindMask();
+    result.rootKind = CSSCalc::webCoreCSSCalcSerializationLastRootKind();
+    result.agree = cppText == swiftText ? 1 : 0;
+    result.cppLength = static_cast<uint32_t>(copyOutSerialization(cppText, cppOut, cppCapacity));
+    result.swiftLength = static_cast<uint32_t>(copyOutSerialization(swiftText, swiftOut, swiftCapacity));
+    return result;
+}
+
+// The same comparison at a caller-chosen `Stage` and `CSS::Range`.
+//
+// A parse always produces `Stage::Specified`; `Stage::Computed` is written in exactly one place in
+// WebCore, StyleCalculationTree+Conversion.cpp:357 (`toCSS`, the getComputedStyle path), which
+// needs a `Style::Calculation::Tree` and the conversion data this entry does not have. So the
+// stage is set directly on an already-parsed tree: both serializers run over the same `Tree`
+// object regardless of how it was built.
+//
+// The stage only changes serialization for a numeric root, so this only tests something if the
+// root is one. `constructRootShape`'s `calc(1px)` might look like it parses to a one-child `Sum`
+// wrapping the leaf, but `parseAndSimplify` folds that wrapper away, landing on a numeric root
+// directly. `Expect::Leaf` below asserts `nodeCount == 1` and a numeric `rootKind` rather than
+// assuming it.
+WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerializationStaged(const char* text, size_t length, unsigned computedStage, double rangeMinimum, double rangeMaximum, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
+{
+    s_calcCompareCalls.fetch_add(1, std::memory_order_relaxed);
+
+    CSSCalcSerializationComparison result { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    auto parsed = parseCalcExpression(source);
+    if (!parsed.tree)
+        return result;
+
+    // The parsed tree with only its stage replaced. Rebuilt rather than mutated in place because
+    // `Tree::stage` is not something a caller of `parseCalcExpression` should be able to reach
+    // through the returned object.
+    auto tree = CSSCalc::Tree {
+        .root = WTF::move(parsed.tree->root),
+        .type = parsed.tree->type,
+        .stage = computedStage ? CSSCalc::Stage::Computed : CSSCalc::Stage::Specified,
+    };
+
+    result.parsed = 1;
+    result.category = static_cast<uint32_t>(parsed.category);
+
+    auto options = CSSCalc::SerializationOptions {
+        .range = WebCore::CSS::Range { rangeMinimum, rangeMaximum },
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+    auto cppText = CSSCalc::serializationForCSS(tree, options, CSSCalc::Serializer::Cpp);
+    auto swiftText = CSSCalc::serializationForCSS(tree, options, CSSCalc::Serializer::Swift);
     auto declinesAfter = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
 
     result.declined = declinesAfter != declinesBefore ? 1 : 0;
