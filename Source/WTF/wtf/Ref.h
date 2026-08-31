@@ -162,10 +162,14 @@ public:
     const T* ptrAllowingHashTableEmptyValue() const LIFETIME_BOUND { ASSERT(m_ptr || isHashTableEmptyValue()); return PtrTraits::unwrap(m_ptr); }
     T* ptrAllowingHashTableEmptyValue() LIFETIME_BOUND { ASSERT(m_ptr || isHashTableEmptyValue()); return PtrTraits::unwrap(m_ptr); }
 
-    T* operator->() const LIFETIME_BOUND { ASSERT(m_ptr); return PtrTraits::unwrap(m_ptr); }
-    T* ptr() const LIFETIME_BOUND RETURNS_NONNULL { ASSERT(m_ptr); return PtrTraits::unwrap(m_ptr); }
+    // SWIFT_RETURNS_UNRETAINED: when T is a foreign reference type (SWIFT_SHARED_REFERENCE),
+    // Swift cannot infer whether these hand back an owned or an unowned value, and drops all
+    // three with "cannot infer ownership of foreign reference value". A Ref<T> is a +1 handle
+    // that keeps owning its referent, so every one of them returns unretained.
+    T* operator->() const LIFETIME_BOUND SWIFT_RETURNS_UNRETAINED { ASSERT(m_ptr); return PtrTraits::unwrap(m_ptr); }
+    T* ptr() const LIFETIME_BOUND RETURNS_NONNULL SWIFT_RETURNS_UNRETAINED { ASSERT(m_ptr); return PtrTraits::unwrap(m_ptr); }
     T* unsafePtr() const RETURNS_NONNULL { ASSERT(m_ptr); return PtrTraits::unwrap(m_ptr); } // FIXME: Replace with ptr() then remove.
-    T& get() const LIFETIME_BOUND { ASSERT(m_ptr); return *PtrTraits::unwrap(m_ptr); }
+    T& get() const LIFETIME_BOUND SWIFT_RETURNS_UNRETAINED { ASSERT(m_ptr); return *PtrTraits::unwrap(m_ptr); }
     T& unsafeGet() const { ASSERT(m_ptr); return *PtrTraits::unwrap(m_ptr); } // FIXME: Replace with get() then remove.
     operator T&() const LIFETIME_BOUND { ASSERT(m_ptr); return *PtrTraits::unwrap(m_ptr); }
     bool operator!() const { ASSERT(m_ptr); return !*m_ptr; }
