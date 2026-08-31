@@ -81,11 +81,21 @@ struct Child;
 // belongs on the C++ side; an `enum class ... : uint8_t` imports as an ordinary Swift enum that
 // the island can `switch` over exhaustively, and there is nothing left to `static_assert`.
 //
-// S1 splits four operator kinds out of S0's single `Operation` case -- the four whose serialization
-// is the grouping-parenthesis state machine (css-values-4 steps 4 to 7). The other 30
-// `IndirectNode<Op>` alternatives stay collapsed into `Operation`, because naming them would be 30
-// names the island cannot yet use; S2 splits those as it absorbs them. The walk still descends
-// through an `Operation`, which is what proves the child accessors work on the kinds S2 will need.
+// S1 split four operator kinds out of S0's single `Operation` case -- the four whose serialization
+// is the grouping-parenthesis state machine (css-values-4 steps 4 to 7). S2 takes the remaining 30,
+// and it does NOT name them one per kind, because their *serialization* only has four shapes. What
+// the island needs of an operator is the shape, so the kind names the shape and `valueID` carries
+// the name: `Function` is `name(id)` followed by comma-separated arguments, which is 19 of the 30
+// outright and `clamp()` too whenever neither bound is `none`. A per-operator kind would have been 30
+// Swift cases and 30 C++ lambdas that all did the same thing, and it would have put the operator
+// *table* on both sides of the boundary.
+//
+// `Operation` is therefore no longer "everything unabsorbed" but a much narrower thing: the four
+// operations whose arguments are not a list of calculation trees -- `Random`'s cache key,
+// `CalcMix`'s per-item weights -- plus any operation added to CSSCalcTree.h that this file has not
+// been taught. That fallback direction is deliberate and is the whole reason the C++ side uses an
+// ALLOWLIST of generically-serialized operations: a new operation declines until someone teaches
+// the island, where a denylist would silently serialize it with the wrong spelling.
 //
 // `OpaqueOperation` is `Anchor` and `AnchorSize`, and it exists because for exactly those two
 // `childCount` LIES. Both declare `tuple_size` 0 (CSSCalcTree.h:1317, "FIXME
@@ -95,6 +105,10 @@ struct Child;
 // `childCount == 0`, conclude "leaf", and emit an anchor() with its arguments silently dropped.
 // A separate kind makes that a decision the compiler forces rather than a trap left in the data:
 // the island's exhaustive switch has to say something about it, and what it says is "decline".
+//
+// New cases are APPENDED, never inserted: `CSSCalcSwiftSerializationResult::kindMask` is `1 <<
+// rawValue` and the differential's per-kind coverage counts are printed by bit number, so inserting
+// a case would silently relabel every historical figure.
 enum class CSSCalcSwiftNodeKind : uint8_t {
     Number,
     Percentage,
@@ -109,6 +123,35 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
     Invert,
     Operation,
     OpaqueOperation,
+    // `Deg2Rad`, which is inserted at parse time inside `Sin`/`Cos`/`Tan` when the argument is an
+    // angle and has no CSS-level spelling at all. It serializes as its child, transparently.
+    Transparent,
+    // A math function whose serialization is `nameLiteralForSerialization(Op::id)`, `(`, its
+    // arguments joined with `, `, `)`. Nineteen of the 34 operations by name, plus `clamp()` when
+    // neither bound is `none`, and `valueID` is the name.
+    Function,
+    // `round()`: the same shape with `round(` and the rounding strategy ahead of the arguments.
+    // `valueID` is the STRATEGY (`nearest`, `up`, `down`, `to-zero`), because the function name is
+    // fixed and the strategy is what distinguishes the four operations.
+    RoundFunction,
+    // `progress(no-clamp ...)`, whose prefix is the function name followed by `(no-clamp ` -- a
+    // space rather than the `, ` every other multi-argument prefix uses.
+    ProgressNoClampFunction,
+    // `clamp()` with one bound holding the keyword `none`, which is the one place in the whole tree
+    // where an ARGUMENT is not a child node: `min` and `max` are `ChildOrNone`, and the C++ argument
+    // serializer emits `none` for a bound holding one (`+Serialization.cpp:588`-`:596`) where
+    // `forAllChildNodes` skips it entirely. Without these the island would serialize
+    // `clamp(none, VAL, MAX)` as `clamp(VAL, MAX)` -- a wrong value rather than a missing one.
+    //
+    // Two kinds rather than a flag on the node, because that is what makes the island's exhaustive
+    // `switch` decide. It also replaced the first attempt at this, a cursor discriminated so it could
+    // stand on something other than a `Child`: that was 25 more lines of C++ for identical coverage,
+    // and it took the glue ratio the wrong way. `clamp(none, VAL, none)` needs no kind at all --
+    // simplification rewrites it to `VAL` for any `val` whatever (`+Simplification.cpp:1007`) -- and
+    // is reported as `Operation`, so a change that made it reachable declines instead of dropping a
+    // bound.
+    ClampWithNoneMinimum,
+    ClampWithNoneMaximum,
 };
 
 // One node, described. A plain aggregate of trivial types, so it crosses in registers and needs no
@@ -123,8 +166,18 @@ struct CSSCalcSwiftNodeInfo {
     // How many `Child`-typed children this node has, counting through `ChildOrNone` and
     // `std::optional<Child>` exactly as `forAllChildNodes` does -- so a `round()` with no second
     // argument reports one child, not two, and the island never sees an absent one.
+    //
+    // A `ChildOrNone` holding `none` is therefore NOT counted, which is right and is why the two
+    // `ClampWithNone...` kinds exist: the count stays the number of subtrees to walk, and the kind
+    // says where the keyword goes. A `static_assert` in CSSCalcTree+Serialization.cpp holds `Clamp` to
+    // being the only operation with a `ChildOrNone` at all, so no other kind can hide one.
     uint32_t childCount;
     // For Symbol, SiblingCount and SiblingIndex: the CSSValueID underlying value.
+    // For Function and ProgressNoClampFunction: `Op::id`, the function's own name. For
+    // RoundFunction: the ROUNDING STRATEGY's id, since the function name is always `round`.
+    //
+    // This field, and not a kind per operator, is what keeps the operator name table on the C++
+    // side: the island names an id and `appendValueIDName` owns how it is spelled.
     uint16_t valueID;
     // For the four numeric kinds: `toCSSUnit(node)`, i.e. the CSSUnitType underlying value.
     // A unit *number* rather than a unit string, so the island names a unit and C++ owns how it is
@@ -136,6 +189,11 @@ struct CSSCalcSwiftNodeInfo {
 };
 
 // A borrowed cursor onto one node of a live CSSCalc::Tree.
+//
+// Always a `Child`, i.e. a subtree, which is what keeps this an 8-byte handle with nothing to
+// discriminate. `clamp()`'s `none` bound is the one argument that is not a subtree, and it is carried
+// by the parent's *kind* rather than by a cursor that could point at something else -- see
+// `CSSCalcSwiftNodeKind::ClampWithNoneMinimum`.
 //
 // `SWIFT_NONESCAPABLE` is the point: the handle borrows a node owned by a tree on the C++ stack,
 // and `~Escapable` is what makes the compiler enforce that it cannot outlive the borrow. Arm 13
