@@ -134,6 +134,11 @@ const CSSParserContext& calcParserContext()
         // CSSCalcTree+Parser.cpp:1345, so the `SiblingCount` and `SiblingIndex` node kinds are
         // unreachable through this entry.
         built.cssTreeCountingFunctionsEnabled = true;
+        // Without these two, `random()` and `calc-mix()` are rejected outright at
+        // CSSCalcTree+Parser.cpp:663 and :933, making the `Random` and `CalcMix` alternatives
+        // unreachable and the `Operation` node kind -- which covers exactly those two -- never produced.
+        built.cssRandomFunctionEnabled = true;
+        built.cssCalcMixEnabled = true;
         return built;
     }();
     return context.get();
@@ -229,6 +234,51 @@ size_t copyOutSerialization(const String& text, char* out, size_t capacity)
     return span.size();
 }
 
+// A tree built directly rather than parsed, to reach a root shape no parse produces: a bare
+// `Negate` or `Invert` at the root of a `Tree`.
+//
+// `serializeMathFunction` has explicit `serializeMathFunctionArguments` overloads for `Sum` and
+// `Product` that route back into the calculation-tree serializer, and none for `Negate` or
+// `Invert` (CSSCalcTree+Serialization.cpp:403-:411). A `Negate` root therefore takes the generic
+// argument template at :545, which walks the node's single child and emits it with no prefix at
+// all -- step 4's `-1 * ` is dropped, so the serialized text means a different number from the
+// tree it came from. The same `Negate` node one level down inside a `Sum` does emit `-1 * `; only
+// the root position is affected.
+//
+// The leaf is parsed rather than constructed so that its `Type` matches what the real parser
+// would produce; only the operator node above it is built by hand.
+std::optional<CSSCalc::Tree> constructRootShape(unsigned shape)
+{
+    auto parsed = parseCalcExpression("calc(1px)"_str);
+    if (!parsed.tree)
+        return std::nullopt;
+
+    // `calc(1px)` parses as a `Sum` wrapping the leaf (CSSCalcTree+Parser.cpp:921 keeps the calc()
+    // wrapper that way), so unwrap to the leaf itself before rebuilding.
+    auto leaf = WTF::move(parsed.tree->root);
+    if (auto* sum = get_if<CSSCalc::IndirectNode<CSSCalc::Sum>>(&leaf); sum && (*sum)->children.size() == 1)
+        leaf = WTF::move((*sum)->children[0]);
+    auto type = CSSCalc::getType(leaf);
+
+    auto operatorNode = [&](CSSCalc::Child&& child) -> CSSCalc::Child {
+        if (shape & 1)
+            return CSSCalc::makeChild(CSSCalc::Invert { WTF::move(child) }, type);
+        return CSSCalc::makeChild(CSSCalc::Negate { WTF::move(child) }, type);
+    };
+
+    auto root = operatorNode(WTF::move(leaf));
+    if (shape >= 2) {
+        Vector<CSSCalc::Child> children;
+        children.append(WTF::move(root));
+        root = CSSCalc::makeChild(CSSCalc::Sum { WTF::move(children) }, type);
+    }
+
+    return CSSCalc::Tree {
+        .root = WTF::move(root),
+        .type = type,
+        .stage = CSSCalc::Stage::Specified,
+    };
+}
 
 } // namespace
 } // namespace WebCore
@@ -794,6 +844,10 @@ struct CSSCalcSerializationComparison {
     // Which CSS::Category the expression parsed at, so the harness can report the spread rather
     // than assume one.
     uint32_t category;
+    // The kind of the tree's ROOT, which the mask above cannot answer: the mask says a `Negate` was
+    // somewhere in the tree, but not whether it was the root, which is the one position where the
+    // C++ drops step 4's `-1 * ` prefix.
+    uint32_t rootKind;
 };
 
 WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization(const char*, size_t, char*, size_t, char*, size_t);
@@ -804,6 +858,7 @@ WEBCORE_EXPORT unsigned webCoreCSSCalcDeclineCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSwiftCallCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcSerializeConstructedRoot(unsigned, unsigned, char*, size_t);
 
 // How many times WebCore was actually asked to compare, so a caller can confirm its sweep really
 // reached this code rather than being elided or miscounted.
@@ -813,7 +868,24 @@ static std::atomic<uint64_t> s_calcCompareCalls;
 // be checked against a stale count.
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void)
 {
-    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::OpaqueOperation) + 1;
+    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::ClampWithNoneMaximum) + 1;
+}
+
+// Serializes one of the four directly-constructed root shapes, on the named arm. Returns the length,
+// or 0 if the leaf could not be parsed. See `constructRootShape` for what this settles and why a
+// parse cannot settle it.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcSerializeConstructedRoot(unsigned shape, unsigned serializerKind, char* out, size_t capacity)
+{
+    auto tree = constructRootShape(shape);
+    if (!tree)
+        return 0;
+    auto options = CSSCalc::SerializationOptions {
+        .range = WebCore::CSS::All,
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+    auto text = CSSCalc::serializationForCSS(*tree, options,
+        serializerKind ? CSSCalc::Serializer::Swift : CSSCalc::Serializer::Cpp);
+    return static_cast<uint32_t>(copyOutSerialization(text, out, capacity));
 }
 
 // Serializes one tree both ways and compares. The two arms see the same `Tree` object, in this
@@ -822,7 +894,7 @@ WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization
 {
     s_calcCompareCalls.fetch_add(1, std::memory_order_relaxed);
 
-    CSSCalcSerializationComparison result { 0, 0, 0, 0, 0, 0, 0, 0 };
+    CSSCalcSerializationComparison result { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
 
     auto parsed = parseCalcExpression(source);
@@ -845,6 +917,7 @@ WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization
     result.declined = declinesAfter != declinesBefore ? 1 : 0;
     result.nodeCount = CSSCalc::webCoreCSSCalcSerializationLastNodeCount();
     result.kindMask = CSSCalc::webCoreCSSCalcSerializationLastKindMask();
+    result.rootKind = CSSCalc::webCoreCSSCalcSerializationLastRootKind();
     result.agree = cppText == swiftText ? 1 : 0;
     result.cppLength = static_cast<uint32_t>(copyOutSerialization(cppText, cppOut, cppCapacity));
     result.swiftLength = static_cast<uint32_t>(copyOutSerialization(swiftText, swiftOut, swiftCapacity));

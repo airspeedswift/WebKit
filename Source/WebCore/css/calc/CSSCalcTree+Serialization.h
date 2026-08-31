@@ -85,6 +85,11 @@ unsigned webCoreCSSCalcSerializationDeclineCount(void);
 // through the tree and really reached every node kind it claims coverage of.
 uint32_t webCoreCSSCalcSerializationLastNodeCount(void);
 uint32_t webCoreCSSCalcSerializationLastKindMask(void);
+// The kind of the last tree's root, which the kind mask cannot answer: the mask says a `Negate`
+// appeared somewhere, but not whether one appears as a root, which is the one position where the
+// C++ drops step 4's `-1 * ` prefix. Accumulated over every tree parsed during testing, so "no
+// parse produces one" is measured rather than assumed.
+uint32_t webCoreCSSCalcSerializationLastRootKind(void);
 uint64_t webCoreCSSCalcSerializationSwiftCallCount(void);
 #endif
 
