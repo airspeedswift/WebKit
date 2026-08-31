@@ -53,6 +53,19 @@ IGNORE_CLANG_WARNINGS_END
 namespace WebCore {
 namespace CSSCalc {
 
+// REGION 1 of 3 of the C++ serializer, guarded so that a build can answer what is DELETABLE by
+// making the compiler the oracle. See CSSCalcTree+Serialization.h for the mode and
+// WebCore.xcconfig for why it is a build mode rather than an `nm` inspection.
+//
+// The sorting block below is deliberately OUTSIDE all three regions: `sortPriority` and
+// `generateSortedChildrenMap` are called by the island's own bridge, from
+// `childInSerializationOrder` at :1139. With the regions gone that is their ONLY caller -- the
+// serializer's two uses are at :655 and :710, both inside region 2 -- so those 107 lines do not
+// become deletable and instead get RECLASSIFIED: they stop being "the C++ serializer" and become
+// "C++ the island calls". The ratio has to be reported on that basis as well as the added-lines
+// basis, rather than left flattering.
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
+
 struct SerializationState {
     enum class GroupingParenthesis {
         Omit,
@@ -128,6 +141,8 @@ static void serializeCalculationTree(StringBuilder&, const IndirectNode<Invert>&
 static void serializeCalculationTree(StringBuilder&, const IndirectNode<Deg2Rad>&, SerializationState&);
 template<Numeric Op> void serializeCalculationTree(StringBuilder&, const Op&, SerializationState&);
 template<typename Op> static void serializeCalculationTree(StringBuilder&, const IndirectNode<Op>&, SerializationState&);
+
+#endif // CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 
 // MARK: Sorting
 
@@ -267,6 +282,9 @@ static Vector<ChildRepresentation, 16> generateSortedChildrenMap(const Children&
 
     return sortedChildrenMap;
 }
+
+// REGION 2 of 3: the serializer proper, css-values-4 steps 1 to 7 for every node kind.
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 
 // MARK: Math Function
 // https://drafts.csswg.org/css-values-4/#serialize-a-math-function
@@ -777,6 +795,8 @@ template<typename Op> void serializeCalculationTree(StringBuilder& builder, cons
     // 3. If root is anything but a Sum, Negate, Product, or Invert node, serialize a math function for the function corresponding to the node type, treating the node’s children as the function’s comma-separated calculation arguments, and return the result.
     serializeMathFunction(builder, root, state);
 }
+
+#endif // CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 
 // MARK: - The Swift calc serialization island (CSSCalcSerializationSwift.swift)
 //
@@ -1337,12 +1357,33 @@ void serializationForCSS(StringBuilder& builder, const Tree& tree, const Seriali
     if (serializer == Serializer::Swift && trySerializeWithSwiftIsland(builder, tree, options))
         return;
 
+    // REGION 3 of 3: the fallback itself, and the two `Child` entries that nothing calls.
+    //
+    // This is the region R107's `nm` criterion could never have accounted for, and the reason that
+    // criterion is wrong: the code below is UNCONDITIONAL, so `serializeMathFunction` links into
+    // every build whatever the island's coverage is, and its presence in a symbol table measures
+    // the fallback decision rather than the port.
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
     SerializationState state {
         .stage = tree.stage,
         .range = options.range,
         .serializationContext = options.serializationContext,
     };
     serializeMathFunction(builder, tree.root, state);
+#else
+    // With no C++ serializer there is nowhere to fall back to, and `serializationForCSS` has no
+    // failure channel -- it returns a `String`, and every caller treats that as the answer. So a
+    // decline has to stop rather than return a truncated `cssText`, which is the same trade the
+    // tokenizer island took when it dropped its fallback: a stop is recoverable evidence, a
+    // silently wrong serialization of every math function on the page is not.
+    //
+    // The island's remaining decline paths all have NO PRODUCER -- the root `Negate`/`Invert`
+    // defect it declines rather than reproduces, a childless `Sum`/`Product`, an `anchor()` whose
+    // child count disagrees with its record, and the `Operation` fall-through -- which is what
+    // makes this mode buildable at all, and is a claim `calccheck` tests at 6,188 trees and 0
+    // declines, on the arm that is not this build.
+    RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the calc() island declined a tree in a build with no C++ serializer compiled in");
+#endif
 }
 
 String serializationForCSS(const Tree& tree, const SerializationOptions& options, Serializer serializer)
@@ -1352,6 +1393,7 @@ String serializationForCSS(const Tree& tree, const SerializationOptions& options
     return builder.toString();
 }
 
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 void serializationForCSS(StringBuilder& builder, const Child& child, const SerializationOptions& options)
 {
     SerializationState state {
@@ -1367,6 +1409,7 @@ String serializationForCSS(const Child& child, const SerializationOptions& optio
     serializationForCSS(builder, child, options);
     return builder.toString();
 }
+#endif
 
 } // namespace CSSCalc
 } // namespace WebCore
