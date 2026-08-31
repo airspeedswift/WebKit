@@ -831,6 +831,39 @@ static uint32_t childNodeCount(const Child& node)
     return count;
 }
 
+// MARK: The operations the island serializes as plain math functions
+//
+// An ALLOWLIST, and the direction matters more than the contents. These are the operations for which
+// `serializeMathFunctionPrefix` and `serializeMathFunctionArguments` both resolve to their *generic*
+// templates above (`:398` and `:545`), i.e. whose whole serialization is
+// `nameLiteralForSerialization(Op::id)`, `(`, the arguments joined with `, `, `)`. An operation added
+// to CSSCalcTree.h is not in this list, so the island declines it until someone teaches it -- where a
+// denylist would silently serialize a new function through the generic path and be wrong if the new
+// function had a prefix or argument overload of its own.
+//
+// `round()`'s four strategies, `progress(no-clamp ...)`, `Sum`, `Product`, `Negate` and `Invert` are
+// absent because they have prefix overloads; `Random`, `CalcMix`, `Anchor` and `AnchorSize` because
+// they have argument overloads whose arguments are not a list of calculation trees; `Deg2Rad` because
+// it has no CSS spelling at all.
+template<typename T, typename... Ts> static constexpr bool isOneOf = (std::same_as<T, Ts> || ...);
+
+template<typename Op> static constexpr bool isGenericSerializedFunction = isOneOf<Op,
+    Min, Max, Mod, Rem, Sin, Cos, Tan, Asin, Acos, Atan, Atan2, Pow, Sqrt, Hypot, Log, Exp,
+    Abs, Sign, Progress>;
+
+template<typename Op> static constexpr bool isRoundingStrategy = isOneOf<Op,
+    RoundNearest, RoundUp, RoundDown, RoundToZero>;
+
+// Whether any of `Op`'s tuple elements is a `ChildOrNone`, which is the one argument shape a child
+// COUNT cannot describe: `forAllChildren` visits a bound holding `none` and the serializer writes
+// `none` for it, while `forAllChildNodes` -- what `childNodeCount` uses -- skips it entirely. `Clamp`
+// is the only such operation, and the island handles it by *kind* rather than by count. This is the
+// `static_assert` that makes a second one a build failure rather than an argument silently dropped
+// from a stylesheet.
+template<typename Op> static constexpr bool hasChildOrNoneArgument = []<size_t... I>(std::index_sequence<I...>) {
+    return (std::same_as<std::remove_cvref_t<std::tuple_element_t<I, Op>>, ChildOrNone> || ...);
+}(std::make_index_sequence<std::tuple_size_v<Op>> { });
+
 CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
 {
     // One `switchOn` over the 41-alternative Variant, answering every question at once. The five
@@ -870,21 +903,63 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
             out.valueID = static_cast<uint16_t>(SiblingIndex::id);
         },
         // The four calc-operator nodes, which are the four whose serialization is the
-        // grouping-parenthesis state machine and the four S1 absorbs.
+        // grouping-parenthesis state machine and the four S1 absorbed.
         [&](const IndirectNode<Sum>&) { out.kind = CSSCalcSwiftNodeKind::Sum; },
         [&](const IndirectNode<Product>&) { out.kind = CSSCalcSwiftNodeKind::Product; },
         [&](const IndirectNode<Negate>&) { out.kind = CSSCalcSwiftNodeKind::Negate; },
         [&](const IndirectNode<Invert>&) { out.kind = CSSCalcSwiftNodeKind::Invert; },
+        // No CSS-level spelling: `serializeCalculationTree` emits this node's child in its place.
+        [&](const IndirectNode<Deg2Rad>&) { out.kind = CSSCalcSwiftNodeKind::Transparent; },
         // The two alternatives whose `childCount` below is not the truth, reported as their own kind
         // so that the island has to decide about them rather than infer "leaf" from a 0.
         // CSSCalcTree.h:1317, webkit.org/b/280798.
         [&](const IndirectNode<Anchor>&) { out.kind = CSSCalcSwiftNodeKind::OpaqueOperation; },
         [&](const IndirectNode<AnchorSize>&) { out.kind = CSSCalcSwiftNodeKind::OpaqueOperation; },
-        // The remaining 30 IndirectNode<Op> alternatives. S1 serializes none of them, so naming
-        // them individually would be 30 cases the island cannot use; S2 splits this as it absorbs
-        // them.
-        [&](const auto&) {
-            out.kind = CSSCalcSwiftNodeKind::Operation;
+        // `clamp()`, and only because of its `none` bounds. `min` and `max` are `ChildOrNone`, so a
+        // bound holding the keyword is an argument the serializer emits but not a child node the walk
+        // can see -- the kind carries it, and `childCount` stays the number of subtrees. With both
+        // bounds `none` the tree cannot reach here at all (`+Simplification.cpp:1007` rewrites it to
+        // `val` whatever `val` is), and it declines rather than resting on that.
+        [&](const IndirectNode<Clamp>& clamp) {
+            out.valueID = static_cast<uint16_t>(Clamp::id);
+            bool minIsNone = WTF::holdsAlternative<CSS::Keyword::None>(clamp->min);
+            bool maxIsNone = WTF::holdsAlternative<CSS::Keyword::None>(clamp->max);
+            if (minIsNone && maxIsNone)
+                out.kind = CSSCalcSwiftNodeKind::Operation;
+            else if (minIsNone)
+                out.kind = CSSCalcSwiftNodeKind::ClampWithNoneMinimum;
+            else if (maxIsNone)
+                out.kind = CSSCalcSwiftNodeKind::ClampWithNoneMaximum;
+            else
+                out.kind = CSSCalcSwiftNodeKind::Function;
+        },
+        // The two whose `serializeMathFunctionArguments` overload is not a list of calculation trees:
+        // `Random`'s `<random-cache-key>` and `CalcMix`'s per-item weights. Named explicitly rather
+        // than left to the fallback so that they are declined by *name*, and so that the fallback's
+        // allowlist is the only other thing that can decline.
+        [&](const IndirectNode<Random>&) { out.kind = CSSCalcSwiftNodeKind::Operation; },
+        [&](const IndirectNode<CalcMix>&) { out.kind = CSSCalcSwiftNodeKind::Operation; },
+        // Everything else, classified by the SHAPE of its serialization rather than one case per
+        // operation. Twenty-six operations reach the island through these four lines, and none of
+        // them costs a name here or in Swift: `valueID` carries `Op::id` and the island hands it back
+        // to `nameLiteralForSerialization`, which is generated from CSSValueKeywords.in and is exactly
+        // the kind of table this port may not transcribe.
+        [&](const auto& operation) {
+            using Op = std::remove_cvref_t<decltype(*operation)>;
+            static_assert(!hasChildOrNoneArgument<Op>,
+                "a second operation with a ChildOrNone argument needs its own kind the way Clamp has, "
+                "or a `none` bound will be dropped from the serialization");
+            // One place sets `valueID`, because every kind below wants the same thing from it: the
+            // operation's own `id`, which for `round()` is the ROUNDING STRATEGY (`nearest`, `up`,
+            // `down`, `to-zero`) rather than the function name, since all four share the name and
+            // differ only by it. `+Serialization.cpp:373`-`:391`.
+            if constexpr (isRoundingStrategy<Op> || std::same_as<Op, ProgressNoClamp> || isGenericSerializedFunction<Op>) {
+                out.valueID = static_cast<uint16_t>(Op::id);
+                out.kind = isRoundingStrategy<Op> ? CSSCalcSwiftNodeKind::RoundFunction
+                    : std::same_as<Op, ProgressNoClamp> ? CSSCalcSwiftNodeKind::ProgressNoClampFunction
+                    : CSSCalcSwiftNodeKind::Function;
+            } else
+                out.kind = CSSCalcSwiftNodeKind::Operation;
         }
     );
 
@@ -964,6 +1039,16 @@ void CSSCalcSwiftSink::appendLiteral(uint8_t literal)
     case CSSCalcSwiftLiteralDividedBy:  m_builder->append(" / "_s);    return;
     case CSSCalcSwiftLiteralNegateOpen: m_builder->append("-1 * "_s);  return;
     case CSSCalcSwiftLiteralInvertOpen: m_builder->append("1 / "_s);   return;
+    case CSSCalcSwiftLiteralCommaSpace: m_builder->append(", "_s);     return;
+    // `round(` is spelled through the generated name table rather than as the string "round", so
+    // there is still exactly one place in the program that decides how CSSValueRound is written --
+    // this is the same call the C++ prefix at `:375` makes.
+    case CSSCalcSwiftLiteralRoundOpen:  m_builder->append(nameLiteralForSerialization(CSSValueRound), '('); return;
+    case CSSCalcSwiftLiteralNoClampOpen: m_builder->append("(no-clamp "_s); return;
+    // `clamp()`'s `none` bound. The same call `serializeCalculationTree(CSS::Keyword::None)` makes:
+    // `CSS::Keyword::None` is `Constant<CSSValueNone>`, whose `Serialize` specialization is exactly
+    // `nameLiteralForSerialization(CSSValueNone)` (CSSValueTypes.h:178).
+    case CSSCalcSwiftLiteralNoneKeyword: m_builder->append(nameLiteralForSerialization(CSSValueNone)); return;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -998,6 +1083,7 @@ static std::atomic<bool> s_forceDecline;
 static std::atomic<unsigned> s_declines;
 static std::atomic<uint32_t> s_lastNodeCount;
 static std::atomic<uint32_t> s_lastKindMask;
+static std::atomic<uint32_t> s_lastRootKind;
 static std::atomic<uint64_t> s_swiftCalls;
 
 void webCoreCSSCalcSerializationSetForceDecline(bool force)
@@ -1020,6 +1106,11 @@ uint32_t webCoreCSSCalcSerializationLastKindMask(void)
     return s_lastKindMask.load(std::memory_order_relaxed);
 }
 
+uint32_t webCoreCSSCalcSerializationLastRootKind(void)
+{
+    return s_lastRootKind.load(std::memory_order_relaxed);
+}
+
 uint64_t webCoreCSSCalcSerializationSwiftCallCount(void)
 {
     return s_swiftCalls.load(std::memory_order_relaxed);
@@ -1038,6 +1129,7 @@ static bool trySerializeWithSwiftIsland(StringBuilder& builder, const Tree& tree
     s_swiftCalls.fetch_add(1, std::memory_order_relaxed);
     s_lastNodeCount.store(result.nodeCount, std::memory_order_relaxed);
     s_lastKindMask.store(result.kindMask, std::memory_order_relaxed);
+    s_lastRootKind.store(static_cast<uint32_t>(CSSCalcSwiftNode { &tree.root }.info().kind), std::memory_order_relaxed);
     if (s_forceDecline.load(std::memory_order_relaxed)) {
         s_declines.fetch_add(1, std::memory_order_relaxed);
         return false;
