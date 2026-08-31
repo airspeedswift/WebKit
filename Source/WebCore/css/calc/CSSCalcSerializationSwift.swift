@@ -26,7 +26,7 @@
 public import WebCore_Private.CSSCalcSwiftTypes
 
 // Swift island for CSS calc() serialization: a port of CSSCalcTree+Serialization.cpp, selected by
-// USE_SWIFT_CSS_CALC_SERIALIZATION. This is phase S1 of that port.
+// USE_SWIFT_CSS_CALC_SERIALIZATION. This is phase S2 of that port.
 //
 // WHY calc() SERIALIZATION IS WEBCORE ISLAND #3, AND WHY THIS SLICE OF IT.
 // `Source/WebCore/css/calc/` is 10,110 lines across 31 files with nothing generated, and it is the
@@ -39,25 +39,29 @@ public import WebCore_Private.CSSCalcSwiftTypes
 // `double`->`float` narrowing, so there is no `narrowPrecisionToFloat` ordering to reproduce
 // bit-for-bit. Two external call sites, both in CSSUnevaluatedCalc.cpp.
 //
-// WHAT S1 DOES. S0 proved the boundary and retired nothing on purpose. S1 is the first phase that
-// takes real C++ responsibility across it: the island now owns
-// https://drafts.csswg.org/css-values-4/#serialize-a-calculation-tree steps 4 to 7 -- Negate,
-// Invert, Sum and Product -- plus the math-function wrapper for a Sum or Product root. Concretely
-// it serializes any tree whose every node is one of
+// WHAT THE ISLAND SERIALIZES AFTER S2. Every tree at the `Specified` stage whose every node is one
+// of
 //
-//   - the seven leaves (the four numeric kinds, `Symbol`, `sibling-count()`, `sibling-index()`), and
-//   - `Sum`, `Product`, `Negate`, `Invert`,
+//   - the seven leaves (the four numeric kinds, `Symbol`, `sibling-count()`, `sibling-index()`),
+//   - `Sum`, `Product`, `Negate`, `Invert` -- css-values-4 steps 4 to 7, S1's work,
+//   - `Deg2Rad`, the implementation-only node inside a trig function, which serializes as its child,
+//   - and 26 of the 34 operations as math functions: `min`, `max`, `clamp` (including a `none`
+//     bound), `round` in all four rounding strategies, `mod`, `rem`, the six trig functions,
+//     `atan2`, `pow`, `sqrt`, `hypot`, `log`, `exp`, `abs`, `sign`, `progress` and
+//     `progress(no-clamp ...)`,
 //
-// with a root that is a leaf, a `Sum` or a `Product`, at the `Specified` stage. Everything else
-// declines, and a decline emits nothing at all.
+// with a root that is not a bare `Negate`, `Invert` or `Deg2Rad`. What is left is four operations --
+// `random()`, `calc-mix()`, `anchor()` and `anchor-size()` -- whose arguments are not a list of
+// calculation trees, plus the `Computed` stage. Everything else declines, and a decline emits
+// nothing at all.
 //
-// WHY THOSE FOUR AND NOT SOME OTHER FOUR. They are the whole of the grouping-parenthesis state
-// machine, which is the only stateful thing in the entire serializer: `SerializationState::
-// groupingParenthesis` plus `ParenthesisSaver`, mutated and restored around every descent. The
-// other 30 operators are a prefix, comma-separated arguments and a close paren, and every one of
-// them *reuses* this machinery for its arguments. So getting this state across is the work, and S2's
-// remaining 30 are then largely a name table -- which is why the order is this way round and not by
-// line count.
+// WHY THE ORDER WAS S1'S FOUR THEN S2'S TWENTY-SIX. S1's four are the whole of the
+// grouping-parenthesis state machine, which is the only stateful thing in the entire serializer:
+// `SerializationState::groupingParenthesis` plus `ParenthesisSaver`, mutated and restored around
+// every descent. Every one of S2's twenty-six *reuses* that machinery for its arguments and adds no
+// state of its own -- it is a prefix, comma-separated arguments and a close paren. So S1 was the
+// work and S2 is a name table, which is why it is a name table that stays in C++ (see
+// `serializeMathFunctionCall`).
 //
 // THE STATE IS IN SWIFT, AND IT IS A PARAMETER RATHER THAN STATE. This is the one design decision in
 // S1 worth arguing about, and the C++-side cost of the alternative decided it: carrying
@@ -69,14 +73,17 @@ public import WebCore_Private.CSSCalcSwiftTypes
 // descent that forgets one silently serializes its subtree with the wrong parenthesisation, while a
 // parameter cannot be forgotten -- the compiler demands a value at every call.
 //
-// SORT ORDER IS AN UPCALL, FOR THE SAME REASON NUMBER FORMATTING IS. Steps 6 and 7 begin "Sort
-// root's children", and the key is a 60-case unit order generated with `__COUNTER__`
-// (CSSCalcTree+Serialization.cpp:146). Copying a generated table into Swift is not allowed here, so
-// `childAt` answers in serialization order -- sorted for `Sum` and `Product`, tree order otherwise --
-// and the island only ever names a position. `sink.appendNumber` likewise routes to C++'s
-// `formatCSSNumberValue`: Swift's `Double.description` is shortest-round-trip and CSS's algorithm is
-// a different one, so a Swift version would agree on every common value, pass all 211 calc tests in
-// the WPT corpus, and diverge on subnormals and 17-significant-digit values.
+// SORT ORDER AND THE OPERATOR NAMES ARE UPCALLS, FOR THE SAME REASON NUMBER FORMATTING IS. Steps 6
+// and 7 begin "Sort root's children", and the key is a 60-case unit order generated with
+// `__COUNTER__` (CSSCalcTree+Serialization.cpp:146). Copying a generated table into Swift is not
+// allowed here, so `childAt` answers in serialization order -- sorted for `Sum` and `Product`, tree
+// order otherwise -- and the island only ever names a position. The same rule is what decides S2's
+// shape: `nameLiteralForSerialization` is generated from CSSValueKeywords.in, so the island carries a
+// `CSSValueID` and `sink.appendValueIDName` owns the spelling, and twenty-six operations therefore
+// cost zero names on this side. `sink.appendNumber` likewise routes to C++'s `formatCSSNumberValue`:
+// Swift's `Double.description` is shortest-round-trip and CSS's algorithm is a different one, so a
+// Swift version would agree on every common value, pass all 211 calc tests in the WPT corpus, and
+// diverge on subnormals and 17-significant-digit values.
 //
 // THE WALK IS THE DECLINE DECISION. A partial emit cannot be undone -- the builder is C++'s and has
 // no truncate -- so the island has to decide whether it can serialize the *entire* tree before it
@@ -97,9 +104,14 @@ public import WebCore_Private.CSSCalcSwiftTypes
 /// `@c` (SE-0495) makes this the single declaration of the numbering: it is emitted into
 /// WebCoreSwift-Generated.h and `static_assert`ed against these names in
 /// CSSCalcTree+Serialization.cpp, so reordering these cases is a build failure there rather than a
-/// silent reinterpretation of every calc() in every stylesheet. `frozen` because `@c` on a
-/// resilient enum crashes IRGen and WebCore compiles with library evolution.
-@frozen
+/// silent reinterpretation of every calc() in every stylesheet.
+///
+/// Internal rather than `public`, for the reason CSSParserFastPathsSwift.swift:71 gives: `@c` on a
+/// *resilient* enum crashes IRGen and WebCore compiles with library evolution, and the generated
+/// header is emitted at `-emit-clang-header-min-access internal` so nothing is lost. S0 wrote
+/// `@frozen` here as well, which was redundant -- `@frozen` has no effect on a non-public enum,
+/// which is what a non-public enum being non-resilient already means, and the compiler now says so.
+/// The two sibling islands have carried bare internal `@c` enums since before this one existed.
 @c
 enum CSSCalcSwiftOutcome: UInt8 {
     /// The island wrote the complete serialization into the sink.
@@ -116,8 +128,8 @@ enum CSSCalcSwiftOutcome: UInt8 {
 /// consumes it, so the single declaration belongs on the producing side, and
 /// `CSSCalcSwiftSink::appendLiteral` switches over these *names* rather than over raw values, which
 /// is what makes reordering this enum harmless and adding a case without teaching C++ a
-/// `RELEASE_ASSERT_NOT_REACHED` instead of a wrong stylesheet.
-@frozen
+/// `RELEASE_ASSERT_NOT_REACHED` instead of a wrong stylesheet. Internal and bare `@c`, for the reason
+/// `CSSCalcSwiftOutcome` above records.
 @c
 enum CSSCalcSwiftLiteral: UInt8 {
     /// `calc(`
@@ -140,6 +152,21 @@ enum CSSCalcSwiftLiteral: UInt8 {
     case negateOpen = 8
     /// `1 / `, the Invert prefix of step 5.
     case invertOpen = 9
+    /// `, `, the argument separator of step 4 of serialize-a-math-function.
+    case commaSpace = 10
+    /// `round(`. The function name plus its open paren, because the four rounding operations differ
+    /// by *strategy* and share the name -- so the name is fixed here and the strategy arrives as a
+    /// `CSSValueID`.
+    case roundOpen = 11
+    /// `(no-clamp `, the whole of `progress(no-clamp ...)`'s prefix after the function name. A space
+    /// rather than the `, ` every other prefix uses, which is the one thing about this operator that
+    /// is not the generic shape.
+    case noClampOpen = 12
+    /// `none`, for a `clamp()` bound that holds the keyword. Named rather than spelled for the same
+    /// reason every other literal here is: C++ emits it through
+    /// `nameLiteralForSerialization(CSSValueNone)`, which is the generated table, so the island never
+    /// holds the characters.
+    case noneKeyword = 13
 }
 
 /// One bit per `CSSCalcSwiftNodeKind`, for the mask the walk reports.
@@ -174,8 +201,22 @@ private func isSerializableNode(
         return true
     case .Sum, .Product:
         return childCount > 0
-    case .Negate, .Invert:
+    case .Negate, .Invert, .Transparent:
         return childCount == 1
+    case .Function, .RoundFunction, .ProgressNoClampFunction:
+        // No lower bound on the argument count, and that is not laxity: an argument-less math
+        // function serializes as `name()` on both arms by construction -- the C++ generic argument
+        // serializer writes its separator *before* each argument, so zero arguments write nothing --
+        // so there is nothing here to disagree about. Contrast `Sum` above, where a zero count is a
+        // real hazard in the C++ rather than an empty string.
+        return true
+    case .ClampWithNoneMinimum, .ClampWithNoneMaximum:
+        // `clamp( [ <calc-sum> | none ], <calc-sum>, [ <calc-sum> | none ] )` with exactly one bound
+        // holding the keyword, so two subtrees remain. Insisting on the count is what keeps the
+        // keyword's position and the arguments' positions in agreement: the kind says *which* bound is
+        // `none` and the walk supplies the other two in order, so a count of anything but 2 would mean
+        // the two halves of that agreement had come apart.
+        return childCount == 2
     case .Operation:
         return false
     case .OpaqueOperation:
@@ -192,27 +233,44 @@ private func isSerializableNode(
 
 /// Whether the island can serialize a tree *rooted* at this kind.
 ///
-/// Narrower than `isSerializableNode` for exactly two kinds, and the reason is a property of the C++
-/// it has to match rather than of the island. `serializeMathFunction` has explicit
-/// `serializeMathFunctionArguments` overloads for `Sum` and `Product` that route back into the
-/// calculation-tree serializer (`+Serialization.cpp:403`-`:411`), and none for `Negate` or `Invert`
-/// -- so a `Negate` root takes the generic overload at `:545`, which emits the child *without* the
-/// `-1 * ` prefix that step 4 requires. Matching that byte for byte would mean reproducing it; not
-/// matching it would be a differential failure. So the island declines, the C++ answers for its own
-/// shape, and no defect is copied across the boundary.
+/// Narrower than `isSerializableNode` for three kinds, and for two different reasons.
 ///
-/// Reachability is an open question rather than a claim: simplification rewrites `Negate` of a
-/// numeric, of a `Negate`, and of an all-numeric `Sum`/`Product`
-/// (`+Simplification.cpp:904`-`:953`), and no parse observed so far produces a bare `Negate` or
-/// `Invert` at the root of a `Tree`. If it is truly unreachable this predicate is inert; the way to
-/// settle it is a bridge entry that constructs such a tree directly, which is S2's to do.
+/// `Negate` and `Invert`, because of a property of the C++ rather than of the island, and S2 settled
+/// what that property is. `serializeMathFunction` has explicit `serializeMathFunctionArguments`
+/// overloads for `Sum` and `Product` that route back into the calculation-tree serializer
+/// (`+Serialization.cpp:403`-`:411`), and none for `Negate` or `Invert` -- so a `Negate` root takes
+/// the generic overload at `:545`, which walks the node's one child and emits it *without* the
+/// `-1 * ` that step 4 requires. It is not a formatting difference: `Negate(1px)` serialises as
+/// `calc(1px)`, the negation silently gone, where the very same node one level down inside a `Sum`
+/// serialises as `(-1 * 1px)`. The bridge constructs both trees directly and prints them, so this is
+/// demonstrated rather than argued, and it is recorded as a WebKit defect to file. The island
+/// declines instead of reproducing it, because a differential that matches a wrong value is worse
+/// than one that declines.
+///
+/// Reachability is settled too, and separately: `webCoreCSSCalcRootKindMask` accumulates the *root*
+/// kind of every tree the differential parses, and across 24,655 cases no parse produces a bare
+/// `Negate` or `Invert` root -- simplification rewrites `Negate` of a numeric, of a `Negate`, and of
+/// an all-numeric `Sum`/`Product` (`+Simplification.cpp:904`-`:953`). So this predicate is inert on
+/// everything the parser can build, and the defect is not user-visible through parsed CSS. It is
+/// still a defect, because `CSSCalc::Tree`s are also built programmatically.
+///
+/// `Transparent`, i.e. `Deg2Rad`, because at the root it is the one node whose C++ path is *not* the
+/// same function: `serializeMathFunction(IndirectNode<Deg2Rad>)` (`:769`) defers to its child's math
+/// function, so whether `calc(` appears is decided by the child's kind, which this predicate cannot
+/// see from a kind and a count. It is also unreachable as a root -- `Deg2Rad` is only ever inserted
+/// *inside* a trig function -- and the same root-kind mask proves it over the whole corpus.
+///
+/// The two `ClampWithNone...` kinds need no exception, and that is worth saying because the first
+/// attempt at `clamp()`'s `none` bound did: a cursor that could stand on the keyword itself would have
+/// been a root candidate that is not a tree at all. Carrying the keyword on the *parent's* kind means
+/// every kind the island can root is a real subtree.
 @inline(always)
 private func isSerializableRoot(
     _ kind: WebCore.CSSCalc.CSSCalcSwiftNodeKind,
     _ childCount: UInt32
 ) -> Bool {
     switch kind {
-    case .Negate, .Invert:
+    case .Negate, .Invert, .Transparent:
         return false
     default:
         return isSerializableNode(kind, childCount)
@@ -281,6 +339,24 @@ private func serializeCalculationTree(
         sink.appendValueIDName(info.valueID)
         sink.appendLiteral(CSSCalcSwiftLiteral.emptyParens.rawValue)
 
+    case .Transparent:
+        // `Deg2Rad` has no CSS-level representation, so serialize the child in this node's place --
+        // including inheriting this node's grouping parenthesis, which is what
+        // `serializeCalculationTree(IndirectNode<Deg2Rad>)` does by passing `state` through
+        // unchanged (`+Serialization.cpp:762`).
+        serializeCalculationTree(node.childAt(0), includingGroupingParenthesis: includeGrouping, &sink)
+
+    case .Function, .RoundFunction, .ProgressNoClampFunction,
+         .ClampWithNoneMinimum, .ClampWithNoneMaximum:
+        // 3. If root is anything but a Sum, Negate, Product, or Invert node, serialize a math
+        // function for the function corresponding to the node type.
+        //
+        // `includeGrouping` is deliberately unused. A math function is already parenthesised by its
+        // own name and paren, so it never takes the grouping parenthesis, and the C++ says the same
+        // by the *shape* of `+Serialization.cpp:775`: the template forwards to
+        // `serializeMathFunction` without consulting `state.groupingParenthesis` at all.
+        serializeMathFunctionCall(node, info, &sink)
+
     case .Sum:
         serializeSum(node, info.childCount, includingGroupingParenthesis: includeGrouping, &sink)
 
@@ -322,6 +398,78 @@ private func serializeCalculationTree(
     @unknown default:
         preconditionFailure("the walk admitted a node kind the serializer cannot emit")
     }
+}
+
+/// https://drafts.csswg.org/css-values-4/#serialize-a-math-function, steps 3 to 5, for the 26
+/// operations whose arguments are a plain list of calculation trees.
+///
+/// This one function is the whole of S2's claim, and it is one function rather than twenty-six
+/// because the C++ it replaces is one function too: `serializeMathFunctionPrefix`'s generic template
+/// is `nameLiteralForSerialization(Op::id)` plus `(` for twenty of them
+/// (`+Serialization.cpp:398`-`:401`), and `serializeMathFunctionArguments`'s generic template is
+/// `serializeCalculationTree` over the children joined with `, ` (`:545`-`:566`). Only the prefix
+/// varies, and only in two ways: `round()` names a strategy first, and `progress(no-clamp ...)`
+/// separates its flag with a space. The *operator name table* stays in C++ -- `info.valueID` is
+/// `Op::id` and `appendValueIDName` is the generated `nameLiteralForSerialization` -- so absorbing
+/// twenty-six operations added no table on this side of the boundary and no C++ per operation.
+///
+/// Every argument is serialized with the grouping parenthesis OMITTED, which is step 4's "if a
+/// result of this serialization starts with a `(` and ends with a `)`, remove those characters". The
+/// C++ spells it as a `ParenthesisSaver` that installs `Omit` around the whole argument list
+/// (`:341`-`:346`); here it is the `false` below, and it applies only to the arguments themselves --
+/// a `Sum` *inside* an argument re-establishes `Include` for its own children, which is what makes
+/// `min(1px + 1em, (1rem + 1vw) * 2)` come out with one set of parentheses and not two.
+private func serializeMathFunctionCall(
+    _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+    _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+    _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
+) {
+    // 3. Let s be a string initially containing the name of the root node, lowercased, followed by
+    //    a "(".
+    switch info.kind {
+    case .RoundFunction:
+        // `round(` and then the rounding strategy: `valueID` is the STRATEGY here, because all four
+        // rounding operations share the function name and differ only by it.
+        sink.appendLiteral(CSSCalcSwiftLiteral.roundOpen.rawValue)
+        sink.appendValueIDName(info.valueID)
+        sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+
+    case .ProgressNoClampFunction:
+        sink.appendValueIDName(info.valueID)
+        sink.appendLiteral(CSSCalcSwiftLiteral.noClampOpen.rawValue)
+
+    default:
+        sink.appendValueIDName(info.valueID)
+        sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
+    }
+
+    // 4. For each child of the root node, serialize the calculation tree, then concatenate all of
+    //    the results using ", ".
+    //
+    // A `clamp()` bound holding `none` is an argument the C++ writes and the walk cannot see, because
+    // `min` and `max` are `ChildOrNone` and only `forAllChildren` visits the keyword. It occupies the
+    // first or the last position, never a middle one, so it is a leading or a trailing term here
+    // rather than anything the loop has to know about.
+    var index: UInt32 = info.kind == .ClampWithNoneMinimum ? 1 : 0
+    if info.kind == .ClampWithNoneMinimum {
+        sink.appendLiteral(CSSCalcSwiftLiteral.noneKeyword.rawValue)
+        sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+        serializeCalculationTree(node.childAt(0), includingGroupingParenthesis: false, &sink)
+    }
+    while index < info.childCount {
+        if index > 0 {
+            sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+        }
+        serializeCalculationTree(node.childAt(index), includingGroupingParenthesis: false, &sink)
+        index += 1
+    }
+    if info.kind == .ClampWithNoneMaximum {
+        sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+        sink.appendLiteral(CSSCalcSwiftLiteral.noneKeyword.rawValue)
+    }
+
+    // 5. Append ")" to s.
+    sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
 }
 
 /// Step 6, the Sum node.
@@ -458,10 +606,20 @@ private func serializeMathFunction(
         serializeProduct(node, info.childCount, includingGroupingParenthesis: false, &sink)
         sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
 
+    case .Function, .RoundFunction, .ProgressNoClampFunction,
+         .ClampWithNoneMinimum, .ClampWithNoneMaximum:
+        // A math function's ROOT serialization and its serialization as a child are the same thing:
+        // `serializeCalculationTree(IndirectNode<Op>)` forwards straight to `serializeMathFunction`
+        // (`+Serialization.cpp:775`-`:779`). That identity is why the 26 operations cost one function
+        // here and not two, and why `min(1px, 1em)` has no `calc(` around it at the root.
+        serializeMathFunctionCall(node, info, &sink)
+
     default:
         // Unreachable: `isSerializableRoot` declined every other kind before anything was appended,
-        // and that includes `.Negate` and `.Invert`, whose C++ root path is the one shape the island
-        // deliberately does not reproduce. See `isSerializableRoot`.
+        // and that is now `.Negate`, `.Invert`, `.Transparent`, `.Operation` and `.OpaqueOperation` --
+        // the first three because the C++ root path for them is a different function from the child
+        // path, the last two because the island does not serialize them anywhere. See
+        // `isSerializableRoot`.
         preconditionFailure("the root check admitted a node kind the math-function wrapper cannot emit")
     }
 }
