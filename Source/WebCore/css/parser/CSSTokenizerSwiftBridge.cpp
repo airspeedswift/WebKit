@@ -931,7 +931,12 @@ static std::atomic<uint64_t> s_calcCompareCalls;
 // while testing against a stale count of them.
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void)
 {
-    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::ClampWithNoneMaximum) + 1;
+    // The LAST case, so adding a kind without touching this line under-reports the count and the
+    // harness silently stops requiring the new kind. That is exactly what happened when S3 appended
+    // four: `ClampWithNoneMaximum` was no longer last, the count read 19 instead of 23, and guard 3
+    // checked nothing about `RandomFunction`, `CalcMixFunction`, `AnchorFunction` or
+    // `AnchorSizeFunction`.
+    return static_cast<uint32_t>(CSSCalc::CSSCalcSwiftNodeKind::AnchorSizeFunction) + 1;
 }
 
 // Serializes one of the four directly-constructed root shapes, on the named arm. Returns the length,

@@ -90,21 +90,28 @@ struct Child;
 // Swift cases and 30 C++ lambdas that all did the same thing, and it would have put the operator
 // *table* on both sides of the boundary.
 //
-// `Operation` is therefore no longer "everything unabsorbed" but a much narrower thing: the four
-// operations whose arguments are not a list of calculation trees -- `Random`'s cache key,
-// `CalcMix`'s per-item weights -- plus any operation added to CSSCalcTree.h that this file has not
-// been taught. That fallback direction is deliberate and is the whole reason the C++ side uses an
-// ALLOWLIST of generically-serialized operations: a new operation declines until someone teaches
-// the island, where a denylist would silently serialize it with the wrong spelling.
+// `Operation` is therefore no longer "everything unabsorbed" but a much narrower thing: after S3 it
+// is ONLY "an operation added to CSSCalcTree.h that this file has not been taught". That fallback
+// direction is deliberate and is the whole reason the C++ side uses an ALLOWLIST of
+// generically-serialized operations: a new operation declines until someone teaches the island,
+// where a denylist would silently serialize it with the wrong spelling.
 //
-// `OpaqueOperation` is `Anchor` and `AnchorSize`, and it exists because for exactly those two
-// `childCount` LIES. Both declare `tuple_size` 0 (CSSCalcTree.h:1317, "FIXME
-// (webkit.org/b/280798): make Anchor and AnchorSize tuple-like"), so `forAllChildNodes` reports no
-// children even though an `Anchor` holds an `AnchorSide` and an optional fallback `Child`. Given a
-// single `Operation` case, a future phase that started serializing operators generically would read
-// `childCount == 0`, conclude "leaf", and emit an anchor() with its arguments silently dropped.
-// A separate kind makes that a decision the compiler forces rather than a trap left in the data:
-// the island's exhaustive switch has to say something about it, and what it says is "decline".
+// S3 takes the last four -- `Random`, `CalcMix`, `Anchor` and `AnchorSize` -- and each gets its own
+// kind rather than sharing one, because unlike S2's thirty their serializations have four genuinely
+// different shapes and each needs different non-tree data (see `CSSCalcSwiftOperationInfo`). Where
+// S2's rule was "the kind names the SHAPE and `valueID` carries the name", these four are the cases
+// where the shape *is* the operation.
+//
+// `OpaqueOperation` NO LONGER HAS A PRODUCER, and it is retained rather than removed. It was
+// `Anchor` and `AnchorSize`, which declare `tuple_size` 0 (CSSCalcTree.h:1317, "FIXME
+// (webkit.org/b/280798): make Anchor and AnchorSize tuple-like") so that `forAllChildNodes` reports
+// no children even though an `Anchor` holds an `AnchorSide` and an optional fallback `Child`. S3
+// does not fix that FIXME -- fixing it would change what `forAllChildNodes` yields for every other
+// caller, simplification and evaluation included, which is a semantic change this slice has no
+// oracle for. Instead `forEachChildNodeOfChild` in the bridge answers for those two directly, so the
+// lie stops at the boundary and `childCount` is the truth on the Swift side. The case stays because
+// removing it would renumber every kind above it, and `kindMask` is `1 << rawValue` with the
+// differential's per-kind figures printed by bit number.
 //
 // New cases are APPENDED, never inserted: `CSSCalcSwiftSerializationResult::kindMask` is `1 <<
 // rawValue` and the differential's per-kind coverage counts are printed by bit number, so inserting
@@ -152,6 +159,83 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
     // bound.
     ClampWithNoneMinimum,
     ClampWithNoneMaximum,
+    // S3's four, each carrying non-tree arguments that `childAt` cannot reach. What they need
+    // beyond `CSSCalcSwiftNodeInfo` arrives in `CSSCalcSwiftOperationInfo` below, and their
+    // `valueID` is `Op::id` -- `random`, `calc-mix`, `anchor`, `anchor-size` -- exactly as
+    // `Function`'s is, so the four function NAMES still cost nothing on the Swift side.
+    //
+    // `random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )`. `childCount` is 2 or 3: the
+    // `<random-key>` is not a `Child` at all.
+    RandomFunction,
+    // `calc-mix( [ <calc-sum> <percentage>? ]# )`. `childCount` is the item count; the per-item
+    // weight is not a `Child`.
+    CalcMixFunction,
+    // `anchor( <anchor-element>? && <anchor-side>, <length-percentage>? )`. `childCount` counts the
+    // `<anchor-side>` only when it is a `<percentage>` rather than a keyword, plus the fallback.
+    AnchorFunction,
+    // `anchor-size( [ <anchor-element> || <anchor-size> ]? , <length-percentage>? )`. `childCount`
+    // is 1 when there is a fallback and 0 otherwise.
+    AnchorSizeFunction,
+};
+
+// Which non-tree argument of an operation node an `appendOperationArgument` upcall should write.
+//
+// Declared in Swift as `CSSCalcSwiftOperationPart` and reaching C++ through
+// WebCoreSwift-Generated.h, for the reason `CSSCalcSwiftLiteral` gives: Swift produces the choice
+// and C++ consumes it, so the single declaration belongs on the producing side, and the switch in
+// `appendOperationArgument` is over those *names*.
+
+// Everything S3's four operations need that is neither a child subtree nor text, from ONE crossing.
+//
+// A second accessor rather than more fields on `CSSCalcSwiftNodeInfo`, because `info()` is called
+// once per node on every walk of every calc() in every stylesheet and these fields are meaningful
+// for four rare kinds. Fetched only when the kind says so.
+//
+// Every field is a `bool` rather than a bit in a flags word. The flags spelling reads as
+// `(info.flags & UInt8(Flag.randomSharingIsKey.rawValue)) != 0` on the Swift side, which is the
+// kind of expression a transcription error hides in; these are a handful of bytes on an accessor
+// that runs for `anchor()` and `random()` only.
+//
+// The one *presence* test that is NOT here is `CalcMix`'s per-item weight, and that is deliberate:
+// it is per item rather than per node, so surfacing it would need a second per-index accessor
+// beside `childAt`. Instead the `calcMixWeight` upcall writes `' '` and the weight when the item
+// has one and nothing when it does not -- one crossing instead of two, at the cost of one
+// structural decision staying in C++. It is the only one in the island.
+struct CSSCalcSwiftOperationInfo {
+    // `Anchor`: the `<anchor-side>` keyword, when `anchorSideIsKeyword`.
+    // `AnchorSize`: the `<anchor-size>` dimension keyword, when `hasDimension`.
+    // `Random`: `property-scoped` or `property-index-scoped`, when `randomKeyHasPropertyScope`.
+    // `CSSValueInvalid` otherwise, so a reader that consults it for the wrong kind gets a defined
+    // wrong answer rather than garbage.
+    uint16_t valueID;
+
+    // `Random`: which alternative `sharing` holds. Both false means `auto`, which serializes as
+    // omitted -- so there is no third flag, and the island's `else` is the `auto` case.
+    bool randomSharingIsKey;
+    bool randomSharingIsFixed;
+    // `Random` with a `<random-cache-key>`: which of the key's three optional parts are present.
+    // The parser never produces an empty key, but the island does not rest on that -- it writes the
+    // separators from these three and an empty key would come out empty rather than wrong.
+    bool randomKeyHasName;
+    bool randomKeyIsElementScoped;
+    bool randomKeyHasPropertyScope;
+
+    // `Anchor`: whether `<anchor-side>` is a keyword. When false it is a `<percentage>` subtree and
+    // occupies child 0, which is what makes the fallback's index depend on this.
+    //
+    // A `bool` rather than "`valueID` is `CSSValueInvalid`", so that the island never has to name a
+    // sentinel value from the generated keyword table.
+    bool anchorSideIsKeyword;
+
+    // `Anchor` and `AnchorSize`: whether an `<anchor-element>` dashed-ident is present.
+    bool hasElementName;
+    // `AnchorSize`: whether an `<anchor-size>` dimension keyword is present.
+    bool hasDimension;
+    // `Anchor` and `AnchorSize`: whether a fallback `<length-percentage>` is present. Redundant
+    // with `childCount` and kept anyway, for the reason the two `ClampWithNone...` kinds are kept:
+    // the island requires the two to AGREE and declines when they do not, so a boundary that came
+    // apart is a decline rather than an argument written in the wrong position.
+    bool hasFallback;
 };
 
 // One node, described. A plain aggregate of trivial types, so it crosses in registers and needs no
@@ -239,6 +323,13 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // discriminant up to five times per node to answer questions it could answer together.
     WEBCORE_EXPORT CSSCalcSwiftNodeInfo info() const;
 
+    // Everything S3's four operations need beyond `info()`, from one more crossing.
+    //
+    // Separate from `info()` rather than folded into it because `info()` runs for every node of
+    // every tree and this answers questions only four kinds ask. The island calls it exactly when
+    // the kind says to.
+    WEBCORE_EXPORT CSSCalcSwiftOperationInfo operationInfo() const;
+
     // The `index`th child, IN SERIALIZATION ORDER.
     //
     // For `Sum` and `Product` that is not tree order: css-values-4 steps 6 and 7 both begin "Sort
@@ -260,6 +351,11 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     WEBCORE_EXPORT CSSCalcSwiftNode childAt(uint32_t index) const [[clang::lifetimebound]];
 
 private:
+    // So that `appendOperationArgument` can reach the node it is being asked to write a piece of.
+    // The alternative -- a public accessor handing out the `Child*` -- would put a raw pointer in
+    // the Swift-visible surface of a type whose whole point is that no pointer crosses.
+    friend struct CSSCalcSwiftSink;
+
     const Child* m_node;
 };
 
@@ -314,6 +410,42 @@ struct SWIFT_SAFE CSSCalcSwiftSink {
     // `nameLiteralForSerialization(CSSValueID)`, for Symbol, SiblingCount and SiblingIndex. The
     // island names the id; C++ owns the table, which is generated and must not be transcribed.
     WEBCORE_EXPORT void appendValueIDName(uint16_t valueID);
+
+    // THE SECOND UPCALL, and it exists for the same reason the first does: S3's four operations
+    // carry arguments that are CSS values rather than calculation trees, and every one of them must
+    // be spelled by C++.
+    //
+    // `<dashed-ident>` goes through `CSS::serializationForCSS` over a `CSS::CustomIdent`, which
+    // escapes identifiers; `random()`'s `fixed <number>` is a `CSS::Number<ClosedUnitRange>` and
+    // `calc-mix()`'s weight a `CSS::Percentage<ClosedPercentageRange>`, both of which are
+    // `PrimitiveNumeric` types that the C++ serializer hands to `CSS::serializationForCSS`
+    // directly. Routing them through `appendNumber` instead would mean the island deciding they are
+    // plain doubles in a known unit, which is a claim about types it cannot see -- so this calls
+    // exactly what the C++ arm calls, and the two agree by construction rather than by comparison.
+    // Same rule, same reason, as `formatCSSNumberValue`.
+    //
+    // ONE entry selected by `part` rather than four named methods, for the reason `appendLiteral`
+    // gives: four methods is ~28 lines of C++ written to facilitate Swift against ~20 for one
+    // entry and a switch, and the numbering lives on the side that produces it.
+    //
+    // `index` is meaningful only for `calcMixWeight`, where it selects the item.
+    //
+    // BY `const&`, AND THAT IS LOAD-BEARING. Taken by VALUE this method imports as `unsafe` and
+    // every call site needs a marker -- the sink's struct-level `SWIFT_SAFE` does not reach a
+    // parameter that is itself `~Escapable`. Measured, with the three sink methods above as the
+    // control since they take only PODs and are clean:
+    //
+    //   by value, no annotation ......................... 1 unsafe call
+    //   SWIFT_SAFE on the method, prefix or postfix ..... 1 unsafe call  (the annotation is INERT
+    //                                                     in this position -- it is not the cure,
+    //                                                     and reaching for it would have looked
+    //                                                     like one)
+    //   [[clang::lifetimebound]] on the parameter ....... does not compile
+    //   **by const reference ............................ 0**
+    //
+    // Reproducer: ~/src/webkit-swift-ports/cssprobe/calcimport/s3safe/ (`probe.swift`, seconds to
+    // run, and it fails on the baseline so it is not a vacuous pass).
+    WEBCORE_EXPORT void appendOperationArgument(const CSSCalcSwiftNode&, uint8_t part, uint32_t index);
 
 private:
     WTF::StringBuilder* m_builder;
