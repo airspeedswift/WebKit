@@ -51,6 +51,16 @@ IGNORE_CLANG_WARNINGS_END
 namespace WebCore {
 namespace CSSCalc {
 
+// Region 1 of 3 of the C++ serializer, guarded so a build can determine what can be removed by
+// compiling it out and letting the compiler name what still needs it. See
+// CSSCalcTree+Serialization.h for the guard and WebCore.xcconfig for the build setting.
+//
+// The sorting block below is deliberately outside all three regions: `sortPriority` and
+// `generateSortedChildrenMap` are called from `childInSerializationOrder` at :1139, and with the
+// regions removed that becomes their only caller (the serializer's own uses, at :655 and :710, are
+// both inside region 2). So this code stays needed even once the rest of the serializer is gone.
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
+
 struct SerializationState {
     enum class GroupingParenthesis {
         Omit,
@@ -126,6 +136,8 @@ static void serializeCalculationTree(StringBuilder&, const IndirectNode<Invert>&
 static void serializeCalculationTree(StringBuilder&, const IndirectNode<Deg2Rad>&, SerializationState&);
 template<Numeric Op> void serializeCalculationTree(StringBuilder&, const Op&, SerializationState&);
 template<typename Op> static void serializeCalculationTree(StringBuilder&, const IndirectNode<Op>&, SerializationState&);
+
+#endif // CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 
 // MARK: Sorting
 
@@ -265,6 +277,9 @@ static Vector<ChildRepresentation, 16> generateSortedChildrenMap(const Children&
 
     return sortedChildrenMap;
 }
+
+// Region 2 of 3: the serializer proper, css-values-4 steps 1 to 7 for every node kind.
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 
 // MARK: Math Function
 // https://drafts.csswg.org/css-values-4/#serialize-a-math-function
@@ -775,6 +790,8 @@ template<typename Op> void serializeCalculationTree(StringBuilder& builder, cons
     // 3. If root is anything but a Sum, Negate, Product, or Invert node, serialize a math function for the function corresponding to the node type, treating the node’s children as the function’s comma-separated calculation arguments, and return the result.
     serializeMathFunction(builder, root, state);
 }
+
+#endif // CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 
 // MARK: - Swift serialization support (CSSCalcSerializationSwift.swift)
 //
@@ -1316,12 +1333,29 @@ void serializationForCSS(StringBuilder& builder, const Tree& tree, const Seriali
     if (serializer == Serializer::Swift && trySerializeWithSwiftIsland(builder, tree, options))
         return;
 
+    // Region 3 of 3: the fallback itself, and the two `Child` entries that nothing calls.
+    //
+    // The code below is unconditional, so `serializeMathFunction` links into every build regardless
+    // of how much this file covers -- its presence in a symbol table says nothing about coverage.
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
     SerializationState state {
         .stage = tree.stage,
         .range = options.range,
         .serializationContext = options.serializationContext,
     };
     serializeMathFunction(builder, tree.root, state);
+#else
+    // With no C++ serializer there is nowhere to fall back to, and `serializationForCSS` has no
+    // failure channel -- it returns a `String`, and every caller treats that as the answer. So a
+    // decline has to stop here rather than return a truncated `cssText`: a trap is recoverable
+    // evidence, a silently wrong serialization of every math function on the page is not.
+    //
+    // The remaining decline paths have no known producer -- the root `Negate`/`Invert` defect this
+    // declines rather than reproduces, a childless `Sum`/`Product`, an `anchor()` whose child count
+    // disagrees with its record, and the generic `Operation` fall-through -- which is what makes
+    // this mode buildable at all.
+    RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the calc() island declined a tree in a build with no C++ serializer compiled in");
+#endif
 }
 
 String serializationForCSS(const Tree& tree, const SerializationOptions& options, Serializer serializer)
@@ -1331,6 +1365,7 @@ String serializationForCSS(const Tree& tree, const SerializationOptions& options
     return builder.toString();
 }
 
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 void serializationForCSS(StringBuilder& builder, const Child& child, const SerializationOptions& options)
 {
     SerializationState state {
@@ -1346,6 +1381,7 @@ String serializationForCSS(const Child& child, const SerializationOptions& optio
     serializationForCSS(builder, child, options);
     return builder.toString();
 }
+#endif
 
 } // namespace CSSCalc
 } // namespace WebCore

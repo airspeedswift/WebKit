@@ -66,12 +66,40 @@ static constexpr Serializer defaultSerializer =
     Serializer::Cpp;
 #endif
 
+// Whether the C++ serializer is compiled in at all. Off means the Swift implementation is the
+// only one, which lets a build be checked by the compiler for what code is still needed rather
+// than by inspecting a symbol table.
+//
+// Spelled once, here, as a named condition rather than repeated as a two-clause `#if` at each of the
+// guarded regions in CSSCalcTree+Serialization.cpp, so the condition cannot drift between them.
+#if defined(USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK) && USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK
+#if !defined(USE_SWIFT_CSS_CALC_SERIALIZATION) || !USE_SWIFT_CSS_CALC_SERIALIZATION
+// Diagnosed here rather than left to produce a pile of link errors naming `serializeMathFunction`,
+// which is what removing every serializer from a build that still selects one looks like.
+#error "WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK=YES requires WK_USE_SWIFT_CSS_CALC_SERIALIZATION=YES: it removes the only other serializer."
+#endif
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// The test bridge selects `Serializer::Cpp` explicitly, and this mode removes that implementation.
+// The two cannot be combined, and saying so here is cheaper than discovering it as a missing
+// overload inside a large bridge file.
+#error "WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK=YES is mutually exclusive with WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=YES: the differential needs the C++ arm this mode removes."
+#endif
+#define CSS_CALC_CPP_SERIALIZER_COMPILED_IN 0
+#else
+#define CSS_CALC_CPP_SERIALIZER_COMPILED_IN 1
+#endif
+
 // https://drafts.csswg.org/css-values-4/#serialize-a-math-function
 void serializationForCSS(StringBuilder&, const Tree&, const SerializationOptions&, Serializer = defaultSerializer);
 String serializationForCSS(const Tree&, const SerializationOptions&, Serializer = defaultSerializer);
 
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
+// These two overloads have no caller anywhere in WebCore. Every production path goes through the
+// `Tree` overloads above (CSSUnevaluatedCalc.cpp:284 and :293, the only two production call sites
+// of any of these).
 void serializationForCSS(StringBuilder&, const Child&, const SerializationOptions&);
 String serializationForCSS(const Child&, const SerializationOptions&);
+#endif
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
 // Test-only, reached from CSSTokenizerSwiftBridge.cpp. The counter and the switch live beside the
