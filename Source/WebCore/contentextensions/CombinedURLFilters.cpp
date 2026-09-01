@@ -186,13 +186,23 @@ struct CombinedURLFilters::SwiftIsland {
 //
 // (`{braced}` arguments would diagnose the narrowing too, and were the first choice, but scalar
 // braced initializers trip -Wbraced-scalar-init and WebCore builds -Werror.)
+//
+// AND THE MAPPING IS NOT SYMMETRIC, which is the trap one layer down. A `size_t` IMPORTED into
+// Swift from C++ is `Int` -- that is the Clang importer's fixed mapping, so `termCount()` below is
+// read as `Int` and the compiler checks it. A Swift `Int` EXPORTED to C++ is `ptrdiff_t`, which is
+// how R125 happened. So an entry point Swift provides spells its size `UInt` (`processNFAs`) while
+// a query C++ provides is read as `Int` (`CombinedURLFiltersPattern::termCount`), and both of
+// those are pinned here as `size_t` on the C++ side, which is the one spelling that is true of
+// both directions.
 using SwiftIslandType = WebCore::CombinedURLFiltersSwift;
-static_assert(std::is_same_v<decltype(&SwiftIslandType::addPatternTerm),
-    void (SwiftIslandType::*)(uint32_t)>,
-    "CombinedURLFiltersSwift.addPatternTerm must take the alphabet's term id type unchanged.");
-static_assert(std::is_same_v<decltype(&SwiftIslandType::endPattern),
-    void (SwiftIslandType::*)(uint64_t)>,
-    "CombinedURLFiltersSwift.endPattern must take CombinedURLFilters::addPattern's action id type unchanged.");
+static_assert(std::is_same_v<decltype(&SwiftIslandType::addPattern),
+    void (SwiftIslandType::*)(uint64_t, CombinedURLFiltersPattern&)>,
+    "CombinedURLFiltersSwift.addPattern must take CombinedURLFilters::addPattern's action id type "
+    "unchanged, and the pattern by reference so that no Term and no Vector is copied.");
+static_assert(std::is_same_v<decltype(&CombinedURLFiltersPattern::termCount),
+    size_t (CombinedURLFiltersPattern::*)() const>,
+    "CombinedURLFiltersPattern::termCount must stay a size_t: the island's loop bound narrowing "
+    "is the same class of defect as R125's, and Swift spells size_t `UInt`.");
 static_assert(std::is_same_v<decltype(&SwiftIslandType::isEmptyTree),
     bool (SwiftIslandType::*)()>,
     "CombinedURLFiltersSwift.isEmptyTree must return CombinedURLFilters::isEmpty's type unchanged.");
@@ -237,19 +247,15 @@ void CombinedURLFilters::addPattern(uint64_t actionId, const Vector<Term>& patte
         return;
 
     if (m_island) {
-        // The island stores term IDS, so this is where a `Term` stops existing as far as the port
-        // is concerned. Interning every term up front is not the order the C++ below uses -- it
-        // interns only the terms it appends -- but it produces the identical alphabet: a term that
-        // matches an existing edge was interned when that edge was appended, so `interned` finds
-        // it and adds nothing, and a term that does not match is interned either way, at the same
-        // point in the same sequence.
-        //
-        // One call per term rather than one call per pattern because a Swift function exposed to
-        // C++ cannot take a `Span` (filings register §27), and a per-term call needs no buffer on
-        // either side.
-        for (const Term& term : pattern)
-            m_island->island.addPatternTerm(m_alphabet.interned(term));
-        m_island->island.endPattern(actionId);
+        // The whole pattern, in one call. `CombinedURLFiltersPattern` borrows the alphabet and
+        // this `Vector<Term>` for the duration, and the island names the pattern's terms by INDEX:
+        // it asks whether an edge's interned term equals the term at an index, and interns only
+        // where the C++ below would have appended an edge. So no `Term` crosses, interning is as
+        // lazy as the C++'s, and the boundary is crossed once per rule rather than once per term
+        // -- which is what lets the island's tree be reached through a single `inout` access
+        // instead of paying Swift's dynamic exclusivity enforcement on every touch. R124.
+        CombinedURLFiltersPattern islandPattern(m_alphabet, pattern);
+        m_island->island.addPattern(actionId, islandPattern);
         return;
     }
 

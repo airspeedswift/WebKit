@@ -46,25 +46,30 @@
 //    115.7). Mean fanout on real blocker lists is 1.08-1.09, which is also why the child search
 //    below is a linear scan and not a binary one.
 //
-// Result on a real 26,664-rule blocker list: 0.596 of the production shape, 0.797 against the same
-// design in C++, 2.3 MB against 6.3 MB, zero `unsafe`.
+// That model predicted 0.596 of the production shape and the island first measured 1.389, and the
+// whole of the divergence was the BOUNDARY rather than the representation (revisit log R124): the
+// island interned every term instead of only the ones it appended, and it was called one term at
+// a time, so every prefix-tree touch paid Swift's dynamic exclusivity enforcement. Both are
+// properties of how the island is CALLED, and both are fixed here -- see `PrefixTree` and
+// `CombinedURLFiltersPattern`.
 //
 // WHAT STILL CROSSES TO C++, and why each one does:
 //
 //  * `Term` never crosses. `CombinedFiltersAlphabet::interned` returns a dense `UInt32` id and the
-//    C++ caller interns; the island stores ids. `term(UInt32) -> const Term&` is deliberately NOT
-//    importable -- the reference is a projection of the alphabet's storage, and the annotation the
-//    importer suggests would be a false lifetime claim -- so the three things the walk needs from
-//    a term are id-taking queries on the alphabet instead.
+//    island stores ids. `term(UInt32) -> const Term&` is deliberately NOT importable -- the
+//    reference is a projection of the alphabet's storage, and the annotation the importer suggests
+//    would be a false lifetime claim -- so everything the island needs from a term is an id-taking
+//    query on the alphabet, or an index-taking query on the pattern in flight.
 //  * `ImmutableCharNFANodeBuilder` and the NFA stay in C++. That is not a limitation, it is a
 //    correctness requirement: the builder sinks its ranges, epsilon targets and actions by
 //    iterating `HashSet`s, and re-implementing it in Swift would change the ORDER those land in
 //    the NFA's five parallel vectors. `SerializedNFA` stores those offsets, so a Swift set would
-//    be behaviourally identical and byte-different -- and one of the differential oracle's nine
-//    golden captures is taken in stored order for exactly this reason.
+//    be behaviourally identical and byte-different -- and one of the differential oracle's golden
+//    captures is taken in stored order for exactly this reason.
 //  * A `WTF::Function` cannot be called from Swift, so the per-NFA handler arrives as
-//    `CombinedURLFiltersNFASink` -- the island's only piece of added C++, and the same shape the
-//    CSS tokenizer island already uses in the other direction.
+//    `CombinedURLFiltersNFASink`, and the pattern being added arrives as
+//    `CombinedURLFiltersPattern`. Those two borrowed-callable structs are the island's whole
+//    added C++, and they are the same shape the CSS tokenizer island already uses.
 
 public import WebCore_Private.CombinedURLFiltersSwiftTypes
 
@@ -148,68 +153,218 @@ private struct ReverseSuffixTree {
     var roots: [[UInt64]: Int] = [:]
 }
 
-// MARK: - The island
+// MARK: - The tree, and why it is one struct rather than three stored properties
 
-@_expose(Cxx)
-public final class CombinedURLFiltersSwift {
+/// Every mutable thing the island owns, in a single value.
+///
+/// WHY IT IS SHAPED LIKE THIS, because it is not the obvious spelling. These three arrays were
+/// stored properties of the `final class` below. Swift enforces exclusive access to a stored
+/// property of a class DYNAMICALLY, and R124 measured **1,979,975 `swift_beginAccess` calls** on a
+/// real 26,664-rule blocker list against the C++ arm's zero -- 1.47 per term instance, >=2.82 ms,
+/// and >=32% of the island's entire deficit. `@exclusivity(unchecked)` would remove them and is
+/// not on the table: it is a safety check, and the charter does not sell those.
+///
+/// Passing the whole tree as one `inout` argument does remove them, and safely. An `inout`
+/// argument formed from a class property opens ONE dynamic access that covers the callee, and
+/// every access *inside* the callee is to an `inout` parameter, which is enforced statically at
+/// compile time. So `addPattern` and `processNFAs` each pay exactly one, and the ~1.1M interior
+/// accesses become none. The enforcement is not weakened anywhere: a genuine overlapping access
+/// would still trap, at the one place that can now see it.
+///
+/// That only pays if the entry points are COARSE, which is why the boundary is per pattern and
+/// per walk rather than per term.
+private struct PrefixTree {
     /// Vertex 0 is the root, and it is never removed. Nothing is ever freed: the C++ deletes
     /// prefix-tree vertices as `processNFAs` walks them, and cxprobe finding 7 measured that this
     /// buys no footprint back at 30k rules -- `phys_footprint` at end of consume is identical to
     /// footprint after insert for every arm, in bmalloc and in system malloc alike, because
     /// neither returns the pages. What the walk does instead is clear a vertex's child count,
     /// which is what makes the tree shrink logically.
-    private var nodes: [PrefixTreeNode] = [PrefixTreeNode()]
+    var nodes: [PrefixTreeNode] = [PrefixTreeNode()]
 
     /// Children 1..n-1 of every vertex, in one arena. A full run bump-allocates a run of twice the
     /// capacity at the end and copies; the abandoned space is not reclaimed, which is the same
     /// trade `WTF::Vector` makes when it reallocates.
-    private var edges: [PrefixTreeEdge] = []
+    var edges: [PrefixTreeEdge] = []
 
     /// The action side table, dense and parallel to `nodes` -- C++'s
     /// `HashMap<const PrefixTreeVertex*, ActionList>`. An empty list means "no entry": C++ only
     /// ever inserts through `add(vertex, ActionList())` immediately followed by an append, so a
     /// present-but-empty entry does not occur and `find() != end()` and "non-empty" agree.
-    private var actions: [[UInt64]] = [[]]
+    var actions: [[UInt64]] = [[]]
+}
 
-    /// Where `addPatternTerm` is in the tree. C++ walks a local pointer down the tree inside one
-    /// `addPattern` call; the terms arrive here one at a time because a Swift function exposed to
-    /// C++ cannot take a `Span` (filings register §27), and a per-term call needs no buffer at all.
-    private var cursor: UInt32 = 0
+// MARK: - Building the tree
 
-    public init() { }
-
-    // MARK: Building the tree
-
-    /// One term of the pattern currently being added, named by its id in the C++ alphabet.
+extension PrefixTree {
+    /// `CombinedURLFilters::addPattern`'s tree half: walk the pattern down the tree, creating the
+    /// vertices that are missing, and record the action on the vertex the last term reaches.
     ///
-    /// C++ compares `alphabet.term(edge.termId) == term`, a VALUE comparison against a term it has
-    /// not interned yet, and its comment explains why: interning first would add alphabet entries
-    /// for terms the tree already has. That reasoning does not survive inspection -- every term of
-    /// every pattern is interned either way, because a term that matches an existing edge is by
-    /// construction already interned with that edge's id, and one that does not is interned as the
-    /// edge is appended. Same set, same order, same ids. So the caller interns up front and the
-    /// scan below compares ids, which is what makes the whole boundary term-free.
-    public func addPatternTerm(_ termId: UInt32) {
-        cursor = descend(from: cursor, term: termId)
-    }
-
-    /// Ends the pattern begun by the preceding `addPatternTerm` calls and records its action.
+    /// The pattern arrives as a whole and its terms are named by INDEX, never by value, because a
+    /// `Term` cannot cross the boundary (`CombinedURLFiltersSwiftTypes.h`). Interning is therefore
+    /// LAZY, exactly as the C++ is: the sibling scan asks the pattern whether an existing edge's
+    /// interned term equals the pattern's term at this index, and only a miss interns. R124
+    /// measured the eager alternative at 47.3% of the island's insert self-time, against the C++
+    /// alphabet's 4.7%.
     ///
     /// The caller guarantees at least one term: `CombinedURLFilters::addPattern` returns early on
     /// an empty pattern, and without that guard this would attach an action to the root.
-    public func endPattern(_ actionId: UInt64) {
-        if !actions[Int(cursor)].contains(actionId) {
-            actions[Int(cursor)].append(actionId)
+    mutating func addPattern(_ actionId: UInt64, _ pattern: inout CX.CombinedURLFiltersPattern) {
+        var vertex: UInt32 = 0
+        // `Int`, because `size_t` is what the C++ declares and the Clang importer maps `size_t`
+        // to Swift's `Int` on the way IN. (The opposite direction is not symmetric: an exported
+        // Swift `Int` is `ptrdiff_t`, which is the R125 defect, so `processNFAs` spells its
+        // exported limit `UInt`. Both are pinned by static_asserts in CombinedURLFilters.cpp.)
+        let count = pattern.termCount()
+        var index = 0
+        while index < count {
+            vertex = descend(from: vertex, patternIndex: index, pattern: &pattern)
+            index += 1
         }
-        cursor = 0
+        if !actions[Int(vertex)].contains(actionId) {
+            actions[Int(vertex)].append(actionId)
+        }
     }
 
-    public func isEmptyTree() -> Bool {
-        nodes[0].childCount == 0
+    /// The child of `vertex` reached by the pattern's term at `patternIndex`, appending one if
+    /// there is none. The linear scan is the measured choice: mean fanout on real blocker lists is
+    /// 1.08-1.09, so at least 92% of scans stop on the first element and a search-algorithm change
+    /// cannot reach the other 8% without also changing the order the consume walk visits children
+    /// in.
+    ///
+    /// `pattern.termMatches` is the C++'s `m_alphabet.term(edge.termId) == term`, reached without
+    /// a `Term` crossing in either direction; `pattern.intern` is the C++'s `m_alphabet.interned`,
+    /// called on exactly the appends the C++ calls it on.
+    private mutating func descend(from vertex: UInt32, patternIndex: Int,
+                                  pattern: inout CX.CombinedURLFiltersPattern) -> UInt32 {
+        let node = nodes[Int(vertex)]
+        if node.childCount != 0 {
+            if pattern.termMatches(patternIndex, node.term0) {
+                return node.child0
+            }
+            for k in 0..<(node.childCount - 1) {
+                let edge = edges[Int(node.moreStart + k)]
+                if pattern.termMatches(patternIndex, edge.term) {
+                    return edge.child
+                }
+            }
+        }
+        return append(to: vertex, term: pattern.intern(patternIndex))
     }
 
-    // MARK: The walk
+    /// Appends a fresh child of `vertex` reached by `term`, and returns it.
+    private mutating func append(to vertex: UInt32, term: UInt32) -> UInt32 {
+        let child = UInt32(nodes.count)
+        nodes.append(PrefixTreeNode())
+        actions.append([])
 
+        let existing = nodes[Int(vertex)].childCount
+        if existing == 0 {
+            nodes[Int(vertex)].term0 = term
+            nodes[Int(vertex)].child0 = child
+            nodes[Int(vertex)].childCount = 1
+            return child
+        }
+
+        // `inRun` children live at `moreStart`; the run is full when `inRun` is zero or a power of
+        // two, which is the implicit-capacity rule stated on `PrefixTreeNode`.
+        let inRun = existing - 1
+        var start = nodes[Int(vertex)].moreStart
+        if inRun & (inRun &- 1) == 0 {
+            let newCapacity = inRun == 0 ? 1 : inRun * 2
+            let newStart = UInt32(edges.count)
+            edges.append(contentsOf: repeatElement(PrefixTreeEdge(term: 0, child: 0),
+                                                   count: Int(newCapacity)))
+            for k in 0..<Int(inRun) {
+                edges[Int(newStart) + k] = edges[Int(start) + k]
+            }
+            start = newStart
+            nodes[Int(vertex)].moreStart = newStart
+        }
+        edges[Int(start + inRun)] = PrefixTreeEdge(term: term, child: child)
+        nodes[Int(vertex)].childCount = existing + 1
+        return child
+    }
+}
+
+// MARK: - Prefix tree primitives
+//
+// Each one is the `PrefixTreeEdges` operation of the same name, with child 0 in the node record
+// and children 1..n-1 at `moreStart`. Keeping them together is what lets the walk below read like
+// the C++ it replaces.
+
+extension PrefixTree {
+    func childEdge(_ vertex: UInt32, _ index: UInt32) -> PrefixTreeEdge {
+        let node = nodes[Int(vertex)]
+        if index == 0 {
+            return PrefixTreeEdge(term: node.term0, child: node.child0)
+        }
+        return edges[Int(node.moreStart + index - 1)]
+    }
+
+    func lastChildEdge(_ vertex: UInt32) -> PrefixTreeEdge {
+        childEdge(vertex, nodes[Int(vertex)].childCount - 1)
+    }
+
+    mutating func setChildEdge(_ vertex: UInt32, _ index: UInt32, _ edge: PrefixTreeEdge) {
+        if index == 0 {
+            nodes[Int(vertex)].term0 = edge.term
+            nodes[Int(vertex)].child0 = edge.child
+            return
+        }
+        edges[Int(nodes[Int(vertex)].moreStart + index - 1)] = edge
+    }
+
+    mutating func setChildTerm(_ vertex: UInt32, _ index: UInt32, _ term: UInt32) {
+        if index == 0 {
+            nodes[Int(vertex)].term0 = term
+            return
+        }
+        edges[Int(nodes[Int(vertex)].moreStart + index - 1)].term = term
+    }
+
+    mutating func removeLastChild(_ vertex: UInt32) {
+        nodes[Int(vertex)].childCount -= 1
+    }
+
+    /// `edges.removeAllMatching([](edge) { return edge.termId == invalidTermId; })`, and stable,
+    /// as WTF's is (`Vector.h:1787` compacts by moving the survivors down over the holes).
+    ///
+    /// Shrinking a run never invalidates the implicit capacity: capacity is at least
+    /// `childCount - 1` rounded up to a power of two at the moment it was allocated, and the
+    /// append path reallocates whenever `childCount - 1` is zero or a power of two, so the slot it
+    /// writes is always inside what was allocated.
+    mutating func removeChildrenWithInvalidTerm(_ vertex: UInt32) {
+        let count = nodes[Int(vertex)].childCount
+        var write: UInt32 = 0
+        for read in 0..<count {
+            let edge = childEdge(vertex, read)
+            if edge.term == CX.invalidTermId {
+                continue
+            }
+            if write != read {
+                setChildEdge(vertex, write, edge)
+            }
+            write += 1
+        }
+        nodes[Int(vertex)].childCount = write
+    }
+
+    /// The actions on `vertex` as the `ActionList` the C++ API takes. The order is the order they
+    /// were added in, which is what `HashMap::get` hands `Term::generateGraph`, and it reaches the
+    /// NFA through a `HashSet` whose iteration order depends on it.
+    func actionList(of vertex: UInt32) -> CX.ActionList {
+        var list = CX.ActionList()
+        for action in actions[Int(vertex)] {
+            list.append(consuming: action)
+        }
+        return list
+    }
+}
+
+// MARK: - The walk
+
+extension PrefixTree {
     /// `CombinedURLFilters::processNFAs`. Returns false if the sink asked to stop.
     ///
     /// `UInt`, not `Int`, and the difference is a shipped defect. `swift::UInt` is `size_t`, so
@@ -221,9 +376,9 @@ public final class CombinedURLFiltersSwift {
     /// one NFA per pattern. C++ warns on none of this. Six of 105 tests, and the oracle could
     /// not see it because all nine of its captures used one finite limit; the sweep that catches
     /// it now is `oracle/run.py`'s MAXNFA_SWEEP. Revisit log R125.
-    public func processNFAs(_ maxNFASize: UInt,
-                            _ alphabet: inout WebCore.ContentExtensions.CombinedFiltersAlphabet,
-                            _ sink: inout WebCore.ContentExtensions.CombinedURLFiltersNFASink) -> Bool {
+    mutating func processNFAs(_ maxNFASize: UInt,
+                              _ alphabet: inout CX.CombinedFiltersAlphabet,
+                              _ sink: inout CX.CombinedURLFiltersNFASink) -> Bool {
         var stack: [UInt32] = []
         stack.reserveCapacity(128)
 
@@ -289,135 +444,13 @@ public final class CombinedURLFiltersSwift {
         return true
     }
 
-    // MARK: - Prefix tree primitives
-    //
-    // Each one is the `PrefixTreeEdges` operation of the same name, with child 0 in the node
-    // record and children 1..n-1 at `moreStart`. Keeping them together is what lets the walk above
-    // read like the C++ it replaces.
-
-    private func childEdge(_ vertex: UInt32, _ index: UInt32) -> PrefixTreeEdge {
-        let node = nodes[Int(vertex)]
-        if index == 0 {
-            return PrefixTreeEdge(term: node.term0, child: node.child0)
-        }
-        return edges[Int(node.moreStart + index - 1)]
-    }
-
-    private func lastChildEdge(_ vertex: UInt32) -> PrefixTreeEdge {
-        childEdge(vertex, nodes[Int(vertex)].childCount - 1)
-    }
-
-    private func setChildEdge(_ vertex: UInt32, _ index: UInt32, _ edge: PrefixTreeEdge) {
-        if index == 0 {
-            nodes[Int(vertex)].term0 = edge.term
-            nodes[Int(vertex)].child0 = edge.child
-            return
-        }
-        edges[Int(nodes[Int(vertex)].moreStart + index - 1)] = edge
-    }
-
-    private func setChildTerm(_ vertex: UInt32, _ index: UInt32, _ term: UInt32) {
-        if index == 0 {
-            nodes[Int(vertex)].term0 = term
-            return
-        }
-        edges[Int(nodes[Int(vertex)].moreStart + index - 1)].term = term
-    }
-
-    private func removeLastChild(_ vertex: UInt32) {
-        nodes[Int(vertex)].childCount -= 1
-    }
-
-    /// `edges.removeAllMatching([](edge) { return edge.termId == invalidTermId; })`, and stable,
-    /// as WTF's is (`Vector.h:1787` compacts by moving the survivors down over the holes).
-    ///
-    /// Shrinking a run never invalidates the implicit capacity: capacity is at least
-    /// `childCount - 1` rounded up to a power of two at the moment it was allocated, and the
-    /// append path reallocates whenever `childCount - 1` is zero or a power of two, so the slot it
-    /// writes is always inside what was allocated.
-    private func removeChildrenWithInvalidTerm(_ vertex: UInt32) {
-        let count = nodes[Int(vertex)].childCount
-        var write: UInt32 = 0
-        for read in 0..<count {
-            let edge = childEdge(vertex, read)
-            if edge.term == CX.invalidTermId {
-                continue
-            }
-            if write != read {
-                setChildEdge(vertex, write, edge)
-            }
-            write += 1
-        }
-        nodes[Int(vertex)].childCount = write
-    }
-
-    /// The child of `vertex` reached by `term`, appending one if there is none. The linear scan is
-    /// the measured choice: mean fanout on real blocker lists is 1.08-1.09, so at least 92% of
-    /// scans stop on the first element and a search-algorithm change cannot reach the other 8%
-    /// without also changing the order the consume walk visits children in.
-    private func descend(from vertex: UInt32, term: UInt32) -> UInt32 {
-        let node = nodes[Int(vertex)]
-        if node.childCount != 0 {
-            if node.term0 == term {
-                return node.child0
-            }
-            for k in 0..<(node.childCount - 1) where edges[Int(node.moreStart + k)].term == term {
-                return edges[Int(node.moreStart + k)].child
-            }
-        }
-
-        let child = UInt32(nodes.count)
-        nodes.append(PrefixTreeNode())
-        actions.append([])
-
-        let existing = node.childCount
-        if existing == 0 {
-            nodes[Int(vertex)].term0 = term
-            nodes[Int(vertex)].child0 = child
-            nodes[Int(vertex)].childCount = 1
-            return child
-        }
-
-        // `inRun` children live at `moreStart`; the run is full when `inRun` is zero or a power of
-        // two, which is the implicit-capacity rule stated on `PrefixTreeNode`.
-        let inRun = existing - 1
-        var start = nodes[Int(vertex)].moreStart
-        if inRun & (inRun &- 1) == 0 {
-            let newCapacity = inRun == 0 ? 1 : inRun * 2
-            let newStart = UInt32(edges.count)
-            edges.append(contentsOf: repeatElement(PrefixTreeEdge(term: 0, child: 0),
-                                                   count: Int(newCapacity)))
-            for k in 0..<Int(inRun) {
-                edges[Int(newStart) + k] = edges[Int(start) + k]
-            }
-            start = newStart
-            nodes[Int(vertex)].moreStart = newStart
-        }
-        edges[Int(start + inRun)] = PrefixTreeEdge(term: term, child: child)
-        nodes[Int(vertex)].childCount = existing + 1
-        return child
-    }
-
-    /// The actions on `vertex` as the `ActionList` the C++ API takes. The order is the order they
-    /// were added in, which is what `HashMap::get` hands `Term::generateGraph`, and it reaches the
-    /// NFA through a `HashSet` whose iteration order depends on it.
-    private func actionList(of vertex: UInt32) -> CX.ActionList {
-        var list = CX.ActionList()
-        for action in actions[Int(vertex)] {
-            list.append(consuming: action)
-        }
-        return list
-    }
-
-    // MARK: - Generating one NFA out of a fixed-length subtree
-
     /// `generateNFAForSubtree`. Walks the subtree rooted at `root`, generating NFA nodes for every
     /// fixed-length edge and clearing the vertices it consumes.
-    private func generateNFAForSubtree(_ nfa: inout CX.NFA,
-                                       _ alphabet: inout CX.CombinedFiltersAlphabet,
-                                       subtreeRoot: consuming CX.ImmutableCharNFANodeBuilder,
-                                       root: UInt32,
-                                       maxNFASize: UInt) {
+    private mutating func generateNFAForSubtree(_ nfa: inout CX.NFA,
+                                                _ alphabet: inout CX.CombinedFiltersAlphabet,
+                                                subtreeRoot: consuming CX.ImmutableCharNFANodeBuilder,
+                                                root: UInt32,
+                                                maxNFASize: UInt) {
         var stack: [ActiveSubtree] = []
         if nodes[Int(root)].childCount == 0 {
             // C++ never moves the parameter in this case, so the caller's builder is finalized by
@@ -496,9 +529,10 @@ public final class CombinedURLFiltersSwift {
     /// `generateInfixUnsuitableForReverseSuffixTree`. The reverse suffix tree may only absorb the
     /// part of a branch below the last vertex that either carries an action or branches; this
     /// generates everything above that point in the forward direction.
-    private func generateInfixUnsuitableForReverseSuffixTree(_ nfa: inout CX.NFA,
-                                                             _ alphabet: inout CX.CombinedFiltersAlphabet,
-                                                             _ stack: inout [ActiveSubtree]) {
+    private mutating func generateInfixUnsuitableForReverseSuffixTree(
+        _ nfa: inout CX.NFA,
+        _ alphabet: inout CX.CombinedFiltersAlphabet,
+        _ stack: inout [ActiveSubtree]) {
         var i = stack.count - 1
         while i > 0 {
             i -= 1
@@ -549,10 +583,11 @@ public final class CombinedURLFiltersSwift {
     /// `generateSuffixWithReverseSuffixTree`. Walks back up from the leaf, unifying the suffix
     /// with any other branch that ends in the same action list, and connects the result to the
     /// first vertex that already has a generated node.
-    private func generateSuffixWithReverseSuffixTree(_ nfa: inout CX.NFA,
-                                                     _ alphabet: inout CX.CombinedFiltersAlphabet,
-                                                     _ stack: inout [ActiveSubtree],
-                                                     _ tree: inout ReverseSuffixTree) {
+    private mutating func generateSuffixWithReverseSuffixTree(
+        _ nfa: inout CX.NFA,
+        _ alphabet: inout CX.CombinedFiltersAlphabet,
+        _ stack: inout [ActiveSubtree],
+        _ tree: inout ReverseSuffixTree) {
         let leafVertex = stack[stack.count - 1].vertex
         // Not empty: the prefix tree always has actions on its leaves by construction.
         let key = actions[Int(leafVertex)].sorted()
@@ -619,7 +654,7 @@ public final class CombinedURLFiltersSwift {
         }
     }
 
-    // MARK: - Stack shrinking, and why it finalizes
+    // MARK: Stack shrinking, and why it finalizes
 
     /// `Vector<ActiveSubtree>::shrink`, including the part that matters: destroying an
     /// `ActiveSubtree` destroys its builder, which sinks that node into the NFA. WTF destroys the
@@ -636,5 +671,38 @@ public final class CombinedURLFiltersSwift {
     private func finalizeAndPop(_ stack: inout [ActiveSubtree]) {
         stack[stack.count - 1].builder?.builder.finalizeNow()
         stack.removeLast()
+    }
+}
+
+// MARK: - The island
+
+/// The C++-visible surface, and nothing else: every entry point immediately hands the tree to a
+/// `PrefixTree` method as a single `inout` argument.
+///
+/// That is the whole reason this class is so thin. See `PrefixTree`: one `inout` access covers a
+/// whole pattern or a whole walk, where a stored property touched from many small methods paid
+/// Swift's dynamic exclusivity enforcement on each touch.
+@_expose(Cxx)
+public final class CombinedURLFiltersSwift {
+    private var tree = PrefixTree()
+
+    public init() { }
+
+    /// One rule: every term of `pattern` in order, then its action. `CombinedURLFilters::addPattern`
+    /// has always taken a whole `Vector<Term>`, so this is the boundary the C++ already had; the
+    /// per-term entry point this replaces was an accommodation to Swift not being able to receive a
+    /// `Span` from C++ (filings register §27), and `CombinedURLFiltersPattern` answers it instead.
+    public func addPattern(_ actionId: UInt64, _ pattern: inout WebCore.ContentExtensions.CombinedURLFiltersPattern) {
+        tree.addPattern(actionId, &pattern)
+    }
+
+    public func isEmptyTree() -> Bool {
+        tree.nodes[0].childCount == 0
+    }
+
+    public func processNFAs(_ maxNFASize: UInt,
+                            _ alphabet: inout WebCore.ContentExtensions.CombinedFiltersAlphabet,
+                            _ sink: inout WebCore.ContentExtensions.CombinedURLFiltersNFASink) -> Bool {
+        tree.processNFAs(maxNFASize, &alphabet, &sink)
     }
 }
