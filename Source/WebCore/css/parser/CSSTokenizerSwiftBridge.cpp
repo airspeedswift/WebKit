@@ -67,12 +67,10 @@
 #include "CSSSerializationContext.h"
 #include "CSSTokenizer.h"
 #include "CSSTokenizerSwiftTypes.h"
-// Same suppression, and the same FIXME, as CSSTokenizer.cpp: the generated header's
-// `SWIFT_ENUM` hands C++ an Objective-C-only non-defining fixed-underlying-type enum
-// declaration for each `@c` enum, which -Werror makes fatal.
-IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
-#include "WebCoreSwift-Generated.h"
-IGNORE_CLANG_WARNINGS_END
+// WebCoreSwift-Generated.h is module-scoped, so any translation unit that includes it must declare
+// every Swift boundary type in the module, not just the ones this file calls.
+// WebCoreSwiftBoundaryTypes.h states that requirement once.
+#include "WebCoreSwiftBoundaryTypes.h"
 #include <array>
 #include <atomic>
 #include <optional>

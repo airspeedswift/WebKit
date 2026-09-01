@@ -34,15 +34,10 @@
 #include "CSSPrimitiveNumericTypes+Serialization.h"
 #include "CSSPrimitiveValue.h"
 #include "CSSUnits.h"
-// WebCoreSwift-Generated.h below is emitted once for the whole module, so a translation unit
-// that includes it must see every Swift boundary's types, not just the ones this file uses.
-#include "CSSTokenizerSwiftTypes.h"
-// Same suppression, and the same FIXME, as CSSTokenizer.cpp and CSSParserFastPaths.cpp: the
-// generated header's `SWIFT_ENUM` hands C++ an Objective-C-only non-defining
-// fixed-underlying-type enum declaration for each `@c` enum, which -Werror makes fatal.
-IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
-#include "WebCoreSwift-Generated.h"
-IGNORE_CLANG_WARNINGS_END
+// The entry points this file calls, and every other Swift boundary's types along with them --
+// WebCoreSwift-Generated.h is module-scoped, so a translation unit that includes it must declare
+// all of them. See WebCoreSwiftBoundaryTypes.h.
+#include "WebCoreSwiftBoundaryTypes.h"
 #include <atomic>
 #include <limits>
 #include <ranges>
