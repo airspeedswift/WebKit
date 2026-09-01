@@ -228,6 +228,16 @@ WK_HAVE_URL_FORMATTING_xrsimulator = YES;
 WK_HAVE_URL_FORMATTING_maccatalyst = YES;
 WK_HAVE_URL_FORMATTING_macosx = YES;
 
+// Whole-module, matching JavaScriptCore.xcconfig:80. Without it Xcode compiles Swift
+// `-incremental -enable-batch-mode`, and nothing specializes across a Swift *file*
+// boundary: a call from one file to a generic function in another reaches the
+// unspecialized generic through a lazily-built conformance witness table, whatever
+// specializations already sit in the same binary. In the CSS tokenizer that cost 10.7
+// points, because `consumeNumericToken` called the unit trie's 17,898-instruction
+// unspecialized form rather than the 943-instruction UInt8 one next to it. JSC has this
+// setting; WebCore inherited the common Swift settings but this was not among them.
+SWIFT_COMPILATION_MODE = wholemodule;
+
 SWIFT_INSTALL_OBJC_HEADER = NO;
 BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
 SWIFT_LIBRARY_LEVEL = spi;
