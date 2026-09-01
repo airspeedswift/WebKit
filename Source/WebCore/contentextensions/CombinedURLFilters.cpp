@@ -50,6 +50,12 @@ namespace WebCore {
 
 namespace ContentExtensions {
 
+// REGION 1 of 4 of the C++ builder, guarded so that a build can answer what is DELETABLE by
+// making the compiler the oracle. See CombinedURLFilters.h for the mode and WebCore.xcconfig for
+// why it is a build mode rather than an `nm` inspection.
+//
+// The prefix tree and the reverse suffix tree, both of which the island replaces with arenas.
+#if COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
 struct PrefixTreeEdge {
     // The term is named by its id in CombinedURLFilters::m_alphabet, never by a pointer into the
     // alphabet's storage: the id has no lifetime to get wrong, it is what an eventual Swift
@@ -79,8 +85,9 @@ struct ReverseSuffixTreeVertex {
     uint32_t nodeId;
 };
 using ReverseSuffixTreeRoots = HashMap<HashableActionList, ReverseSuffixTreeVertex, HashableActionListHash, HashableActionListHashTraits>;
+#endif // COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
 
-#if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING
+#if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING && COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
 static size_t recursiveMemoryUsed(const PrefixTreeVertex& vertex)
 {
     size_t size = sizeof(PrefixTreeVertex)
@@ -115,7 +122,7 @@ size_t CombinedURLFilters::memoryUsed() const
 }
 #endif
     
-#if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
+#if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING && COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
 static String prefixTreeVertexToString(const PrefixTreeVertex& vertex, const HashMap<const PrefixTreeVertex*, ActionList>& actions, unsigned depth)
 {
     StringBuilder builder;
@@ -162,9 +169,18 @@ struct CombinedURLFilters::SwiftIsland {
 };
 
 CombinedURLFilters::CombinedURLFilters(Builder builder)
+#if COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
     : m_prefixTreeRoot(makeUniqueRef<PrefixTreeVertex>())
     , m_island(builder == Builder::Swift ? makeUnique<SwiftIsland>() : nullptr)
+#else
+    // REGION 2 of 4: with no C++ builder there is nowhere for `Builder::Cpp` to go, and the
+    // measurement mode asserts that rather than silently producing an empty rule list.
+    : m_island(makeUnique<SwiftIsland>())
+#endif
 {
+#if !COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
+    RELEASE_ASSERT(builder == Builder::Swift);
+#endif
 }
 
 CombinedURLFilters::~CombinedURLFilters() = default;
@@ -173,7 +189,11 @@ bool CombinedURLFilters::isEmpty() const
 {
     if (m_island)
         return m_island->island.isEmptyTree();
+#if COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
     return m_prefixTreeRoot->edges.isEmpty();
+#else
+    RELEASE_ASSERT_NOT_REACHED();
+#endif
 }
 
 void CombinedURLFilters::addPattern(uint64_t actionId, const Vector<Term>& pattern)
@@ -200,6 +220,11 @@ void CombinedURLFilters::addPattern(uint64_t actionId, const Vector<Term>& patte
         return;
     }
 
+#if !COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
+    // No other builder to fall through to, and no failure channel on this signature either.
+    RELEASE_ASSERT_NOT_REACHED();
+#else
+    // REGION 3 of 4: building the tree.
     // Extend the prefix tree with the new pattern.
     auto* lastPrefixTree = m_prefixTreeRoot.ptr();
 
@@ -226,8 +251,12 @@ void CombinedURLFilters::addPattern(uint64_t actionId, const Vector<Term>& patte
     ActionList& actions = addResult.iterator->value;
     if (actions.find(actionId) == notFound)
         actions.append(actionId);
+#endif // COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
 }
 
+// REGION 4 of 4: the walk itself -- the ActiveSubtree stack, the two graph generators, the
+// hand-rolled depth-first free of the reverse suffix tree, and the subtree driver.
+#if COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
 struct ActiveSubtree {
     ActiveSubtree(PrefixTreeVertex& vertex, ImmutableCharNFANodeBuilder&& nfaNode, unsigned edgeIndex)
         : vertex(vertex)
@@ -457,6 +486,8 @@ static void generateNFAForSubtree(const CombinedFiltersAlphabet& alphabet, NFA& 
     clearReverseSuffixTree(reverseSuffixTreeRoots);
 }
 
+#endif // COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
+
 bool CombinedURLFilters::processNFAs(size_t maxNFASize, Function<bool(NFA&&)>&& handler)
 {
     if (m_island) {
@@ -466,7 +497,11 @@ bool CombinedURLFilters::processNFAs(size_t maxNFASize, Function<bool(NFA&&)>&& 
         return m_island->island.processNFAs(maxNFASize, m_alphabet, sink);
     }
 
-#if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
+#if !COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
+    RELEASE_ASSERT_NOT_REACHED();
+#else
+    // REGION 4b of 4: the driver.
+#if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING && COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
     print();
 #endif
     while (true) {
@@ -524,6 +559,7 @@ bool CombinedURLFilters::processNFAs(size_t maxNFASize, Function<bool(NFA&&)>&& 
         }
     }
     return true;
+#endif // COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
 }
 
 } // namespace ContentExtensions

@@ -39,6 +39,31 @@ namespace ContentExtensions {
 
 struct PrefixTreeVertex;
 
+// Whether the C++ builder is compiled in at all. Off means the island is the only implementation,
+// which is the MEASUREMENT MODE that answers *deletable* -- what could be dropped if the Swift
+// permanently replaced the C++ path -- as opposed to *deleted*, which stays 0 by decision because
+// keeping the fallback is the schedule.
+//
+// It has to be a build mode and not an `nm` inspection: with both arms compiled in, every symbol
+// in the C++ arm links whatever the island's coverage is, so its presence in a symbol table says
+// nothing at all. Guarding the bodies out makes the COMPILER the oracle -- it either links, in
+// which case the guarded lines are deletable and the set is enumerated by construction, or it
+// names the reference that keeps one alive.
+//
+// Spelled once, here, rather than repeated as a two-clause `#if` at each guarded region. A
+// measurement whose boundary is written out eight times is one whose boundary can drift between
+// them, and the count it produces is the thing being reported.
+#if defined(USE_SWIFT_COMBINED_URL_FILTERS_NO_FALLBACK) && USE_SWIFT_COMBINED_URL_FILTERS_NO_FALLBACK
+#if !defined(USE_SWIFT_COMBINED_URL_FILTERS) || !USE_SWIFT_COMBINED_URL_FILTERS
+// Diagnosed here rather than left to produce a pile of link errors naming `generateNFAForSubtree`,
+// which is what removing every builder from a build that still selects one looks like.
+#error "WK_USE_SWIFT_COMBINED_URL_FILTERS_NO_FALLBACK=YES requires WK_USE_SWIFT_COMBINED_URL_FILTERS=YES: it removes the only other builder."
+#endif
+#define COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN 0
+#else
+#define COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN 1
+#endif
+
 class WEBCORE_EXPORT CombinedURLFilters {
 public:
     // Which implementation holds the prefix tree and walks it. Both are compiled in -- keeping the
@@ -67,10 +92,10 @@ public:
     bool processNFAs(size_t maxNFASize, Function<bool(NFA&&)>&&);
     bool NODELETE isEmpty() const;
 
-#if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING
+#if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING && COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
     size_t memoryUsed() const;
 #endif
-#if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
+#if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING && COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
     void print() const;
 #endif
 
@@ -84,8 +109,10 @@ private:
     struct SwiftIsland;
 
     CombinedFiltersAlphabet m_alphabet;
+#if COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
     const UniqueRef<PrefixTreeVertex> m_prefixTreeRoot;
     HashMap<const PrefixTreeVertex*, ActionList> m_actions;
+#endif
     const std::unique_ptr<SwiftIsland> m_island;
 };
 
