@@ -30,13 +30,23 @@
 #include <WebCore/ContentExtensionsDebugging.h>
 #include <WebCore/Term.h>
 #include <wtf/HashSet.h>
+#include <wtf/SwiftBridging.h>
 #include <wtf/Vector.h>
 
 namespace WebCore {
 
 namespace ContentExtensions {
 
-class CombinedFiltersAlphabet {
+// SWIFT_SAFE: Swift imports the alphabet as unsafe because `m_uniqueTerms` is a set of raw
+// `const Term*` into `m_internedTermsStorage`, which the alphabet itself owns for its whole
+// lifetime -- the pointers are interior to the object and cannot dangle while it is alive.
+// Without this, every mention of the alphabet from Swift costs an `unsafe` marker.
+//
+// This does NOT make `interned` importable: it returns one of those interior pointers, so Swift
+// still drops it. The fix there is an API change -- hand back an index into the storage vector
+// rather than a pointer -- not an annotation; SWIFT_RETURNS_INDEPENDENT_VALUE, which the importer
+// suggests, would be a false claim about the returned pointer's lifetime.
+class SWIFT_SAFE CombinedFiltersAlphabet {
 public:
     const Term* interned(const Term&);
 #if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING

@@ -33,7 +33,10 @@ namespace WebCore {
 
 namespace ContentExtensions {
 
-struct NFA;
+// `NFA` is an alias for a class-template specialization (NFA.h), which cannot be forward-declared
+// as `struct NFA;`. Declaring the template and re-forming the alias keeps this header standalone.
+template <typename CharacterType, typename ActionType> struct ImmutableNFA;
+using NFA = ImmutableNFA<char, uint64_t>;
 
 // NFAToDFA provides a way to build a DFA corresponding to a NFA.
 class NFAToDFA {

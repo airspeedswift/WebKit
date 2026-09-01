@@ -36,17 +36,17 @@ namespace WebCore {
 namespace ContentExtensions {
 
 #if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
-void NFA::debugPrintDot() const
+void debugPrintDot(const NFA& nfa)
 {
     dataLogF("digraph NFA_Transitions {\n");
     dataLogF("    rankdir=LR;\n");
     dataLogF("    node [shape=circle];\n");
     dataLogF("    {\n");
 
-    for (unsigned i = 0; i < nodes.size(); ++i) {
+    for (unsigned i = 0; i < nfa.nodes.size(); ++i) {
         dataLogF("         %d [label=<Node %d", i, i);
 
-        const auto& node = nodes[i];
+        const auto& node = nfa.nodes[i];
 
         if (node.actionStart != node.actionEnd) {
             dataLogF("<BR/>(Final: ");
@@ -54,7 +54,7 @@ void NFA::debugPrintDot() const
             for (unsigned actionIndex = node.actionStart; actionIndex < node.actionEnd; ++actionIndex) {
                 if (!isFirst)
                     dataLogF(", ");
-                dataLogF("%" PRIu64, actions[actionIndex]);
+                dataLogF("%" PRIu64, nfa.actions[actionIndex]);
                 isFirst = false;
             }
             dataLogF(")");
@@ -68,15 +68,15 @@ void NFA::debugPrintDot() const
     dataLogF("    }\n");
 
     dataLogF("    {\n");
-    for (unsigned i = 0; i < nodes.size(); ++i) {
-        const auto& node = nodes[i];
+    for (unsigned i = 0; i < nfa.nodes.size(); ++i) {
+        const auto& node = nfa.nodes[i];
 
         HashMap<uint32_t, Vector<uint32_t>, DefaultHash<unsigned>, WTF::UnsignedWithZeroKeyHashTraits<unsigned>> transitionsPerTarget;
 
         for (uint32_t transitionIndex = node.rangesStart; transitionIndex < node.rangesEnd; ++transitionIndex) {
-            const ImmutableCharRange& range = transitions[transitionIndex];
+            const ImmutableCharRange& range = nfa.transitions[transitionIndex];
             for (uint32_t targetIndex = range.targetStart; targetIndex < range.targetEnd; ++targetIndex) {
-                uint32_t target = targets[targetIndex];
+                uint32_t target = nfa.targets[targetIndex];
                 auto addResult = transitionsPerTarget.add(target, Vector<uint32_t>());
                 addResult.iterator->value.append(transitionIndex);
             }
@@ -92,7 +92,7 @@ void NFA::debugPrintDot() const
                 else
                     isFirst = false;
 
-                const ImmutableCharRange& range = transitions[rangeIndex];
+                const ImmutableCharRange& range = nfa.transitions[rangeIndex];
                 if (range.first == range.last) {
                     if (isASCIIPrintable(range.first))
                     dataLogF("%c", range.first);
@@ -109,7 +109,7 @@ void NFA::debugPrintDot() const
         }
 
         for (uint32_t epsilonTargetIndex = node.epsilonTransitionTargetsStart; epsilonTargetIndex < node.epsilonTransitionTargetsEnd; ++epsilonTargetIndex) {
-            uint32_t target = epsilonTransitionsTargets[epsilonTargetIndex];
+            uint32_t target = nfa.epsilonTransitionsTargets[epsilonTargetIndex];
             dataLogF("        %d -> %d [label=\"ɛ\"]\n", i, target);
         }
     }

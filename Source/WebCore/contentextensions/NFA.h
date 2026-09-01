@@ -39,11 +39,16 @@ typedef Vector<uint64_t, 0, CrashOnOverflow, 1> ActionList;
 typedef ImmutableRange<char> ImmutableCharRange;
 typedef ImmutableNFANodeBuilder<char, uint64_t> ImmutableCharNFANodeBuilder;
 
-struct NFA : public ImmutableNFA<char, uint64_t> {
+// An alias, not a derived struct. Swift's C++ importer brings inherited members across but will
+// not convert a derived value to a `Base&` parameter, which `ImmutableNFANodeBuilder(TypedImmutableNFA&)`
+// requires -- so a one-member subclass made every node construction unreachable from Swift.
+// At the default CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING == 0 the subclass had no members at
+// all, so nothing is lost by naming the base directly and making the debug dump a free function.
+using NFA = ImmutableNFA<char, uint64_t>;
+
 #if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
-    void debugPrintDot() const;
+void debugPrintDot(const NFA&);
 #endif
-};
 
 } // namespace ContentExtensions
 } // namespace WebCore

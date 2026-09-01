@@ -240,7 +240,7 @@ static bool compileToBytecode(CombinedURLFilters&& filters, UniversalActionSet&&
     bool processedSuccessfully = filters.processNFAs(maxNFASize, [&](NFA&& nfa) {
 #if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
         dataLogF("NFA\n");
-        nfa.debugPrintDot();
+        debugPrintDot(nfa);
 #endif
         LOG_LARGE_STRUCTURES(nfa, nfa.memoryUsed());
         auto dfa = NFAToDFA::convert(WTF::move(nfa));

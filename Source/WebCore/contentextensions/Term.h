@@ -32,6 +32,7 @@
 #include <unicode/utypes.h>
 #include <wtf/ASCIICType.h>
 #include <wtf/Hasher.h>
+#include <wtf/SwiftBridging.h>
 #include <wtf/Vector.h>
 #include <wtf/text/StringBuilder.h>
 
@@ -46,7 +47,13 @@ enum class AtomQuantifier : uint8_t {
     OneOrMore
 };
 
-class Term {
+// SWIFT_SAFE: Swift imports `Term` as unsafe because of the `m_atomData` union, whose
+// `Vector<Term>` alternative is managed by the hand-written copy/move/destructor below rather
+// than by the compiler. The union is encapsulated -- the accessors guard on `m_termType` with a
+// release-mode early return (e.g. `addCharacter`, `extendGroupSubpattern`), and the copy, move
+// and destructor switch on it -- so the type is safe to use even though a constituent is not.
+// Without this, every mention of `Term` from Swift costs an `unsafe` marker.
+class SWIFT_SAFE Term {
 public:
     Term();
     Term(char character, bool isCaseSensitive);

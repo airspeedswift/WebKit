@@ -28,6 +28,7 @@
 #include <WebCore/ImmutableNFA.h>
 #include <WebCore/MutableRangeList.h>
 #include <wtf/HashSet.h>
+#include <wtf/SwiftBridging.h>
 
 #if ENABLE(CONTENT_EXTENSIONS)
 
@@ -38,8 +39,18 @@ namespace ContentExtensions {
 // A ImmutableNFANodeBuilder let you build an NFA node by adding states and linking with other nodes.
 // When a builder is destructed, all its properties are finalized into the NFA. Using the NFA with a live
 // builder results in undefined behavior.
+// SWIFT_SAFE: Swift imports the builder as unsafe because of the raw `TypedImmutableNFA*` back
+// pointer. The pointer is never handed out, and the class maintains the invariant that
+// `m_finalized` is true whenever it is null -- the default constructor leaves both in that state,
+// and the move constructor and move assignment restore it in the source -- so the destructor and
+// `finalize()` never dereference null. `isValid()` reports the pointer's presence rather than
+// exposing it. Without this, every mention of the builder from Swift costs an `unsafe` marker.
+//
+// The annotation does NOT claim the aliasing rule noted above is enforced: touching the NFA while
+// a builder is live is undefined behaviour in C++ and would remain so from Swift. Swift's own
+// exclusivity checking is what covers it there, because the builder holds the NFA `inout`.
 template <typename CharacterType, typename ActionType>
-class ImmutableNFANodeBuilder {
+class SWIFT_SAFE ImmutableNFANodeBuilder {
     typedef ImmutableNFA<CharacterType, ActionType> TypedImmutableNFA;
     typedef HashSet<uint32_t, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>> TargetSet;
 public:
