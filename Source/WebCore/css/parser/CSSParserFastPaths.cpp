@@ -62,6 +62,10 @@
 // named 'CSSCalcSwiftNode' in namespace 'WebCore::CSSCalc'".
 #include "CSSCalcSwiftTypes.h"
 #include "CSSTokenizerSwiftTypes.h"
+// Not used by this file either, and included for the same reason: the content-extensions
+// island (CombinedURLFiltersSwift.swift) is the third island in this module, and the one
+// generated header carries its boundary types too.
+#include "CombinedURLFiltersSwiftTypes.h"
 IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
 #include "WebCoreSwift-Generated.h"
 IGNORE_CLANG_WARNINGS_END

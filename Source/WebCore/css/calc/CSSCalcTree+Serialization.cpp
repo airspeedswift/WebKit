@@ -38,6 +38,10 @@
 // direction: WebCoreSwift-Generated.h below is emitted once for the whole module, so a translation
 // unit that includes it has to be able to see every island's boundary types, not just its own.
 #include "CSSTokenizerSwiftTypes.h"
+// Not used by this file either, and included for the same reason: the content-extensions
+// island (CombinedURLFiltersSwift.swift) is the third island in this module, and the one
+// generated header carries its boundary types too.
+#include "CombinedURLFiltersSwiftTypes.h"
 // Same suppression, and the same FIXME, as CSSTokenizer.cpp and CSSParserFastPaths.cpp: the
 // generated header's `SWIFT_ENUM` hands C++ an Objective-C-only non-defining
 // fixed-underlying-type enum declaration for each `@c` enum, which -Werror makes fatal.

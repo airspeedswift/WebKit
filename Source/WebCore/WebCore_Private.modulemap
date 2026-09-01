@@ -27,6 +27,17 @@ framework module WebCore_Private [system] {
         export *
     }
 
+    // The content-extensions island's boundary, its own module for the same reason again. It
+    // names only the sink that carries the per-NFA handler; everything else the island touches --
+    // Term, NFA, ImmutableNFANodeBuilder, CombinedFiltersAlphabet -- is reached through the
+    // ordinary includes in that header, which resolve to the source tree through WebCore's own
+    // target header map rather than to the Core umbrella.
+    explicit module CombinedURLFiltersSwiftTypes {
+        header "CombinedURLFiltersSwiftTypes.h"
+        requires cplusplus
+        export *
+    }
+
     module Core {
         // Workaround for rdar://173516139: PrivateHeaders includes a header
         // "WorkAround173516139.h" that the build system regenerates whenever
@@ -55,6 +66,7 @@ framework module WebCore_Private [system] {
         exclude header "CSSTokenizerSwiftTypes.h"
         exclude header "CSSParserTokenBits.h"
         exclude header "CSSCalcSwiftTypes.h"
+        exclude header "CombinedURLFiltersSwiftTypes.h"
 
         module * {
             export *

@@ -41,7 +41,26 @@ struct PrefixTreeVertex;
 
 class WEBCORE_EXPORT CombinedURLFilters {
 public:
-    CombinedURLFilters();
+    // Which implementation holds the prefix tree and walks it. Both are compiled in -- keeping the
+    // C++ in tree until every WebKit platform has Swift is the schedule, not a hedge -- and the
+    // island is CombinedURLFiltersSwift.swift.
+    //
+    // The default comes from a build setting so a whole build can be flipped, and the constructor
+    // takes it as a parameter so that ONE process can run both arms. That is not a convenience:
+    // the differential oracle diffs the two implementations' NFAs over nine corpora, and an
+    // instrument that needs a rebuild to change arms cannot rule out the rebuild.
+    //
+    // `defined() &&` rather than a `#if !defined / #define 0` prologue, because WebCore builds
+    // with -Werror,-Wundef. Same arrangement as `CSSCalc::Serializer`.
+    enum class Builder : bool { Cpp, Swift };
+    static constexpr Builder defaultBuilder =
+#if defined(USE_SWIFT_COMBINED_URL_FILTERS) && USE_SWIFT_COMBINED_URL_FILTERS
+        Builder::Swift;
+#else
+        Builder::Cpp;
+#endif
+
+    explicit CombinedURLFilters(Builder = defaultBuilder);
     ~CombinedURLFilters();
 
     void addPattern(uint64_t actionId, const Vector<Term>& pattern);
@@ -54,11 +73,20 @@ public:
 #if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
     void print() const;
 #endif
-    
+
 private:
+    // Holds the Swift island. Out of line because the type comes from WebCoreSwift-Generated.h,
+    // which only translation units that can see every island's boundary header may include -- so
+    // it cannot be named in a public header. Null on the `Builder::Cpp` arm, and the members
+    // below are then the whole state; non-null on `Builder::Swift`, and the prefix tree and the
+    // action side table live in the island instead. `m_alphabet` is shared by both arms: interning
+    // is where a `Term` becomes an id, and the island only ever holds ids.
+    struct SwiftIsland;
+
     CombinedFiltersAlphabet m_alphabet;
     const UniqueRef<PrefixTreeVertex> m_prefixTreeRoot;
     HashMap<const PrefixTreeVertex*, ActionList> m_actions;
+    const std::unique_ptr<SwiftIsland> m_island;
 };
 
 } // namespace ContentExtensions

@@ -30,6 +30,18 @@
 
 #include "HashableActionList.h"
 #include "Term.h"
+// The island's boundary types, plus -- for the reason CSSTokenizer.cpp:37 records -- the other
+// two islands' boundary headers, because WebCoreSwift-Generated.h is emitted once for the whole
+// module and every translation unit that includes it must be able to see all of them.
+#include "CSSCalcSwiftTypes.h"
+#include "CSSTokenizerSwiftTypes.h"
+#include "CombinedURLFiltersSwiftTypes.h"
+// Same suppression and the same FIXME as CSSTokenizer.cpp: the generated header hands C++ an
+// Objective-C-only non-defining fixed-underlying-type enum declaration for each `@c` enum, which
+// -Werror makes fatal. Filings register §26.
+IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
+#include "WebCoreSwift-Generated.h"
+IGNORE_CLANG_WARNINGS_END
 #include <wtf/DataLog.h>
 #include <wtf/Vector.h>
 #include <wtf/text/CString.h>
@@ -82,6 +94,14 @@ static size_t recursiveMemoryUsed(const PrefixTreeVertex& vertex)
 
 size_t CombinedURLFilters::memoryUsed() const
 {
+    // Counts the C++ arm only. On `Builder::Swift` the prefix tree and the action side table are
+    // in the island, so this reports the two empty containers below plus the alphabet, and the
+    // island's own footprint is missing. Not filled in here because this whole branch does not
+    // compile today for reasons that predate the island (ContentExtensionCompiler.cpp:388 names
+    // locals that no longer exist), and a size accessor written against a branch that cannot be
+    // built is a number nobody has ever seen. cxprobe measured the island's footprint directly
+    // instead, off `phys_footprint`: 2.3 MB against the C++ shape's 6.3 MB on a real 26,664-rule
+    // list. Recorded as a follow-up, together with fixing the branch.
     size_t actionsSize = 0;
     for (const auto& slot : m_actions)
         actionsSize += slot.value.capacity() * sizeof(uint64_t);
@@ -128,12 +148,22 @@ static void recursivePrint(const CombinedFiltersAlphabet& alphabet, const Prefix
 
 void CombinedURLFilters::print() const
 {
+    // C++ arm only: on `Builder::Swift` the tree below is empty and the island has no dumper.
     recursivePrint(m_alphabet, m_prefixTreeRoot, m_actions, 0);
 }
 #endif
 
-CombinedURLFilters::CombinedURLFilters()
+// The Swift island, boxed so that CombinedURLFilters.h does not have to name a type that only
+// exists in the generated header.
+struct CombinedURLFilters::SwiftIsland {
+    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(SwiftIsland);
+
+    WebCore::CombinedURLFiltersSwift island { WebCore::CombinedURLFiltersSwift::init() };
+};
+
+CombinedURLFilters::CombinedURLFilters(Builder builder)
     : m_prefixTreeRoot(makeUniqueRef<PrefixTreeVertex>())
+    , m_island(builder == Builder::Swift ? makeUnique<SwiftIsland>() : nullptr)
 {
 }
 
@@ -141,6 +171,8 @@ CombinedURLFilters::~CombinedURLFilters() = default;
 
 bool CombinedURLFilters::isEmpty() const
 {
+    if (m_island)
+        return m_island->island.isEmptyTree();
     return m_prefixTreeRoot->edges.isEmpty();
 }
 
@@ -150,6 +182,23 @@ void CombinedURLFilters::addPattern(uint64_t actionId, const Vector<Term>& patte
 
     if (pattern.isEmpty())
         return;
+
+    if (m_island) {
+        // The island stores term IDS, so this is where a `Term` stops existing as far as the port
+        // is concerned. Interning every term up front is not the order the C++ below uses -- it
+        // interns only the terms it appends -- but it produces the identical alphabet: a term that
+        // matches an existing edge was interned when that edge was appended, so `interned` finds
+        // it and adds nothing, and a term that does not match is interned either way, at the same
+        // point in the same sequence.
+        //
+        // One call per term rather than one call per pattern because a Swift function exposed to
+        // C++ cannot take a `Span` (filings register §27), and a per-term call needs no buffer on
+        // either side.
+        for (const Term& term : pattern)
+            m_island->island.addPatternTerm(m_alphabet.interned(term));
+        m_island->island.endPattern(actionId);
+        return;
+    }
 
     // Extend the prefix tree with the new pattern.
     auto* lastPrefixTree = m_prefixTreeRoot.ptr();
@@ -410,6 +459,13 @@ static void generateNFAForSubtree(const CombinedFiltersAlphabet& alphabet, NFA& 
 
 bool CombinedURLFilters::processNFAs(size_t maxNFASize, Function<bool(NFA&&)>&& handler)
 {
+    if (m_island) {
+        // The sink is the whole of the added C++: a `WTF::Function` is not something Swift can
+        // call, so it is borrowed for the duration of this one call and never stored.
+        CombinedURLFiltersNFASink sink(handler);
+        return m_island->island.processNFAs(maxNFASize, m_alphabet, sink);
+    }
+
 #if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
     print();
 #endif
