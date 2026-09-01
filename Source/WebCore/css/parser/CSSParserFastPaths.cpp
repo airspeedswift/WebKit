@@ -50,21 +50,13 @@
 #include "FloatConversion.h"
 #include "HashTools.h"
 #include "StylePropertyShorthand.h"
-// The colour fast-path island's boundary types, and the generated header carrying its
-// `@c CSSSwiftColorOutcome` numbering. Same warning suppression, and the same FIXME, as
-// CSSTokenizer.cpp: the generated header hands C++ an Objective-C-only non-defining
-// fixed-underlying-type enum declaration for each `@c` enum, which -Werror makes fatal.
-// Filings register §26.
-// Not used by this file. WebCoreSwift-Generated.h below is emitted once for the whole module, so
-// every C++ translation unit that includes it must be able to see *every* island's boundary types --
-// the per-island Clang modules in WebCore_Private.modulemap isolate what Swift may reach, not what
-// C++ must declare. Without this the generated thunk for cssCalcSerializeSwift fails with "no member
-// named 'CSSCalcSwiftNode' in namespace 'WebCore::CSSCalc'".
-#include "CSSCalcSwiftTypes.h"
+// The colour fast-path island's `@c CSSSwiftColorOutcome` numbering and the named-colour lookup
+// it calls back into are declared here.
 #include "CSSTokenizerSwiftTypes.h"
-IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
-#include "WebCoreSwift-Generated.h"
-IGNORE_CLANG_WARNINGS_END
+// The island entry point this file calls, and every other island's boundary types along with it --
+// WebCoreSwift-Generated.h is module-scoped, so a translation unit that includes it must declare
+// all of them. WebCoreSwiftBoundaryTypes.h says why, and is the one file an added island edits.
+#include "WebCoreSwiftBoundaryTypes.h"
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringParsingBuffer.h>
 

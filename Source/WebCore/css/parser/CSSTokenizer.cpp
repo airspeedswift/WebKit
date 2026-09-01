@@ -34,28 +34,12 @@
 #include "CSSParserObserverWrapper.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
-// Not used by this file. WebCoreSwift-Generated.h below is emitted once for the whole module, so
-// every C++ translation unit that includes it must be able to see *every* island's boundary types --
-// the per-island Clang modules in WebCore_Private.modulemap isolate what Swift may reach, not what
-// C++ must declare. Without this the generated thunk for cssCalcSerializeSwift fails with "no member
-// named 'CSSCalcSwiftNode' in namespace 'WebCore::CSSCalc'".
-#include "CSSCalcSwiftTypes.h"
 #include "CSSTokenizerSwiftTypes.h"
-// FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops
-// handing C++ the Objective-C spelling. It treats C++11 as implying support for the
-// Objective-C fixed-enum forward declaration, so the C++ arm expands
-// `typedef SWIFT_ENUM(uint8_t, CSSTokenTypeSwift, closed) {` to
-// `enum CSSTokenTypeSwift : uint8_t CSSTokenTypeSwift;` -- a non-defining declaration of an
-// enumeration with a fixed underlying type, which only Objective-C accepts. Clang warns
-// -Welaborated-enum-base and WebCore's -Werror makes it fatal. `CF_ENUM` has the identical
-// bug, and JSC_CF_ENUM (JavaScriptCore's API/JSBase.h) already works around it the way the
-// generated header should: branch on `__cplusplus` and emit the plain `enum X : T { ... }`.
-// Recorded as a to-file item, filings register §26.
-//
-// Suppressing it here is what lets the three enums below be declared *once*, in Swift.
-IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
-#include "WebCoreSwift-Generated.h"
-IGNORE_CLANG_WARNINGS_END
+// The island entry points this file calls, and every other island's boundary types along with
+// them -- WebCoreSwift-Generated.h is module-scoped, so a translation unit that includes it must
+// declare all of them. WebCoreSwiftBoundaryTypes.h says why, and is the one file an added island
+// edits.
+#include "WebCoreSwiftBoundaryTypes.h"
 #include <atomic>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/dtoa.h>
