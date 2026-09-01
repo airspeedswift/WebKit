@@ -61,11 +61,19 @@ struct TermCreatorTranslator {
     }
 };
 
-const Term* CombinedFiltersAlphabet::interned(const Term& term)
+uint32_t CombinedFiltersAlphabet::interned(const Term& term)
 {
     TermCreatorInput input { term, m_internedTermsStorage };
-    auto addResult = m_uniqueTerms.add<TermCreatorTranslator>(input);
-    return *addResult.iterator;
+    // `ensure`'s functor runs only when the entry is new, and only *after*
+    // TermCreatorTranslator::translate has appended the interned copy, so the term just interned
+    // is the last element of the storage vector. Going through the translator keeps interning to
+    // a single hash lookup, as the plain HashSet form did.
+    auto addResult = m_uniqueTerms.ensure<TermCreatorTranslator>(input, [&] {
+        size_t termId = m_internedTermsStorage.size() - 1;
+        RELEASE_ASSERT(termId < invalidTermId);
+        return static_cast<uint32_t>(termId);
+    });
+    return addResult.iterator->value;
 }
 
 #if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING
@@ -76,7 +84,7 @@ size_t CombinedFiltersAlphabet::memoryUsed() const
         termsSize += termPointer->memoryUsed();
     return sizeof(CombinedFiltersAlphabet)
         + termsSize
-        + m_uniqueTerms.capacity() * sizeof(Term*)
+        + m_uniqueTerms.capacity() * (sizeof(const Term*) + sizeof(uint32_t))
         + m_internedTermsStorage.capacity() * sizeof(std::unique_ptr<Term>);
 }
 #endif

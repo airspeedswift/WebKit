@@ -29,7 +29,8 @@
 
 #include <WebCore/ContentExtensionsDebugging.h>
 #include <WebCore/Term.h>
-#include <wtf/HashSet.h>
+#include <limits>
+#include <wtf/HashMap.h>
 #include <wtf/SwiftBridging.h>
 #include <wtf/Vector.h>
 
@@ -37,18 +38,42 @@ namespace WebCore {
 
 namespace ContentExtensions {
 
-// SWIFT_SAFE: Swift imports the alphabet as unsafe because `m_uniqueTerms` is a set of raw
+// No term is ever given this id: it is the "this prefix tree edge carries no term" sentinel,
+// replacing the null `const Term*` that used to mark a leaf for deleting.
+//
+// It sits at namespace scope rather than inside the alphabet because Swift's C++ importer does
+// not import `static constexpr` data members at all -- measured, not assumed: a `static
+// constexpr uint32_t` on a plain struct and on a SWIFT_SAFE one are both dropped with "has no
+// member", while this exact constant at namespace scope imports (cxprobe/termimport).
+constexpr uint32_t invalidTermId = std::numeric_limits<uint32_t>::max();
+
+// SWIFT_SAFE: Swift imports the alphabet as unsafe because `m_uniqueTerms` is keyed on raw
 // `const Term*` into `m_internedTermsStorage`, which the alphabet itself owns for its whole
 // lifetime -- the pointers are interior to the object and cannot dangle while it is alive.
 // Without this, every mention of the alphabet from Swift costs an `unsafe` marker.
 //
-// This does NOT make `interned` importable: it returns one of those interior pointers, so Swift
-// still drops it. The fix there is an API change -- hand back an index into the storage vector
-// rather than a pointer -- not an annotation; SWIFT_RETURNS_INDEPENDENT_VALUE, which the importer
-// suggests, would be a false claim about the returned pointer's lifetime.
+// Those pointers stay strictly private. An interned term is named outside the alphabet by a
+// dense `uint32_t` id -- an index into the storage vector -- so nothing that crosses the
+// boundary carries a lifetime. The importer suggests SWIFT_RETURNS_INDEPENDENT_VALUE for a
+// `const Term*` return, which would be a false claim about the pointee; an id needs no claim at
+// all, and it makes term identity and NFA node identity the same kind of thing.
 class SWIFT_SAFE CombinedFiltersAlphabet {
 public:
-    const Term* interned(const Term&);
+    // Returns the id of the unique interned copy of `term`, interning it if it is new. Equal
+    // terms always get the same id, so comparing two ids is the identity comparison the raw
+    // pointer comparison used to be, not a value comparison.
+    uint32_t interned(const Term&);
+
+    // Resolving an id is bounds-checked -- `Vector::operator[]` traps on an out-of-range index --
+    // where dereferencing an edge's `const Term*` was not checked at all.
+    //
+    // Swift drops THIS one, and the SWIFT_RETURNS_INDEPENDENT_VALUE the importer suggests would
+    // be as false here as it was on the old `interned`: the result is a projection of the
+    // alphabet's storage. That is a live gap for the port, not a reason to lie -- and a port that
+    // wanted a Term per edge visit would be asking for a deep copy of one anyway, so the answer
+    // is more likely to be an id-taking query on the alphabet than a Term crossing the boundary.
+    const Term& term(uint32_t termId) const LIFETIME_BOUND { return *m_internedTermsStorage[termId]; }
+
 #if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING
     size_t memoryUsed() const;
 #endif
@@ -63,7 +88,9 @@ private:
         static const bool safeToCompareToEmptyOrDeleted = false;
     };
 
-    HashSet<const Term*, TermPointerHash> m_uniqueTerms;
+    // Keyed on the interned term's address, which `std::unique_ptr` keeps stable across the
+    // storage vector growing; the value is that term's index in the storage vector.
+    HashMap<const Term*, uint32_t, TermPointerHash> m_uniqueTerms;
     Vector<std::unique_ptr<Term>> m_internedTermsStorage;
 };
 
