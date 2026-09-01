@@ -100,25 +100,18 @@ static size_t recursiveMemoryUsed(const PrefixTreeVertex& vertex)
     return size;
 }
 
-size_t CombinedURLFilters::memoryUsed() const
+// The C++ arm's half of CombinedURLFilters::memoryUsed(), which is defined below, after the
+// island's box: on `Builder::Swift` the prefix tree and the action side table are in the island
+// and this cannot be what answers.
+static size_t cppBuilderMemoryUsed(const UniqueRef<PrefixTreeVertex>& prefixTreeRoot, const HashMap<const PrefixTreeVertex*, ActionList>& actions)
 {
-    // Counts the C++ arm only. On `Builder::Swift` the prefix tree and the action side table are
-    // in the island, so this reports the two empty containers below plus the alphabet, and the
-    // island's own footprint is missing. Not filled in here because this whole branch does not
-    // compile today for reasons that predate the island (ContentExtensionCompiler.cpp:388 names
-    // locals that no longer exist), and a size accessor written against a branch that cannot be
-    // built is a number nobody has ever seen. cxprobe measured the island's footprint directly
-    // instead, off `phys_footprint`: 2.3 MB against the C++ shape's 6.3 MB on a real 26,664-rule
-    // list. Recorded as a follow-up, together with fixing the branch.
     size_t actionsSize = 0;
-    for (const auto& slot : m_actions)
+    for (const auto& slot : actions)
         actionsSize += slot.value.capacity() * sizeof(uint64_t);
 
-    return sizeof(CombinedURLFilters)
-        + m_alphabet.memoryUsed()
-        + recursiveMemoryUsed(m_prefixTreeRoot)
+    return recursiveMemoryUsed(prefixTreeRoot)
         + sizeof(HashMap<PrefixTreeVertex*, ActionList>)
-        + m_actions.capacity() * (sizeof(PrefixTreeVertex*) + sizeof(ActionList))
+        + actions.capacity() * (sizeof(PrefixTreeVertex*) + sizeof(ActionList))
         + actionsSize;
 }
 #endif
@@ -206,6 +199,10 @@ static_assert(std::is_same_v<decltype(&CombinedURLFiltersPattern::termCount),
 static_assert(std::is_same_v<decltype(&SwiftIslandType::isEmptyTree),
     bool (SwiftIslandType::*)()>,
     "CombinedURLFiltersSwift.isEmptyTree must return CombinedURLFilters::isEmpty's type unchanged.");
+static_assert(std::is_same_v<decltype(&SwiftIslandType::memoryUsed),
+    size_t (SwiftIslandType::*)()>,
+    "CombinedURLFiltersSwift.memoryUsed must return CombinedURLFilters::memoryUsed's size_t: "
+    "spelled `Int` in Swift it would export as ptrdiff_t (R125).");
 static_assert(std::is_same_v<decltype(&SwiftIslandType::processNFAs),
     bool (SwiftIslandType::*)(size_t, CombinedFiltersAlphabet&, CombinedURLFiltersNFASink&)>,
     "CombinedURLFiltersSwift.processNFAs must take CombinedURLFilters::processNFAs' size_t "
@@ -238,6 +235,27 @@ bool CombinedURLFilters::isEmpty() const
     RELEASE_ASSERT_NOT_REACHED();
 #endif
 }
+
+#if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING
+size_t CombinedURLFilters::memoryUsed() const
+{
+    // Both arms answer, and they count the same things, so the two are comparable: the alphabet,
+    // which is shared, plus whichever prefix tree and action side table exist. The island's half
+    // is `PrefixTree.memoryUsed()` in CombinedURLFiltersSwift.swift.
+    size_t builderSize = 0;
+    if (m_island)
+        builderSize = m_island->island.memoryUsed();
+    else {
+#if COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
+        builderSize = cppBuilderMemoryUsed(m_prefixTreeRoot, m_actions);
+#else
+        RELEASE_ASSERT_NOT_REACHED();
+#endif
+    }
+
+    return sizeof(CombinedURLFilters) + m_alphabet.memoryUsed() + builderSize;
+}
+#endif
 
 void CombinedURLFilters::addPattern(uint64_t actionId, const Vector<Term>& pattern)
 {

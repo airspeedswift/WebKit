@@ -385,8 +385,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #endif
 
-    LOG_LARGE_STRUCTURES(filtersWithoutConditions, filtersWithoutConditions.memoryUsed());
-    LOG_LARGE_STRUCTURES(filtersWithConditions, filtersWithConditions.memoryUsed());
+    // One CombinedURLFilters per URL the rules can match against, and the names track the locals
+    // above. `filtersWithoutConditions` and `filtersWithConditions` were merged into the single
+    // `urlFilters` by ab1948875d01, which did not update these lines -- they have named nothing
+    // since, and this branch has not compiled since.
+    LOG_LARGE_STRUCTURES(urlFilters, urlFilters.memoryUsed());
     LOG_LARGE_STRUCTURES(topURLFilters, topURLFilters.memoryUsed());
     LOG_LARGE_STRUCTURES(frameURLFilters, frameURLFilters.memoryUsed());
 

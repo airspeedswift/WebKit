@@ -360,6 +360,25 @@ extension PrefixTree {
         }
         return list
     }
+
+    /// The tree's own storage, for `CONTENT_EXTENSIONS_PERFORMANCE_REPORTING`'s
+    /// `LOG_LARGE_STRUCTURES`. Counts what the C++ `recursiveMemoryUsed` plus the action side
+    /// table count on the other arm, so the two arms' numbers mean the same thing: the vertices,
+    /// the edge arena, and each action list's elements.
+    ///
+    /// CAPACITY rather than count, matching `WTF::Vector::capacity()` in the C++. What it omits,
+    /// and the C++ omits the same things: each Swift array buffer's 32-byte header, and the
+    /// alphabet -- which `CombinedURLFilters::memoryUsed` adds separately because it is shared by
+    /// both arms.
+    func memoryUsed() -> UInt {
+        var total = UInt(nodes.capacity) * UInt(MemoryLayout<PrefixTreeNode>.stride)
+            + UInt(edges.capacity) * UInt(MemoryLayout<PrefixTreeEdge>.stride)
+            + UInt(actions.capacity) * UInt(MemoryLayout<[UInt64]>.stride)
+        for list in actions {
+            total += UInt(list.capacity) * UInt(MemoryLayout<UInt64>.stride)
+        }
+        return total
+    }
 }
 
 // MARK: - The walk
@@ -698,6 +717,13 @@ public final class CombinedURLFiltersSwift {
 
     public func isEmptyTree() -> Bool {
         tree.nodes[0].childCount == 0
+    }
+
+    /// The island's storage in bytes, for `CombinedURLFilters::memoryUsed`. `UInt`, not `Int`,
+    /// for the R125 reason recorded on `processNFAs`: an exported Swift `Int` is `ptrdiff_t` and
+    /// only `UInt` is the `size_t` the C++ signature declares.
+    public func memoryUsed() -> UInt {
+        tree.memoryUsed()
     }
 
     public func processNFAs(_ maxNFASize: UInt,

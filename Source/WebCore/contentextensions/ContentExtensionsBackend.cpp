@@ -194,7 +194,10 @@ auto ContentExtensionsBackend::actionsForResourceLoad(const ResourceLoadInfo& re
 
 #if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING
     MonotonicTime addedTimeEnd = MonotonicTime::now();
-    dataLogF("Time added: %f microseconds %s \n", (addedTimeEnd - addedTimeStart).microseconds(), resourceLoadInfo.resourceURL.string().utf8().data());
+    // dataLog rather than dataLogF: passing a CString's data() to a format function fails
+    // -Wunsafe-buffer-usage-in-format-attr-call, and dataLog takes the String directly.
+    dataLog("Time added: ", (addedTimeEnd - addedTimeStart).microseconds(), " microseconds ",
+        resourceLoadInfo.resourceURL.string(), " \n");
 #endif
     return actionsVector;
 }

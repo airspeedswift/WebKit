@@ -92,7 +92,10 @@ public:
     bool processNFAs(size_t maxNFASize, Function<bool(NFA&&)>&&);
     bool NODELETE isEmpty() const;
 
-#if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING && COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
+    // Not `&& COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN`, unlike print() below: both arms
+    // answer this one, so ContentExtensionCompiler's LOG_LARGE_STRUCTURES calls compile in the
+    // measurement mode too. Guarded on it, that mode did not build with reporting on.
+#if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING
     size_t memoryUsed() const;
 #endif
 #if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING && COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
