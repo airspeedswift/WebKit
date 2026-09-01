@@ -109,6 +109,12 @@ public:
         const SerializedNFA& serializedNFA;
         uint32_t position;
 
+        // Like DFANode::ConstRangeIterator, this is a cursor rather than a handle to a
+        // dereferenceable element: the underlying ImmutableRange holds raw buffer indices that are
+        // meaningless without the SerializedNFA, so range() stays private and callers read the
+        // range through first()/last()/data(). Dereferencing therefore yields the cursor itself.
+        const ConstRangeIterator& operator*() const { return *this; }
+
         bool operator==(const ConstRangeIterator& other) const
         {
             ASSERT(&serializedNFA == &other.serializedNFA);
@@ -156,7 +162,7 @@ public:
         void debugPrint() const
         {
             for (const auto& range : *this)
-                WTFLogAlways("    %d-%d", range.first, range.last);
+                WTFLogAlways("    %d-%d", range.first(), range.last());
         }
 #endif
     };

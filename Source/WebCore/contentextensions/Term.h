@@ -227,13 +227,13 @@ inline String quantifierToString(AtomQuantifier quantifier)
 {
     switch (quantifier) {
     case AtomQuantifier::One:
-        return "";
+        return ""_s;
     case AtomQuantifier::ZeroOrOne:
-        return "?";
+        return "?"_s;
     case AtomQuantifier::ZeroOrMore:
-        return "*";
+        return "*"_s;
     case AtomQuantifier::OneOrMore:
-        return "+";
+        return "+"_s;
     }
 }
     
@@ -241,7 +241,7 @@ inline String Term::toString() const
 {
     switch (m_termType) {
     case TermType::Empty:
-        return "(Empty)";
+        return "(Empty)"_s;
     case TermType::CharacterSet: {
         StringBuilder builder;
         builder.append('[');
