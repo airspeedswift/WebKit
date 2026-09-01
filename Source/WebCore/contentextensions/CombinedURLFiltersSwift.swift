@@ -211,7 +211,17 @@ public final class CombinedURLFiltersSwift {
     // MARK: The walk
 
     /// `CombinedURLFilters::processNFAs`. Returns false if the sink asked to stop.
-    public func processNFAs(_ maxNFASize: Int,
+    ///
+    /// `UInt`, not `Int`, and the difference is a shipped defect. `swift::UInt` is `size_t`, so
+    /// this parameter and the C++ `size_t` are the same type and NOTHING is converted at the
+    /// boundary. Spelled `Int` it was `ptrdiff_t`, and every caller that passes
+    /// `std::numeric_limits<size_t>::max()` -- which is how all ten of WebKit's own
+    /// direct-construction ContentExtensionTest cases spell "no limit", DFAHelpers.h:52 --
+    /// delivered **-1**, so the size test below fired on the first node and the island emitted
+    /// one NFA per pattern. C++ warns on none of this. Six of 105 tests, and the oracle could
+    /// not see it because all nine of its captures used one finite limit; the sweep that catches
+    /// it now is `oracle/run.py`'s MAXNFA_SWEEP. Revisit log R125.
+    public func processNFAs(_ maxNFASize: UInt,
                             _ alphabet: inout WebCore.ContentExtensions.CombinedFiltersAlphabet,
                             _ sink: inout WebCore.ContentExtensions.CombinedURLFiltersNFASink) -> Bool {
         var stack: [UInt32] = []
@@ -407,7 +417,7 @@ public final class CombinedURLFiltersSwift {
                                        _ alphabet: inout CX.CombinedFiltersAlphabet,
                                        subtreeRoot: consuming CX.ImmutableCharNFANodeBuilder,
                                        root: UInt32,
-                                       maxNFASize: Int) {
+                                       maxNFASize: UInt) {
         var stack: [ActiveSubtree] = []
         if nodes[Int(root)].childCount == 0 {
             // C++ never moves the parameter in this case, so the caller's builder is finalized by
@@ -458,7 +468,12 @@ public final class CombinedURLFiltersSwift {
                     // Only ever stop at a leaf, so the NFA is always complete. This can overshoot
                     // `maxNFASize`, which is what the C++ comment here says and what the oracle's
                     // `share-hi` capture demonstrates at 75,002 nodes against a limit of 75,000.
-                    if Int(nfa.nodes.size()) > maxNFASize {
+                    //
+                    // `WTF::Vector::size()` is a `size_t` too, so both sides of this comparison
+                    // are `UInt` and it is character-for-character `CombinedURLFilters.cpp:472`.
+                    // It used to read `Int(nfa.nodes.size()) > maxNFASize`, which was both the
+                    // R125 defect and a trap on a value no build can reach.
+                    if nfa.nodes.size() > maxNFASize {
                         nfaTooBig = true
                     }
                 } else {

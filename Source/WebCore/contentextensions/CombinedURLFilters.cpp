@@ -45,6 +45,7 @@ IGNORE_CLANG_WARNINGS_END
 #include <wtf/DataLog.h>
 #include <wtf/Vector.h>
 #include <wtf/text/CString.h>
+#include <type_traits>
 
 namespace WebCore {
 
@@ -167,6 +168,38 @@ struct CombinedURLFilters::SwiftIsland {
 
     WebCore::CombinedURLFiltersSwift island { WebCore::CombinedURLFiltersSwift::init() };
 };
+
+// Every integer that crosses into the island, asserted to arrive as the type it left as.
+//
+// This exists because one of them did not. `processNFAs` took `size_t` here and `Int` on the Swift
+// side, `swift::Int` is `ptrdiff_t`, and C++ converts `size_t` to it silently -- so
+// `std::numeric_limits<size_t>::max()`, which is how WebKit's own tests spell "no limit", arrived
+// as -1 and the island emitted one NFA per pattern. Six of 105 ContentExtensionTest cases, no
+// diagnostic anywhere, and nine golden NFA captures that all passed because every one of them used
+// a finite limit. Revisit log R125.
+//
+// Asserting the whole member-function type, rather than adding a cast at the call, is the
+// difference between fixing the instance and closing the class: a Swift signature is not visible
+// from here and nobody editing the island sees this file, so the check has to be one that fires on
+// ANY future change to how these arguments are spelled -- width, signedness or order. It costs
+// nothing at runtime and it names the boundary in the diagnostic.
+//
+// (`{braced}` arguments would diagnose the narrowing too, and were the first choice, but scalar
+// braced initializers trip -Wbraced-scalar-init and WebCore builds -Werror.)
+using SwiftIslandType = WebCore::CombinedURLFiltersSwift;
+static_assert(std::is_same_v<decltype(&SwiftIslandType::addPatternTerm),
+    void (SwiftIslandType::*)(uint32_t)>,
+    "CombinedURLFiltersSwift.addPatternTerm must take the alphabet's term id type unchanged.");
+static_assert(std::is_same_v<decltype(&SwiftIslandType::endPattern),
+    void (SwiftIslandType::*)(uint64_t)>,
+    "CombinedURLFiltersSwift.endPattern must take CombinedURLFilters::addPattern's action id type unchanged.");
+static_assert(std::is_same_v<decltype(&SwiftIslandType::isEmptyTree),
+    bool (SwiftIslandType::*)()>,
+    "CombinedURLFiltersSwift.isEmptyTree must return CombinedURLFilters::isEmpty's type unchanged.");
+static_assert(std::is_same_v<decltype(&SwiftIslandType::processNFAs),
+    bool (SwiftIslandType::*)(size_t, CombinedFiltersAlphabet&, CombinedURLFiltersNFASink&)>,
+    "CombinedURLFiltersSwift.processNFAs must take CombinedURLFilters::processNFAs' size_t "
+    "unchanged: spelled `Int` in Swift it is ptrdiff_t, and SIZE_MAX silently becomes -1 (R125).");
 
 CombinedURLFilters::CombinedURLFilters(Builder builder)
 #if COMBINED_URL_FILTERS_CPP_BUILDER_COMPILED_IN
@@ -493,6 +526,8 @@ bool CombinedURLFilters::processNFAs(size_t maxNFASize, Function<bool(NFA&&)>&& 
     if (m_island) {
         // The sink is the whole of the added C++: a `WTF::Function` is not something Swift can
         // call, so it is borrowed for the duration of this one call and never stored.
+        //
+        // `maxNFASize` goes over unconverted -- the static_asserts above are what keeps that true.
         CombinedURLFiltersNFASink sink(handler);
         return m_island->island.processNFAs(maxNFASize, m_alphabet, sink);
     }
