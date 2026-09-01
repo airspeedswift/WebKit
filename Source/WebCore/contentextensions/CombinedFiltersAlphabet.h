@@ -69,10 +69,30 @@ public:
     //
     // Swift drops THIS one, and the SWIFT_RETURNS_INDEPENDENT_VALUE the importer suggests would
     // be as false here as it was on the old `interned`: the result is a projection of the
-    // alphabet's storage. That is a live gap for the port, not a reason to lie -- and a port that
-    // wanted a Term per edge visit would be asking for a deep copy of one anyway, so the answer
-    // is more likely to be an id-taking query on the alphabet than a Term crossing the boundary.
+    // alphabet's storage, and [[clang::lifetimebound]] on it changes nothing. It is left
+    // unannotated, and the id-taking queries below are the answer instead -- a port wanting a Term
+    // per edge visit would be asking for a deep copy of one anyway.
     const Term& term(uint32_t termId) const LIFETIME_BOUND { return *m_internedTermsStorage[termId]; }
+
+    // The three operations a prefix-tree walk performs on a term, offered BY ID, because a caller
+    // holding an id cannot get to the Term: `term()` above does not import, and the annotation the
+    // importer suggests for it would be a false lifetime claim.
+    //
+    // These are forwarding one-liners on purpose. Nothing is recomputed and no Term crosses a
+    // boundary -- a Term crossing by value would be a deep copy of a Group's Vector<Term>, and a
+    // Term crossing by reference is the lifetime claim we declined to make. The alphabet is the
+    // right place for them because it is what owns the mapping in the first place.
+    bool hasFixedLength(uint32_t termId) const { return term(termId).hasFixedLength(); }
+
+    ImmutableCharNFANodeBuilder generateGraph(uint32_t termId, NFA& nfa, ImmutableCharNFANodeBuilder& source, ActionList&& finalActions) const
+    {
+        return term(termId).generateGraph(nfa, source, WTF::move(finalActions));
+    }
+
+    void generateGraph(uint32_t termId, NFA& nfa, ImmutableCharNFANodeBuilder& source, uint32_t destination) const
+    {
+        term(termId).generateGraph(nfa, source, destination);
+    }
 
 #if CONTENT_EXTENSIONS_PERFORMANCE_REPORTING
     size_t memoryUsed() const;

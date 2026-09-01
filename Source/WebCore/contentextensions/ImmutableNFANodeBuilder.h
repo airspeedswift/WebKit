@@ -159,6 +159,31 @@ public:
         m_actions.addAll(WTF::move(actions));
     }
 
+    // The one instantiation content extensions actually use, named so that Swift can reach it:
+    // the importer does not bring across the function template above (measured -- "has no member
+    // 'setActions'", cxprobe/termimport/armcalls.swift), and a forwarding reference has nothing
+    // for it to deduce from. Forwards, so the two spellings cannot drift.
+    void setActionList(Vector<ActionType, 0, CrashOnOverflow, 1>&& actions)
+    {
+        setActions(WTF::move(actions));
+    }
+
+    // Sink this node's accumulated ranges, epsilon transitions and actions into the NFA now,
+    // rather than whenever the builder happens to be destroyed.
+    //
+    // The order in which builders finalize decides how the five parallel NFA vectors are packed,
+    // and that packing is observable (SerializedNFA stores the offsets). C++ gets the order from
+    // scope exit and from Vector<ActiveSubtree>'s destruct order; Swift's release timing for an
+    // imported C++ value is not the same thing, and for a builder held behind a class reference
+    // it is ARC's business rather than the algorithm's. Calling this at each point the C++ would
+    // have destroyed the builder makes the packing an explicit part of the algorithm in both
+    // languages -- and the destructor still finalizes, so nothing that does not call it changes.
+    void finalizeNow()
+    {
+        if (!m_finalized)
+            finalize();
+    }
+
     ImmutableNFANodeBuilder& operator=(ImmutableNFANodeBuilder&& other)
     {
         if (!m_finalized)
