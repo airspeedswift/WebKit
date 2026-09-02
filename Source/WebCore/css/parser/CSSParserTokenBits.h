@@ -92,7 +92,30 @@ struct SWIFT_SAFE CSSParserTokenBits {
     // cssprobe/probes/bits-packing-probe.cpp is the standalone check that it packs.
     unsigned hasParkedNumberRange : 1 { 0 };
     unsigned valueLength { 0 };
-    const void* valueDataCharRaw { nullptr }; // Either Latin1Character* or char16_t*.
+    // The value's characters, and the slot's type depends on which side owns the token -- which
+    // is why it is a union rather than a `const void*` Swift stores an integer into.
+    //
+    // WHILE SWIFT OWNS THE TOKEN this holds `parkedValueOffset`, an offset into the input (or,
+    // tagged, into the chunk's unescape buffer); `resolveValuePointer` turns it into
+    // `valueDataCharRaw` once the chunk has crossed into C++. That was true before this was a
+    // union too -- what was NOT true was the declared type, which said `const void*` throughout
+    // and made C++ `reinterpret_cast` an integer in and out of a pointer slot.
+    //
+    // Stating it as a union is what lets Swift write the offset with NO `unsafe` marker. Any
+    // expression of type `UnsafeRawPointer` is unsafe under strict memory safety (SE-0458),
+    // whether or not it is ever dereferenced, so with the old declaration the island could not
+    // write this field at all without one -- and Swift was right to object, because the type was
+    // claiming a pointer where an integer was being stored. It is the same phase-dependent
+    // storage the union below models for the number range, and it gets the same treatment.
+    //
+    // `uintptr_t` and not `uint32_t`: the alternative has to cover the whole slot, or writing the
+    // offset would leave the pointer's upper four bytes indeterminate.
+    //
+    // Anonymous, so every existing `valueDataCharRaw` use site in the CSS parser is untouched.
+    union {
+        const void* valueDataCharRaw { nullptr }; // Either Latin1Character* or char16_t*.
+        uintptr_t parkedValueOffset;
+    };
 
     union {
         char16_t delimiter;
@@ -110,23 +133,17 @@ struct SWIFT_SAFE CSSParserTokenBits {
 };
 
 
-// MARK: - The island's writers
+// MARK: - What C++ still does with the bits
 //
-// One factory per token kind, mirroring CSSParserToken's constructors, so a producer that
-// knows the kind statically never encodes it for a consumer to decode again. Inline, so the
-// Swift importer folds them and no call survives.
+// The WRITERS ARE IN SWIFT (CSSParserTokenBitsSwift.swift), beside the code that calls them --
+// they never had a C++ caller. They were here because this header claimed "Swift cannot name a
+// bitfield or an anonymous union member"; it can name every part of this struct, including
+// `pendingNumberRange`, and it can name `NumericValueType`/`NumericSign`/`HashTokenType`, which
+// are declared below and so are in the island's boundary module rather than being mirrored.
+// Probes at ~/src/webkit-swift-ports/bitfieldimport/.
 //
-// `valueOffset` is an offset into the input, parked in the pointer slot; resolveValuePointer
-// below turns it into a real pointer in one branch-free pass once the chunk lands in C++.
-// Swift therefore never holds, forms or dereferences a pointer.
-//
-// Where a field is a C++ enumeration with two or three values -- NumericValueType,
-// NumericSign, HashTokenType -- these take booleans and do the mapping here, rather than
-// taking the encoded value. That is deliberate: an island passing `1` for NumberValueType
-// would be mirroring a numbering with nothing checking it, and these enums have no
-// static_assert bridge the way CSSParserTokenType and CSSUnitType do. `type`, `blockType`
-// and `unit` do take encoded values, because for those the island's enums are declared in
-// Swift with `@c` and CSSTokenizer.cpp pins all 106 enumerators by name.
+// What is left here is what the C++ side genuinely does: read a parked offset back, ask whether
+// a token still owes a double, and turn the offset into a pointer.
 
 // Which buffer a parked value offset indexes. Set means the chunk's unescape buffer, clear
 // means the input. There is no room in CSSParserTokenBits for a flag of its own -- every bit
@@ -135,134 +152,11 @@ struct SWIFT_SAFE CSSParserTokenBits {
 // token, so the top bit of that is free until resolveValuePointer runs.
 constexpr unsigned cssParserTokenBitsUnescapedValueTag = 0x80000000u;
 
-// The island calls this once per tokenization, not once per token. A stylesheet at or above
-// 2 GB cannot have its value offsets tagged, and the island has no fallback, so it reports
-// failure instead of truncating. Nothing real comes close; "surely not" is not a bound.
-//
-// And this is a **memory-safety** property rather than the representability one the sentence
-// above describes, which is the reason it earns its keep beyond "no stylesheet is 2 GB". While
-// Swift owns a token the pointer slot holds the offset, so a CSSParserToken built from bits that
-// never went through resolveValuePointer would dereference a small integer. Darwin's __PAGEZERO
-// is 4 GB -- `otool -l` on this framework reports `vmsize 0x100000000` for it -- and this check
-// keeps every parked offset below 2^31 untagged and below 2^32 tagged, so every unresolved offset
-// lies strictly inside that guard page and a mis-sequenced resolve faults deterministically
-// instead of reading live heap. Drop the check and an offset could exceed 4 GB, at which point it
-// would not. Ledger R1.
-inline bool cssParserTokenBitsCanRepresentOffsets(size_t inputLength)
-{
-    return inputLength < cssParserTokenBitsUnescapedValueTag;
-}
-
 // The offset Swift parked in the pointer slot, tag included. Only meaningful before
 // resolveValuePointer has run.
 inline unsigned bitsParkedValueOffset(const CSSParserTokenBits& bits)
 {
-    return static_cast<unsigned>(reinterpret_cast<uintptr_t>(bits.valueDataCharRaw));
-}
-
-// Swift cannot name a bitfield, and this is the only kind it has to read back off a finished
-// token: end-of-file to stop the loop, and CommentToken to keep comments out of the token
-// buffer. One `ubfx`, and the packing still lives in exactly one place.
-inline unsigned tokenBitsType(const CSSParserTokenBits& bits)
-{
-    return bits.type;
-}
-
-inline CSSParserTokenBits makeSimpleTokenBits(unsigned type, unsigned blockType)
-{
-    CSSParserTokenBits bits;
-    bits.type = type;
-    bits.blockType = blockType;
-    return bits;
-}
-
-inline CSSParserTokenBits makeValueTokenBits(unsigned type, unsigned blockType, unsigned valueOffset, unsigned valueLength, bool valueIsUnescaped, bool is8Bit)
-{
-    CSSParserTokenBits bits;
-    bits.type = type;
-    bits.blockType = blockType;
-    bits.valueLength = valueLength;
-    bits.valueIs8Bit = is8Bit;
-    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueIsUnescaped ? valueOffset | cssParserTokenBitsUnescapedValueTag : valueOffset));
-    bits.id = -1;
-    return bits;
-}
-
-// The constructor this mirrors uses designated mem-initialisers, so it leaves the union's bytes
-// above the delimiter unspecified where this zeroes them through numericValue's default member
-// initialiser. That is behaviourally identical -- nothing may read a union member that was never
-// written -- and better defined, so it is deliberate rather than an oversight.
-inline CSSParserTokenBits makeDelimiterTokenBits(unsigned type, unsigned character)
-{
-    CSSParserTokenBits bits;
-    bits.type = type;
-    bits.delimiter = static_cast<char16_t>(character);
-    return bits;
-}
-
-// Zeroes the rest of the union where the constructor leaves it unspecified, for the same reason
-// as the delimiter factory above.
-inline CSSParserTokenBits makeWhitespaceTokenBits(unsigned type, unsigned count)
-{
-    CSSParserTokenBits bits;
-    bits.type = type;
-    bits.whitespaceCount = count;
-    return bits;
-}
-
-inline CSSParserTokenBits makeHashTokenBits(unsigned type, bool isIdHashToken, unsigned valueOffset, unsigned valueLength, bool valueIsUnescaped, bool is8Bit)
-{
-    CSSParserTokenBits bits;
-    bits.type = type;
-    bits.valueLength = valueLength;
-    bits.valueIs8Bit = is8Bit;
-    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueIsUnescaped ? valueOffset | cssParserTokenBitsUnescapedValueTag : valueOffset));
-    bits.hashTokenType = isIdHashToken ? HashTokenId : HashTokenUnrestricted;
-    return bits;
-}
-
-// Numeric tokens keep their double unconverted: charactersToDouble runs on the C++ side so
-// the rounding stays bit-identical with the C++ scanner, for free. Until that post-pass runs
-// the union carries the number's own range instead, which costs nothing because the slot the
-// double will occupy is dead until it exists.
-//
-// The number's range and the value range are separate parameters because they are separate
-// things, and the first is not recoverable from the second. For a NumberToken they do coincide
-// -- value() is originalText() is the number. But a DimensionToken merges the number and the
-// unit into one view when they are physically adjacent in the input and the number is shorter
-// than sixteen characters, and after that merge value() is "10px" and the number's own range is
-// only recoverable if you know the merge happened. In the two cases where it did not -- a number
-// of sixteen characters or more, and an escaped unit, whose text is a pooled String rather than
-// a range of the input -- value() is the unit alone and the number is nowhere in it.
-//
-// nonUnitPrefixLength is the field that records which of those happened: zero when the value is
-// the bare unit, the number's length when the two were merged. It is not a detail the caller may
-// leave at its default, because unitString() is defined as value().substring(nonUnitPrefixLength),
-// operator== selects which comparison a DimensionToken gets on whether it is zero, and custom
-// property serialization reserializes from value(). A merged value with a zero prefix length is a
-// state convertToDimensionWithUnit can never produce, and every one of those three would read it
-// as a unit sixteen characters long.
-inline CSSParserTokenBits makeNumericTokenBits(unsigned type, bool isNonInteger, bool hasPlusSign, bool hasMinusSign, unsigned unit, unsigned valueOffset, unsigned valueLength, bool valueIsUnescaped, unsigned nonUnitPrefixLength, unsigned numberOffset, unsigned numberLength, bool is8Bit)
-{
-    CSSParserTokenBits bits;
-    bits.type = type;
-    bits.numericValueType = isNonInteger ? NumberValueType : IntegerValueType;
-    bits.numericSign = hasMinusSign ? MinusSign : (hasPlusSign ? PlusSign : NoSign);
-    bits.unit = unit;
-    bits.nonUnitPrefixLength = nonUnitPrefixLength;
-    bits.valueLength = valueLength;
-    bits.valueIs8Bit = is8Bit;
-    bits.valueDataCharRaw = reinterpret_cast<const void*>(static_cast<uintptr_t>(valueIsUnescaped ? valueOffset | cssParserTokenBitsUnescapedValueTag : valueOffset));
-    bits.pendingNumberRange = { numberOffset, numberLength };
-    // The union's discriminant, written together with the member it discriminates so the two
-    // cannot drift. `bitsCarryPendingNumber` below answers "does a token of this *type* owe a
-    // double", which is a property of the type and therefore says nothing about whether this
-    // factory is the one that produced the token; a numeric type reaching any other factory
-    // leaves numericValue active and would have its double read out as an offset and a length.
-    // takeChunk requires this flag before it touches pendingNumberRange, so that read is no
-    // longer through a member nothing wrote. Ledger R2.
-    bits.hasParkedNumberRange = 1;
-    return bits;
+    return static_cast<unsigned>(bits.parkedValueOffset);
 }
 
 // NumberToken, PercentageToken and DimensionToken are 7, 8 and 9 in CSSParserTokenType, and
@@ -321,7 +215,9 @@ template<unsigned characterSize>
 inline void resolveValuePointer(CSSParserTokenBits& bits, std::span<const uint8_t> input)
 {
     static_assert(characterSize == 1 || characterSize == 2, "the only two StringImpl widths");
-    auto offset = reinterpret_cast<uintptr_t>(bits.valueDataCharRaw);
+    // Read through the union's integer alternative, which is the one Swift wrote. This was a
+    // `reinterpret_cast` off `valueDataCharRaw` while the slot was declared a pointer.
+    auto offset = bits.parkedValueOffset;
     // subspan rather than pointer arithmetic: libc++ hardening is on in this build, so this
     // is a real bounds check on a value that crossed a language boundary, which the raw form
     // would not have been.
