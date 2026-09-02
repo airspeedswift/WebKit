@@ -379,12 +379,12 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
     ) -> EmittedToken {
-        emit(WebCore.makeSimpleTokenBits(UInt32(type.rawValue), UInt32(block.rawValue)), start, data)
+        emit(makeSimpleTokenBits(UInt32(type.rawValue), UInt32(block.rawValue)), start, data)
     }
 
     @inline(always) private func delimiter(_ c: Unit, _ start: Int, _ data: Span<Unit>) -> EmittedToken {
         emit(
-            WebCore.makeDelimiterTokenBits(
+            makeDelimiterTokenBits(
                 UInt32(CSSTokenTypeSwift.delimiter.rawValue), UInt32(truncatingIfNeeded: c)),
             start, data)
     }
@@ -393,7 +393,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         _ count: Int, _ start: Int, _ data: Span<Unit>
     ) -> EmittedToken {
         emit(
-            WebCore.makeWhitespaceTokenBits(
+            makeWhitespaceTokenBits(
                 UInt32(CSSTokenTypeSwift.nonNewlineWhitespace.rawValue),
                 UInt32(truncatingIfNeeded: count)),
             start, data)
@@ -404,7 +404,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         block: CSSBlockTypeSwift = .notBlock
     ) -> EmittedToken {
         emit(
-            WebCore.makeValueTokenBits(
+            makeValueTokenBits(
                 UInt32(type.rawValue), UInt32(block.rawValue),
                 value.start, value.length, value.unescaped, Self.valueIs8Bit),
             start, data)
@@ -414,7 +414,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         _ value: ScannedValue, isId: Bool, _ start: Int, _ data: Span<Unit>
     ) -> EmittedToken {
         emit(
-            WebCore.makeHashTokenBits(
+            makeHashTokenBits(
                 UInt32(CSSTokenTypeSwift.hash.rawValue), isId,
                 value.start, value.length, value.unescaped, Self.valueIs8Bit),
             start, data)
@@ -691,7 +691,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
                 && number.length >= 1 && number.length < 16
                 && unit.start == number.start &+ number.length
             return emit(
-                WebCore.makeNumericTokenBits(
+                makeNumericTokenBits(
                     UInt32(CSSTokenTypeSwift.dimension.rawValue),
                     number.isNonInteger, number.sign == .plus, number.sign == .minus,
                     UInt32(unitType.rawValue),
@@ -720,7 +720,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         _ start: Int, _ data: Span<Unit>
     ) -> EmittedToken {
         emit(
-            WebCore.makeNumericTokenBits(
+            makeNumericTokenBits(
                 UInt32(type.rawValue),
                 number.isNonInteger, number.sign == .plus, number.sign == .minus,
                 UInt32(unit.rawValue),
@@ -1071,7 +1071,7 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
     // it indexes, so an input at or above 2 GB cannot have its offsets represented. Nothing real
     // is within three orders of magnitude of that, but this tokenizer has no fallback, so it reports
     // failure rather than truncating -- and the check is once per tokenization, not per token.
-    guard WebCore.cssParserTokenBitsCanRepresentOffsets(numericCast(span.count)) else { return false }
+    guard cssParserTokenBitsCanRepresentOffsets(numericCast(span.count)) else { return false }
 
     // Chunked so the buffer stays cache-resident: one entry per token for a whole
     // document is tens of megabytes, and writing that and reading it back costs more
@@ -1112,10 +1112,9 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
 
     while true {
         let token = tokenizer.nextToken(span)
-        // The one thing Swift has to read back off a finished token, because it cannot name a
-        // bitfield. `tokenBitsType` is a one-line accessor in CSSParserTokenBits.h, next to the
-        // factories that wrote the field, so the packing is still stated exactly once.
-        let type = WebCore.tokenBitsType(token.bits)
+        // The one thing Swift reads back off a finished token: end-of-file to stop the loop,
+        // and CommentToken to keep comments out of the buffer. Read straight off the bitfield.
+        let type = token.bits.type
         if type == endOfFileType { break }
 
         // Comments never enter `m_tokens` -- the C++ scanner drops them too, and

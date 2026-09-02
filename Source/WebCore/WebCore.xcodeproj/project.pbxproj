@@ -62,6 +62,7 @@
 		DEADBEEF00000000000000F2 /* CSSTokenizerSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000F1 /* CSSTokenizerSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DEADBEEF00000000000000D2 /* CSSTokenizerSwiftBridge.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000D1 /* CSSTokenizerSwiftBridge.cpp */; };
 		DEADBEEF00000000000000C2 /* CSSTokenizerSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000C1 /* CSSTokenizerSwift.swift */; };
+		BEE7501000000000000000C2 /* CSSParserTokenBitsSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE7501000000000000000C1 /* CSSParserTokenBitsSwift.swift */; };
 		DEADBEEF0000000000000102 /* CSSUnitTrieSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000101 /* CSSUnitTrieSwift.swift */; };
 		DEADBEEF0000000000000112 /* CSSParserFastPathsSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000111 /* CSSParserFastPathsSwift.swift */; };
 		DEADBEEF0000000000000122 /* CSSCalcSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000121 /* CSSCalcSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -7779,6 +7780,7 @@
 		DEADBEEF00000000000000F1 /* CSSTokenizerSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = css/parser/CSSTokenizerSwiftTypes.h; sourceTree = "<group>"; };
 		DEADBEEF00000000000000D1 /* CSSTokenizerSwiftBridge.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = css/parser/CSSTokenizerSwiftBridge.cpp; sourceTree = "<group>"; };
 		DEADBEEF00000000000000C1 /* CSSTokenizerSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSTokenizerSwift.swift; sourceTree = "<group>"; };
+		BEE7501000000000000000C1 /* CSSParserTokenBitsSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSParserTokenBitsSwift.swift; sourceTree = "<group>"; };
 		DEADBEEF0000000000000101 /* CSSUnitTrieSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSUnitTrieSwift.swift; sourceTree = "<group>"; };
 		DEADBEEF0000000000000111 /* CSSParserFastPathsSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSParserFastPathsSwift.swift; sourceTree = "<group>"; };
 		DEADBEEF0000000000000121 /* CSSCalcSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = css/calc/CSSCalcSwiftTypes.h; sourceTree = "<group>"; };
@@ -51120,6 +51122,7 @@
 			files = (
 				DEADBEEF00000000000000D2 /* CSSTokenizerSwiftBridge.cpp in Sources */,
 				DEADBEEF00000000000000C2 /* CSSTokenizerSwift.swift in Sources */,
+				BEE7501000000000000000C2 /* CSSParserTokenBitsSwift.swift in Sources */,
 				DEADBEEF0000000000000102 /* CSSUnitTrieSwift.swift in Sources */,
 				DEADBEEF0000000000000112 /* CSSParserFastPathsSwift.swift in Sources */,
 				DEADBEEF0000000000000132 /* CSSCalcSerializationSwift.swift in Sources */,
