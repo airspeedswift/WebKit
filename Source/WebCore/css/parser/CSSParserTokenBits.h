@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 #include <wtf/SwiftBridging.h>
 
 namespace WebCore {
@@ -144,10 +145,62 @@ inline unsigned bitsParkedValueOffset(const CSSParserTokenBits& bits)
     return static_cast<unsigned>(bits.parkedValueOffset);
 }
 
+// MARK: - The token types
+//
+// Declared here rather than in CSSParserToken.h so Swift imports the real enumeration instead
+// of mirroring it. This header is included by CSSParserToken.h, so no C++ use site moves; the
+// enum stays unscoped, so every `IdentToken` in the CSS parser still resolves unqualified.
+//
+// Swift sees an unscoped C++ enum as a type with `rawValue` whose enumerators are global
+// constants: `WebCore.IdentToken`, not `CSSParserTokenType.ident`.
+
+// `: uint8_t` so the Swift side's `rawValue` is a `UInt8`, matching the block-stack storage.
+// Without it the enum imports with a `CUnsignedInt` rawValue and every use needs a narrowing
+// conversion. Changes nothing in C++: the enum stays unscoped, so all 361 uses of its
+// enumerators still resolve unqualified, and `numberOfCSSParserTokenTypes` is 33.
+enum CSSParserTokenType : uint8_t {
+    IdentToken = 0,
+    FunctionToken,
+    AtKeywordToken,
+    HashToken,
+    UrlToken,
+    BadUrlToken,
+    DelimiterToken,
+    NumberToken,
+    PercentageToken,
+    DimensionToken,
+    IncludeMatchToken,
+    DashMatchToken,
+    PrefixMatchToken,
+    SuffixMatchToken,
+    SubstringMatchToken,
+    ColumnToken,
+    NonNewlineWhitespaceToken,
+    NewlineToken,
+    CDOToken,
+    CDCToken,
+    ColonToken,
+    SemicolonToken,
+    CommaToken,
+    LeftParenthesisToken,
+    RightParenthesisToken,
+    LeftBracketToken,
+    RightBracketToken,
+    LeftBraceToken,
+    RightBraceToken,
+    StringToken,
+    BadStringToken,
+    EOFToken,
+    CommentToken,
+    LastCSSParserTokenType = CommentToken,
+};
+
+constexpr std::underlying_type_t<CSSParserTokenType> numberOfCSSParserTokenTypes = LastCSSParserTokenType + 1;
+
 // NumberToken, PercentageToken and DimensionToken are contiguous, so "does this token still
 // owe a double" is one unsigned range check rather than a switch.
-constexpr unsigned firstNumericCSSParserTokenType = 7; // NumberToken
-constexpr unsigned lastNumericCSSParserTokenType = 9; // DimensionToken
+constexpr unsigned firstNumericCSSParserTokenType = NumberToken;
+constexpr unsigned lastNumericCSSParserTokenType = DimensionToken;
 
 // The reader half of the pendingNumberRange discipline: answers "does a token of this type
 // still owe a double", from the type alone. CSSParserToken.h proves it against a three-way
