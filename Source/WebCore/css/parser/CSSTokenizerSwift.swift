@@ -124,20 +124,27 @@ extension UInt16: CSSCodeUnit { }
     c <= 0x08 || c == 0x0B || (c >= 0x0E && c <= 0x1F) || c == 0x7F
 }
 
-/// A bounds-checked read of the input that costs one unsigned compare, which is the
-/// shape C++ gets for free by indexing with `size_t`.
+/// A bounds-checked read of the input, spelled the way `Span`'s own precondition is
+/// spelled.
 ///
-/// `Span`'s subscript checks `0 <= index && index < count`, and nothing establishes
-/// the first half for the optimizer because the index arrives as a parameter or from
-/// a stored property. Comparing bit patterns as unsigned discharges both at once and
-/// is not `unsafe`: a negative index fails the compare and reads as the EOF marker.
-/// Worth 26% on the name scan, the hottest loop here.
+/// `Span`'s precondition is `Span.swift:472`: `_precondition(indices.contains(position))`,
+/// which `Range.swift:200` expands to `lowerBound <= element && element < upperBound` —
+/// signed and two-sided. A guard written as `UInt(bitPattern: index) < UInt(bitPattern:
+/// data.count)` is unsigned and one-sided, and is a *different comparison of the same
+/// values*: the optimizer cannot always prove it implies the two-sided precondition, since
+/// that implication also needs `count >= 0`, which `Span.swift:441`'s
+/// `_assumeNonNegative(_count)` does not establish for a frozen struct passed in registers
+/// (`IRGen/GenBuiltin.cpp:582` emits the backing builtin only for a load or a call). Spelling
+/// the guard the same way the precondition is spelled below lets the optimizer discharge the
+/// check.
 ///
-/// Use this ONLY where the EOF-marker semantics are wanted anyway: in a loop whose
-/// own condition already bounds the index, the select is pure overhead, measured at
-/// 28% on all-whitespace input, so those loops index directly.
+/// Not `unsafe` either way: a negative index fails the compare and reads as the EOF marker.
+///
+/// Use this ONLY where the EOF-marker semantics are wanted anyway: in a loop whose own
+/// condition already bounds the index, the select is pure overhead, measured at 28% on
+/// all-whitespace input, so those loops index directly.
 @inline(always) private func byteAt<Unit: CSSCodeUnit>(_ data: Span<Unit>, _ index: Int) -> Unit {
-    UInt(bitPattern: index) < UInt(bitPattern: data.count) ? data[index] : 0
+    data.indices.contains(index) ? data[index] : 0
 }
 
 /// The 128-entry dispatch class. The C++ holds a `std::array<CodePoint, 128>` of
