@@ -27,8 +27,9 @@
 // both C++ and Swift. Self-contained on purpose: the island's boundary module takes this and
 // nothing else, so importing it cannot walk into WebCore's umbrella.
 //
-// Swift cannot name a bitfield or an anonymous union member, so it does not: it calls the
-// inline setters below, which are the only place the packing is written down.
+// Swift names this struct's fields directly -- bitfields, the anonymous union's members, and
+// `pendingNumberRange` inside it -- and writes all but one of them. The writers are in
+// CSSParserTokenBitsSwift.swift; see the MARK below for what is left here and why.
 
 #pragma once
 
