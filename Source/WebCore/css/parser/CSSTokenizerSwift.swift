@@ -432,6 +432,12 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     /// Returns the next token; `.endOfFile` when the input is exhausted.
     /// Mirrors CSSTokenizer::nextToken.
+    ///
+    /// `@inline(always)`: left to the heuristic, this function goes out of line once it grows
+    /// past the inliner's threshold, and `cssTokenizeSwiftAll8`/`...16` lose ~1,100 instructions
+    /// of an inlined call per token on the hottest path — costing double digits of throughput
+    /// under thin LTO and nothing without it. Forcing the inline keeps the shape explicit.
+    @inline(always)
     mutating func nextToken(_ data: Span<Unit>) -> EmittedToken {
         let start = clampedOffset(data)
         let cc = consume(data)
