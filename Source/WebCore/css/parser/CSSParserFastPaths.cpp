@@ -50,18 +50,11 @@
 #include "FloatConversion.h"
 #include "HashTools.h"
 #include "StylePropertyShorthand.h"
-// The generated header emits the `@c CSSSwiftColorOutcome` enum as an Objective-C-only
-// non-defining fixed-underlying-type declaration, which -Werror makes fatal without this
-// suppression. Same warning, same fix, as CSSTokenizer.cpp.
-// Required even though this file does not call into it: WebCoreSwift-Generated.h is emitted
-// once for the whole module, so every translation unit that includes it must declare every
-// Swift boundary type. Omitting this makes the generated thunk for cssCalcSerializeSwift fail
-// to compile with "no member named 'CSSCalcSwiftNode' in namespace 'WebCore::CSSCalc'".
-#include "CSSCalcSwiftTypes.h"
+// Declares CSSSwiftColorOutcome and the named-colour lookup this file provides to Swift.
 #include "CSSTokenizerSwiftTypes.h"
-IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
-#include "WebCoreSwift-Generated.h"
-IGNORE_CLANG_WARNINGS_END
+// The Swift entry points this file calls. WebCoreSwift-Generated.h is module-scoped, so a
+// translation unit including it must declare every boundary's types; this header collects them.
+#include "WebCoreSwiftBoundaryTypes.h"
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringParsingBuffer.h>
 

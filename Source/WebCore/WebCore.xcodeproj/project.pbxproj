@@ -62,10 +62,12 @@
 		DEADBEEF00000000000000F2 /* CSSTokenizerSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000F1 /* CSSTokenizerSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DEADBEEF00000000000000D2 /* CSSTokenizerSwiftBridge.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000D1 /* CSSTokenizerSwiftBridge.cpp */; };
 		DEADBEEF00000000000000C2 /* CSSTokenizerSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF00000000000000C1 /* CSSTokenizerSwift.swift */; };
+		BEE7501000000000000000C2 /* CSSParserTokenBitsSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE7501000000000000000C1 /* CSSParserTokenBitsSwift.swift */; };
 		DEADBEEF0000000000000102 /* CSSUnitTrieSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000101 /* CSSUnitTrieSwift.swift */; };
 		DEADBEEF0000000000000112 /* CSSParserFastPathsSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000111 /* CSSParserFastPathsSwift.swift */; };
 		DEADBEEF0000000000000122 /* CSSCalcSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000121 /* CSSCalcSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DEADBEEF0000000000000132 /* CSSCalcSerializationSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000131 /* CSSCalcSerializationSwift.swift */; };
+		DEADBEEF0000000000000162 /* WebCoreSwiftBoundaryTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000161 /* WebCoreSwiftBoundaryTypes.h */; };
 		0014628B103CD1DE000B20DB /* OriginAccessEntry.h in Headers */ = {isa = PBXBuildFile; fileRef = 00146289103CD1DE000B20DB /* OriginAccessEntry.h */; };
 		003F1FEA11E6AB43008258D9 /* UserContentTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 003F1FE911E6AB43008258D9 /* UserContentTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		00B9318813BA8DBA0035A948 /* XMLDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = 00B9318213BA867F0035A948 /* XMLDocumentParser.h */; };
@@ -465,6 +467,7 @@
 		0F60F32B1DFBB10700416D6C /* CommonVM.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F60F32A1DFBB10400416D6C /* CommonVM.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F6383DE18615B29003E5DB5 /* ThreadedScrollingTree.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6383DC18615B29003E5DB5 /* ThreadedScrollingTree.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F6A12BE1A00923700C6DE72 /* DebugPageOverlays.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6A12BC1A00923700C6DE72 /* DebugPageOverlays.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		BEE7501000000000000000B2 /* CSSUnitType.h in Headers */ = {isa = PBXBuildFile; fileRef = BEE7501000000000000000B1 /* CSSUnitType.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F6B707A237BC36D0052CA47 /* CSSUnits.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6B7077237BC12F0052CA47 /* CSSUnits.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F73B769222B3A0C00805316 /* ScrollingTreeOverflowScrollingNodeMac.h in Headers */ = {isa = PBXBuildFile; fileRef = 0FC0516A219B5EBE0031C39E /* ScrollingTreeOverflowScrollingNodeMac.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F768C2D26D03841008DBE0B /* UserMediaRequestIdentifier.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F768C2B26D03841008DBE0B /* UserMediaRequestIdentifier.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -7804,10 +7807,12 @@
 		DEADBEEF00000000000000F1 /* CSSTokenizerSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = css/parser/CSSTokenizerSwiftTypes.h; sourceTree = "<group>"; };
 		DEADBEEF00000000000000D1 /* CSSTokenizerSwiftBridge.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = css/parser/CSSTokenizerSwiftBridge.cpp; sourceTree = "<group>"; };
 		DEADBEEF00000000000000C1 /* CSSTokenizerSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSTokenizerSwift.swift; sourceTree = "<group>"; };
+		BEE7501000000000000000C1 /* CSSParserTokenBitsSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSParserTokenBitsSwift.swift; sourceTree = "<group>"; };
 		DEADBEEF0000000000000101 /* CSSUnitTrieSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSUnitTrieSwift.swift; sourceTree = "<group>"; };
 		DEADBEEF0000000000000111 /* CSSParserFastPathsSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSParserFastPathsSwift.swift; sourceTree = "<group>"; };
 		DEADBEEF0000000000000121 /* CSSCalcSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = css/calc/CSSCalcSwiftTypes.h; sourceTree = "<group>"; };
 		DEADBEEF0000000000000131 /* CSSCalcSerializationSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/calc/CSSCalcSerializationSwift.swift; sourceTree = "<group>"; };
+		DEADBEEF0000000000000161 /* WebCoreSwiftBoundaryTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = WebCoreSwiftBoundaryTypes.h; sourceTree = "<group>"; };
 		00146288103CD1DE000B20DB /* OriginAccessEntry.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = OriginAccessEntry.cpp; sourceTree = "<group>"; };
 		00146289103CD1DE000B20DB /* OriginAccessEntry.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = OriginAccessEntry.h; sourceTree = "<group>"; };
 		003F1FE911E6AB43008258D9 /* UserContentTypes.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UserContentTypes.h; sourceTree = "<group>"; };
@@ -8555,6 +8560,7 @@
 		0F69F2B7228B98FF008D3565 /* LayerOverlapMap.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayerOverlapMap.cpp; sourceTree = "<group>"; };
 		0F6A12BB1A00923700C6DE72 /* DebugPageOverlays.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = DebugPageOverlays.cpp; sourceTree = "<group>"; };
 		0F6A12BC1A00923700C6DE72 /* DebugPageOverlays.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DebugPageOverlays.h; sourceTree = "<group>"; };
+		BEE7501000000000000000B1 /* CSSUnitType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSUnitType.h; sourceTree = "<group>"; };
 		0F6B7077237BC12F0052CA47 /* CSSUnits.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSUnits.h; sourceTree = "<group>"; };
 		0F6B7079237BC12F0052CA47 /* CSSUnits.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CSSUnits.cpp; sourceTree = "<group>"; };
 		0F6EAD6626FE728000064D03 /* ScrollAnimation.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ScrollAnimation.cpp; sourceTree = "<group>"; };
@@ -42399,6 +42405,7 @@
 				371F53E80D2704F900ECE0D5 /* CSSUnicodeRangeValue.cpp */,
 				371F53E70D2704F900ECE0D5 /* CSSUnicodeRangeValue.h */,
 				0F6B7079237BC12F0052CA47 /* CSSUnits.cpp */,
+				BEE7501000000000000000B1 /* CSSUnitType.h */,
 				0F6B7077237BC12F0052CA47 /* CSSUnits.h */,
 				BCC0F3D42D99BDD90065B859 /* CSSURLValue.cpp */,
 				BCC0F3D52D99BDD90065B859 /* CSSURLValue.h */,
@@ -45426,6 +45433,7 @@
 				DEADBEEF00000000000000F4 /* CSSParserTokenBits.h in Headers */,
 				DEADBEEF00000000000000F2 /* CSSTokenizerSwiftTypes.h in Headers */,
 				DEADBEEF0000000000000122 /* CSSCalcSwiftTypes.h in Headers */,
+				DEADBEEF0000000000000162 /* WebCoreSwiftBoundaryTypes.h in Headers */,
 				3169B7DA2C63091700024DBA /* CSSTokenizerInputStream.h in Headers */,
 				9AB1F38018E2489A00534743 /* CSSToLengthConversionData.h in Headers */,
 				2A538A2D26F0104C00965FC8 /* CSSTransformComponent.h in Headers */,
@@ -45437,6 +45445,7 @@
 				1EE518E5ED7854C9B3BB1291 /* CSSTypeSpecifier.h in Headers */,
 				BCB272002CC1EB8B00265123 /* CSSUnevaluatedCalc.h in Headers */,
 				371F53E90D2704F900ECE0D5 /* CSSUnicodeRangeValue.h in Headers */,
+				BEE7501000000000000000B2 /* CSSUnitType.h in Headers */,
 				0F6B707A237BC36D0052CA47 /* CSSUnits.h in Headers */,
 				4BAFD0E1219242A000C0AB64 /* CSSUnitValue.h in Headers */,
 				4BAFD0D921921EA000C0AB64 /* CSSUnparsedValue.h in Headers */,
@@ -51334,6 +51343,7 @@
 			files = (
 				DEADBEEF00000000000000D2 /* CSSTokenizerSwiftBridge.cpp in Sources */,
 				DEADBEEF00000000000000C2 /* CSSTokenizerSwift.swift in Sources */,
+				BEE7501000000000000000C2 /* CSSParserTokenBitsSwift.swift in Sources */,
 				DEADBEEF0000000000000102 /* CSSUnitTrieSwift.swift in Sources */,
 				DEADBEEF0000000000000112 /* CSSParserFastPathsSwift.swift in Sources */,
 				DEADBEEF0000000000000132 /* CSSCalcSerializationSwift.swift in Sources */,

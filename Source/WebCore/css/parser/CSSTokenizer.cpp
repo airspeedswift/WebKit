@@ -34,27 +34,11 @@
 #include "CSSParserObserverWrapper.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
-// Not used by this file. WebCoreSwift-Generated.h below is emitted once for the whole module, so
-// every C++ translation unit that includes it must be able to see every Swift subsystem's boundary types --
-// the per-subsystem Clang modules in WebCore_Private.modulemap isolate what Swift may reach, not what
-// C++ must declare. Without this the generated thunk for cssCalcSerializeSwift fails with "no member
-// named 'CSSCalcSwiftNode' in namespace 'WebCore::CSSCalc'".
-#include "CSSCalcSwiftTypes.h"
 #include "CSSTokenizerSwiftTypes.h"
-// FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops
-// handing C++ the Objective-C spelling. It treats C++11 as implying support for the
-// Objective-C fixed-enum forward declaration, so the C++ arm expands
-// `typedef SWIFT_ENUM(uint8_t, CSSTokenTypeSwift, closed) {` to
-// `enum CSSTokenTypeSwift : uint8_t CSSTokenTypeSwift;` -- a non-defining declaration of an
-// enumeration with a fixed underlying type, which only Objective-C accepts. Clang warns
-// -Welaborated-enum-base and WebCore's -Werror makes it fatal. `CF_ENUM` has the identical
-// bug, and JSC_CF_ENUM (JavaScriptCore's API/JSBase.h) already works around it the way the
-// generated header should: branch on `__cplusplus` and emit the plain `enum X : T { ... }`.
-//
-// Suppressing it here is what lets the three enums below be declared *once*, in Swift.
-IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
-#include "WebCoreSwift-Generated.h"
-IGNORE_CLANG_WARNINGS_END
+// The Swift entry points this file calls. WebCoreSwift-Generated.h is module-scoped, so a
+// translation unit that includes it must declare every Swift subsystem's boundary types;
+// WebCoreSwiftBoundaryTypes.h is where those declarations go.
+#include "WebCoreSwiftBoundaryTypes.h"
 #include <atomic>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/dtoa.h>
@@ -236,173 +220,25 @@ CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
 
 // MARK: - Swift tokenizer path
 //
-// See CSSTokenizerSwift.swift. Swift decides token types, extents and block structure;
-// everything below materialises that into CSSParserTokens -- StringViews over the input,
-// double conversion, and the escaped-value string pool.
+// See CSSTokenizerSwift.swift. Swift decides token types, extents and block structure; the code
+// below materialises that into CSSParserTokens: StringViews over the input, double conversion,
+// and the escaped-value string pool.
 
-// Swift writes a token's type and block type straight into CSSParserTokenBits' bitfields,
-// so the two numberings have to agree: a reorder or an insertion in CSSParserTokenType, an
-// ordinary WebCore change, would otherwise silently retype every token above the insertion point.
-//
-// These now *prove* it. CSSTokenTypeSwift and CSSBlockTypeSwift are `@c` (SE-0495), so
-// they are emitted into WebCoreSwift-Generated.h as uint8_t-backed C enums and each
-// assert below names the Swift case directly. Until that attribute went on, C++ could
-// not see the Swift enum at all and these could only pin the C++ side -- making a change
-// to this numbering fail to build, in the hope that whoever made it then went and updated
-// the Swift mirror by hand. C++ stays the original of the pair, since CSSParserTokenType
-// is what the rest of the CSS parser uses; Swift is the mirror. The names are spelled out
-// one per line rather than counted because that is what makes the mirroring checkable.
-static_assert(numberOfCSSParserTokenTypes == 33, "CSSTokenTypeSwift in CSSTokenizerSwift.swift mirrors this enum case for case; add the new type there too, then update this count");
-static_assert(static_cast<uint8_t>(IdentToken) == CSSTokenTypeSwiftIdent);
-static_assert(static_cast<uint8_t>(FunctionToken) == CSSTokenTypeSwiftFunction);
-static_assert(static_cast<uint8_t>(AtKeywordToken) == CSSTokenTypeSwiftAtKeyword);
-static_assert(static_cast<uint8_t>(HashToken) == CSSTokenTypeSwiftHash);
-static_assert(static_cast<uint8_t>(UrlToken) == CSSTokenTypeSwiftUrl);
-static_assert(static_cast<uint8_t>(BadUrlToken) == CSSTokenTypeSwiftBadUrl);
-static_assert(static_cast<uint8_t>(DelimiterToken) == CSSTokenTypeSwiftDelimiter);
-static_assert(static_cast<uint8_t>(NumberToken) == CSSTokenTypeSwiftNumber);
-static_assert(static_cast<uint8_t>(PercentageToken) == CSSTokenTypeSwiftPercentage);
-static_assert(static_cast<uint8_t>(DimensionToken) == CSSTokenTypeSwiftDimension);
-static_assert(static_cast<uint8_t>(IncludeMatchToken) == CSSTokenTypeSwiftIncludeMatch);
-static_assert(static_cast<uint8_t>(DashMatchToken) == CSSTokenTypeSwiftDashMatch);
-static_assert(static_cast<uint8_t>(PrefixMatchToken) == CSSTokenTypeSwiftPrefixMatch);
-static_assert(static_cast<uint8_t>(SuffixMatchToken) == CSSTokenTypeSwiftSuffixMatch);
-static_assert(static_cast<uint8_t>(SubstringMatchToken) == CSSTokenTypeSwiftSubstringMatch);
-static_assert(static_cast<uint8_t>(ColumnToken) == CSSTokenTypeSwiftColumn);
-static_assert(static_cast<uint8_t>(NonNewlineWhitespaceToken) == CSSTokenTypeSwiftNonNewlineWhitespace);
-static_assert(static_cast<uint8_t>(NewlineToken) == CSSTokenTypeSwiftNewline);
-static_assert(static_cast<uint8_t>(CDOToken) == CSSTokenTypeSwiftCdo);
-static_assert(static_cast<uint8_t>(CDCToken) == CSSTokenTypeSwiftCdc);
-static_assert(static_cast<uint8_t>(ColonToken) == CSSTokenTypeSwiftColon);
-static_assert(static_cast<uint8_t>(SemicolonToken) == CSSTokenTypeSwiftSemicolon);
-static_assert(static_cast<uint8_t>(CommaToken) == CSSTokenTypeSwiftComma);
-static_assert(static_cast<uint8_t>(LeftParenthesisToken) == CSSTokenTypeSwiftLeftParenthesis);
-static_assert(static_cast<uint8_t>(RightParenthesisToken) == CSSTokenTypeSwiftRightParenthesis);
-static_assert(static_cast<uint8_t>(LeftBracketToken) == CSSTokenTypeSwiftLeftBracket);
-static_assert(static_cast<uint8_t>(RightBracketToken) == CSSTokenTypeSwiftRightBracket);
-static_assert(static_cast<uint8_t>(LeftBraceToken) == CSSTokenTypeSwiftLeftBrace);
-static_assert(static_cast<uint8_t>(RightBraceToken) == CSSTokenTypeSwiftRightBrace);
-static_assert(static_cast<uint8_t>(StringToken) == CSSTokenTypeSwiftString);
-static_assert(static_cast<uint8_t>(BadStringToken) == CSSTokenTypeSwiftBadString);
-static_assert(static_cast<uint8_t>(EOFToken) == CSSTokenTypeSwiftEndOfFile);
-static_assert(static_cast<uint8_t>(CommentToken) == CSSTokenTypeSwiftComment);
-
-// Same, for CSSBlockTypeSwift, whose three cases are written into
-    // CSSParserTokenBits::blockType.
+// BlockType is mirrored as CSSBlockTypeSwift rather than imported, because it is nested inside
+// CSSParserToken, and importing it would move 304 use sites for the sake of three asserts.
+// CSSParserTokenType itself is imported from CSSParserTokenBits.h and needs no mirror.
 static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == CSSBlockTypeSwiftNotBlock);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == CSSBlockTypeSwiftBlockStart);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == CSSBlockTypeSwiftBlockEnd);
 
-// The CSS unit-type trie's enum mirror. Swift resolves a dimension's unit
-// itself, and it has to spell CSSUnitType out rather than import it: CSSUnits.h has no
-// #includes of its own -- it takes uint8_t, std::optional, ASCIILiteral and NODELETE from
-// whoever includes it -- so it cannot join the boundary module, and it
-// is a Private header, so moving it there would take CSSUnitType away from every other Swift
-// file that imports the WebCore_Private umbrella.
-//
-// A mirror is only as good as its check, and behaviour is not the check here. The trie can
-// return 63 of these 70 enumerators, so no behavioral comparison -- not even an exhaustive one -- can
-// see a mis-transcribed Calc, Percentage or Integer. Worse, CSSUnits.h interleaves
-// `FirstViewportCSSUnitType = Vw` and `LastViewportCSSUnitType = Dvi` into the enumerator list,
-// and in C++ the enumerator after an alias continues from the *alias*: Cqw is 43 only because
-// `LastViewportCSSUnitType = Dvi` happens to name the value immediately before it. Move either
-// alias and all 27 enumerators below it renumber, in silence.
-//
-// So all 70 are pinned here by name, which `@c` (SE-0495) on the Swift enum makes possible:
-// the Swift cases are emitted into WebCoreSwift-Generated.h as CSSUnitTypeSwift<Name>. The two
-// aliases are not Swift cases -- Swift enums cannot carry duplicate raw values -- so they are
-// checked against the enumerators they name. These asserts are not behind
-// ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE): the mirror is compiled into every build, so its check
-// has to be too, and a static_assert costs no bytes.
-static_assert(static_cast<uint8_t>(CSSUnitType::Unknown) == CSSUnitTypeSwiftUnknown);
-static_assert(static_cast<uint8_t>(CSSUnitType::Number) == CSSUnitTypeSwiftNumber);
-static_assert(static_cast<uint8_t>(CSSUnitType::Integer) == CSSUnitTypeSwiftInteger);
-static_assert(static_cast<uint8_t>(CSSUnitType::Percentage) == CSSUnitTypeSwiftPercentage);
-static_assert(static_cast<uint8_t>(CSSUnitType::Em) == CSSUnitTypeSwiftEm);
-static_assert(static_cast<uint8_t>(CSSUnitType::Ex) == CSSUnitTypeSwiftEx);
-static_assert(static_cast<uint8_t>(CSSUnitType::Px) == CSSUnitTypeSwiftPx);
-static_assert(static_cast<uint8_t>(CSSUnitType::Cm) == CSSUnitTypeSwiftCm);
-static_assert(static_cast<uint8_t>(CSSUnitType::Mm) == CSSUnitTypeSwiftMm);
-static_assert(static_cast<uint8_t>(CSSUnitType::In) == CSSUnitTypeSwiftIn);
-static_assert(static_cast<uint8_t>(CSSUnitType::Pt) == CSSUnitTypeSwiftPt);
-static_assert(static_cast<uint8_t>(CSSUnitType::Pc) == CSSUnitTypeSwiftPc);
-static_assert(static_cast<uint8_t>(CSSUnitType::Deg) == CSSUnitTypeSwiftDeg);
-static_assert(static_cast<uint8_t>(CSSUnitType::Rad) == CSSUnitTypeSwiftRad);
-static_assert(static_cast<uint8_t>(CSSUnitType::Grad) == CSSUnitTypeSwiftGrad);
-static_assert(static_cast<uint8_t>(CSSUnitType::Ms) == CSSUnitTypeSwiftMs);
-static_assert(static_cast<uint8_t>(CSSUnitType::S) == CSSUnitTypeSwiftS);
-static_assert(static_cast<uint8_t>(CSSUnitType::Hz) == CSSUnitTypeSwiftHz);
-static_assert(static_cast<uint8_t>(CSSUnitType::Khz) == CSSUnitTypeSwiftKhz);
+// A dimension's unit is resolved by the CSS unit-type trie, over the real CSSUnitType, imported
+// from CSSUnitType.h through the boundary module, so there is no mirrored numbering to assert
+// here.
 
-static_assert(static_cast<uint8_t>(CSSUnitType::Vw) == CSSUnitTypeSwiftVw);
-static_assert(static_cast<uint8_t>(CSSUnitType::Vh) == CSSUnitTypeSwiftVh);
-static_assert(static_cast<uint8_t>(CSSUnitType::Vmin) == CSSUnitTypeSwiftVmin);
-static_assert(static_cast<uint8_t>(CSSUnitType::Vmax) == CSSUnitTypeSwiftVmax);
-static_assert(static_cast<uint8_t>(CSSUnitType::Vb) == CSSUnitTypeSwiftVb);
-static_assert(static_cast<uint8_t>(CSSUnitType::Vi) == CSSUnitTypeSwiftVi);
-static_assert(static_cast<uint8_t>(CSSUnitType::Svw) == CSSUnitTypeSwiftSvw);
-static_assert(static_cast<uint8_t>(CSSUnitType::Svh) == CSSUnitTypeSwiftSvh);
-static_assert(static_cast<uint8_t>(CSSUnitType::Svmin) == CSSUnitTypeSwiftSvmin);
-static_assert(static_cast<uint8_t>(CSSUnitType::Svmax) == CSSUnitTypeSwiftSvmax);
-static_assert(static_cast<uint8_t>(CSSUnitType::Svb) == CSSUnitTypeSwiftSvb);
-static_assert(static_cast<uint8_t>(CSSUnitType::Svi) == CSSUnitTypeSwiftSvi);
-static_assert(static_cast<uint8_t>(CSSUnitType::Lvw) == CSSUnitTypeSwiftLvw);
-static_assert(static_cast<uint8_t>(CSSUnitType::Lvh) == CSSUnitTypeSwiftLvh);
-static_assert(static_cast<uint8_t>(CSSUnitType::Lvmin) == CSSUnitTypeSwiftLvmin);
-static_assert(static_cast<uint8_t>(CSSUnitType::Lvmax) == CSSUnitTypeSwiftLvmax);
-static_assert(static_cast<uint8_t>(CSSUnitType::Lvb) == CSSUnitTypeSwiftLvb);
-static_assert(static_cast<uint8_t>(CSSUnitType::Lvi) == CSSUnitTypeSwiftLvi);
-static_assert(static_cast<uint8_t>(CSSUnitType::Dvw) == CSSUnitTypeSwiftDvw);
-static_assert(static_cast<uint8_t>(CSSUnitType::Dvh) == CSSUnitTypeSwiftDvh);
-static_assert(static_cast<uint8_t>(CSSUnitType::Dvmin) == CSSUnitTypeSwiftDvmin);
-static_assert(static_cast<uint8_t>(CSSUnitType::Dvmax) == CSSUnitTypeSwiftDvmax);
-static_assert(static_cast<uint8_t>(CSSUnitType::Dvb) == CSSUnitTypeSwiftDvb);
-static_assert(static_cast<uint8_t>(CSSUnitType::Dvi) == CSSUnitTypeSwiftDvi);
-
-static_assert(static_cast<uint8_t>(CSSUnitType::Cqw) == CSSUnitTypeSwiftCqw);
-static_assert(static_cast<uint8_t>(CSSUnitType::Cqh) == CSSUnitTypeSwiftCqh);
-static_assert(static_cast<uint8_t>(CSSUnitType::Cqi) == CSSUnitTypeSwiftCqi);
-static_assert(static_cast<uint8_t>(CSSUnitType::Cqb) == CSSUnitTypeSwiftCqb);
-static_assert(static_cast<uint8_t>(CSSUnitType::Cqmin) == CSSUnitTypeSwiftCqmin);
-static_assert(static_cast<uint8_t>(CSSUnitType::Cqmax) == CSSUnitTypeSwiftCqmax);
-
-static_assert(static_cast<uint8_t>(CSSUnitType::Dppx) == CSSUnitTypeSwiftDppx);
-static_assert(static_cast<uint8_t>(CSSUnitType::X) == CSSUnitTypeSwiftX);
-static_assert(static_cast<uint8_t>(CSSUnitType::Dpi) == CSSUnitTypeSwiftDpi);
-static_assert(static_cast<uint8_t>(CSSUnitType::Dpcm) == CSSUnitTypeSwiftDpcm);
-static_assert(static_cast<uint8_t>(CSSUnitType::Fr) == CSSUnitTypeSwiftFr);
-static_assert(static_cast<uint8_t>(CSSUnitType::Q) == CSSUnitTypeSwiftQ);
-static_assert(static_cast<uint8_t>(CSSUnitType::Lh) == CSSUnitTypeSwiftLh);
-static_assert(static_cast<uint8_t>(CSSUnitType::Rlh) == CSSUnitTypeSwiftRlh);
-
-static_assert(static_cast<uint8_t>(CSSUnitType::Turn) == CSSUnitTypeSwiftTurn);
-static_assert(static_cast<uint8_t>(CSSUnitType::Rem) == CSSUnitTypeSwiftRem);
-static_assert(static_cast<uint8_t>(CSSUnitType::Rex) == CSSUnitTypeSwiftRex);
-static_assert(static_cast<uint8_t>(CSSUnitType::Cap) == CSSUnitTypeSwiftCap);
-static_assert(static_cast<uint8_t>(CSSUnitType::Rcap) == CSSUnitTypeSwiftRcap);
-static_assert(static_cast<uint8_t>(CSSUnitType::Ch) == CSSUnitTypeSwiftCh);
-static_assert(static_cast<uint8_t>(CSSUnitType::Rch) == CSSUnitTypeSwiftRch);
-static_assert(static_cast<uint8_t>(CSSUnitType::Ic) == CSSUnitTypeSwiftIc);
-static_assert(static_cast<uint8_t>(CSSUnitType::Ric) == CSSUnitTypeSwiftRic);
-
-static_assert(static_cast<uint8_t>(CSSUnitType::Calc) == CSSUnitTypeSwiftCalc);
-static_assert(static_cast<uint8_t>(CSSUnitType::CalcPercentageWithAngle) == CSSUnitTypeSwiftCalcPercentageWithAngle);
-static_assert(static_cast<uint8_t>(CSSUnitType::CalcPercentageWithLength) == CSSUnitTypeSwiftCalcPercentageWithLength);
-
-static_assert(static_cast<uint8_t>(CSSUnitType::QuirkyEm) == CSSUnitTypeSwiftQuirkyEm);
-
-// The aliases, which have no Swift case of their own.
-static_assert(static_cast<uint8_t>(CSSUnitType::FirstViewportCSSUnitType) == CSSUnitTypeSwiftVw);
-static_assert(static_cast<uint8_t>(CSSUnitType::LastViewportCSSUnitType) == CSSUnitTypeSwiftDvi);
-// A new enumerator appended to CSSUnitType would be invisible to every assert above, since
-// each names a value that already exists. This is the one that fails.
-static_assert(static_cast<uint8_t>(CSSUnitType::QuirkyEm) == 69, "CSSUnitTypeSwift in CSSTokenizerSwift.swift mirrors CSSUnitType case for case; add the new unit there too, then update this value");
-
-// The shared boundary struct. Swift imports CSSParserTokenBits itself, so there is nothing left
-// here that could disagree with C++ about a token's layout; what is still restated here is the
-// observer record, which is small enough to pin outright. Twelve bytes and trivially copyable,
-// because the whole point of taking it out of the token was that production tokenization -- which
-// has no observer -- writes none of them.
+// The observer record is the one boundary struct still restated on both sides; Swift imports
+// CSSParserTokenBits itself, so nothing here can disagree with C++ about a token's layout.
+// Twelve bytes and trivially copyable, because production tokenization has no observer and
+// writes none of them.
 static_assert(sizeof(CSSSwiftObserverRecord) == 12);
 static_assert(alignof(CSSSwiftObserverRecord) == 4);
 static_assert(std::is_trivially_copyable_v<CSSSwiftObserverRecord>);
