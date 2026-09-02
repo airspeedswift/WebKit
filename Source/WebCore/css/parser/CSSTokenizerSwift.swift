@@ -449,6 +449,16 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     /// Returns the next token; `.endOfFile` when the input is exhausted.
     /// Mirrors CSSTokenizer::nextToken.
+    ///
+    /// `@inline(always)` because the *heuristic* used to do this and stopped. Moving the token-bits
+    /// writers from C++ into Swift (CSSParserTokenBitsSwift.swift) grew this function past the
+    /// inliner's threshold, so it went out of line and `cssTokenizeSwiftAll8`/`...16` shrank by
+    /// ~1,100 instructions each -- a call per token on the hottest path in the island. That cost
+    /// **17% at 8-bit and 11% at 16-bit** under thin LTO on real stylesheets, and was completely
+    /// invisible without LTO, where the ratio moved 0.960 -> 0.953. Stating the inline makes the
+    /// shape explicit instead of accidental. Per-symbol instruction counts are the instrument:
+    /// cssprobe/validate/symcount.sh.
+    @inline(always)
     mutating func nextToken(_ data: Span<Unit>) -> EmittedToken {
         let start = clampedOffset(data)
         let cc = consume(data)
