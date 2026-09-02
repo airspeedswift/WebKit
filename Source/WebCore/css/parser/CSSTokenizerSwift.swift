@@ -139,20 +139,44 @@ extension UInt16: CSSCodeUnit { }
     c <= 0x08 || c == 0x0B || (c >= 0x0E && c <= 0x1F) || c == 0x7F
 }
 
-/// A bounds-checked read of the input that costs one unsigned compare, which is the
-/// shape C++ gets for free by indexing with `size_t`.
+/// A bounds-checked read of the input, spelled the way `Span`'s own precondition is spelled.
 ///
-/// `Span`'s subscript checks `0 <= index && index < count`, and nothing establishes
-/// the first half for the optimizer because the index arrives as a parameter or from
-/// a stored property. Comparing bit patterns as unsigned discharges both at once and
-/// is not `unsafe`: a negative index fails the compare and reads as the EOF marker.
-/// Worth 26% on the name scan, the hottest loop here.
+/// THE "UNSIGNED BIT-PATTERN COMPARE IS FREE" CLAIM WAS WRONG, AND IT WAS EXPENSIVE. This used
+/// to read `UInt(bitPattern: index) < UInt(bitPattern: data.count)` -- the standard trick for
+/// testing `0 <= i < n` in one compare -- with a comment saying it discharged `Span`'s check and
+/// was "worth 26% on the name scan". Replacing it with the two-sided form below is worth **+5.7%
+/// of island throughput** on the six real stylesheets at 8-bit, and it is what recovered the lead
+/// the token-bits port had cost (island 634.7 MB/s against the pre-port arm's 634.1 at 8-bit,
+/// 347.7 against 346.3 at 16-bit, on an absolute column whose null-control floor is 0.03%).
+///
+/// The reason is that the two spellings are *different comparisons of the same values*, so the
+/// precondition was never eliminated by CSE -- it was eliminated by an inference, which held for
+/// months and then silently stopped. `Span.swift:472` is `_precondition(indices.contains(position))`
+/// and `Range.swift:200` is `lowerBound <= element && element < upperBound`: signed and two-sided,
+/// where the guard was unsigned and one-sided. And the implication only holds if `count >= 0`,
+/// which the stdlib tries to publish at `Span.swift:441` via `_assumeNonNegative(_count)` -- a
+/// builtin that `IRGen/GenBuiltin.cpp:582` emits **only for a load or a call**. `Span` is a frozen
+/// two-word struct passed in registers, so `_count` is a `struct_extract` of an SSA argument and
+/// the annotation is a no-op for exactly the type it was written for. Filings register §43; a C++
+/// twin reproduces the whole thing with no Swift involved, which is what routed it to the stdlib
+/// rather than to LLVM.
+///
+/// Measured cost was NOT what the mechanism predicted, which is worth recording: the prediction was
+/// "branches down, instructions flat, IPC up", and it is refuted. Retired instructions fall 4.6%
+/// and IPC does *not* recover (0.9455 -> 0.9631 against the pre-port arm's 0.9879). Static branch
+/// density is refuted as a predictor outright -- the `_fastPath` variant had the fewest branches of
+/// any arm built and the worst throughput, and a `_slowPath` variant matched this arm's branch count
+/// exactly and lost 1.9%. So do not tune this loop by counting branches.
+/// Notes: cssprobe/notes/r1sweep-results-0902.md.
+///
+/// Not `unsafe`, on either spelling: a negative index fails the compare and reads as the EOF marker.
 ///
 /// Use this ONLY where the EOF-marker semantics are wanted anyway: in a loop whose
 /// own condition already bounds the index, the select is pure overhead, measured at
-/// 28% on all-whitespace input, so those loops index directly.
+/// 28% on all-whitespace input, so those loops index directly. That sibling claim is
+/// untested by the sweep above and is left alone.
 @inline(always) private func byteAt<Unit: CSSCodeUnit>(_ data: Span<Unit>, _ index: Int) -> Unit {
-    UInt(bitPattern: index) < UInt(bitPattern: data.count) ? data[index] : 0
+    data.indices.contains(index) ? data[index] : 0
 }
 
 /// The 128-entry dispatch class. The C++ holds a `std::array<CodePoint, 128>` of
@@ -459,22 +483,29 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// shape explicit instead of accidental. Per-symbol instruction counts are the instrument:
     /// cssprobe/validate/symcount.sh.
     ///
-    /// It recovers 11 of the 17 points. The remaining 5-6 are filings register §42, and the
-    /// mechanism is a **stall, not a size problem** -- which is worth stating because the
-    /// obvious-looking fix follows from the wrong one. The writers' own codegen is
-    /// instruction-identical to the C++ factories they replaced (26=26 in isolation, 27=27 in
-    /// composition, 48=48 with the bool-to-enum selects live), and the enclosing entry does grow
-    /// by 93 instructions at 8-bit -- but retired instructions on the real corpora are **flat**:
-    /// +0.26% at 8-bit and -0.6% at 16-bit, i.e. fewer. What moves is **IPC, down 5.73% at 8-bit
-    /// and 3.73% at 16-bit**, in all twelve corpus x width cells, against a floor of +/-0.2%. So
-    /// the static +93 overstates the dynamic effect by 24x and gets the 16-bit sign wrong: that
-    /// code is cold, and shrinking this function or outlining its cold token kinds is measured as
-    /// near-worthless. The instrument is retired-instruction and cycle counters in
-    /// cssprobe/validate/cssbench.cpp (`--counters`, self-tested at 2x work -> 1.9998x
-    /// instructions); notes in webkit-swift-ports/writercodegen/notes/ipc-0902.md.
+    /// It recovers 11 of the 17 points. **The remaining 5-6 are now recovered too, by `byteAt`'s
+    /// guard respelling -- see the comment there and filings register §43.** §42, which used to be
+    /// cited here, is WITHDRAWN: its mechanism ("the SILOptimizer makes worse global decisions once
+    /// 43 previously-opaque callees become visible early, and the enclosing function grows") is
+    /// refuted twice over, and the two arms whose sizes were its dose-response turn out to be
+    /// byte-identical in this symbol.
     ///
-    /// Filed rather than reverted, deliberately: the island is at parity and the port removed
-    /// C++ glue. Do not "fix" this by moving the writers back.
+    /// What survives, and is worth keeping because it is the trap: the writers' own codegen is
+    /// instruction-identical to the C++ factories they replaced (26=26 in isolation, 27=27 in
+    /// composition, 48=48 with the bool-to-enum selects live), and the enclosing entry does grow by
+    /// 93 instructions at 8-bit -- yet retired instructions on the real corpora were **flat**,
+    /// +0.26% at 8-bit and -0.6% at 16-bit. The static +93 overstated the dynamic effect 24x and got
+    /// the 16-bit sign wrong: that code is cold. **So do not tune this function by its instruction
+    /// count, and do not tune the hot loop by counting branches either** -- a `_fastPath` arm had
+    /// the fewest branches of any built and the worst throughput. Get retired instructions:
+    /// cssprobe/validate/cssbench.cpp `--counters`, notes in writercodegen/notes/ipc-0902.md and
+    /// cssprobe/notes/r1sweep-results-0902.md.
+    ///
+    /// STILL OPEN, and not to be quietly closed: the 16-bit arm lost 2.7 points to an IPC drop with
+    /// every static hot-path metric *improved*, and that has no mechanism. Revisit log R130.
+    ///
+    /// The port was kept rather than reverted, and that decision now reads better than when it was
+    /// taken: the push removed a net 99 lines of C++ for 69 lines of Swift.
     @inline(always)
     mutating func nextToken(_ data: Span<Unit>) -> EmittedToken {
         let start = clampedOffset(data)
