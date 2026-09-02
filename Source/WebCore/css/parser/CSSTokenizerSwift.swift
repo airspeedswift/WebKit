@@ -45,31 +45,16 @@ public import WebCore_Private.CSSTokenizerSwiftTypes
 // ratios, per-construct measurements and the causes ruled out for the token-dense
 // deficit are in ~/src/webkit-swift-ports/cssprobe and adoption notes §11.
 
-/// Mirrors CSSParserTokenType. Raw values match so C++ can cast directly.
-///
-/// `@c` (SE-0495) makes this the only *declaration* of the Swift side of that mirroring:
-/// it is emitted into WebCoreSwift-Generated.h as a `uint8_t`-backed C enum, so the
-/// static_asserts in CSSTokenizer.cpp can name `CSSTokenTypeSwiftIdent` and friends and
-/// therefore prove the two numberings agree, where before they could only pin the C++
-/// side and hope someone updated this file. C++ stays the original here, since
-/// `CSSParserTokenType` is what the rest of the CSS parser uses.
-///
-/// Internal rather than `public` deliberately: `@c` on a *resilient* enum crashes IRGen
-/// (`C enum with resilient payload?!`, GenEnum.cpp), and WebCore compiles Swift with
-/// -enable-library-evolution, so a public enum here is resilient. `@frozen` also avoids
-/// it; internal is the accurate answer, because nothing outside this file uses these.
-/// Recorded as a to-file item. The generated header is emitted at
-/// `-emit-clang-header-min-access internal`, so internal loses nothing.
-@c
-enum CSSTokenTypeSwift: UInt8 {
-    case ident = 0, function, atKeyword, hash, url, badUrl, delimiter
-    case number, percentage, dimension
-    case includeMatch, dashMatch, prefixMatch, suffixMatch, substringMatch, column
-    case nonNewlineWhitespace, newline, cdo, cdc
-    case colon, semicolon, comma
-    case leftParenthesis, rightParenthesis, leftBracket, rightBracket, leftBrace, rightBrace
-    case string, badString, endOfFile, comment
-}
+// `WebCore.CSSParserTokenType` is imported, not mirrored. A 33-case `@c CSSTokenTypeSwift` stood
+// here, pinned by 33 `static_assert`s in CSSTokenizer.cpp, because CSSParserToken.h is not
+// self-contained and so could not join the island's boundary module. Moving the enum into
+// CSSParserTokenBits.h -- which already is that module, and which CSSParserToken.h includes --
+// answered it without moving a single C++ use site: the enum is unscoped, so every `IdentToken`
+// in the CSS parser still resolves unqualified.
+//
+// Swift sees an unscoped C++ enum as a type with `rawValue` whose enumerators are GLOBAL
+// constants, so the spelling here is `WebCore.IdentToken` rather than a leading-dot case. That
+// is the whole cost, and it buys away a table that had to be transcribed by hand.
 
 /// Mirrors CSSParserToken::BlockType. `@c` for the same reason as above.
 @c
@@ -392,7 +377,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     }
 
     @inline(always) private func token(
-        _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>,
+        _ type: WebCore.CSSParserTokenType, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
     ) -> EmittedToken {
         emit(makeSimpleTokenBits(UInt32(type.rawValue), UInt32(block.rawValue)), start, data)
@@ -401,7 +386,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     @inline(always) private func delimiter(_ c: Unit, _ start: Int, _ data: Span<Unit>) -> EmittedToken {
         emit(
             makeDelimiterTokenBits(
-                UInt32(CSSTokenTypeSwift.delimiter.rawValue), UInt32(truncatingIfNeeded: c)),
+                UInt32(WebCore.DelimiterToken.rawValue), UInt32(truncatingIfNeeded: c)),
             start, data)
     }
 
@@ -410,13 +395,13 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     ) -> EmittedToken {
         emit(
             makeWhitespaceTokenBits(
-                UInt32(CSSTokenTypeSwift.nonNewlineWhitespace.rawValue),
+                UInt32(WebCore.NonNewlineWhitespaceToken.rawValue),
                 UInt32(truncatingIfNeeded: count)),
             start, data)
     }
 
     @inline(always) private func valueToken(
-        _ type: CSSTokenTypeSwift, _ value: ScannedValue, _ start: Int, _ data: Span<Unit>,
+        _ type: WebCore.CSSParserTokenType, _ value: ScannedValue, _ start: Int, _ data: Span<Unit>,
         block: CSSBlockTypeSwift = .notBlock
     ) -> EmittedToken {
         emit(
@@ -431,24 +416,24 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     ) -> EmittedToken {
         emit(
             makeHashTokenBits(
-                UInt32(CSSTokenTypeSwift.hash.rawValue), isId,
+                UInt32(WebCore.HashToken.rawValue), isId,
                 value.start, value.length, value.unescaped, Self.valueIs8Bit),
             start, data)
     }
 
-    @inline(always) private mutating func pushBlock(_ type: CSSTokenTypeSwift) {
+    @inline(always) private mutating func pushBlock(_ type: WebCore.CSSParserTokenType) {
         blockStack.append(type.rawValue)
     }
 
     private mutating func blockStart(
-        _ type: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>
+        _ type: WebCore.CSSParserTokenType, _ start: Int, _ data: Span<Unit>
     ) -> EmittedToken {
         pushBlock(type)
         return token(type, start, data, block: .blockStart)
     }
 
     private mutating func blockEnd(
-        _ type: CSSTokenTypeSwift, _ startType: CSSTokenTypeSwift, _ start: Int, _ data: Span<Unit>
+        _ type: WebCore.CSSParserTokenType, _ startType: WebCore.CSSParserTokenType, _ start: Int, _ data: Span<Unit>
     ) -> EmittedToken {
         // The unsigned compare both bounds-checks and tests for an empty stack.
         let top = blockStack.count &- 1
@@ -470,7 +455,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
         switch dispatchClass(cc) {
         case .endOfFile:
-            return token(.endOfFile, start, data)
+            return token(WebCore.EOFToken, start, data)
 
         case .whitespace:
             // CSSTokenizer::whitespace: the count includes the character just
@@ -480,7 +465,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return whitespace(1 &+ (clampedOffset(data) &- runStart), start, data)
 
         case .newline:
-            return token(.newline, start, data)
+            return token(WebCore.NewlineToken, start, data)
 
         case .stringStart:
             return consumeStringTokenUntil(data, cc, start)
@@ -495,17 +480,17 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return delimiter(cc, start, data)
 
         case .dollarSign:
-            if consumeIfNext(data, 0x3D) { return token(.suffixMatch, start, data) }
+            if consumeIfNext(data, 0x3D) { return token(WebCore.SuffixMatchToken, start, data) }
             return delimiter(cc, start, data)
 
         case .leftParenthesis:
-            return blockStart(.leftParenthesis, start, data)
+            return blockStart(WebCore.LeftParenthesisToken, start, data)
 
         case .rightParenthesis:
-            return blockEnd(.rightParenthesis, .leftParenthesis, start, data)
+            return blockEnd(WebCore.RightParenthesisToken, WebCore.LeftParenthesisToken, start, data)
 
         case .asterisk:
-            if consumeIfNext(data, 0x3D) { return token(.substringMatch, start, data) }
+            if consumeIfNext(data, 0x3D) { return token(WebCore.SubstringMatchToken, start, data) }
             return delimiter(cc, start, data)
 
         case .plusOrFullStop:
@@ -516,7 +501,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return delimiter(cc, start, data)
 
         case .comma:
-            return token(.comma, start, data)
+            return token(WebCore.CommaToken, start, data)
 
         case .hyphenMinus:
             if nextCharsAreNumber(data, cc) {
@@ -525,7 +510,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             }
             if peek(data, 0) == 0x2D, peek(data, 1) == 0x3E { // -->
                 advance(2)
-                return token(.cdc, start, data)
+                return token(WebCore.CDCToken, start, data)
             }
             if nextCharsAreIdentifier(data, cc) {
                 reconsume()
@@ -536,7 +521,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         case .solidus:
             if consumeIfNext(data, 0x2A) { // /*
                 consumeUntilCommentEndFound(data)
-                return token(.comment, start, data)
+                return token(WebCore.CommentToken, start, data)
             }
             return delimiter(cc, start, data)
 
@@ -545,22 +530,22 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return consumeNumericToken(data, start)
 
         case .colon:
-            return token(.colon, start, data)
+            return token(WebCore.ColonToken, start, data)
 
         case .semiColon:
-            return token(.semicolon, start, data)
+            return token(WebCore.SemicolonToken, start, data)
 
         case .lessThan:
             if peek(data, 0) == 0x21, peek(data, 1) == 0x2D, peek(data, 2) == 0x2D { // <!--
                 advance(3)
-                return token(.cdo, start, data)
+                return token(WebCore.CDOToken, start, data)
             }
             return delimiter(cc, start, data)
 
         case .commercialAt:
             if nextCharsAreIdentifier(data) {
                 let name = consumeName(data)
-                return valueToken(.atKeyword, name, start, data)
+                return valueToken(WebCore.AtKeywordToken, name, start, data)
             }
             return delimiter(cc, start, data)
 
@@ -569,7 +554,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return consumeIdentLikeToken(data, start)
 
         case .leftBracket:
-            return blockStart(.leftBracket, start, data)
+            return blockStart(WebCore.LeftBracketToken, start, data)
 
         case .reverseSolidus:
             if twoCharsAreValidEscape(cc, peek(data, 0)) {
@@ -579,25 +564,25 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
             return delimiter(cc, start, data)
 
         case .rightBracket:
-            return blockEnd(.rightBracket, .leftBracket, start, data)
+            return blockEnd(WebCore.RightBracketToken, WebCore.LeftBracketToken, start, data)
 
         case .circumflexAccent:
-            if consumeIfNext(data, 0x3D) { return token(.prefixMatch, start, data) }
+            if consumeIfNext(data, 0x3D) { return token(WebCore.PrefixMatchToken, start, data) }
             return delimiter(cc, start, data)
 
         case .leftBrace:
-            return blockStart(.leftBrace, start, data)
+            return blockStart(WebCore.LeftBraceToken, start, data)
 
         case .verticalLine:
-            if consumeIfNext(data, 0x3D) { return token(.dashMatch, start, data) }
-            if consumeIfNext(data, 0x7C) { return token(.column, start, data) }
+            if consumeIfNext(data, 0x3D) { return token(WebCore.DashMatchToken, start, data) }
+            if consumeIfNext(data, 0x7C) { return token(WebCore.ColumnToken, start, data) }
             return delimiter(cc, start, data)
 
         case .rightBrace:
-            return blockEnd(.rightBrace, .leftBrace, start, data)
+            return blockEnd(WebCore.RightBraceToken, WebCore.LeftBraceToken, start, data)
 
         case .tilde:
-            if consumeIfNext(data, 0x3D) { return token(.includeMatch, start, data) }
+            if consumeIfNext(data, 0x3D) { return token(WebCore.IncludeMatchToken, start, data) }
             return delimiter(cc, start, data)
 
         case .delimiter:
@@ -709,7 +694,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
                 && unit.start == number.start &+ number.length
             return emit(
                 makeNumericTokenBits(
-                    UInt32(CSSTokenTypeSwift.dimension.rawValue),
+                    UInt32(WebCore.DimensionToken.rawValue),
                     number.isNonInteger, number.sign == .plus, number.sign == .minus,
                     UInt32(unitType.rawValue),
                     merged ? number.start : unit.start,
@@ -724,16 +709,16 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         if consumeIfNext(data, 0x25) {
             // convertToPercentage: the type and the unit change and nothing else does, so the
             // value stays the number's own range and the prefix length stays zero.
-            return numericToken(.percentage, unit: .Percentage, number, start, data)
+            return numericToken(WebCore.PercentageToken, unit: .Percentage, number, start, data)
         }
 
-        return numericToken(.number, unit: .Number, number, start, data)
+        return numericToken(WebCore.NumberToken, unit: .Number, number, start, data)
     }
 
     /// A NumberToken or a PercentageToken: `value()` is `originalText()` is the number, so there
     /// is no unit text and no merge to decide.
     @inline(always) private func numericToken(
-        _ type: CSSTokenTypeSwift, unit: WebCore.CSSUnitType, _ number: ScannedNumber,
+        _ type: WebCore.CSSParserTokenType, unit: WebCore.CSSUnitType, _ number: ScannedNumber,
         _ start: Int, _ data: Span<Unit>
     ) -> EmittedToken {
         emit(
@@ -764,10 +749,10 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
                     return consumeURLToken(data, start)
                 }
             }
-            pushBlock(.leftParenthesis)
-            return valueToken(.function, name, start, data, block: .blockStart)
+            pushBlock(WebCore.LeftParenthesisToken)
+            return valueToken(WebCore.FunctionToken, name, start, data, block: .blockStart)
         }
-        return valueToken(.ident, name, start, data)
+        return valueToken(WebCore.IdentToken, name, start, data)
     }
 
     /// equalLettersIgnoringASCIICase(name, "url"), against either the input or the
@@ -846,11 +831,11 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
                 var value = ScannedValue()
                 value.start = UInt32(truncatingIfNeeded: startOffset)
                 value.length = UInt32(truncatingIfNeeded: size)
-                return valueToken(.string, value, start, data)
+                return valueToken(WebCore.StringToken, value, start, data)
             }
             if isCSSNewlineByte(cc) {
                 advance(size)
-                return token(.badString, start, data)
+                return token(WebCore.BadStringToken, start, data)
             }
             if cc == 0 || cc == 0x5C { break }
             size &+= 1
@@ -863,11 +848,11 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         while true {
             let cc = consume(data)
             if cc == endingCodePoint || cc == 0 {
-                return valueToken(.string, unescapedValue(since: mark), start, data)
+                return valueToken(WebCore.StringToken, unescapedValue(since: mark), start, data)
             }
             if isCSSNewlineByte(cc) {
                 reconsume()
-                return token(.badString, start, data)
+                return token(WebCore.BadStringToken, start, data)
             }
             if cc == 0x5C {
                 if peek(data, 0) == 0 { continue }
@@ -897,7 +882,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
                 var value = ScannedValue()
                 value.start = UInt32(truncatingIfNeeded: startOffset)
                 value.length = UInt32(truncatingIfNeeded: size)
-                return valueToken(.url, value, start, data)
+                return valueToken(WebCore.UrlToken, value, start, data)
             }
             if cc <= 0x20 || cc == 0x5C || cc == 0x22 || cc == 0x27 || cc == 0x28 || cc == 0x7F {
                 break
@@ -913,12 +898,12 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         while true {
             let cc = consume(data)
             if cc == 0x29 || cc == 0 {
-                return valueToken(.url, unescapedValue(since: mark), start, data)
+                return valueToken(WebCore.UrlToken, unescapedValue(since: mark), start, data)
             }
             if isASCIIWhitespaceByte(cc) {
                 advanceUntilNonWhitespace(data)
                 if consumeIfNext(data, 0x29) || peek(data, 0) == 0 {
-                    return valueToken(.url, unescapedValue(since: mark), start, data)
+                    return valueToken(WebCore.UrlToken, unescapedValue(since: mark), start, data)
                 }
                 break
             }
@@ -934,7 +919,7 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         }
 
         consumeBadUrlRemnants(data)
-        return token(.badUrl, start, data)
+        return token(WebCore.BadUrlToken, start, data)
     }
 
     /// Mirrors CSSTokenizer::consumeBadUrlRemnants.
@@ -1126,8 +1111,8 @@ private func tokenizeAll<Unit: CSSCodeUnit>(
         observerRecords.reserveCapacity(chunkCapacity)
     }
 
-    let endOfFileType = UInt32(CSSTokenTypeSwift.endOfFile.rawValue)
-    let commentType = UInt32(CSSTokenTypeSwift.comment.rawValue)
+    let endOfFileType = UInt32(WebCore.EOFToken.rawValue)
+    let commentType = UInt32(WebCore.CommentToken.rawValue)
 
     while true {
         let token = tokenizer.nextToken(span)

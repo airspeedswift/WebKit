@@ -196,52 +196,11 @@ CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
 // is the materialisation the island deliberately leaves in C++ — StringViews over
 // the input, double conversion, and the escaped-value string pool.
 
-// The island writes a token's type and block type straight into CSSParserTokenBits' bitfields,
-// so the two numberings have to agree: a reorder or an insertion in CSSParserTokenType, an
-// ordinary WebCore change, would otherwise silently retype every token above the insertion point.
-//
-// These now *prove* it. CSSTokenTypeSwift and CSSBlockTypeSwift are `@c` (SE-0495), so
-// they are emitted into WebCoreSwift-Generated.h as uint8_t-backed C enums and each
-// assert below names the Swift case directly. Until that attribute went on, C++ could
-// not see the Swift enum at all and these could only pin the C++ side -- making a change
-// to this numbering fail to build, in the hope that whoever made it then went and updated
-// the Swift mirror by hand. C++ stays the original of the pair, since CSSParserTokenType
-// is what the rest of the CSS parser uses; Swift is the mirror. The names are spelled out
-// one per line rather than counted because that is what makes the mirroring checkable.
-static_assert(numberOfCSSParserTokenTypes == 33, "CSSTokenTypeSwift in CSSTokenizerSwift.swift mirrors this enum case for case; add the new type there too, then update this count");
-static_assert(static_cast<uint8_t>(IdentToken) == CSSTokenTypeSwiftIdent);
-static_assert(static_cast<uint8_t>(FunctionToken) == CSSTokenTypeSwiftFunction);
-static_assert(static_cast<uint8_t>(AtKeywordToken) == CSSTokenTypeSwiftAtKeyword);
-static_assert(static_cast<uint8_t>(HashToken) == CSSTokenTypeSwiftHash);
-static_assert(static_cast<uint8_t>(UrlToken) == CSSTokenTypeSwiftUrl);
-static_assert(static_cast<uint8_t>(BadUrlToken) == CSSTokenTypeSwiftBadUrl);
-static_assert(static_cast<uint8_t>(DelimiterToken) == CSSTokenTypeSwiftDelimiter);
-static_assert(static_cast<uint8_t>(NumberToken) == CSSTokenTypeSwiftNumber);
-static_assert(static_cast<uint8_t>(PercentageToken) == CSSTokenTypeSwiftPercentage);
-static_assert(static_cast<uint8_t>(DimensionToken) == CSSTokenTypeSwiftDimension);
-static_assert(static_cast<uint8_t>(IncludeMatchToken) == CSSTokenTypeSwiftIncludeMatch);
-static_assert(static_cast<uint8_t>(DashMatchToken) == CSSTokenTypeSwiftDashMatch);
-static_assert(static_cast<uint8_t>(PrefixMatchToken) == CSSTokenTypeSwiftPrefixMatch);
-static_assert(static_cast<uint8_t>(SuffixMatchToken) == CSSTokenTypeSwiftSuffixMatch);
-static_assert(static_cast<uint8_t>(SubstringMatchToken) == CSSTokenTypeSwiftSubstringMatch);
-static_assert(static_cast<uint8_t>(ColumnToken) == CSSTokenTypeSwiftColumn);
-static_assert(static_cast<uint8_t>(NonNewlineWhitespaceToken) == CSSTokenTypeSwiftNonNewlineWhitespace);
-static_assert(static_cast<uint8_t>(NewlineToken) == CSSTokenTypeSwiftNewline);
-static_assert(static_cast<uint8_t>(CDOToken) == CSSTokenTypeSwiftCdo);
-static_assert(static_cast<uint8_t>(CDCToken) == CSSTokenTypeSwiftCdc);
-static_assert(static_cast<uint8_t>(ColonToken) == CSSTokenTypeSwiftColon);
-static_assert(static_cast<uint8_t>(SemicolonToken) == CSSTokenTypeSwiftSemicolon);
-static_assert(static_cast<uint8_t>(CommaToken) == CSSTokenTypeSwiftComma);
-static_assert(static_cast<uint8_t>(LeftParenthesisToken) == CSSTokenTypeSwiftLeftParenthesis);
-static_assert(static_cast<uint8_t>(RightParenthesisToken) == CSSTokenTypeSwiftRightParenthesis);
-static_assert(static_cast<uint8_t>(LeftBracketToken) == CSSTokenTypeSwiftLeftBracket);
-static_assert(static_cast<uint8_t>(RightBracketToken) == CSSTokenTypeSwiftRightBracket);
-static_assert(static_cast<uint8_t>(LeftBraceToken) == CSSTokenTypeSwiftLeftBrace);
-static_assert(static_cast<uint8_t>(RightBraceToken) == CSSTokenTypeSwiftRightBrace);
-static_assert(static_cast<uint8_t>(StringToken) == CSSTokenTypeSwiftString);
-static_assert(static_cast<uint8_t>(BadStringToken) == CSSTokenTypeSwiftBadString);
-static_assert(static_cast<uint8_t>(EOFToken) == CSSTokenTypeSwiftEndOfFile);
-static_assert(static_cast<uint8_t>(CommentToken) == CSSTokenTypeSwiftComment);
+// The island writes a token's block type into CSSParserTokenBits' bitfield, and those three
+// values are still mirrored -- `BlockType` is nested inside `CSSParserToken`, so unnesting it to
+// reach the island's boundary module would move 304 use sites for three asserts. The token TYPES
+// are no longer mirrored: `CSSParserTokenType` moved into CSSParserTokenBits.h and the island
+// imports it, which retired 33 static_asserts that stood here.
 
 // Same, for CSSBlockTypeSwift, whose three cases the island writes into
 // CSSParserTokenBits::blockType.

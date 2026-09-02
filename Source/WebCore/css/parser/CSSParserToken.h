@@ -36,53 +36,6 @@
 
 namespace WebCore {
 
-enum CSSParserTokenType {
-    IdentToken = 0,
-    FunctionToken,
-    AtKeywordToken,
-    HashToken,
-    UrlToken,
-    BadUrlToken,
-    DelimiterToken,
-    NumberToken,
-    PercentageToken,
-    DimensionToken,
-    IncludeMatchToken,
-    DashMatchToken,
-    PrefixMatchToken,
-    SuffixMatchToken,
-    SubstringMatchToken,
-    ColumnToken,
-    NonNewlineWhitespaceToken,
-    NewlineToken,
-    CDOToken,
-    CDCToken,
-    ColonToken,
-    SemicolonToken,
-    CommaToken,
-    LeftParenthesisToken,
-    RightParenthesisToken,
-    LeftBracketToken,
-    RightBracketToken,
-    LeftBraceToken,
-    RightBraceToken,
-    StringToken,
-    BadStringToken,
-    EOFToken,
-    CommentToken,
-    LastCSSParserTokenType = CommentToken,
-};
-
-constexpr std::underlying_type_t<CSSParserTokenType> numberOfCSSParserTokenTypes = LastCSSParserTokenType + 1;
-
-// CSSParserTokenBits states the numeric range as literals because it cannot include this header
-// and still be takeable on its own by the island's module. This is the only place that sees both,
-// so it is where the two are held together. Contiguity is asserted as well as the endpoints: the
-// range check is only equivalent to the three-way test while nothing else sits between them.
-static_assert(firstNumericCSSParserTokenType == NumberToken);
-static_assert(lastNumericCSSParserTokenType == DimensionToken);
-static_assert(PercentageToken == NumberToken + 1);
-static_assert(DimensionToken == PercentageToken + 1);
 
 // And the predicate itself, over every token type, because a range check written the wrong way
 // round still compiles and still returns a bool. This walks the whole enumeration and compares
