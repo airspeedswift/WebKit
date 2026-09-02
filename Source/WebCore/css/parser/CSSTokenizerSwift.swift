@@ -458,13 +458,23 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// invisible without LTO, where the ratio moved 0.960 -> 0.953. Stating the inline makes the
     /// shape explicit instead of accidental. Per-symbol instruction counts are the instrument:
     /// cssprobe/validate/symcount.sh.
-///
-/// It recovers 11 of the 17 points. The remaining 5-6 are filings register §42: the writers'
-/// own codegen is instruction-identical to the C++ factories they replaced (26=26 in isolation,
-/// 27=27 in composition, 48=48 with the bool-to-enum selects live), so the cost is the
-/// SILOptimizer's *global* decisions once 43 previously-opaque callees became visible at SIL
-/// level. Filed rather than reverted, deliberately: the island is at parity and the port removed
-/// 62 lines of C++. Do not "fix" this by moving the writers back.
+    ///
+    /// It recovers 11 of the 17 points. The remaining 5-6 are filings register §42, and the
+    /// mechanism is a **stall, not a size problem** -- which is worth stating because the
+    /// obvious-looking fix follows from the wrong one. The writers' own codegen is
+    /// instruction-identical to the C++ factories they replaced (26=26 in isolation, 27=27 in
+    /// composition, 48=48 with the bool-to-enum selects live), and the enclosing entry does grow
+    /// by 93 instructions at 8-bit -- but retired instructions on the real corpora are **flat**:
+    /// +0.26% at 8-bit and -0.6% at 16-bit, i.e. fewer. What moves is **IPC, down 5.73% at 8-bit
+    /// and 3.73% at 16-bit**, in all twelve corpus x width cells, against a floor of +/-0.2%. So
+    /// the static +93 overstates the dynamic effect by 24x and gets the 16-bit sign wrong: that
+    /// code is cold, and shrinking this function or outlining its cold token kinds is measured as
+    /// near-worthless. The instrument is retired-instruction and cycle counters in
+    /// cssprobe/validate/cssbench.cpp (`--counters`, self-tested at 2x work -> 1.9998x
+    /// instructions); notes in webkit-swift-ports/writercodegen/notes/ipc-0902.md.
+    ///
+    /// Filed rather than reverted, deliberately: the island is at parity and the port removed
+    /// C++ glue. Do not "fix" this by moving the writers back.
     @inline(always)
     mutating func nextToken(_ data: Span<Unit>) -> EmittedToken {
         let start = clampedOffset(data)
