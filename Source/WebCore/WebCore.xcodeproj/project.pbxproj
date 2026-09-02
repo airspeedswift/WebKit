@@ -464,6 +464,7 @@
 		0F60F32B1DFBB10700416D6C /* CommonVM.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F60F32A1DFBB10400416D6C /* CommonVM.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F6383DE18615B29003E5DB5 /* ThreadedScrollingTree.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6383DC18615B29003E5DB5 /* ThreadedScrollingTree.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F6A12BE1A00923700C6DE72 /* DebugPageOverlays.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6A12BC1A00923700C6DE72 /* DebugPageOverlays.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		BEE7501000000000000000B2 /* CSSUnitType.h in Headers */ = {isa = PBXBuildFile; fileRef = BEE7501000000000000000B1 /* CSSUnitType.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F6B707A237BC36D0052CA47 /* CSSUnits.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6B7077237BC12F0052CA47 /* CSSUnits.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F73B769222B3A0C00805316 /* ScrollingTreeOverflowScrollingNodeMac.h in Headers */ = {isa = PBXBuildFile; fileRef = 0FC0516A219B5EBE0031C39E /* ScrollingTreeOverflowScrollingNodeMac.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F768C2D26D03841008DBE0B /* UserMediaRequestIdentifier.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F768C2B26D03841008DBE0B /* UserMediaRequestIdentifier.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -8526,6 +8527,7 @@
 		0F69F2B7228B98FF008D3565 /* LayerOverlapMap.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayerOverlapMap.cpp; sourceTree = "<group>"; };
 		0F6A12BB1A00923700C6DE72 /* DebugPageOverlays.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = DebugPageOverlays.cpp; sourceTree = "<group>"; };
 		0F6A12BC1A00923700C6DE72 /* DebugPageOverlays.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DebugPageOverlays.h; sourceTree = "<group>"; };
+		BEE7501000000000000000B1 /* CSSUnitType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSUnitType.h; sourceTree = "<group>"; };
 		0F6B7077237BC12F0052CA47 /* CSSUnits.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSUnits.h; sourceTree = "<group>"; };
 		0F6B7079237BC12F0052CA47 /* CSSUnits.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CSSUnits.cpp; sourceTree = "<group>"; };
 		0F6EAD6626FE728000064D03 /* ScrollAnimation.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ScrollAnimation.cpp; sourceTree = "<group>"; };
@@ -42213,6 +42215,7 @@
 				371F53E80D2704F900ECE0D5 /* CSSUnicodeRangeValue.cpp */,
 				371F53E70D2704F900ECE0D5 /* CSSUnicodeRangeValue.h */,
 				0F6B7079237BC12F0052CA47 /* CSSUnits.cpp */,
+				BEE7501000000000000000B1 /* CSSUnitType.h */,
 				0F6B7077237BC12F0052CA47 /* CSSUnits.h */,
 				BCC0F3D42D99BDD90065B859 /* CSSURLValue.cpp */,
 				BCC0F3D52D99BDD90065B859 /* CSSURLValue.h */,
@@ -45240,6 +45243,7 @@
 				2A538A2F26F0105200965FC8 /* CSSTranslate.h in Headers */,
 				BCB272002CC1EB8B00265123 /* CSSUnevaluatedCalc.h in Headers */,
 				371F53E90D2704F900ECE0D5 /* CSSUnicodeRangeValue.h in Headers */,
+				BEE7501000000000000000B2 /* CSSUnitType.h in Headers */,
 				0F6B707A237BC36D0052CA47 /* CSSUnits.h in Headers */,
 				4BAFD0E1219242A000C0AB64 /* CSSUnitValue.h in Headers */,
 				4BAFD0D921921EA000C0AB64 /* CSSUnparsedValue.h in Headers */,

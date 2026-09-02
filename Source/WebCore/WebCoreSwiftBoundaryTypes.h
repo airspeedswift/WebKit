@@ -69,7 +69,9 @@
 // generated header should: branch on `__cplusplus` and emit the plain `enum X : T { ... }`.
 //
 // Suppressing it here is what lets these `@c` enums -- CSSTokenTypeSwift, CSSBlockTypeSwift,
-// CSSUnitTypeSwift, CSSSwiftColorOutcome -- be declared *once*, in Swift.
+// CSSSwiftColorOutcome -- be declared *once*, in Swift. CSSUnitType is no longer among
+// them: it runs the other way now, with C++ declaring it in CSSUnitType.h and Swift
+// importing it.
 IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
 #include "WebCoreSwift-Generated.h"
 IGNORE_CLANG_WARNINGS_END
