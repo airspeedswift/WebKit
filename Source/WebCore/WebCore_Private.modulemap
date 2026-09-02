@@ -13,6 +13,10 @@ framework module WebCore_Private [system] {
     explicit module CSSTokenizerSwiftTypes {
         header "CSSTokenizerSwiftTypes.h"
         header "CSSParserTokenBits.h"
+        // The real CSSUnitType, so the island imports the enum instead of mirroring it. Split
+        // out of CSSUnits.h to be self-contained; that header could not be taken directly,
+        // being neither self-contained nor free of WTF. See CSSUnitType.h.
+        header "CSSUnitType.h"
         requires cplusplus
         export *
     }
@@ -54,6 +58,7 @@ framework module WebCore_Private [system] {
         // These headers are already included via their dedicated modules above.
         exclude header "CSSTokenizerSwiftTypes.h"
         exclude header "CSSParserTokenBits.h"
+        exclude header "CSSUnitType.h"
         exclude header "CSSCalcSwiftTypes.h"
 
         module * {

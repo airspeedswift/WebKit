@@ -724,16 +724,16 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         if consumeIfNext(data, 0x25) {
             // convertToPercentage: the type and the unit change and nothing else does, so the
             // value stays the number's own range and the prefix length stays zero.
-            return numericToken(.percentage, unit: .percentage, number, start, data)
+            return numericToken(.percentage, unit: .Percentage, number, start, data)
         }
 
-        return numericToken(.number, unit: .number, number, start, data)
+        return numericToken(.number, unit: .Number, number, start, data)
     }
 
     /// A NumberToken or a PercentageToken: `value()` is `originalText()` is the number, so there
     /// is no unit text and no merge to decide.
     @inline(always) private func numericToken(
-        _ type: CSSTokenTypeSwift, unit: CSSUnitTypeSwift, _ number: ScannedNumber,
+        _ type: CSSTokenTypeSwift, unit: WebCore.CSSUnitType, _ number: ScannedNumber,
         _ start: Int, _ data: Span<Unit>
     ) -> EmittedToken {
         emit(

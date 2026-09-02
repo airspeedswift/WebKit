@@ -22,6 +22,12 @@
 
 #pragma once
 
+// `CSSUnitType` itself lives here, split out so that it is self-contained and the CSS
+// tokenizer island can take it as its own Clang module and import the real enum rather
+// than mirroring it. Everything in this header still declares over it, and every existing
+// consumer of CSSUnits.h is unaffected.
+#include <WebCore/CSSUnitType.h>
+
 namespace WTF {
 class TextStream;
 }
@@ -54,92 +60,6 @@ constexpr double hertzPerKilohertz = 1000.0;
 
 }
 
-enum class CSSUnitType : uint8_t {
-    Unknown,
-    Number,
-    Integer,
-    Percentage,
-    Em,
-    Ex,
-    Px,
-    Cm,
-    Mm,
-    In,
-    Pt,
-    Pc,
-    Deg,
-    Rad,
-    Grad,
-    Ms,
-    S,
-    Hz,
-    Khz,
-
-    Vw,
-    Vh,
-    Vmin,
-    Vmax,
-    Vb,
-    Vi,
-    Svw,
-    Svh,
-    Svmin,
-    Svmax,
-    Svb,
-    Svi,
-    Lvw,
-    Lvh,
-    Lvmin,
-    Lvmax,
-    Lvb,
-    Lvi,
-    Dvw,
-    Dvh,
-    Dvmin,
-    Dvmax,
-    Dvb,
-    Dvi,
-    FirstViewportCSSUnitType = Vw,
-    LastViewportCSSUnitType = Dvi,
-
-    Cqw,
-    Cqh,
-    Cqi,
-    Cqb,
-    Cqmin,
-    Cqmax,
-
-    Dppx,
-    X,
-    Dpi,
-    Dpcm,
-    Fr,
-    Q,
-    Lh,
-    Rlh,
-
-    Turn,
-    Rem,
-    Rex,
-    Cap,
-    Rcap,
-    Ch,
-    Rch,
-    Ic,
-    Ric,
-
-    Calc,
-    CalcPercentageWithAngle,
-    CalcPercentageWithLength,
-
-    // This value is used to handle quirky margins in reflow roots (body, td, and th) like WinIE.
-    // The basic idea is that a stylesheet can use the value __qem (for quirky em) instead of em.
-    // When the quirky value is used, if you're in quirks mode, the margin will collapse away
-    // inside a table cell. This quirk is specified in the HTML spec but our impl is different.
-    QuirkyEm
-
-    // Note that CSSValue allocates 7 bits for m_primitiveUnitType, so there can be no value here > 127.
-};
 
 enum class CSSUnitCategory : uint8_t {
     Number,

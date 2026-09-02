@@ -74,7 +74,9 @@
 // Recorded as a to-file item, filings register §26.
 //
 // Suppressing it here is what lets each island's `@c` enums -- CSSTokenTypeSwift,
-// CSSBlockTypeSwift, CSSUnitTypeSwift, CSSSwiftColorOutcome -- be declared *once*, in Swift.
+// CSSBlockTypeSwift, CSSSwiftColorOutcome -- be declared *once*, in Swift. CSSUnitType is no
+// longer among them: it runs the other way now, C++ declaring it in CSSUnitType.h and the
+// island importing it, which is what let its 70-case mirror and 73 static_asserts go.
 IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
 #include "WebCoreSwift-Generated.h"
 IGNORE_CLANG_WARNINGS_END

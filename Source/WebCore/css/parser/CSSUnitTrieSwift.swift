@@ -23,6 +23,18 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+// The island's boundary types, for `WebCore.CSSUnitType`. Needed here in its own right even
+// though CSSTokenizerSwift.swift next door imports the same module: an import binds the FILE,
+// not the module, so a `public import` there re-exports to this module's clients but makes
+// nothing visible in this file. Until this file named a C++ type it needed no import at all,
+// which is why one was never here. Without it `WebCore` resolves to the Swift module of that
+// name -- WebCore is both -- and the error is "no type named 'CSSUnitType' in module 'WebCore'",
+// which reads like a missing header rather than a missing import.
+//
+// `internal`, not `public`: nothing this file exposes names the type. The two `@_expose(Cxx)`
+// differential entries at the bottom return its `rawValue`, a `UInt8`.
+internal import WebCore_Private.CSSTokenizerSwiftTypes
+
 // MARK: - The CSS unit-type trie
 //
 // In its own file, and that depends on a build setting. WebCore's Swift step is
@@ -32,7 +44,7 @@
 // mode in force, `consumeNumericToken` did not call the 943-instruction `UInt8` specialization
 // that was sitting in the same binary. Per dimension token it called a lazy
 // protocol-conformance-witness-table accessor, then the *unspecialized* generic trie -- 17,898
-// instructions, every `Span` access through a witness -- then `CSSUnitTypeSwift.rawValue` out of
+// instructions, every `Span` access through a witness -- then `CSSUnitType.rawValue` out of
 // line, twice. That was 10.7 points of the 8-bit real-corpus median (0.879 split, 0.992 in one
 // file, each against its own interleaved C++ control), which is why `e5183bac37fd` folded the
 // trie into CSSTokenizerSwift.swift and why that commit named -wmo as the build change that
@@ -84,112 +96,17 @@
 // an `ASSERT(data.data())` that is a no-op in Release, so a null span there is unchecked;
 // here the empty case is just `count == 0`, which is a real check rather than an assertion.
 
-/// Mirrors `WebCore::CSSUnitType` (`Source/WebCore/css/CSSUnits.h`).
-///
-/// A mirror rather than the imported enum, and the reason is the boundary module rather than
-/// anything about the type. The island imports `WebCore_Private.CSSTokenizerSwiftTypes`, whose
-/// whole point is that it is *not* the WebCore umbrella (see CSSTokenizerSwiftTypes.h), and
-/// `CSSUnits.h` cannot join it: it has no `#include`s at all and leans on its includer for
-/// `uint8_t`, `std::optional`, `ASCIILiteral` and `NODELETE`, so it is not self-contained; and
-/// it is a Private header, so putting it in the island's module means excluding it from the
-/// `Core` umbrella and taking `CSSUnitType` away from every other Swift file that imports
-/// WebCore_Private. Mirroring costs 70 lines and no build risk.
-///
-/// `@c` (SE-0495) is what makes the mirror checkable rather than hopeful. It emits this into
-/// WebCoreSwift-Generated.h as a `uint8_t`-backed C enum, so CSSTokenizer.cpp can `static_assert`
-/// each C++ enumerator against `CSSUnitTypeSwift<Name>` **by name**, for all 70. That is not
-/// pedantry: `CSSUnitType` interleaves the aliases `FirstViewportCSSUnitType = Vw` and
-/// `LastViewportCSSUnitType = Dvi` into the enumerator list, and the enumerator after an alias
-/// continues from the *alias*, so moving either one silently renumbers everything below it.
-/// The trie can only return 63 of the 70, so a behavioural differential -- however exhaustive --
-/// would never catch a mis-transcribed `Calc`, `Percentage` or `Integer`. The aliases are not
-/// cases here; Swift enums cannot carry duplicate raw values, and the asserts cover them
-/// against `Vw` and `Dvi` directly.
-///
-/// Internal rather than `public` for the reason given on `CSSTokenTypeSwift`: `@c` on a
-/// *resilient* enum crashes IRGen, and WebCore compiles Swift with -enable-library-evolution.
-/// The generated header is emitted at `-emit-clang-header-min-access internal`, so internal
-/// loses nothing.
-@c
-enum CSSUnitTypeSwift: UInt8 {
-    case unknown = 0
-    case number = 1
-    case integer = 2
-    case percentage = 3
-    case em = 4
-    case ex = 5
-    case px = 6
-    case cm = 7
-    case mm = 8
-    case `in` = 9
-    case pt = 10
-    case pc = 11
-    case deg = 12
-    case rad = 13
-    case grad = 14
-    case ms = 15
-    case s = 16
-    case hz = 17
-    case khz = 18
-
-    case vw = 19
-    case vh = 20
-    case vmin = 21
-    case vmax = 22
-    case vb = 23
-    case vi = 24
-    case svw = 25
-    case svh = 26
-    case svmin = 27
-    case svmax = 28
-    case svb = 29
-    case svi = 30
-    case lvw = 31
-    case lvh = 32
-    case lvmin = 33
-    case lvmax = 34
-    case lvb = 35
-    case lvi = 36
-    case dvw = 37
-    case dvh = 38
-    case dvmin = 39
-    case dvmax = 40
-    case dvb = 41
-    case dvi = 42
-
-    case cqw = 43
-    case cqh = 44
-    case cqi = 45
-    case cqb = 46
-    case cqmin = 47
-    case cqmax = 48
-
-    case dppx = 49
-    case x = 50
-    case dpi = 51
-    case dpcm = 52
-    case fr = 53
-    case q = 54
-    case lh = 55
-    case rlh = 56
-
-    case turn = 57
-    case rem = 58
-    case rex = 59
-    case cap = 60
-    case rcap = 61
-    case ch = 62
-    case rch = 63
-    case ic = 64
-    case ric = 65
-
-    case calc = 66
-    case calcPercentageWithAngle = 67
-    case calcPercentageWithLength = 68
-
-    /// `__qem`, the quirky-em unit. See the comment on the C++ enumerator.
-    case quirkyEm = 69
-}
+// `WebCore::CSSUnitType` is imported, not mirrored. It used to be a 70-case `@c` enum here,
+// pinned to the C++ by 73 `static_assert`s in CSSTokenizer.cpp, because `CSSUnits.h` could not
+// join the island's boundary module -- it is not self-contained, and it is a Private header, so
+// taking it would have meant excluding it from the `Core` umbrella that seven WebKit Swift files
+// import. Splitting the enum alone into a self-contained CSSUnitType.h answers both: `Core`
+// excludes only the split header, and CSSUnits.h includes it so no C++ consumer moves.
+//
+// The mirror was checkable but not free of hazard, which is why removing it is worth a header:
+// the trie can return only 63 of the 70 enumerators, so no behavioural differential, however
+// exhaustive, could have caught a mis-transcribed `Calc`, `Percentage` or `Integer` -- the
+// asserts were the only thing standing there. Now there is nothing to keep in step.
 
 /// The ASCII code units the trie's edges are drawn from, plus the sentinel every non-ASCII
 /// code unit folds to.
@@ -255,16 +172,16 @@ private enum Sym {
 /// `CSSParserToken::stringToUnitType` is a two-line width dispatch onto the C++ template
 /// (`CSSParserToken.cpp`); it has no counterpart here because the island already knows
 /// statically which width it holds.
-func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSSUnitTypeSwift {
+func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> WebCore.CSSUnitType {
     switch data.count {
     case 1:
         switch trieSymbol(data[0]) {
         case Sym.q:
-            return .q
+            return .Q
         case Sym.s:
-            return .s
+            return .S
         case Sym.x:
-            return .x
+            return .X
         default:
             break
         }
@@ -274,72 +191,72 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
         case Sym.c:
             switch trieSymbol(data[1]) {
             case Sym.h:
-                return .ch
+                return .Ch
             case Sym.m:
-                return .cm
+                return .Cm
             default:
                 break
             }
         case Sym.e:
             switch trieSymbol(data[1]) {
             case Sym.m:
-                return .em
+                return .Em
             case Sym.x:
-                return .ex
+                return .Ex
             default:
                 break
             }
         case Sym.f:
             if trieSymbol(data[1]) == Sym.r {
-                return .fr
+                return .Fr
             }
         case Sym.h:
             if trieSymbol(data[1]) == Sym.z {
-                return .hz
+                return .Hz
             }
         case Sym.i:
             switch trieSymbol(data[1]) {
             case Sym.c:
-                return .ic
+                return .Ic
             case Sym.n:
-                return .in
+                return .In
             default:
                 break
             }
         case Sym.l:
             if trieSymbol(data[1]) == Sym.h {
-                return .lh
+                return .Lh
             }
         case Sym.m:
             switch trieSymbol(data[1]) {
             case Sym.m:
-                return .mm
+                return .Mm
             case Sym.s:
-                return .ms
+                return .Ms
             default:
                 break
             }
         case Sym.p:
             switch trieSymbol(data[1]) {
             case Sym.c:
-                return .pc
+                return .Pc
             case Sym.t:
-                return .pt
+                return .Pt
             case Sym.x:
-                return .px
+                return .Px
             default:
                 break
             }
         case Sym.v:
             switch trieSymbol(data[1]) {
             case Sym.b:
-                return .vb
+                return .Vb
             case Sym.h:
-                return .vh
+                return .Vh
             case Sym.i:
-                return .vi
+                return .Vi
             case Sym.w:
-                return .vw
+                return .Vw
             default:
                 break
             }
@@ -357,19 +274,19 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
             // reachable from the second test's failure path.
             if trieSymbol(data[1]) == Sym.a {
                 if trieSymbol(data[2]) == Sym.p {
-                    return .cap
+                    return .Cap
                 }
             }
             if trieSymbol(data[1]) == Sym.q {
                 switch trieSymbol(data[2]) {
                 case Sym.b:
-                    return .cqb
+                    return .Cqb
                 case Sym.h:
-                    return .cqh
+                    return .Cqh
                 case Sym.i:
-                    return .cqi
+                    return .Cqi
                 case Sym.w:
-                    return .cqw
+                    return .Cqw
                 default:
                     break
                 }
@@ -378,22 +295,22 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
             switch trieSymbol(data[1]) {
             case Sym.e:
                 if trieSymbol(data[2]) == Sym.g {
-                    return .deg
+                    return .Deg
                 }
             case Sym.p:
                 if trieSymbol(data[2]) == Sym.i {
-                    return .dpi
+                    return .Dpi
                 }
             case Sym.v:
                 switch trieSymbol(data[2]) {
                 case Sym.b:
-                    return .dvb
+                    return .Dvb
                 case Sym.h:
-                    return .dvh
+                    return .Dvh
                 case Sym.i:
-                    return .dvi
+                    return .Dvi
                 case Sym.w:
-                    return .dvw
+                    return .Dvw
                 default:
                     break
                 }
@@ -404,45 +321,45 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
             if trieSymbol(data[1]) == Sym.v {
                 switch trieSymbol(data[2]) {
                 case Sym.b:
-                    return .lvb
+                    return .Lvb
                 case Sym.h:
-                    return .lvh
+                    return .Lvh
                 case Sym.i:
-                    return .lvi
+                    return .Lvi
                 case Sym.w:
-                    return .lvw
+                    return .Lvw
                 default:
                     break
                 }
             }
         case Sym.k:
             if trieSymbol(data[1]) == Sym.h && trieSymbol(data[2]) == Sym.z {
-                return .khz
+                return .Khz
             }
         case Sym.r:
             switch trieSymbol(data[1]) {
             case Sym.a:
                 if trieSymbol(data[2]) == Sym.d {
-                    return .rad
+                    return .Rad
                 }
             case Sym.c:
                 if trieSymbol(data[2]) == Sym.h {
-                    return .rch
+                    return .Rch
                 }
             case Sym.e:
                 if trieSymbol(data[2]) == Sym.m {
-                    return .rem
+                    return .Rem
                 }
                 if trieSymbol(data[2]) == Sym.x {
-                    return .rex
+                    return .Rex
                 }
             case Sym.i:
                 if trieSymbol(data[2]) == Sym.c {
-                    return .ric
+                    return .Ric
                 }
             case Sym.l:
                 if trieSymbol(data[2]) == Sym.h {
-                    return .rlh
+                    return .Rlh
                 }
             default:
                 break
@@ -451,13 +368,13 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
             if trieSymbol(data[1]) == Sym.v {
                 switch trieSymbol(data[2]) {
                 case Sym.b:
-                    return .svb
+                    return .Svb
                 case Sym.h:
-                    return .svh
+                    return .Svh
                 case Sym.i:
-                    return .svi
+                    return .Svi
                 case Sym.w:
-                    return .svw
+                    return .Svw
                 default:
                     break
                 }
@@ -474,11 +391,11 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
                 switch trieSymbol(data[2]) {
                 case Sym.c:
                     if trieSymbol(data[3]) == Sym.m {
-                        return .dpcm
+                        return .Dpcm
                     }
                 case Sym.p:
                     if trieSymbol(data[3]) == Sym.x {
-                        return .dppx
+                        return .Dppx
                     }
                 default:
                     break
@@ -488,15 +405,15 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
             }
         case Sym.g:
             if trieSymbol(data[1]) == Sym.r && trieSymbol(data[2]) == Sym.a && trieSymbol(data[3]) == Sym.d {
-                return .grad
+                return .Grad
             }
         case Sym.r:
             if trieSymbol(data[1]) == Sym.c && trieSymbol(data[2]) == Sym.a && trieSymbol(data[3]) == Sym.p {
-                return .rcap
+                return .Rcap
             }
         case Sym.t:
             if trieSymbol(data[1]) == Sym.u && trieSymbol(data[2]) == Sym.r && trieSymbol(data[3]) == Sym.n {
-                return .turn
+                return .Turn
             }
         case Sym.v:
             switch trieSymbol(data[1]) {
@@ -504,11 +421,11 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
                 switch trieSymbol(data[2]) {
                 case Sym.a:
                     if trieSymbol(data[3]) == Sym.x {
-                        return .vmax
+                        return .Vmax
                     }
                 case Sym.i:
                     if trieSymbol(data[3]) == Sym.n {
-                        return .vmin
+                        return .Vmin
                     }
                 default:
                     break
@@ -525,18 +442,18 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
         case Sym.underscore:
             if trieSymbol(data[1]) == Sym.underscore && trieSymbol(data[2]) == Sym.q
                 && trieSymbol(data[3]) == Sym.e && trieSymbol(data[4]) == Sym.m {
-                return .quirkyEm
+                return .QuirkyEm
             }
         case Sym.c:
             if trieSymbol(data[1]) == Sym.q && trieSymbol(data[2]) == Sym.m {
                 switch trieSymbol(data[3]) {
                 case Sym.a:
                     if trieSymbol(data[4]) == Sym.x {
-                        return .cqmax
+                        return .Cqmax
                     }
                 case Sym.i:
                     if trieSymbol(data[4]) == Sym.n {
-                        return .cqmin
+                        return .Cqmin
                     }
                 default:
                     break
@@ -547,11 +464,11 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
                 switch trieSymbol(data[3]) {
                 case Sym.a:
                     if trieSymbol(data[4]) == Sym.x {
-                        return .dvmax
+                        return .Dvmax
                     }
                 case Sym.i:
                     if trieSymbol(data[4]) == Sym.n {
-                        return .dvmin
+                        return .Dvmin
                     }
                 default:
                     break
@@ -562,11 +479,11 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
                 switch trieSymbol(data[3]) {
                 case Sym.a:
                     if trieSymbol(data[4]) == Sym.x {
-                        return .lvmax
+                        return .Lvmax
                     }
                 case Sym.i:
                     if trieSymbol(data[4]) == Sym.n {
-                        return .lvmin
+                        return .Lvmin
                     }
                 default:
                     break
@@ -577,11 +494,11 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
                 switch trieSymbol(data[3]) {
                 case Sym.a:
                     if trieSymbol(data[4]) == Sym.x {
-                        return .svmax
+                        return .Svmax
                     }
                 case Sym.i:
                     if trieSymbol(data[4]) == Sym.n {
-                        return .svmin
+                        return .Svmin
                     }
                 default:
                     break
@@ -594,7 +511,7 @@ func cssPrimitiveValueUnitFromTrie<Unit: CSSCodeUnit>(_ data: Span<Unit>) -> CSS
     default:
         break
     }
-    return .unknown
+    return .Unknown
 }
 
 #if ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE
