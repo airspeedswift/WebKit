@@ -458,6 +458,13 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// invisible without LTO, where the ratio moved 0.960 -> 0.953. Stating the inline makes the
     /// shape explicit instead of accidental. Per-symbol instruction counts are the instrument:
     /// cssprobe/validate/symcount.sh.
+///
+/// It recovers 11 of the 17 points. The remaining 5-6 are filings register §42: the writers'
+/// own codegen is instruction-identical to the C++ factories they replaced (26=26 in isolation,
+/// 27=27 in composition, 48=48 with the bool-to-enum selects live), so the cost is the
+/// SILOptimizer's *global* decisions once 43 previously-opaque callees became visible at SIL
+/// level. Filed rather than reverted, deliberately: the island is at parity and the port removed
+/// 62 lines of C++. Do not "fix" this by moving the writers back.
     @inline(always)
     mutating func nextToken(_ data: Span<Unit>) -> EmittedToken {
         let start = clampedOffset(data)
