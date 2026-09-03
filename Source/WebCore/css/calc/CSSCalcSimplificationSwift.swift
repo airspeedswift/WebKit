@@ -40,36 +40,85 @@ internal import wtf.Core.MathExtras
 // `::sin`), so both arms reach the same functions. Everything else the executors need is stdlib.
 import Darwin
 
-// A Swift port of CSSCalcTree+Simplification.cpp, selected by USE_SWIFT_CSS_CALC_SIMPLIFICATION.
+// Swift port of CSSCalcTree+Simplification.cpp's calc() simplification, selected by
+// USE_SWIFT_CSS_CALC_SIMPLIFICATION.
 //
-// The output node's kind is the input node's kind everywhere except one rule (`clamp()` becoming
-// `min()`/`max()`), so `rebuildFrom` recovers the operation from the original node's own variant tag
-// and this file supplies only operands and a count -- no operation kind crosses the boundary.
+// WHY THIS IS A SECOND SWIFT PASS OVER THE SAME TREE, AND WHAT IT ADDS. The serializer next
+// door only ever READS a tree. This one rewrites it, and the whole boundary question that shaped
+// the design is how a node gets CONSTRUCTED without the operation kind crossing. The answer, which
+// CSSCalcSwiftTypes.h states at length, is that it never has to: simplification is a tree-to-tree
+// rewrite in which the output node's kind is the input node's kind everywhere except one rule, so
+// `rebuildFrom` recovers the operation from the ORIGINAL node's own variant tag and this file
+// supplies only operands and a count.
 //
-// Handles every tree whose every node is one of the four numeric leaves, `Symbol` at a resolvable
-// unit, `Invert` and `Deg2Rad`, and 21 of the 34 operations: `mod`, `rem`, `round` in all four
-// strategies, the six trig functions, `atan2`, `pow`, `sqrt`, `log`, `exp`, `abs`, `sign`, `progress`
-// and `progress(no-clamp ...)`. Everything else declines as a whole-tree decline: the C++ arm runs
-// and the operand stack is dropped unread.
+// What this file simplifies. Every tree whose every node is one of
 //
-// `Sum`, `Product`, `Negate`, `Min`/`Max`, `Clamp`, `Hypot`, `CalcMix`, `Random`, `Anchor`,
-// `AnchorSize`, `sibling-count()` and `sibling-index()` are declined: their simplification is not a
-// fold of one node's own children, or (the last six) needs `Style::BuilderState`, which the boundary
-// does not carry.
+//   - the four numeric leaves, and `Symbol` at any unit its table resolves to,
+//   - `Invert` and `Deg2Rad`, the two implementation-only wrappers,
+//   - 21 of the 34 operations: `mod`, `rem`, `round` in all four strategies, the six
+//     trig functions, `atan2`, `pow`, `sqrt`, `log`, `exp`, `abs`, `sign`, `progress` and
+//     `progress(no-clamp ...)`,
+//   - and four more: `hypot()`, `min()`, `max()` and `clamp()`.
 //
-// The push is lazy because the builder is an operand stack with no pop: a parent that folded
-// `mod(1, 2)` to `Number(1)` after its children had already pushed would leave them stranded under
-// the answer. So `fold(_:_:)` decides what a subtree collapses to without pushing anything, and
-// `rewrite(_:_:)` pushes exactly one operand -- the folded leaf if there is one, otherwise its
-// children's operands followed by `rebuildFrom`. `fold` is re-entered once per level, which is
-// quadratic in tree depth; real calc() trees are shallow enough for this not to matter.
+// Everything else declines, and a decline is a WHOLE-TREE decline: the C++ arm runs and the Swift
+// operand stack is destroyed unread. That is why this file needs no equivalent of the
+// serializer's "the walk is the decline decision" rule -- a `StringBuilder` cannot be
+// un-appended, but a local `Vector<Child>` can simply be dropped.
 //
-// The arithmetic is ported rather than upcalled: `Double`'s IEEE operations and Darwin's
-// transcendentals are the same libm calls `CSSCalcExecutor.h` makes, so porting them introduces no
-// second implementation. Each executor below names the C++ expression it reproduces.
+// The kinds still declined, and each for its own reason: `Sum` and `Product` (whose rules
+// reassociate and reorder), `Negate` (whose rules 6.2 to 6.4 rewrite a *child's* children in place),
+// `CalcMix` (normalisation over per-item weights that are not child nodes), `Random`, `Anchor`,
+// `AnchorSize`, `sibling-count()` and `sibling-index()` (all of which need `Style::BuilderState` or
+// the anchor evaluator, which the boundary does not carry and this file does not ask it to).
 //
-// No `unsafe`: the tree crosses as a borrowed `~Escapable` handle and the output crosses as a
-// `SWIFT_SAFE` builder taken `inout`.
+// This round added an arity change: everything before rebuilt every unfolded node with exactly the
+// children it came in with, so `rebuildSlot(const Children&)` -- which deliberately takes all
+// remaining operands and ignores the original's count -- had never executed. `min()`'s merge and
+// `hypot()`'s rebuild are the first things in the whole file to run it. This also added the only
+// rewrite that produces a node of a kind that was not in the input, `clamp()` collapsing to `min()`
+// or `max()`, which is `buildMinMax`'s first and only caller.
+//
+// THE PUSH IS LAZY, AND THAT IS THE ONE DESIGN DECISION WORTH ARGUING ABOUT. The obvious shape for a
+// post-order rewriter is "simplify each child, push it, then ask the parent to fold" -- and it does
+// not work, because the builder is an operand STACK with no pop. A parent that folds `mod(1, 2)`
+// into `Number(1)` would leave its two children stranded on the stack under the answer, and the
+// entry point's "exactly one operand" contract would fail for every folded tree in the document.
+// Adding a `discard(n)` to the boundary was the alternative and it was rejected: it is C++ written
+// to facilitate Swift, and it is not needed: a `min(r, 1px)` keeps an unresolved `Symbol` as a
+// survivor, and `clamp(none, r, 1px)` rebuilds as a `min()` over two subtrees, and the answer is
+// still not a `pop`, because `Fold` has cases that say what `rewrite` must push instead. So the work
+// splits in two:
+//
+//   - `fold(_:_:)` decides what a subtree collapses to, PUSHING NOTHING. It is pure apart from the
+//     two `const` lookups on the builder, and it allocates nothing on the C++ side either, so a
+//     subtree that folds away never causes a `makeChild` at all.
+//   - `rewrite(_:_:)` pushes exactly one operand: the folded leaf if there is one, otherwise its
+//     children's operands followed by `rebuildFrom`.
+//
+// The cost is that `fold` is re-entered once per level, so a node at depth d is folded d+1 times --
+// and for a merged `Min`/`Max` the merge plan is computed twice, once in `fold` to learn the arity
+// and once in `rewrite` to push the survivors. Priced rather than assumed, and on the same evidence
+// `childAt`'s linear scan was priced on: a calc expression's tree is a handful of nodes, the deepest
+// in the whole WPT css-values corpus is single digits, and `childInTreeOrder` is already linear per
+// access so the walk is quadratic before this file adds anything. If a measurement finds it, the fix
+// is for `fold` to hand its per-child results down to `rewrite` rather than a boundary change. Having
+// `.mergedChildren` carry the survivor list was rejected for now because the list is dynamically
+// sized, so it would put a heap allocation on a `Fold` value that is constructed for every node at
+// every level, where the common case allocates nothing.
+//
+// THE ARITHMETIC IS PORTED, NOT UPCALLED, and that is the opposite of the choice the serialization
+// pass made for number FORMATTING. The two are different problems. `formatCSSNumberValue` is a
+// CSS-specific algorithm with no Swift equivalent, so a reimplementation would agree on every common
+// value and diverge on subnormals; `std::fmod` and `std::sin` are libm, and Swift reaches the SAME
+// libm. So porting them introduces no second implementation of anything -- `Double`'s IEEE
+// operations and `Darwin`'s transcendentals are the identical machine instructions and the identical
+// library calls -- while an upcall would have been ~30 lines of C++ written purely to let Swift do
+// arithmetic. Every executor below names the C++ expression it reproduces at its site, and the four
+// places where the correspondence rests on something subtler than "same libm call" say so.
+//
+// NO `unsafe`, AND IT IS THE BOUNDARY THAT BUYS IT, exactly as next door: the tree crosses as a
+// borrowed `~Escapable` handle and the output crosses as a `SWIFT_SAFE` builder taken `inout`.
+// Nothing in this file can see a pointer, so there is no marker to justify.
 
 /// What simplification did with a tree.
 ///
@@ -236,11 +285,36 @@ private enum CalcExecutor {
         return 1.0 / a
     }
 
-    /// `OperatorExecutor<Operator::Clamp>`'s three-`double` overload (CSSCalcExecutor.h:206-:214).
-    ///
-    /// Only reachable from `progress()` here -- `clamp()` itself is declined -- but it is the real
-    /// executor rather than an inlined copy, because `Progress` calls
-    /// `executeOperation<Operator::Clamp>` and the two must not drift.
+/// `OperatorExecutor<Operator::Min>`'s two-`double` overload. NOT `minWithSignedZero`: this executor
+/// short-circuits on either operand being NaN before the helper would run, so `min(1, NaN)` here is
+/// `NaN` while the helper's would be `1`. Parameter order matters for the same reason.
+    @inline(always)
+    static func min(_ val: Double, _ minimum: Double) -> Double {
+        if val.isNaN {
+            return val
+        }
+        if minimum.isNaN {
+            return minimum
+        }
+        return minWithSignedZero(val, minimum)
+    }
+
+/// `OperatorExecutor<Operator::Max>`, `min` above with the helper swapped; the two NaN
+/// short-circuits are the whole difference from `maxWithSignedZero`.
+    @inline(always)
+    static func max(_ val: Double, _ maximum: Double) -> Double {
+        if val.isNaN {
+            return val
+        }
+        if maximum.isNaN {
+            return maximum
+        }
+        return maxWithSignedZero(val, maximum)
+    }
+
+/// `OperatorExecutor<Operator::Clamp>`. Calls `maxWithSignedZero`/`minWithSignedZero` directly
+/// after its own three-way NaN check, matching the C++ executor rather than going through `min`/`max`
+/// above.
     @inline(always)
     static func clamp(_ minimum: Double, _ value: Double, _ maximum: Double) -> Double {
         if minimum.isNaN || value.isNaN || maximum.isNaN {
@@ -467,24 +541,43 @@ private enum CalcExecutor {
 
 // MARK: - What a subtree folded to
 
-/// The result of folding one subtree, which is `copyAndSimplify`'s `std::optional<Child>` plus a
-/// decline channel.
+/// The result of folding one subtree: `copyAndSimplify`'s `std::optional<Child>` plus a decline
+/// channel. Invariant: `.leaf` holds exactly when the C++'s `simplify` produced a `Numeric`, and
+/// every operand predicate below relies on that.
 private enum Fold {
-    /// `simplify` returned a replacement, and the replacement is a numeric leaf -- true everywhere
-    /// except `Invert`'s rule 7.2, which is declined instead; see `foldInvert`.
-    ///
-    /// Nothing has been pushed: the caller either uses the value or pushes the leaf itself.
+/// `simplify` returned a replacement that is a numeric leaf. Nothing has been pushed; the caller
+/// uses the value or pushes the leaf itself.
     case leaf(NumericLeaf)
-    /// `simplify` returned `std::nullopt`: the node keeps its own kind and is rebuilt from its
-    /// simplified children. Carries the node's alternative, which `foldInvert` needs and which the
-    /// caller would otherwise pay a second `info()` crossing for.
+/// `simplify` returned `std::nullopt`: the node keeps its kind and is rebuilt from its simplified
+/// children with the same arity. Carries the alternative, which `foldInvert` needs.
     case unchanged(CalcAlternative)
-    /// Outside what this file simplifies, or a boundary contract it will not guess at. The whole
-    /// tree declines.
+    /// The node collapses to one of its own children, unfolded: `return { WTF::move(root.children[i])
+    /// }` at `+Simplification.cpp:409`, `:456` and `:1015`. `rewrite` pushes that subtree's operand
+    /// and nothing else, which is exactly one operand, so the parent's count is unaffected.
     ///
-    /// The payload is the blame, and it is what `CSSCalcSwiftSimplificationResult.declineAlternative`
-    /// reports. `nil` means "declined with no single alternative to blame", which the boundary spells
-    /// `0xFF`; every decline produced from a *known* cause names it.
+    /// One level for now: `rewrite` on the named child re-folds it, so a child that itself collapses
+    /// to a grandchild is handled by the recursion and never needs to be addressed from here. `Sum`
+    /// is the case that needs a second level, because step 8.1 splices a child `Sum`'s children into
+    /// the parent's own child list before the merge runs, and a survivor of that merge can be a
+    /// grandchild that `rewrite` has no single child to delegate to.
+    ///
+    /// Never produced when the promoted term is a leaf -- see `promoteTerm`, which returns the leaf
+    /// itself in that case. That is what keeps the file's `.leaf` invariant exact: the C++ returns the
+    /// child, so if the child is a `Numeric` the parent's `switchOn` sees a `Numeric`.
+    case replacedByTerm(child: UInt32)
+/// `clamp()` becoming `min()` or `max()`: the only rewrite that creates an operation kind not in
+/// the input, and the only reason `buildMinMax` exists on the boundary.
+    case rebuiltMinMax(isMax: Bool)
+    /// A `Children`-slotted node whose children merged: `rewrite` recomputes the merge plan, pushes
+    /// one operand per survivor, and calls `rebuildFrom(node, survivorCount)` with the new count.
+    ///
+    /// Kept apart from `.unchanged` rather than folded into it -- the C++ returns `std::nullopt` for
+    /// both -- so that `fold`'s answer says whether the arity changed, which is the property
+    /// `rebuildSlot(const Children&)` turns on. Carries the alternative for the same reason
+    /// `.unchanged` does.
+    case mergedChildren(CalcAlternative)
+/// Outside this file's slice, or a boundary contract it will not guess at: the whole tree declines.
+/// The payload is the blame `declineAlternative` reports; `nil` means declined with no single cause.
     case declined(CalcAlternative?)
 }
 
@@ -541,9 +634,9 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
         return childCount == 3
 
     case .Sum, .Product:
-        // Declined. Their rules reassociate and reorder -- step 8.1 splices a child Sum's
-        // children into the parent, and the zero-term and same-unit merges run over an index-offset
-        // table, which is not a fold of one node.
+        // Declined. Their rules reassociate and reorder -- step 8.1 splices a child Sum's children
+        // into the parent, and the zero-term and same-unit merges run over an index-offset table --
+        // which is not a fold of one node.
         return false
 
     case .Negate:
@@ -552,20 +645,22 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
         return false
 
     case .Min, .Max:
-        // Declined. `simplifyForMinMax` (`:403`-`:496`) is the two-phase merge over
-        // `offsetOfFirstInstance`, and it changes the node's arity.
-        return false
+        // `simplifyForMinMax` (`:371`-`:482`) asserts non-empty children; unreachable through the
+        // parser, so a decline (rather than claiming the node) is the honest answer if it ever isn't.
+        // No upper bound: `rebuildSlot` takes all remaining operands.
+        return childCount >= 1
 
     case .Clamp:
-        // Declined. It is the one rule that changes an operation's kind -- `clamp(none, VAL,
-        // MAX)` becomes `min(VAL, MAX)` -- and it is the only reason `buildMinMax` exists on the
-        // boundary.
-        return false
+        // `clamp(none, VAL, MAX)` becomes `min(VAL, MAX)` -- the only rule that changes an operation's kind,
+        // and the only reason `buildMinMax` exists on the boundary. 3/2/1 are the only shapes `ChildOrNone`
+        // admits; whether `kind` agrees on WHICH bound is `none` is checked separately in `foldClamp`.
+        return childCount >= 1 && childCount <= 3
 
     case .Hypot:
-        // Declined. Its fold (`:1210`-`:1283`) is a stateful pass over a variable number of
-        // children with a running type tag, which is a `Children` shape rather than a fixed arity.
-        return false
+        // A stateful pass over a variable number of children with a running type tag. No arity condition:
+        // `simplify(Hypot&)` has no `ASSERT` on child count, and its executor defines the empty case (returns
+        // NaN without calling the functor), which this file reaches the same way via `.unchanged`.
+        return true
 
     case .CalcMix:
         // Normalisation over per-item weights that are not child nodes.
@@ -779,6 +874,20 @@ private extension CalcSimplification {
             if childAlternative == .Invert {
                 return .declined(.Invert)
             }
+            return .unchanged(.Invert)
+        case .replacedByTerm:
+            // The child collapsed to one of its own children -- a single-argument `min()`, or a
+            // `clamp(none, VAL, none)` -- and this file does not carry what that grandchild's
+            // alternative is, so it cannot tell whether rule 7.2 applies to the result. Declining is
+            // exact: a decline runs the C++ arm, which applies 7.2 or not as the tree requires. An
+            // `Invert` is only reachable inside a `Product`, which declines outright, so reaching this
+            // at all needs a constructed tree.
+            return .declined(.Invert)
+        case .mergedChildren, .rebuiltMinMax:
+            // Both provably produce a `Min` or a `Max` and never an `Invert`: `.mergedChildren` carries
+            // the alternative and `foldMinMax` is its only producer, and `.rebuiltMinMax` is
+            // `buildMinMax` by construction. So this is the C++'s `[](auto&)` arm: `nullopt`, and the
+            // `Invert` is rebuilt from its one simplified child.
             return .unchanged(.Invert)
         case .declined(let blame):
             return .declined(blame)
@@ -1032,6 +1141,14 @@ private extension CalcSimplification {
         case .Deg2Rad:
             return foldDeg2Rad(fold(node.childInTreeOrder(0), builder))
 
+        case .Min:
+            return foldMinMax(node, info, false, builder)
+        case .Max:
+            return foldMinMax(node, info, true, builder)
+
+        case .Clamp:
+            return foldClamp(node, info, builder)
+
         case .RoundNearest:
             return foldRound(fold(node.childInTreeOrder(0), builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundNearest)
         case .RoundUp:
@@ -1069,6 +1186,9 @@ private extension CalcSimplification {
         case .Sqrt:
             return foldOneNumber(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.sqrt)
 
+        case .Hypot:
+            return foldHypot(node, info, builder)
+
         case .Log:
             // `log( <calc-sum>, <calc-sum>? )`. With a base it is the two-`Number` shape, without
             // one it is the natural log -- two different `OperatorExecutor<Operator::Log>`
@@ -1105,11 +1225,11 @@ private extension CalcSimplification {
                 CalcExecutor.progressNoClamp
             )
 
-        case .SiblingCount, .SiblingIndex, .Sum, .Product, .Negate, .Min, .Max, .Clamp, .Hypot,
+        case .SiblingCount, .SiblingIndex, .Sum, .Product, .Negate,
              .Random, .CalcMix, .Anchor, .AnchorSize:
-            // Enumerated one by one rather than swept into the `@unknown default` below, so that
-            // the two lists stay distinguishable: these are alternatives this file knows and declines,
-            // and the default is alternatives it has not been taught.
+            // Enumerated by name rather than swept into the `@unknown default` below, so an
+            // alternative that is declined on purpose stays distinguishable from one that simply has
+            // not been taught.
             return .declined(alternative)
 
         @unknown default:
@@ -1326,29 +1446,486 @@ private extension CalcSimplification {
     }
 }
 
+// MARK: - The `Children`-slotted folds: `hypot()`, `min()`, `max()` and `clamp()`
+//
+// These can produce a result with a different number of children than the input, or a node of a
+// kind not in the input, so each needs its own node rather than just its operands' folds. `fold` may
+// answer `.replacedByTerm`, `.mergedChildren` or `.rebuiltMinMax` for them.
+
+/// `simplify(Hypot&)`'s five-alternative running type tag (`+Simplification.cpp:1208`-`:1212`), spelled
+/// `Variant<std::monostate, NumberTag, PercentageTag, DimensionTag, FailureTag>` in the C++.
+///
+/// `.unset`, not `.none`: a case named `none` on a non-`Optional` enum reads as `Optional.none` at
+/// every `switch` site. `DimensionTag`'s key is a `CSSUnitType` raw value rather than a
+/// `CanonicalDimension::Dimension`, since `toCSSUnit` is a bijection onto the six canonical units.
+private enum HypotTag {
+    case unset
+    case number
+    case percentage
+    case dimension(UInt16)
+    case failed
+}
+
+private extension CalcSimplification {
+
+    /// Fold every child of a variable-arity node, in tree order. One `[Fold]` allocation per node --
+    /// `Fold` is all `Copyable`/`Escapable` scalars, so no container-of-`~Escapable` problem arises.
+    func foldChildren(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ childCount: UInt32,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> [Fold] {
+        var folded: [Fold] = []
+        // `Int(clamping:)`, not `Int(_:)`, which traps if `Int` is narrower than `UInt32`. A
+        // saturating capacity hint can't be wrong -- `append` grows regardless.
+        folded.reserveCapacity(Int(clamping: childCount))
+        var index: UInt32 = 0
+        while index < childCount {
+            folded.append(fold(node.childInTreeOrder(index), builder))
+            index += 1
+        }
+        return folded
+    }
+
+    /// The first child that declined, as the `Fold` to return, or `nil` when none did. Returns the
+    /// child's own `.declined` value rather than its blame, avoiding a double optional.
+    ///
+    /// Checked over all children before any fold dispatches: a declined child means the whole tree
+    /// can't be built, regardless of which operand the C++ would have looked at first.
+    @inline(always)
+    func declinedChild(_ folded: [Fold]) -> Fold? {
+        for child in folded {
+            if case .declined = child {
+                return child
+            }
+        }
+        return nil
+    }
+
+    /// `return { WTF::move(root.children[index]) }`: the node collapses to one of its own children.
+    ///
+    /// The `.leaf` case is required, not an optimisation: the C++ returns the child itself, so a
+    /// parent must be able to fold over it if it's `Numeric` (`abs(min(1px))` -> `1px`). This is what
+    /// keeps `Fold`'s `.leaf` invariant true.
+    @inline(always)
+    func promoteTerm(_ folded: Fold, _ index: UInt32) -> Fold {
+        switch folded {
+        case .leaf(let leaf):
+            return .leaf(leaf)
+        case .declined(let blame):
+            return .declined(blame)
+        case .unchanged, .replacedByTerm, .rebuiltMinMax, .mergedChildren:
+            return .replacedByTerm(child: index)
+        }
+    }
+
+    // MARK: `hypot()`
+
+    /// `simplify(Hypot&)` (`+Simplification.cpp:1204`-`:1279`). An optimistic state machine over the
+    /// children: empty range -> NaN; one element -> `abs(f(c0))`; two or more -> `sqrt(sum(f(c)^2))`.
+    /// The functor runs once per element in tree order.
+    ///
+    /// Runs the full pass even after failure (matching the C++, which cannot short-circuit its
+    /// evaluation API) though the accumulated value is discarded once failed -- observationally
+    /// identical to an early exit, kept for parity with the C++ it's checked against.
+    ///
+    /// Only ever runs over `.leaf` children: any other `Fold` case means `simplify` did not produce a
+    /// `Numeric`, which `hypotElement` maps to `.failed` in one place.
+    func foldHypot(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let folded = foldChildren(node, info.childCount, builder)
+        if let declined = declinedChild(folded) {
+            return declined
+        }
+
+        // The empty range, which never calls the functor.
+        if folded.isEmpty {
+            return .unchanged(.Hypot)
+        }
+
+        var tag = HypotTag.unset
+        var sumOfSquares = 0.0
+        var firstElement = 0.0
+        var isFirst = true
+        for child in folded {
+            let value = hypotElement(child, &tag)
+            if isFirst {
+                firstElement = value
+                isFirst = false
+            }
+            sumOfSquares += value * value
+        }
+
+        // `std::abs(*range.begin())` for one element, `std::sqrt(sum)` for two or more. `.magnitude`
+        // is `std::abs(double)`: it clears the sign bit, so `hypot(-0px)` is `+0px` on both arms.
+        let value = folded.count == 1 ? firstElement.magnitude : sumOfSquares.squareRoot()
+
+        switch tag {
+        case .number:
+            return .leaf(NumericLeaf.number(value))
+
+        case .percentage:
+            // The hint is provably 0 wherever this runs: `determinePercentHint` is non-`None` only for
+            // `LengthPercentage`/`AnglePercentage`, and this arm is reached only when
+            // `percentageResolveToDimension` was false for those same two categories -- the two
+            // conditions can't both hold.
+            return .leaf(NumericLeaf(
+                kind: .percentage,
+                value: value,
+                unitType: UInt16(WebCore.CSSUnitType.Percentage.rawValue),
+                percentHint: 0
+            ))
+
+        case .dimension(let canonicalUnit):
+            // `makeChild(CanonicalDimension { .value = value, .dimension = tag.dimension })`. The unit
+            // is the FIRST child's, carried through the tag, and every subsequent child was required
+            // to match it.
+            return .leaf(NumericLeaf(
+                kind: .canonicalDimension,
+                value: value,
+                unitType: canonicalUnit,
+                percentHint: 0
+            ))
+
+        case .unset, .failed:
+            // `nullopt` in the C++: rebuilt from its children at the same arity. `.unset` is
+            // unreachable here (the empty case returned above) but enumerated rather than defaulted so
+            // a future tag must be classified.
+            return .unchanged(.Hypot)
+        }
+    }
+
+    /// One iteration of `simplify(Hypot&)`'s functor: advance the tag and return the value the
+    /// executor accumulates. `Double.nan` on every failure, matching the C++; discarded once
+    /// `.failed`, but returned anyway for parity.
+    @inline(always)
+    func hypotElement(_ folded: Fold, _ tag: inout HypotTag) -> Double {
+        guard case .leaf(let leaf) = folded else {
+            // Not a `Numeric`, which reaches the `[&](const auto&)` arm of whichever tag state is
+            // live. Every one of them sets `FailureTag`, including `monostate`'s.
+            tag = .failed
+            return Double.nan
+        }
+
+        switch tag {
+        case .unset:
+            // `:1216`-`:1240`, the first iteration.
+            switch leaf.kind {
+            case .number:
+                tag = .number
+                return leaf.value
+            case .percentage:
+                if percentageResolveToDimension {
+                    tag = .failed
+                    return Double.nan
+                }
+                tag = .percentage
+                return leaf.value
+            case .canonicalDimension:
+                tag = .dimension(leaf.unitType)
+                return leaf.value
+            case .nonCanonicalDimension:
+                // A `Numeric`, but the C++ has no arm for it: `hypot()` over an unconverted `1em` is
+                // rebuilt rather than folded, since its value isn't yet in a comparable unit.
+                tag = .failed
+                return Double.nan
+            }
+
+        case .number:
+            // `if (auto* numberChild = get_if<Number>(&child)) return numberChild->value;`
+            guard leaf.kind == .number else {
+                tag = .failed
+                return Double.nan
+            }
+            return leaf.value
+
+        case .percentage:
+            // Reads the value only: a percentage's `hint` plays no part in matching here -- the
+            // folded result's hint is stamped from the category. See `foldHypot`'s `.percentage` arm.
+            guard leaf.kind == .percentage else {
+                tag = .failed
+                return Double.nan
+            }
+            return leaf.value
+
+        case .dimension(let canonicalUnit):
+            // `get_if<CanonicalDimension>(&child); dimensionChild && dimensionChild->dimension ==
+            // tag.dimension`, with the unit standing in for the dimension.
+            guard leaf.kind == .canonicalDimension, leaf.unitType == canonicalUnit else {
+                tag = .failed
+                return Double.nan
+            }
+            return leaf.value
+
+        case .failed:
+            // Absorbing, and the loop keeps running. See `foldHypot`'s note on why this is not a
+            // `return`.
+            return Double.nan
+        }
+    }
+
+    // MARK: `min()` and `max()`
+
+    /// `simplifyForMinMax` (`+Simplification.cpp:371`-`:482`), css-values-4 steps 5.1 to 5.3, for both
+    /// `Min` and `Max`.
+    ///
+    /// The C++ mutates `root.children` while iterating it, relying on invariants nothing states (that
+    /// an assignment target index is always behind the read index, and that a moved-from `Variant`
+    /// keeps its discriminant). This file needs neither: it merges over `NumericLeaf` values via
+    /// `mergePlan`, never mutating the tree, and `rewrite` makes the single consuming pass once the
+    /// plan is complete.
+    ///
+    /// Four outcomes, in the C++'s order: one child -> return it; no merges -> rebuild unchanged;
+    /// `n - merges == 1` -> return child 0; otherwise -> survivors replace the children
+    /// (`.mergedChildren`, which the C++'s single `nullopt` can't distinguish from the no-merges case).
+    func foldMinMax(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+        _ isMax: Bool,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let alternative: CalcAlternative = isMax ? .Max : .Min
+        let folded = foldChildren(node, info.childCount, builder)
+        if let declined = declinedChild(folded) {
+            return declined
+        }
+
+        // `if (root.children.size() == 1) return { WTF::move(root.children[0]) };` -- BEFORE the
+        // merge, which is why a single-child `min()` folds to its child even when the child is a
+        // percentage the merge would have refused.
+        if folded.count == 1 {
+            return promoteTerm(folded[0], 0)
+        }
+
+        let plan = mergePlan(folded, isMax)
+
+        // `if (!numberOfMergeOpportunities) return { };`
+        if plan.merges == 0 {
+            return .unchanged(alternative)
+        }
+
+        // `if (combinedChildrenSize == 1) return { WTF::move(root.children[0]) };`
+        //
+        // Term 0 is always the sole survivor here, which is why the C++ writes `children[0]`
+        // unconditionally and why this needs no search. Proof: term 0 has no earlier term to merge
+        // into, so it always survives; a non-`Numeric` term and a percentage the merge skipped both
+        // always survive; and any merge implies a first instance that survives. So if term 0 were not
+        // the only survivor there would be two, contradicting `n - merges == 1`.
+        if folded.count - plan.merges == 1 {
+            if let accumulated = plan.slots[0].accumulated {
+                return .leaf(accumulated)
+            }
+            // Term 0 is not a `Numeric`, so the answer is the subtree itself.
+            return .replacedByTerm(child: 0)
+        }
+
+        return .mergedChildren(alternative)
+    }
+
+    /// One term's place in the merge: what it accumulated, whether anything may merge into it, and
+    /// whether it survives. Per term, not per unit identity, which removes the C++'s 512-byte dense
+    /// table (`:414`) in favor of a linear scan (`mergeTarget`).
+    struct MergeSlot {
+        /// The accumulated leaf, or `nil` when the term is not a `Numeric`. A value type, so a merge
+        /// is a copy and there is nothing the tree can observe.
+        var accumulated: NumericLeaf?
+        /// Whether a later term may merge into this one -- true only for a first instance, matching
+        /// the C++'s `offsetOfFirstInstance[id] = i + 1`.
+        var mergeable: Bool
+        /// Whether the term appears in the rebuilt child list.
+        var survives: Bool
+    }
+
+    /// Phase 1 of `simplifyForMinMax` (`:418`-`:446`), as values. No dense table: `CSSUnitType` is a
+    /// bijection onto `NumericIdentity` over every leaf the tree can hold, so the merge keys on the
+    /// `unitType` already carried in `NumericLeaf` and finds a first instance with a linear scan
+    /// instead of a 512-byte table.
+    ///
+    /// `evaluate` is `CalcExecutor.min`/`.max` (the two-`double` overload, not the signed-zero
+    /// helpers). With those executors' NaN short-circuits and signed-zero symmetry, merge order can't
+    /// change the result for `Min`/`Max` -- written in term order anyway since it costs nothing and
+    /// `Sum` genuinely depends on it.
+    func mergePlan(_ folded: [Fold], _ isMax: Bool) -> (slots: [MergeSlot], merges: Int) {
+        var slots = [MergeSlot](
+            repeating: MergeSlot(accumulated: nil, mergeable: false, survives: true),
+            count: folded.count
+        )
+        var merges = 0
+        // `bool canMergePercentages = !percentageResolveToDimension(options);` (`:416`).
+        let canMergePercentages = !percentageResolveToDimension
+
+        for i in 0..<folded.count {
+            // `[](const auto&) { return 0; }`: a non-`Numeric` child contributes no merge
+            // opportunity, is never merged, and always survives.
+            guard case .leaf(let leaf) = folded[i] else {
+                continue
+            }
+
+            // `if (id == NumericIdentity::Percentage && !canMergePercentages) return 0;` -- and the
+            // table entry is LEFT UNSET, which is what makes phase 2 keep every such child. Its leaf
+            // is still recorded, because phase 3 pushes it.
+            if leaf.kind == .percentage, !canMergePercentages {
+                slots[i].accumulated = leaf
+                continue
+            }
+
+            // The scan carries the accumulated leaf out with the index, rather than re-reading
+            // `slots[j].accumulated` after the loop: two `if let`s would leave a fall-through where a
+            // set target with a `nil` leaf silently became a new first instance.
+            var target: (index: Int, accumulated: NumericLeaf)?
+            for j in 0..<i where slots[j].mergeable {
+                guard let accumulated = slots[j].accumulated else {
+                    continue
+                }
+                if switchTogether(accumulated, leaf), unitsMatch(accumulated, leaf) {
+                    target = (j, accumulated)
+                    break
+                }
+            }
+
+            if let target {
+                // The surviving alternative, unit and percent hint are the first instance's, which
+                // is exactly what `withValue` carries.
+                let merged = isMax
+                    ? CalcExecutor.max(target.accumulated.value, leaf.value)
+                    : CalcExecutor.min(target.accumulated.value, leaf.value)
+                slots[target.index].accumulated = target.accumulated.withValue(merged)
+                slots[i].survives = false
+                merges += 1
+            } else {
+                // `offsetOfFirstInstance[id] = i + 1;` -- the first instance, not yet a merge
+                // opportunity.
+                slots[i].accumulated = leaf
+                slots[i].mergeable = true
+            }
+        }
+
+        return (slots, merges)
+    }
+
+    // MARK: `clamp()`
+
+    /// `simplify(Clamp&)` (`+Simplification.cpp:1008`-`:1105`). Four outcomes: both bounds `none` ->
+    /// return `val` whatever it is; `val` not a `Numeric` -> rebuild unchanged (dominates the other
+    /// two); one bound `none` -> fold if it agrees with `val`, else convert to `min()`/`max()`;
+    /// neither `none` -> fold if all three agree, else rebuild (no conversion in this branch).
+    ///
+    /// `Clamp`'s tuple skips an absent bound in tree order, so `childInTreeOrder` already gives
+    /// `[val, max]` / `[min, val]` / `[val]` / `[min, val, max]`. `childCount` gives the arity and
+    /// `info.kind`'s `ClampWithNoneMinimum`/`ClampWithNoneMaximum` says which bound is absent when the
+    /// arity is 2; the two are cross-checked and a mismatch declines.
+    func foldClamp(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let folded = foldChildren(node, info.childCount, builder)
+        if let declined = declinedChild(folded) {
+            return declined
+        }
+
+        let minimumIsNone = info.kind == .ClampWithNoneMinimum
+        let maximumIsNone = info.kind == .ClampWithNoneMaximum
+
+        // The cross-check: exactly one absent bound means two children and vice versa. A mismatch
+        // declines rather than filling a bound with the wrong subtree.
+        guard (info.childCount == 2) == (minimumIsNone || maximumIsNone) else {
+            return .declined(.Clamp)
+        }
+
+        // `childCount == 1` means both bounds hold the keyword, so child 0 is `val` -- returned
+        // whatever it is.
+        if info.childCount == 1 {
+            return promoteTerm(folded[0], 0)
+        }
+
+        if info.childCount == 3 {
+            // Neither bound is `none`: `[min, val, max]`.
+            guard case .leaf(let value) = folded[1] else {
+                // `val` is not a `Numeric`. Outcome 2.
+                return .unchanged(.Clamp)
+            }
+            // `switchTogether` against `val` for both bounds; a non-leaf bound fails it too.
+            guard case .leaf(let minimum) = folded[0], case .leaf(let maximum) = folded[2],
+                  switchTogether(value, minimum), switchTogether(value, maximum) else {
+                return .unchanged(.Clamp)
+            }
+            guard unitsMatch(minimum, value), unitsMatch(value, maximum) else {
+                return .unchanged(.Clamp)
+            }
+            // "As units already match, we only have to check that one of the arguments is
+            // `magnitudeComparable`", and the C++ checks `val`.
+            guard magnitudeComparable(value) else {
+                return .unchanged(.Clamp)
+            }
+            return .leaf(value.withValue(CalcExecutor.clamp(minimum.value, value.value, maximum.value)))
+        }
+
+        // Exactly one bound is `none`, so there are two children.
+        if minimumIsNone {
+            // `[val, max]`, and `clamp(none, VAL, MAX)` is `min(VAL, MAX)`.
+            guard case .leaf(let value) = folded[0] else {
+                // Outcome 2 again, and it dominates the conversion: a non-`Numeric` `val` never
+                // reaches `convertToMin`.
+                return .unchanged(.Clamp)
+            }
+            guard case .leaf(let maximum) = folded[1], switchTogether(value, maximum),
+                  unitsMatch(value, maximum), magnitudeComparable(value) else {
+                // Covers all three of the C++'s `convertToMin()` sites, plus `max` not folding to a
+                // `Numeric` at all.
+                return .rebuiltMinMax(isMax: false)
+            }
+            // Argument order is load-bearing: the executor's NaN short-circuit returns the first NaN
+            // operand, so `(val, max)` and `(max, val)` differ.
+            return .leaf(value.withValue(CalcExecutor.min(value.value, maximum.value)))
+        }
+
+        // `[min, val]`, and `clamp(MIN, VAL, none)` is `max(MIN, VAL)`.
+        guard case .leaf(let value) = folded[1] else {
+            return .unchanged(.Clamp)
+        }
+        guard case .leaf(let minimum) = folded[0], switchTogether(minimum, value),
+              unitsMatch(minimum, value), magnitudeComparable(value) else {
+            return .rebuiltMinMax(isMax: true)
+        }
+        // Operands are `(min, val)`; the result's shape is `val`'s, matching the branch above.
+        return .leaf(value.withValue(CalcExecutor.max(minimum.value, value.value)))
+    }
+}
+
 // MARK: - Building the answer
 
 private extension CalcSimplification {
 
-    /// Push exactly one operand for this subtree, and report whether the rewrite can continue.
+    /// Push exactly ONE operand for this subtree, and report whether the rewrite can continue.
     ///
     /// The contract in both directions, because `rebuildFrom`'s correctness rests on it: on
     /// `.pushed` the operand stack has grown by exactly one, and on `.declined` the caller must
     /// abandon the tree without inspecting the stack at all.
     ///
-    /// Three shapes, in the order they are tried:
+    /// Six shapes, in the order they are tried:
     ///
     ///  1. The subtree folds to a numeric leaf -- `pushLeaf`, and none of its children are ever
     ///     built at all. That is not just an allocation saved: a folded subtree in the C++ arm
     ///     builds every intermediate `Child` and then throws them away.
     ///  2. The subtree is an unresolved `Symbol` -- `pushCopyOf`, which routes to
     ///     `CSSCalc::copy(const Child&)`, the same copy `copyAndSimplifyChildren` bottoms out in.
-    ///  3. Anything else in scope -- rewrite each child in tree order, then `rebuildFrom`, which
+    ///  3. The subtree collapses to one of its own children -- push that child's operand and nothing
+    ///     else, which is still exactly one operand.
+    ///  4. A `clamp()` that became a `min()` or a `max()` -- push its two arguments and `buildMinMax`.
+    ///     This is the only place the file asks for a kind that was not in the input.
+    ///  5. A `min()`/`max()` whose children merged -- push one operand per survivor and `rebuildFrom`
+    ///     with the new count -- the first thing here to change an arity.
+    ///  6. Anything else in scope -- rewrite each child in tree order, then `rebuildFrom`, which
     ///     recovers the operation from the original's own variant tag.
     ///
-    /// Unlike the coverage walk, this stops at the first decline: the walk keeps going because the
-    /// mask and the count have to describe the whole tree, while here there is nothing left to learn
-    /// and every further push is work on a stack that will be destroyed unread.
+    /// UNLIKE THE COVERAGE WALK, THIS STOPS AT THE FIRST DECLINE, and the asymmetry is deliberate:
+    /// the walk keeps going because the mask and the count have to describe the whole tree, while
+    /// here there is nothing left to learn and every further push is work on a stack that will be
+    /// destroyed unread.
     mutating func rewrite(
         _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
@@ -1363,9 +1940,85 @@ private extension CalcSimplification {
             // asserted so a broken boundary falls back to the C++ arm.
             return builder.pushLeaf(leaf.boundaryLeaf) ? .pushed : .declined(nil)
 
+        case .replacedByTerm(let child):
+            // `return { WTF::move(root.children[i]) }`: pushes one operand for the named child and
+            // nothing for the node itself, avoiding any need for `pop`.
+            return rewrite(node.childInTreeOrder(child), &builder)
+
+        case .rebuiltMinMax(let isMax):
+            return rewriteConvertedMinMax(node, isMax, &builder)
+
+        case .mergedChildren(let alternative):
+            return rewriteMergedChildren(node, alternative, &builder)
+
         case .unchanged(let alternative):
             return rebuild(node, alternative, &builder)
         }
+    }
+
+    /// `convertToMin`/`convertToMax` (`+Simplification.cpp:1018`-`:1044`): a fresh `min()`/`max()`
+    /// over `clamp()`'s two surviving arguments, via `buildMinMax`, the boundary's only construction
+    /// selector.
+    ///
+    /// A `false` from `buildMinMax` declines the whole tree rather than rebuilding the `Clamp`: by
+    /// that point two operands are already pushed where the parent expects one, and there is no `pop`.
+    /// Exact regardless, since the C++ arm then rebuilds the `Clamp` itself. Expected never to fire in
+    /// practice, since the parser's own type check should make the mismatch unreachable.
+    mutating func rewriteConvertedMinMax(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ isMax: Bool,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        var index: UInt32 = 0
+        while index < 2 {
+            if case .declined(let blame) = rewrite(node.childInTreeOrder(index), &builder) {
+                return .declined(blame)
+            }
+            index += 1
+        }
+        return builder.buildMinMax(isMax, 2) ? .pushed : .declined(.Clamp)
+    }
+
+    /// The `.mergedChildren` half of `rewrite`: `simplifyForMinMax`'s phase 2 (`:458`-`:479`). The
+    /// merge plan is recomputed here rather than carried on `Fold`, trading a re-walk for avoiding a
+    /// heap allocation on every node's `Fold` value.
+    ///
+    /// A `Numeric` survivor is pushed as a leaf rather than re-rewritten -- required, not an
+    /// optimisation, since a merged first instance's value is `evaluate(...)`'s result and exists
+    /// nowhere in the input tree.
+    mutating func rewriteMergedChildren(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ alternative: CalcAlternative,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        let info = node.info()
+        let folded = foldChildren(node, info.childCount, builder)
+        let plan = mergePlan(folded, alternative == .Max)
+
+        // Carried as a `UInt32` beside the iteration rather than converted from the array's `Int`:
+        // `childInTreeOrder` wants a `UInt32`.
+        var index: UInt32 = 0
+        var survivors: UInt32 = 0
+        for slot in plan.slots {
+            defer { index += 1 }
+            guard slot.survives else {
+                continue
+            }
+            if let accumulated = slot.accumulated {
+                guard builder.pushLeaf(accumulated.boundaryLeaf) else {
+                    // A contract violation: the leaf is synthesised here, so there is no input
+                    // alternative to blame.
+                    return .declined(nil)
+                }
+            } else if case .declined(let blame) = rewrite(node.childInTreeOrder(index), &builder) {
+                return .declined(blame)
+            }
+            survivors += 1
+        }
+
+        // Expressed as a count: `rebuildSlot` takes all remaining operands, which is what lets
+        // the arity change.
+        return builder.rebuildFrom(node, survivors) ? .pushed : .declined(alternative)
     }
 
     /// The `.unchanged` half of `rewrite`: the node keeps its own alternative and is rebuilt from
