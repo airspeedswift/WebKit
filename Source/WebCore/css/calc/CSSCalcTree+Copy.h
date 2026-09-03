@@ -28,11 +28,15 @@ namespace WebCore {
 namespace CSSCalc {
 
 struct AnchorSide;
+struct Child;
 struct Tree;
 
 // Makes a copy of the tree.
 Tree copy(const Tree&);
 AnchorSide copy(const AnchorSide&);
+// The single implementation of copying one node; copy(Tree) and copy(AnchorSide) both call
+// into it, and it is exposed here so other callers can reuse it too.
+Child copy(const Child&);
 
 } // namespace CSSCalc
 } // namespace WebCore
