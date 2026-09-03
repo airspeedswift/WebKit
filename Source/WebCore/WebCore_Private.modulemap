@@ -47,6 +47,60 @@ framework module WebCore_Private [system] {
         export *
     }
 
+    // `CSSCalc::Type` -- the css-typed-om numeric type, seven `int8_t` exponents and a percent hint
+    // -- AND ITS WHOLE ALGEBRA, for the simplification island's step 9.4.
+    //
+    // THE ANSWER TO "IS CSSCalcType.h SELF-CONTAINED ENOUGH TO BE A BOUNDARY SUBMODULE" IS YES, and
+    // it was compiled rather than reasoned about (`cssprobe/calcsimplify/typemodule/probe-type.swift`,
+    // exit 0). It includes only `<array>`, `<optional>` and `<wtf/Forward.h>`, and it FORWARD-DECLARES
+    // both `CSSUnitType` and `CSS::Category` rather than including their headers -- which is exactly
+    // the property that lets it stand alone here while the two enums arrive through their own
+    // submodules.
+    //
+    // WHAT THIS BUYS, AND WHY IT IS NOT A TRANSCRIPTION. `simplify(Product&)`'s step 9.4 needs
+    // `Type::multiply`, `Type::invert`, `Type::calculationCategory` and
+    // `Type::determinePercentHint`. The island CALLS those four; it does not reimplement them. That
+    // is ~90 lines of integer arithmetic and an eleven-case category switch that exist exactly once
+    // in the program, in CSSCalcType.cpp, and both arms reach the same definitions -- the same
+    // standard `CSSUnitConversions.h` and `wtf.Core.MathExtras` are held to next door. The
+    // alternative shapes were both worse: two or three new upcalls on `CSSCalcSwiftBuilder` (~30
+    // lines of C++ written to facilitate Swift), or a Swift reimplementation (a second
+    // implementation of a spec algorithm, agreeing on every common input and free to diverge on
+    // exponent overflow and on the percent-hint merge).
+    //
+    // `Type` MUST BE SPELLED WITH BACKTICKS ON THE SWIFT SIDE -- ``WebCore.CSSCalc.`Type` `` -- because
+    // bare `WebCore.CSSCalc.Type` parses as the METATYPE of the namespace enum and the diagnostic
+    // ("type 'WebCore.CSSCalc' has no member 'length'") does not name the cause. Recorded here
+    // because it is a property of this header's naming, not of the island.
+    explicit module CSSCalcTypeSwiftTypes {
+        header "CSSCalcType.h"
+        requires cplusplus
+        export *
+    }
+
+    // `CSS::Category`, the eleven-case numeric category, which `Type::determinePercentHint` takes and
+    // `Type::calculationCategory` returns. A submodule of its own rather than a member of the one
+    // above, for the same reason the two island boundaries are separate modules: this header is
+    // WebCore's own vocabulary and is included by hundreds of C++ headers, where CSSCalcType.h is
+    // one island's boundary.
+    //
+    // It carries `#include <wtf/Forward.h>` and nothing else. Compiled, not reasoned about
+    // (`cssprobe/calcsimplify/typemodule/probe-type.swift`).
+    //
+    // IT REPLACES A PRECOMPUTED BYTE ON THE BOUNDARY. `CSSCalcSwiftSimplificationOptions` already
+    // carries `category` as a raw `uint8_t`, and step 9.4's `Category::Percentage` arm needs
+    // `Type::determinePercentHint(options.category)` -- which is *not* derivable from the
+    // `percentageResolveToDimension` bool beside it, because that bool cannot tell `LengthPercentage`
+    // from `AnglePercentage`. The plan of record (CSSCalcSimplificationSwift.swift's `foldHypot` note)
+    // was to add a `percentHintForCategory` byte to the options struct. This makes that unnecessary:
+    // the island reconstructs the real enum from the byte it already receives and calls the real
+    // function, so no new production C++ was written for it.
+    explicit module CSSPrimitiveNumericCategorySwiftTypes {
+        header "CSSPrimitiveNumericCategory.h"
+        requires cplusplus
+        export *
+    }
+
     module Core {
         // Workaround for rdar://173516139: PrivateHeaders includes a header
         // "WorkAround173516139.h" that the build system regenerates whenever
@@ -77,6 +131,8 @@ framework module WebCore_Private [system] {
         exclude header "CSSUnitType.h"
         exclude header "CSSUnitConversions.h"
         exclude header "CSSCalcSwiftTypes.h"
+        exclude header "CSSCalcType.h"
+        exclude header "CSSPrimitiveNumericCategory.h"
 
         module * {
             export *
