@@ -23,8 +23,8 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// The island's boundary types, for `WebCore.CSSUnitType`. Needed here in its own right even
-// though CSSTokenizerSwift.swift next door imports the same module: an import binds the FILE,
+// `WebCore.CSSUnitType`, which is the one C++ type this file names. Needed here in its own right
+// even though CSSTokenizerSwift.swift next door imports the same module: an import binds the FILE,
 // not the module, so a `public import` there re-exports to this module's clients but makes
 // nothing visible in this file. Until this file named a C++ type it needed no import at all,
 // which is why one was never here. Without it `WebCore` resolves to the Swift module of that
@@ -33,7 +33,12 @@
 //
 // `internal`, not `public`: nothing this file exposes names the type. The two `@_expose(Cxx)`
 // differential entries at the bottom return its `rawValue`, a `UInt8`.
-internal import WebCore_Private.CSSTokenizerSwiftTypes
+//
+// THE MODULE IS `CSSUnitsSwiftTypes` AND NOT `CSSTokenizerSwiftTypes`, which is where CSSUnitType.h
+// used to live. It moved beside the unit-conversion constants when the calc simplification island
+// needed both -- a header may appear in exactly one submodule of a module map -- and this file wants
+// nothing else from the tokenizer's boundary, so the import narrowed rather than doubled.
+internal import WebCore_Private.CSSUnitsSwiftTypes
 
 // MARK: - The CSS unit-type trie
 //

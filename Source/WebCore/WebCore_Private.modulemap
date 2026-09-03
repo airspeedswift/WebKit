@@ -4,6 +4,26 @@ framework module WebCore_Private [system] {
         export *
     }
 
+    // The CSS unit vocabulary, shared by the tokenizer island and the two calc islands and owned by
+    // neither -- so it is a third boundary submodule rather than a member of either of theirs.
+    //
+    // CSSUnitType.h MOVED HERE out of CSSTokenizerSwiftTypes below, and it had to: a header may
+    // appear in exactly one submodule of a module map, so the calc simplification island could not
+    // be given the unit constants beside the enum any other way. The alternative -- letting the calc
+    // island import CSSTokenizerSwiftTypes -- would hand it CSSParserTokenBits.h and the tokenizer's
+    // whole boundary, which is the opposite of what these submodules are for.
+    //
+    // CSSUnitConversions.h is the eleven `constexpr double` conversion constants, split out of
+    // CSSUnits.h in the same shape and for the same reason CSSUnitType.h was: `canonicalize`'s
+    // fourteen arithmetic cases are in Swift now and they multiply by these, so the island reads the
+    // same constants the C++ reads rather than transcribing them. See CSSUnitConversions.h.
+    explicit module CSSUnitsSwiftTypes {
+        header "CSSUnitType.h"
+        header "CSSUnitConversions.h"
+        requires cplusplus
+        export *
+    }
+
     // The Swift island's boundary, its own module so that the island can import
     // *only* what it is allowed to see rather than the Core umbrella below. Walking
     // that umbrella reaches JavaScriptCore's private headers, where two inner structs
@@ -13,10 +33,6 @@ framework module WebCore_Private [system] {
     explicit module CSSTokenizerSwiftTypes {
         header "CSSTokenizerSwiftTypes.h"
         header "CSSParserTokenBits.h"
-        // The real CSSUnitType, so the island imports the enum instead of mirroring it. Split
-        // out of CSSUnits.h to be self-contained; that header could not be taken directly,
-        // being neither self-contained nor free of WTF. See CSSUnitType.h.
-        header "CSSUnitType.h"
         requires cplusplus
         export *
     }
@@ -59,6 +75,7 @@ framework module WebCore_Private [system] {
         exclude header "CSSTokenizerSwiftTypes.h"
         exclude header "CSSParserTokenBits.h"
         exclude header "CSSUnitType.h"
+        exclude header "CSSUnitConversions.h"
         exclude header "CSSCalcSwiftTypes.h"
 
         module * {

@@ -1965,13 +1965,32 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
         }));
         return true;
 
+    case CSSCalcSwiftNodeKind::NonCanonicalDimension:
+        // THE SECOND ALTERNATIVE `makeNumeric` CANNOT PRODUCE FAITHFULLY, and the reason is the one
+        // simplifycheck's phase I found: `makeNumeric` is a mapping from UNIT to alternative, so it
+        // cannot express "this dimension stays a `NonCanonicalDimension`" for a unit it classifies
+        // as something else. Fourteen units are exactly that -- the six canonical dimensional units
+        // (`Px` `Deg` `S` `Hz` `Dppx` `Fr`), the three non-dimensional ones (`Number` `Integer`
+        // `Percentage`) and the five non-numeric ones (`Calc` `CalcPercentageWithAngle`
+        // `CalcPercentageWithLength` `QuirkyEm` `Unknown`) -- and routing them through `makeNumeric`
+        // rewrote the leaf: `Px` became a `CanonicalDimension`, `Number` a `Number`, and the five
+        // non-numeric ones hit `makeNumeric`'s `ASSERT_NOT_REACHED` and became `Number { 0 }`
+        // (CSSCalcTree.cpp:276-288). The C++ arm's `simplify(NonCanonicalDimension&)` copies the node
+        // through UNCHANGED in every one of those cases, so the island diverged from it on all
+        // fourteen, and in an assertions build it also fired an assert the C++ arm never reaches.
+        //
+        // `unit` is the only member `NonCanonicalDimension` has beside `value` (CSSCalcTree.h:138),
+        // so nothing is re-derived here and no table crosses: this is the leaf the island already
+        // named, built as named, which is strictly less inference than the call it replaces.
+        m_operands->value.append(makeChild(NonCanonicalDimension { .value = leaf.value, .unit = static_cast<CSSUnitType>(leaf.unitType) }));
+        return true;
+
     case CSSCalcSwiftNodeKind::Number:
     case CSSCalcSwiftNodeKind::CanonicalDimension:
-    case CSSCalcSwiftNodeKind::NonCanonicalDimension:
         // `makeNumeric` owns the classification, including which `CanonicalDimension::Dimension` a
         // canonical unit means -- so `Dimension` never crosses the boundary and there is no second
         // place in the program where "Dppx means Resolution" is written down. `unitType` is
-        // authoritative for these three; `kind` is the island stating what it believes it is
+        // authoritative for these two; `kind` is the island stating what it believes it is
         // building, and the differential is what checks the two agree.
         m_operands->value.append(makeNumeric(leaf.value, static_cast<CSSUnitType>(leaf.unitType)));
         return true;
@@ -2125,17 +2144,34 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, u
     return out;
 }
 
-CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::canonicalizeUnit(double value, uint16_t unitType) const
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double value, uint16_t unitType) const
 {
-    // The same call `simplify(NonCanonicalDimension&)` makes at :510, so the two arms share one unit
-    // table by construction. CSSCalcSwiftTypes.h records at length why this is an upcall rather than
-    // a port, and the first of the three reasons is that Swift cannot see `CSS::pixelsPerCm` at all.
+    // `canonicalize`'s `tryMakeCanonical` (`:181`-`:187`), and ONLY that. The other twenty-eight of
+    // its seventy cases are decided in Swift now -- see `canonicalizedDimension` in
+    // CSSCalcSimplificationSwift.swift -- so what is left here is the one thing that cannot cross:
+    // `Style::resolveLength` needs a `CSSToLengthConversionData`, which carries a style, a realised
+    // font cascade and a viewport.
     //
-    // The result is expressed as a canonical CSSUnitType rather than as a
+    // The island never names which forty-two units reach this, and does not have to: its `switch`
+    // names the twenty-eight it decides and this is its `default` arm, so `CSS::toLengthUnit` is
+    // still the program's only statement of that membership set.
+    //
+    // BOTH OPTIONALS ARE CHECKED, and the first of them is a safety improvement on the arm this
+    // replaces rather than a transcription of it. `canonicalize` writes `*CSS::toLengthUnit(root.unit)`
+    // (`:245`), which is sound there only because the surrounding `switch` has already established
+    // that `root.unit` is one of the forty-two; here the unit arrives as a `uint16_t` across a
+    // boundary, so nothing in the type system says so and an unchecked dereference would be UB on an
+    // input the island could construct. It reports "no answer" instead, which is the outcome the
+    // island already handles: the dimension stays as it is.
+    //
+    // Reported exactly as the old `canonicalizeUnit` reported it, in exactly the same shape and on
+    // exactly as many lines -- an `if` with an initializer, the resolved case first, the unresolved
+    // one as the fallthrough: a canonical `CSSUnitType` rather than a
     // `CanonicalDimension::Dimension`, so the reverse mapping stays `makeNumeric`'s and `Dimension`
-    // still never crosses.
-    if (auto canonical = canonicalize(NonCanonicalDimension { .value = value, .unit = static_cast<CSSUnitType>(unitType) }, m_options->conversionData))
-        return { .value = canonical->value, .unitType = static_cast<uint16_t>(toCSSUnit(canonical->dimension)), .resolved = true, .alternative = CSSCalcSwiftAlternative::CanonicalDimension };
+    // still never crosses; and `toCSSUnit` is CALLED rather than `CSSUnitType::Px` written out, so
+    // there is no second place in the program that says a resolved length is measured in pixels.
+    if (auto lengthUnit = CSS::toLengthUnit(static_cast<CSSUnitType>(unitType)); lengthUnit && m_options->conversionData)
+        return { .value = Style::resolveLength(value, *lengthUnit, *m_options->conversionData), .unitType = static_cast<uint16_t>(toCSSUnit(CanonicalDimension::Dimension::Length)), .resolved = true, .alternative = CSSCalcSwiftAlternative::CanonicalDimension };
     return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number };
 }
 

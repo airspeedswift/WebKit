@@ -1704,6 +1704,64 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 
+// ENTRIES 11 AND 12 -- the PARAMETER axis of the canonicalization port.
+//
+// WHY A SECOND ORACLE EXISTS BESIDE THE TREE-LEVEL ONE. `canonicalize`
+// (CSSCalcTree+Simplification.cpp:169-287) is a seventy-case `switch` over `CSSUnitType`, and the
+// sweep above cannot cover it: a unit only reaches `simplify(NonCanonicalDimension&)` if some
+// expression in the corpus is written in it, and the corpus names about a dozen of the seventy.
+// Nine hand-written corpora at one value of a parameter is CORPUS coverage, not PARAMETER coverage,
+// and the content-extensions oracle already demonstrated what that misses -- an island that was
+// catastrophically broken passed a differential over ~190,000 nodes because every capture ran at one
+// value of `maxNFASize`. So this entry takes the unit as an ARGUMENT and the harness sweeps all
+// seventy enumerators, boundary values included.
+//
+// FOUR ARMS, NOT TWO, and each one is there because it can fail where the others cannot:
+//
+//   1. the harness's OWN arithmetic, computed from <WebCore/CSSUnitConversions.h> and
+//      <wtf/MathExtras.h> -- the same headers both ported arms read. This is the arm that makes the
+//      constants checkable at all; a differential between two implementations that both multiply by
+//      the same wrong constant agrees.
+//   2. `canonicalize` ITSELF, called directly here, with nothing between it and this struct. The
+//      function under port, unmediated by a tree walk that could mask it.
+//   3. the C++ SIMPLIFIER over a `NonCanonicalDimension`-rooted tree, which is how `canonicalize` is
+//      actually reached in production.
+//   4. the SWIFT ISLAND over the same tree object -- `canonicalizedDimension`, the port.
+//
+// The unit crosses as a `uint32_t` rather than as `CSSUnitType` so that the harness can sweep values
+// OUTSIDE the enum too; `built` is 0 for those, and it is a reported outcome rather than an assert.
+struct CSSCalcCanonicalizationComparison {
+    // Arm 3: the leaf the C++ simplifier produced.
+    double cppValue;
+    // Arm 4: the leaf the Swift island produced.
+    double swiftValue;
+    // Arm 2: `canonicalize`'s own answer. Meaningful only when `referenceResolved`.
+    double referenceValue;
+    // `toCSSUnit` of each arm's result leaf, as a `CSSUnitType` underlying value.
+    uint32_t cppUnitType;
+    uint32_t swiftUnitType;
+    uint32_t referenceUnitType;
+    // `Node`'s alternative index of each arm's result root, so "it stayed a NonCanonicalDimension"
+    // and "it became a CanonicalDimension" are distinguishable without inspecting the value.
+    uint32_t cppAlternative;
+    uint32_t swiftAlternative;
+    // Did `canonicalize` return a value at all. The C++'s `nullopt` for a relative unit with no
+    // conversion data, and for the fourteen units a `NonCanonicalDimension` can never hold.
+    uint32_t referenceResolved;
+    // Did the island decline the tree. A decline is invisible in an output comparison, so it is
+    // reported rather than inferred.
+    uint32_t swiftDeclined;
+    // 0 = `unitRaw` is outside `CSSUnitType`, so no tree was built and every field above is inert.
+    uint32_t built;
+};
+
+static_assert(sizeof(CSSCalcCanonicalizationComparison) == 56);
+static_assert(offsetof(CSSCalcCanonicalizationComparison, cppUnitType) == 24);
+static_assert(offsetof(CSSCalcCanonicalizationComparison, built) == 52);
+
+WEBCORE_EXPORT CSSCalcCanonicalizationComparison webCoreCSSCalcCompareCanonicalization(double, uint32_t, const CSSCalcSimplificationOptionsSpec*);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcUnitTypeCount(void);
+
 static std::atomic<uint64_t> s_simplifyCompareCalls;
 
 // THE BRIDGE KEEPS ITS OWN DECLINE COUNTER rather than forwarding
@@ -1714,6 +1772,24 @@ static std::atomic<uint64_t> s_simplifyCompareCalls;
 // cross-check on every run and the failure would read as a decline the harness missed. What is
 // counted here is exactly "a comparison whose reported answer was a decline".
 static std::atomic<unsigned> s_simplifyComparisonDeclines;
+
+// One `SimplificationOptions` from one spec, for the two comparison entries below AND for
+// `webCoreCSSCalcCompareCanonicalization`. Factored out when the third caller appeared rather than
+// copied: three spellings of the fixture's options is three things that can drift, and the
+// canonicalization sweep's whole point is that its conversionData is the SAME fixture the
+// tree-level sweep uses.
+static CSSCalc::SimplificationOptions makeSimplificationOptions(const CSSCalcSimplificationOptionsSpec* spec)
+{
+    return CSSCalc::SimplificationOptions {
+        .category = static_cast<WebCore::CSS::Category>(spec->category),
+        .range = WebCore::CSS::Range { spec->rangeMinimum, spec->rangeMaximum },
+        .conversionData = spec->conversionDataKind
+            ? std::optional<CSSToLengthConversionData> { CSSToLengthConversionData { simplificationStyleAtFontSize(spec->conversionDataKind == 2 ? 32.0f : 16.0f), nullptr, nullptr, nullptr, nullptr } }
+            : std::nullopt,
+        .symbolTable = simplificationSymbolTable(spec->symbolTableKind),
+        .allowZeroValueLengthRemovalFromSum = !!spec->allowZeroValueLengthRemovalFromSum,
+    };
+}
 
 // Everything the two comparison entries share. Both arms run on the same input `Tree` object inside
 // one call, which is what makes it impossible to pair a C++ answer for one case with a Swift answer
@@ -1736,15 +1812,7 @@ static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree
         .requiresConversionData = inputTree.requiresConversionData,
     };
 
-    auto options = CSSCalc::SimplificationOptions {
-        .category = static_cast<WebCore::CSS::Category>(spec->category),
-        .range = WebCore::CSS::Range { spec->rangeMinimum, spec->rangeMaximum },
-        .conversionData = spec->conversionDataKind
-            ? std::optional<CSSToLengthConversionData> { CSSToLengthConversionData { simplificationStyleAtFontSize(spec->conversionDataKind == 2 ? 32.0f : 16.0f), nullptr, nullptr, nullptr, nullptr } }
-            : std::nullopt,
-        .symbolTable = simplificationSymbolTable(spec->symbolTableKind),
-        .allowZeroValueLengthRemovalFromSum = !!spec->allowZeroValueLengthRemovalFromSum,
-    };
+    auto options = makeSimplificationOptions(spec);
 
     result.inputKindMask = alternativeMaskOfSubtree(input.root);
     result.inputNodeCount = nodeCountOfSubtree(input.root);
@@ -1923,6 +1991,85 @@ WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void)
     return differs(metrics16.xHeight(), metrics32.xHeight())
         && differs(metrics16.capHeight(), metrics32.capHeight())
         && metrics16.lineSpacing() != metrics32.lineSpacing();
+}
+
+// ENTRY 11. One unit, one value, four arms. See the struct above for why there are four.
+WEBCORE_EXPORT CSSCalcCanonicalizationComparison webCoreCSSCalcCompareCanonicalization(double value, uint32_t unitRaw, const CSSCalcSimplificationOptionsSpec* spec)
+{
+    // Counted on the same tally as the tree-level entries, so the harness's cross-check (guard 2)
+    // covers this phase too rather than being disabled for it.
+    s_simplifyCompareCalls.fetch_add(1, std::memory_order_relaxed);
+
+    CSSCalcCanonicalizationComparison result { };
+    // REPORTED, NOT ASSERTED. The harness deliberately offers values outside the enum; an
+    // `ASSERT_NOT_REACHED` here would make the boundary case untestable in a debug build and a
+    // `static_cast` of it would be UB.
+    if (unitRaw > static_cast<uint32_t>(CSSUnitType::QuirkyEm))
+        return result;
+    result.built = 1;
+
+    auto unit = static_cast<CSSUnitType>(unitRaw);
+    auto options = makeSimplificationOptions(spec);
+
+    // ARM 2: the function under port, called directly and with the SAME conversion data the two tree
+    // arms below get -- read off `options` rather than rebuilt, so the three cannot disagree about
+    // which fixture they used.
+    if (auto canonical = CSSCalc::canonicalize(CSSCalc::NonCanonicalDimension { .value = value, .unit = unit }, options.conversionData)) {
+        result.referenceResolved = 1;
+        result.referenceValue = canonical->value;
+        result.referenceUnitType = static_cast<uint32_t>(CSSCalc::toCSSUnit(canonical->dimension));
+    }
+
+    // ARMS 3 AND 4, over ONE input `Tree` object, which is what makes it impossible to pair one
+    // arm's answer for one unit with the other's for another.
+    auto root = CSSCalc::makeChild(CSSCalc::NonCanonicalDimension { .value = value, .unit = unit });
+    auto type = CSSCalc::getType(root);
+    auto input = CSSCalc::Tree { .root = WTF::move(root), .type = type, .stage = spec->stage ? CSSCalc::Stage::Computed : CSSCalc::Stage::Specified };
+
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSimplificationDeclineCount();
+    auto cppTree = CSSCalc::copyAndSimplify(input, options, CSSCalc::Simplifier::Cpp);
+    auto swiftTree = CSSCalc::copyAndSimplify(input, options, CSSCalc::Simplifier::Swift);
+    result.swiftDeclined = CSSCalc::webCoreCSSCalcSimplificationDeclineCount() != declinesBefore ? 1 : 0;
+    // ON THE SAME TALLY THE TREE-LEVEL ENTRIES USE, so the harness's decline cross-check (guard 11)
+    // covers this phase instead of being blind to it. Each call runs the Swift arm exactly ONCE --
+    // there are no idempotence probes here -- so the counter advances by at most one per case and the
+    // reason the tree-level entries need their own counter does not apply.
+    if (result.swiftDeclined)
+        s_simplifyComparisonDeclines.fetch_add(1, std::memory_order_relaxed);
+
+    // The result leaf, read off the variant tag rather than guessed from the unit. The catch-all is
+    // unreachable for a `NonCanonicalDimension` root -- neither simplifier can turn a numeric leaf
+    // into an operation -- and it leaves the value at 0 with the alternative still reported, so an
+    // arm that somehow did would show up as a disagreement rather than as garbage.
+    auto readLeaf = [](const CSSCalc::Tree& tree, double& outValue, uint32_t& outUnit, uint32_t& outAlternative) {
+        outAlternative = static_cast<uint32_t>(tree.root.value.index());
+        WTF::switchOn(tree.root.value,
+            [&]<CSSCalc::Numeric T>(const T& numeric) {
+                outValue = numeric.value;
+                outUnit = static_cast<uint32_t>(CSSCalc::toCSSUnit(numeric));
+            },
+            [&](const auto&) { }
+        );
+    };
+    readLeaf(cppTree, result.cppValue, result.cppUnitType, result.cppAlternative);
+    readLeaf(swiftTree, result.swiftValue, result.swiftUnitType, result.swiftAlternative);
+    return result;
+}
+
+// ENTRY 12. How many `CSSUnitType` enumerators there are, so the sweep's width comes from WebCore.
+//
+// SPELLED "THE LAST ENUMERATOR + 1", WHICH IS THE SPELLING THIS FILE WARNS ABOUT, and saying so is
+// better than implying otherwise. `webCoreCSSCalcChildAlternativeCount` can do better because
+// `std::variant_size_v` counts the list; `CSSUnitType` has no such handle, and `QuirkyEm` carries the
+// comment that it is last. So this catches an enumerator inserted in the middle or removed -- the
+// likelier edit -- and would miss one APPENDED after `QuirkyEm`. Closing that properly needs a count
+// in CSSUnitType.h, which is a change to a header this island shares with the tokenizer.
+//
+// It is still strictly better than the harness naming 70: the harness asserts the two agree, so a
+// removal or a mid-list insertion stops the run rather than silently shortening the sweep.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcUnitTypeCount(void)
+{
+    return static_cast<uint32_t>(CSSUnitType::QuirkyEm) + 1;
 }
 
 } // extern "C"

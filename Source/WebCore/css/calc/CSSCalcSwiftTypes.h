@@ -736,7 +736,8 @@ struct CSSCalcSwiftNumericResult {
     // For `resolveSymbol` this is `toCSSUnit` OF THE LEAF `makeNumeric` BUILT, not the unit that was
     // asked about, so that `Integer` comes back as `Number` and the island's round trip back through
     // `pushLeaf` -- which calls `makeNumeric` again -- lands on the same alternative. For
-    // `canonicalizeUnit` it is `toCSSUnit(canonical->dimension)`.
+    // `resolveRelativeLength` it is `toCSSUnit(canonical->dimension)`, which for a resolved relative
+    // length is always `CSSUnitType::Px`.
     uint16_t unitType;
     // False means "no answer", which for both lookups is a normal outcome and not an error: an
     // unresolved `<calc-keyword>` and a `1em` with no conversion data both simply stay as they are.
@@ -758,7 +759,7 @@ struct CSSCalcSwiftNumericResult {
     // comes back in registers. Held to that by the `static_assert` below, so a future field that
     // does grow it has to say so.
     //
-    // Inert (`Number`) when `resolved` is false. `canonicalizeUnit` always answers
+    // Inert (`Number`) when `resolved` is false. `resolveRelativeLength` always answers
     // `CanonicalDimension` when it resolves, by construction -- that is what canonicalizing is --
     // and it is filled there anyway rather than left to the caller's memory.
     CSSCalcSwiftAlternative alternative;
@@ -785,8 +786,9 @@ struct CSSCalcSwiftSimplificationOptions {
     bool allowZeroValueLengthRemovalFromSum;
     // Whether `options.conversionData` holds a value. The island cannot be given
     // `CSSToLengthConversionData` and does not want it: every use of it is inside
-    // `canonicalizeUnit` and the two sibling-function upcalls. What the island needs is only
-    // whether a canonicalization COULD succeed, which is this bool.
+    // `resolveRelativeLength` and the two sibling-function upcalls. What the island needs is only
+    // whether a canonicalization COULD succeed, which is this bool -- and A1 does not even need that,
+    // because `resolveRelativeLength` answering `resolved == false` says it.
     bool hasConversionData;
     // PRECOMPUTED IN C++ ON PURPOSE, and this is the one derived field here. It is
     // `percentageResolveToDimension(options)` (CSSCalcTree+Simplification.cpp:80-101), an
@@ -905,35 +907,34 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // its own choice is reported. See `CSSCalcSwiftNumericResult::alternative`.
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveSymbol(uint16_t valueID, uint16_t unit) const;
 
-    // THE SECOND UPCALL: `canonicalize(NonCanonicalDimension, options.conversionData)`
-    // (CSSCalcTree+Simplification.cpp:169-287).
+    // THE SECOND UPCALL: `Style::resolveLength(value, *CSS::toLengthUnit(unit), *conversionData)`,
+    // which is `canonicalize`'s `tryMakeCanonical` (CSSCalcTree+Simplification.cpp:181-:187).
     //
-    // STAYS IN C++, and this is a decision rather than a default. Three things decide it, and the
-    // first is dispositive on its own:
+    // FORTY-TWO OF `canonicalize`'s SEVENTY CASES, and only those: the font-, viewport- and
+    // container-relative lengths. The other twenty-eight are decided in Swift -- fourteen multiply by
+    // a `constexpr double` the island now reads from CSSUnitConversions.h and wtf/MathExtras.h, and
+    // fourteen can never reach a `NonCanonicalDimension` at all. See
+    // `CSSCalcSimplificationSwift.canonicalizedDimension`, which is `canonicalize` rather than a call
+    // to it.
     //
-    //  1. Swift cannot see the constants. `CSS::pixelsPerCm` and its nine siblings are in
-    //     CSSUnits.h, which is in the `Core` umbrella module the islands may not import -- and it
-    //     cannot be given a module of its own as CSSUnitType.h was, because it is not
-    //     self-contained (it declares `ASCIILiteral unitTypeString(CSSUnitType)` at :83 with no
-    //     include that provides `ASCIILiteral`). `degreesPerRadianDouble` is in wtf/MathExtras.h,
-    //     which no island imports either. Checked, not assumed.
-    //  2. Forty of the seventy cases resolve nothing themselves: they forward to
-    //     `Style::resolveLength` over `CSSToLengthConversionData`, which is an upcall whatever
-    //     happens. So a Swift port would move fourteen constant multiplications across and would
-    //     have to transcribe the forty-unit "is this a font/viewport/container-relative length"
-    //     membership set to know which ones to forward -- which is `CSS::toLengthUnit`
-    //     (CSSPrimitiveNumericUnits.h:609) restated, i.e. a duplicated table, which is the one
-    //     thing this port counts as goop by name.
-    //  3. It would not be deletable either way. `canonicalize` has a second caller in
-    //     CSSCalcTree+Evaluation.cpp:143, so all 119 lines stay compiled in whatever the island
-    //     does, and a Swift copy would be an eighty-line SECOND implementation of a table that is
-    //     still there -- with the differential's agreement then a coincidence rather than a
-    //     construction.
+    // THESE FORTY-TWO STAY IN C++ FOR ONE REASON: `Style::resolveLength` needs
+    // `CSSToLengthConversionData`, which carries a `RenderStyle`, a font cascade with realised
+    // metrics, and a viewport. That is not reducible to anything that crosses a POD boundary, and it
+    // is the same reason `resolveSymbol` above is an upcall -- the island names what it wants and C++
+    // owns the object that answers.
     //
-    // The answer is `nullopt` -- `resolved == false` -- exactly when the C++ returns `nullopt`,
-    // which for the relative units means "no conversion data", and the island leaves the dimension
-    // alone in that case just as `simplify(NonCanonicalDimension&)` does.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult canonicalizeUnit(double value, uint16_t unitType) const;
+    // THE ISLAND DOES NOT NAME THE FORTY-TWO, and that is what makes this port cost no duplicated
+    // table. Enumerating them in Swift would be `CSS::toLengthUnit`
+    // (CSSPrimitiveNumericUnits.h:609) restated; instead the island's `switch` names the
+    // twenty-eight it decides and this upcall is its `default` arm, so the membership set exists
+    // exactly once, here, where it always did.
+    //
+    // The answer is `nullopt` -- `resolved == false` -- exactly when the C++ returns `nullopt`, which
+    // for these units means "no conversion data", and the island leaves the dimension alone in that
+    // case just as `simplify(NonCanonicalDimension&)` does. `alternative` is still reported for the
+    // reason `CSSCalcSwiftNumericResult::alternative` gives: it is `makeNumeric`'s own choice, so the
+    // island never classifies a `CSSUnitType` itself.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const;
 
 private:
     CSSCalcSwiftOperandStack* m_operands;
