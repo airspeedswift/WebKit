@@ -28,8 +28,10 @@
 // file. Without it, `WebCore` resolves to the Swift module of that name and the error reads
 // "no type named 'CSSUnitType' in module 'WebCore'" rather than pointing at a missing import.
 //
-// `internal`, not `public`: nothing this file exposes names the type.
-internal import WebCore_Private.CSSTokenizerSwiftTypes
+// `internal`, not `public`: nothing this file exposes names the type. The module is
+// `CSSUnitsSwiftTypes`, not `CSSTokenizerSwiftTypes`: `CSSUnitType.h` moved beside the
+// unit-conversion constants, which share its submodule, and a header can be in only one.
+internal import WebCore_Private.CSSUnitsSwiftTypes
 
 // MARK: - The CSS unit-type trie
 //

@@ -4,6 +4,25 @@ framework module WebCore_Private [system] {
         export *
     }
 
+    // The CSS unit vocabulary, shared by the tokenizer and calc boundary modules and owned
+    // by neither, so it is a third boundary submodule rather than a member of either.
+    //
+    // A header may appear in exactly one submodule of a module map, so CSSUnitType.h lives
+    // here rather than in CSSTokenizerSwiftTypes below: putting it there would force the
+    // calc simplification boundary to import CSSTokenizerSwiftTypes to reach it, pulling in
+    // CSSParserTokenBits.h and the tokenizer's whole boundary along with it.
+    //
+    // CSSUnitConversions.h is the eleven `constexpr double` conversion constants, split out
+    // of CSSUnits.h for the same reason CSSUnitType.h was: calc's unit canonicalization in
+    // Swift multiplies by these and reads the same constants C++ does rather than
+    // transcribing them. See CSSUnitConversions.h.
+    explicit module CSSUnitsSwiftTypes {
+        header "CSSUnitType.h"
+        header "CSSUnitConversions.h"
+        requires cplusplus
+        export *
+    }
+
     // The Swift boundary module for the CSS tokenizer, so a Swift file imports only
     // what it needs rather than the Core umbrella below. Walking that umbrella reaches
     // JavaScriptCore's private headers, where two inner structs are defined in explicit
@@ -13,10 +32,6 @@ framework module WebCore_Private [system] {
     explicit module CSSTokenizerSwiftTypes {
         header "CSSTokenizerSwiftTypes.h"
         header "CSSParserTokenBits.h"
-        // The real CSSUnitType, imported here instead of mirrored. Split out of
-        // CSSUnits.h to be self-contained; that header is neither self-contained nor
-        // free of WTF. See CSSUnitType.h.
-        header "CSSUnitType.h"
         requires cplusplus
         export *
     }
@@ -58,6 +73,7 @@ framework module WebCore_Private [system] {
         exclude header "CSSTokenizerSwiftTypes.h"
         exclude header "CSSParserTokenBits.h"
         exclude header "CSSUnitType.h"
+        exclude header "CSSUnitConversions.h"
         exclude header "CSSCalcSwiftTypes.h"
 
         module * {

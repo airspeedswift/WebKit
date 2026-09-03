@@ -601,7 +601,8 @@ struct CSSCalcSwiftNumericResult {
     // For `resolveSymbol` this is `toCSSUnit` of the leaf `makeNumeric` built, not the unit that was
     // asked about, so that `Integer` comes back as `Number` and the round trip back through
     // `pushLeaf` -- which calls `makeNumeric` again -- lands on the same alternative. For
-    // `canonicalizeUnit` it is `toCSSUnit(canonical->dimension)`.
+    // `resolveRelativeLength` it is `toCSSUnit(canonical->dimension)`, which for a resolved relative
+    // length is always `CSSUnitType::Px`.
     uint16_t unitType;
     // False means "no answer", which for both lookups is a normal outcome and not an error: an
     // unresolved `<calc-keyword>` and a `1em` with no conversion data both simply stay as they are.
@@ -615,7 +616,7 @@ struct CSSCalcSwiftNumericResult {
     // Free in bytes: 8 + 2 + 1 + 1 = 12 live bytes in a struct that aligns to 8, so `sizeof` was
     // 16 before this field and is 16 after, held by the `static_assert` below.
     //
-    // Inert (`Number`) when `resolved` is false. `resolveRelativeLength` always answers
+    // Inert (`Number`) when `resolved` is false. `canonicalizeUnit` always answers
     // `CanonicalDimension` when it resolves, by construction, and fills it there anyway.
     CSSCalcSwiftAlternative alternative;
 };
@@ -641,8 +642,9 @@ struct CSSCalcSwiftSimplificationOptions {
     bool allowZeroValueLengthRemovalFromSum;
     // Whether `options.conversionData` holds a value. Swift cannot be given
     // `CSSToLengthConversionData` and does not need it: every use of it is inside
-    // `canonicalizeUnit` and the two sibling-function upcalls. What Swift needs is only whether a
-    // canonicalization could succeed, which is this bool.
+    // `resolveRelativeLength` and the two sibling-function upcalls. `resolveRelativeLength`
+    // answering `resolved == false` already says whether a canonicalization could succeed, so this
+    // bool exists for the two sibling-function upcalls.
     bool hasConversionData;
     // Precomputed in C++ deliberately: it is `percentageResolveToDimension(options)`
     // (CSSCalcTree+Simplification.cpp:80-101), an eleven-case `switch` over `CSS::Category` that is
@@ -748,21 +750,24 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // Swift would mean transcribing `makeNumeric`'s seventy cases.
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveSymbol(uint16_t valueID, uint16_t unit) const;
 
-    // `canonicalize(NonCanonicalDimension, options.conversionData)`
-    // (CSSCalcTree+Simplification.cpp:169-287).
+    // `Style::resolveLength(value, *CSS::toLengthUnit(unit), *conversionData)`, which is
+    // `canonicalize`'s `tryMakeCanonical` (CSSCalcTree+Simplification.cpp:181-:187).
     //
-    // Stays in C++: Swift cannot see the constants (`CSS::pixelsPerCm` and its nine siblings are
-    // in the `Core` umbrella module Swift may not import); forty of the seventy cases forward to
-    // `Style::resolveLength` over `CSSToLengthConversionData`, an upcall whatever happens, and
-    // porting the rest would mean transcribing the forty-unit relative-length membership set
-    // (`CSS::toLengthUnit`, CSSPrimitiveNumericUnits.h:609), i.e. a duplicated table; and it would
-    // not be deletable either way, since `canonicalize` has a second caller in
-    // CSSCalcTree+Evaluation.cpp:143.
+    // Forty-two of `canonicalize`'s seventy cases: the font-, viewport- and container-relative
+    // lengths. The other twenty-eight are decided in Swift -- fourteen multiply by a `constexpr
+    // double`, and fourteen can never reach a `NonCanonicalDimension` at all.
+    //
+    // These forty-two stay in C++ because `Style::resolveLength` needs
+    // `CSSToLengthConversionData`, which carries a `RenderStyle`, a font cascade with realised
+    // metrics, and a viewport -- not reducible to anything that crosses a POD boundary. They are
+    // never named on the Swift side either: the `switch` in Swift names the twenty-eight it
+    // decides and this upcall is its `default` arm, so the membership set exists exactly once,
+    // here, where it always did.
     //
     // The answer is `nullopt` -- `resolved == false` -- exactly when the C++ returns `nullopt`,
-    // which for the relative units means "no conversion data", and the dimension is left alone in
-    // that case just as `simplify(NonCanonicalDimension&)` does.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult canonicalizeUnit(double value, uint16_t unitType) const;
+    // which for these units means "no conversion data", and the dimension is left alone.
+    // `alternative` is still reported for the reason `CSSCalcSwiftNumericResult::alternative` gives.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const;
 
 private:
     CSSCalcSwiftOperandStack* m_operands;

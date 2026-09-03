@@ -1948,12 +1948,24 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
         }));
         return true;
 
+    case CSSCalcSwiftNodeKind::NonCanonicalDimension:
+        // `makeNumeric` cannot produce this alternative faithfully: it maps unit to alternative, so it
+        // cannot express "stays a `NonCanonicalDimension`" for a unit it classifies as something
+        // else -- the six canonical dimensional units, the three non-dimensional ones and the five
+        // non-numeric ones, fourteen in total. `simplify(NonCanonicalDimension&)` copies the node
+        // through unchanged in all of those cases, so this leaf is built directly instead of via
+        // `makeNumeric`.
+        //
+        // `unit` is the only member `NonCanonicalDimension` has beside `value` (CSSCalcTree.h:138),
+        // so nothing is re-derived here and no table crosses.
+        m_operands->value.append(makeChild(NonCanonicalDimension { .value = leaf.value, .unit = static_cast<CSSUnitType>(leaf.unitType) }));
+        return true;
+
     case CSSCalcSwiftNodeKind::Number:
     case CSSCalcSwiftNodeKind::CanonicalDimension:
-    case CSSCalcSwiftNodeKind::NonCanonicalDimension:
         // `makeNumeric` owns the classification, including which `CanonicalDimension::Dimension` a
         // canonical unit means, so `Dimension` never crosses the boundary. `unitType` is
-        // authoritative for these three; `kind` states what Swift believes it is building, and the
+        // authoritative for these two; `kind` states what Swift believes it is building, and the
         // differential test checks the two agree.
         m_operands->value.append(makeNumeric(leaf.value, static_cast<CSSUnitType>(leaf.unitType)));
         return true;
@@ -2101,17 +2113,31 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, u
     return out;
 }
 
-CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::canonicalizeUnit(double value, uint16_t unitType) const
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double value, uint16_t unitType) const
 {
-    // The same call `simplify(NonCanonicalDimension&)` makes at :510, so the two share one unit table
-    // by construction. This is an upcall rather than a port because Swift cannot see
-    // `CSS::pixelsPerCm` and the other unit-conversion constants.
+    // `canonicalize`'s `tryMakeCanonical` (`:181`-`:187`), and only that. The other twenty-eight of
+    // its seventy cases are decided in Swift -- see `canonicalizedDimension` in
+    // CSSCalcSimplificationSwift.swift -- so what is left here is the one thing that cannot cross:
+    // `Style::resolveLength` needs a `CSSToLengthConversionData`, carrying a style, a realised font
+    // cascade and a viewport.
     //
-    // The result is expressed as a canonical CSSUnitType rather than a
-    // `CanonicalDimension::Dimension`, so the reverse mapping stays `makeNumeric`'s and `Dimension`
-    // never crosses.
-    if (auto canonical = canonicalize(NonCanonicalDimension { .value = value, .unit = static_cast<CSSUnitType>(unitType) }, m_options->conversionData))
-        return { .value = canonical->value, .unitType = static_cast<uint16_t>(toCSSUnit(canonical->dimension)), .resolved = true, .alternative = CSSCalcSwiftAlternative::CanonicalDimension };
+    // Which forty-two units reach this is never named here: the `switch` names the twenty-eight it
+    // decides and this is its `default` arm, so `CSS::toLengthUnit` remains the only statement of
+    // that membership set.
+    //
+    // Both optionals are checked. `canonicalize` writes `*CSS::toLengthUnit(root.unit)` (`:245`),
+    // sound there only because the surrounding `switch` already established that `root.unit` is
+    // one of the forty-two; here the unit arrives as a `uint16_t` across the boundary with no such
+    // guarantee, so an unchecked dereference would be UB on a constructible input. This reports
+    // "no answer" instead -- the dimension stays as it is.
+    //
+    // An `if` with an initializer, the resolved case first, the unresolved one as the fallthrough:
+    // a canonical `CSSUnitType` rather than a `CanonicalDimension::Dimension`, so the reverse
+    // mapping stays `makeNumeric`'s and `Dimension` never crosses; and `toCSSUnit` is called rather
+    // than `CSSUnitType::Px` written out, so there is no second place saying a resolved length is
+    // measured in pixels.
+    if (auto lengthUnit = CSS::toLengthUnit(static_cast<CSSUnitType>(unitType)); lengthUnit && m_options->conversionData)
+        return { .value = Style::resolveLength(value, *lengthUnit, *m_options->conversionData), .unitType = static_cast<uint16_t>(toCSSUnit(CanonicalDimension::Dimension::Length)), .resolved = true, .alternative = CSSCalcSwiftAlternative::CanonicalDimension };
     return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number };
 }
 

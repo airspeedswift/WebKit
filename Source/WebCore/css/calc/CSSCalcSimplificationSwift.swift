@@ -25,6 +25,17 @@
 // CSSCalcSwiftTypes.h.
 public import WebCore_Private.CSSCalcSwiftTypes
 
+// The CSS unit vocabulary plus the conversion constants `canonicalize` multiplies by.
+//
+// `CSSUnits.h` is not self-contained, so the constants are split into namespace-scope `constexpr
+// double`s, which import cleanly. `internal`, not `public`, because a `public` Swift signature
+// naming an imported C++ enum is refused under library evolution.
+internal import WebCore_Private.CSSUnitsSwiftTypes
+
+// The three <angle> conversion constants. Imported through the submodule rather than plain
+// `import wtf`, which does not see them under WTF's umbrella module map.
+internal import wtf.Core.MathExtras
+
 // libm, for the trig/pow/log/exp functions the C++ arm calls directly (`std::sin` on Darwin is
 // `::sin`), so both arms reach the same functions. Everything else the executors need is stdlib.
 import Darwin
@@ -620,17 +631,18 @@ private func walk(
 
 // MARK: - The simplifier
 
-/// The part of `SimplificationOptions` this file reads, which is one bool.
+/// The part of `SimplificationOptions` this file reads.
 ///
 /// A `struct`, not a `class`: a class stored property costs dynamic exclusivity enforcement
 /// (`swift_beginAccess`/`swift_endAccess`) on every read, on a recursion that reads this at nearly
 /// every node.
 ///
-/// `CSSCalcSwiftSimplificationOptions` carries six fields and this reads exactly one. `range` is read
-/// at zero sites in the C++ simplifier -- it is the *serializer* that clamps against it;
-/// `allowZeroValueLengthRemovalFromSum` is read only inside `simplify(Sum&)`, which this declines;
-/// `category` is unread here; `hasConversionData` is subsumed by `canonicalizeUnit` answering
-/// `resolved == false`; and `Stage` is copied through `copyAndSimplify` and never read.
+/// `CSSCalcSwiftSimplificationOptions` carries six fields; this reads one. `range` is read at zero
+/// sites in the C++ simplifier -- the *serializer* clamps against it instead;
+/// `allowZeroValueLengthRemovalFromSum` is read at exactly one site, inside `simplify(Sum&)`, not yet
+/// handled here; `category` is unread so far; `hasConversionData` is subsumed by
+/// `resolveRelativeLength` answering `resolved == false`; and `Stage` is copied through
+/// `copyAndSimplify` and never read.
 private struct CalcSimplification {
     /// `percentageResolveToDimension(options)` (`+Simplification.cpp:86`-`:107`), precomputed in C++
     /// to avoid a second copy of the `CSS::Category` table here.
@@ -1169,33 +1181,114 @@ private extension CalcSimplification {
         }
     }
 
-    /// `simplify(NonCanonicalDimension&)` (`:505`-`:513`): canonicalize if there is enough
-    /// information, otherwise leave it alone.
+    /// `simplify(NonCanonicalDimension&)` (`:505`-`:513`) / `canonicalize`
+    /// (`+Simplification.cpp:169`-`:287`): canonicalize if there is enough information, otherwise
+    /// leave it alone. Shared by the walk's own case and `foldSymbol`.
     ///
-    /// Shared by the walk's own `NonCanonicalDimension` case and by `foldSymbol`, because the C++
-    /// reaches the same overload from both, and two spellings of it is two things that can drift.
+    /// `canonicalize`'s seventy `CSSUnitType` cases split three ways: fourteen do arithmetic against a
+    /// compile-time constant (reproduced below, reading the same constants through
+    /// `CSSUnitConversions.h`/`wtf.Core.MathExtras`); fourteen a `NonCanonicalDimension` can never
+    /// hold (enumerated below so they can't silently fall into the upcall arm); and forty-two are
+    /// font-, viewport- and container-relative lengths, resolved through one upcall
+    /// (`resolveRelativeLength`) rather than a transcribed unit table. `resolved == false` there means
+    /// "no conversion data", a normal outcome, and the dimension stays as it is.
     @inline(always)
     func canonicalizedDimension(
         _ value: Double,
         _ unitType: UInt16,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> NumericLeaf {
-        let canonical = builder.canonicalizeUnit(value, unitType)
-        if canonical.resolved {
+        // The C++'s `nullopt`: `simplify(NonCanonicalDimension&)` copies the node through unchanged.
+        func unchanged() -> NumericLeaf {
+            return NumericLeaf(kind: .nonCanonicalDimension, value: value, unitType: unitType, percentHint: 0)
+        }
+        // `makeCanonical(value, dimension)`. The canonical UNIT is named rather than the
+        // `CanonicalDimension::Dimension`, because `Dimension` does not cross the boundary and
+        // `makeNumeric` maps the unit back to it (CSSCalcTree.cpp:187) -- so these five spellings are
+        // `toCSSUnit(Dimension)` (CSSCalcTree.h:992) read forwards, and there is no sixth: `Fr` is
+        // `Dimension::Flex`, which `canonicalize` has no case for.
+        func canonical(_ canonicalized: Double, _ canonicalUnit: WebCore.CSSUnitType) -> NumericLeaf {
             return NumericLeaf(
                 kind: .canonicalDimension,
-                value: canonical.value,
-                unitType: canonical.unitType,
+                value: canonicalized,
+                unitType: UInt16(canonicalUnit.rawValue),
                 percentHint: 0
             )
         }
-        return NumericLeaf(
-            kind: .nonCanonicalDimension,
-            value: value,
-            unitType: unitType,
-            percentHint: 0
-        )
+
+        // `UInt8(exactly:)` rather than `UInt8(_:)`, which traps: the boundary widens the unit to
+        // `uint16_t` (see `CSSCalcSwiftLeaf.unitType`), so narrowing it back is a conversion that
+        // must be able to fail. A value outside the enum lands in the same place the C++'s
+        // `ASSERT_NOT_REACHED` does in a shipping build -- unchanged -- rather than trapping.
+        guard let raw = UInt8(exactly: unitType), let unit = WebCore.CSSUnitType(rawValue: raw) else {
+            return unchanged()
+        }
+
+        switch unit {
+        // Absolute lengths, canonicalizable with no conversion data at all.
+        case .Cm:
+            return canonical(value * WebCore.CSS.pixelsPerCm, .Px)
+        case .Mm:
+            return canonical(value * WebCore.CSS.pixelsPerMm, .Px)
+        case .Q:
+            return canonical(value * WebCore.CSS.pixelsPerQ, .Px)
+        case .In:
+            return canonical(value * WebCore.CSS.pixelsPerInch, .Px)
+        case .Pt:
+            return canonical(value * WebCore.CSS.pixelsPerPt, .Px)
+        case .Pc:
+            return canonical(value * WebCore.CSS.pixelsPerPc, .Px)
+
+        // <angle>
+        case .Rad:
+            return canonical(value * degreesPerRadianDouble, .Deg)
+        case .Grad:
+            return canonical(value * degreesPerGradientDouble, .Deg)
+        case .Turn:
+            return canonical(value * degreesPerTurnDouble, .Deg)
+
+        // <time>
+        case .Ms:
+            return canonical(value * WebCore.CSS.secondsPerMillisecond, .S)
+
+        // <frequency>
+        case .Khz:
+            return canonical(value * WebCore.CSS.hertzPerKilohertz, .Hz)
+
+        // <resolution>
+        case .X:
+            return canonical(value * WebCore.CSS.dppxPerX, .Dppx)
+        case .Dpi:
+            return canonical(value * WebCore.CSS.dppxPerDpi, .Dppx)
+        case .Dpcm:
+            return canonical(value * WebCore.CSS.dppxPerDpcm, .Dppx)
+
+        // The fourteen units a `NonCanonicalDimension` can never hold. `ASSERT_NOT_REACHED` in the
+        // C++; unchanged here, matching shipping behavior. Enumerated so they don't fall to the
+        // upcall below.
+        case .Px, .Deg, .S, .Hz, .Dppx, .Fr,
+             .Number, .Integer, .Percentage,
+             .Calc, .CalcPercentageWithAngle, .CalcPercentageWithLength, .QuirkyEm, .Unknown:
+            return unchanged()
+
+        // Everything else is a font-, viewport- or container-relative length, resolved via upcall
+        // rather than a transcribed `CSS::toLengthUnit` table.
+        default:
+            let resolved = builder.resolveRelativeLength(value, unitType)
+            guard resolved.resolved else {
+                return unchanged()
+            }
+            // `CanonicalDimension` unconditionally: resolving a length yields a length, and the unit
+            // comes from the upcall's own answer, not a guess here.
+            return NumericLeaf(
+                kind: .canonicalDimension,
+                value: resolved.value,
+                unitType: resolved.unitType,
+                percentHint: 0
+            )
+        }
     }
+
 
     /// The `std::optional<Child> b` slot of `round()` and `log()`, folded, or `nil` when absent.
     ///

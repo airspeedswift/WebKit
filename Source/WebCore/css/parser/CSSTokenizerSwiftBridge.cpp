@@ -1601,6 +1601,54 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 
+// ENTRIES 11 AND 12 compare `canonicalize` directly, parameterized over the full `CSSUnitType`
+// range rather than only the units a parsed CSS corpus happens to use.
+// `canonicalize` (CSSCalcTree+Simplification.cpp:169-287) is a seventy-case `switch` over
+// `CSSUnitType`; sweeping every enumerator, boundary values included, exercises cases a corpus of
+// real stylesheets would not reach.
+//
+// Four arms, each able to fail where the others cannot:
+//   1. reference arithmetic computed directly from <WebCore/CSSUnitConversions.h> and
+//      <wtf/MathExtras.h> -- the same headers both ported arms read.
+//   2. `canonicalize` itself, called directly, unmediated by a tree walk.
+//   3. the C++ simplifier over a `NonCanonicalDimension`-rooted tree, how `canonicalize` is reached
+//      in production.
+//   4. the Swift `canonicalizedDimension` over the same tree object.
+//
+// The unit crosses as a `uint32_t` rather than as `CSSUnitType` so callers can pass values outside
+// the enum too; `built` is 0 for those.
+struct CSSCalcCanonicalizationComparison {
+    // Arm 3: the leaf the C++ simplifier produced.
+    double cppValue;
+    // Arm 4: the leaf the Swift side produced.
+    double swiftValue;
+    // Arm 2: `canonicalize`'s own answer. Meaningful only when `referenceResolved`.
+    double referenceValue;
+    // `toCSSUnit` of each arm's result leaf, as a `CSSUnitType` underlying value.
+    uint32_t cppUnitType;
+    uint32_t swiftUnitType;
+    uint32_t referenceUnitType;
+    // `Node`'s alternative index of each arm's result root, so "it stayed a NonCanonicalDimension"
+    // and "it became a CanonicalDimension" are distinguishable without inspecting the value.
+    uint32_t cppAlternative;
+    uint32_t swiftAlternative;
+    // Did `canonicalize` return a value at all. The C++'s `nullopt` for a relative unit with no
+    // conversion data, and for the fourteen units a `NonCanonicalDimension` can never hold.
+    uint32_t referenceResolved;
+    // Did the Swift side decline the tree. A decline is invisible in an output comparison, so it is
+    // reported rather than inferred.
+    uint32_t swiftDeclined;
+    // 0 = `unitRaw` is outside `CSSUnitType`, so no tree was built and every field above is inert.
+    uint32_t built;
+};
+
+static_assert(sizeof(CSSCalcCanonicalizationComparison) == 56);
+static_assert(offsetof(CSSCalcCanonicalizationComparison, cppUnitType) == 24);
+static_assert(offsetof(CSSCalcCanonicalizationComparison, built) == 52);
+
+WEBCORE_EXPORT CSSCalcCanonicalizationComparison webCoreCSSCalcCompareCanonicalization(double, uint32_t, const CSSCalcSimplificationOptionsSpec*);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcUnitTypeCount(void);
+
 static std::atomic<uint64_t> s_simplifyCompareCalls;
 
 // This file keeps its own decline counter rather than forwarding
@@ -1609,6 +1657,22 @@ static std::atomic<uint64_t> s_simplifyCompareCalls;
 // counter advances by up to three per case, while this one counts exactly one per comparison whose
 // reported answer was a decline.
 static std::atomic<unsigned> s_simplifyComparisonDeclines;
+
+// One `SimplificationOptions` from one spec, shared by the two comparison entries below and by
+// `webCoreCSSCalcCompareCanonicalization`, so all three read the same conversion data rather than
+// building three copies that could drift.
+static CSSCalc::SimplificationOptions makeSimplificationOptions(const CSSCalcSimplificationOptionsSpec* spec)
+{
+    return CSSCalc::SimplificationOptions {
+        .category = static_cast<WebCore::CSS::Category>(spec->category),
+        .range = WebCore::CSS::Range { spec->rangeMinimum, spec->rangeMaximum },
+        .conversionData = spec->conversionDataKind
+            ? std::optional<CSSToLengthConversionData> { CSSToLengthConversionData { simplificationStyleAtFontSize(spec->conversionDataKind == 2 ? 32.0f : 16.0f), nullptr, nullptr, nullptr, nullptr } }
+            : std::nullopt,
+        .symbolTable = simplificationSymbolTable(spec->symbolTableKind),
+        .allowZeroValueLengthRemovalFromSum = !!spec->allowZeroValueLengthRemovalFromSum,
+    };
+}
 
 // Everything the two comparison entries share. Both arms run on the same input `Tree` object inside
 // one call, which is what makes it impossible to pair a C++ answer for one case with a Swift answer
@@ -1631,15 +1695,7 @@ static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree
         .requiresConversionData = inputTree.requiresConversionData,
     };
 
-    auto options = CSSCalc::SimplificationOptions {
-        .category = static_cast<WebCore::CSS::Category>(spec->category),
-        .range = WebCore::CSS::Range { spec->rangeMinimum, spec->rangeMaximum },
-        .conversionData = spec->conversionDataKind
-            ? std::optional<CSSToLengthConversionData> { CSSToLengthConversionData { simplificationStyleAtFontSize(spec->conversionDataKind == 2 ? 32.0f : 16.0f), nullptr, nullptr, nullptr, nullptr } }
-            : std::nullopt,
-        .symbolTable = simplificationSymbolTable(spec->symbolTableKind),
-        .allowZeroValueLengthRemovalFromSum = !!spec->allowZeroValueLengthRemovalFromSum,
-    };
+    auto options = makeSimplificationOptions(spec);
 
     result.inputKindMask = alternativeMaskOfSubtree(input.root);
     result.inputNodeCount = nodeCountOfSubtree(input.root);
@@ -1810,6 +1866,78 @@ WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void)
     return differs(metrics16.xHeight(), metrics32.xHeight())
         && differs(metrics16.capHeight(), metrics32.capHeight())
         && metrics16.lineSpacing() != metrics32.lineSpacing();
+}
+
+// ENTRY 11. One unit, one value, four arms. See the struct above for why there are four.
+WEBCORE_EXPORT CSSCalcCanonicalizationComparison webCoreCSSCalcCompareCanonicalization(double value, uint32_t unitRaw, const CSSCalcSimplificationOptionsSpec* spec)
+{
+    // Counted on the same tally as the tree-level entries, so a caller cross-checking totals covers
+    // this entry too.
+    s_simplifyCompareCalls.fetch_add(1, std::memory_order_relaxed);
+
+    CSSCalcCanonicalizationComparison result { };
+    // Reported rather than asserted: callers may pass values outside the enum on purpose, and
+    // `static_cast` of an out-of-range value would be UB, so this is checked explicitly instead.
+    if (unitRaw > static_cast<uint32_t>(CSSUnitType::QuirkyEm))
+        return result;
+    result.built = 1;
+
+    auto unit = static_cast<CSSUnitType>(unitRaw);
+    auto options = makeSimplificationOptions(spec);
+
+    // The reference call, using the same conversion data the two tree-based calls below get -- read
+    // off `options` rather than rebuilt, so all three use the same conversion data.
+    if (auto canonical = CSSCalc::canonicalize(CSSCalc::NonCanonicalDimension { .value = value, .unit = unit }, options.conversionData)) {
+        result.referenceResolved = 1;
+        result.referenceValue = canonical->value;
+        result.referenceUnitType = static_cast<uint32_t>(CSSCalc::toCSSUnit(canonical->dimension));
+    }
+
+    // Both simplifiers run over the same input `Tree` object, so a C++ answer for one unit can
+    // never be paired with a Swift answer for another.
+    auto root = CSSCalc::makeChild(CSSCalc::NonCanonicalDimension { .value = value, .unit = unit });
+    auto type = CSSCalc::getType(root);
+    auto input = CSSCalc::Tree { .root = WTF::move(root), .type = type, .stage = spec->stage ? CSSCalc::Stage::Computed : CSSCalc::Stage::Specified };
+
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSimplificationDeclineCount();
+    auto cppTree = CSSCalc::copyAndSimplify(input, options, CSSCalc::Simplifier::Cpp);
+    auto swiftTree = CSSCalc::copyAndSimplify(input, options, CSSCalc::Simplifier::Swift);
+    result.swiftDeclined = CSSCalc::webCoreCSSCalcSimplificationDeclineCount() != declinesBefore ? 1 : 0;
+    // On the same tally the tree-level entries use. Each call runs the Swift side exactly once --
+    // there are no idempotence checks here -- so the counter advances by at most one per case.
+    if (result.swiftDeclined)
+        s_simplifyComparisonDeclines.fetch_add(1, std::memory_order_relaxed);
+
+    // The result leaf, read off the variant tag rather than guessed from the unit. The catch-all is
+    // unreachable for a `NonCanonicalDimension` root, since neither simplifier turns a numeric leaf
+    // into an operation; it leaves the value at 0 with the alternative still reported, so a
+    // simplifier that somehow did would show up as a disagreement rather than as garbage.
+    auto readLeaf = [](const CSSCalc::Tree& tree, double& outValue, uint32_t& outUnit, uint32_t& outAlternative) {
+        outAlternative = static_cast<uint32_t>(tree.root.value.index());
+        WTF::switchOn(tree.root.value,
+            [&]<CSSCalc::Numeric T>(const T& numeric) {
+                outValue = numeric.value;
+                outUnit = static_cast<uint32_t>(CSSCalc::toCSSUnit(numeric));
+            },
+            [&](const auto&) { }
+        );
+    };
+    readLeaf(cppTree, result.cppValue, result.cppUnitType, result.cppAlternative);
+    readLeaf(swiftTree, result.swiftValue, result.swiftUnitType, result.swiftAlternative);
+    return result;
+}
+
+// ENTRY 12. How many `CSSUnitType` enumerators there are, so a caller's sweep width comes from
+// WebCore rather than a hardcoded count.
+//
+// Spelled as "the last enumerator + 1" -- the same fragile pattern `webCoreCSSCalcChildAlternativeCount`
+// avoids via `std::variant_size_v`, which `CSSUnitType` has no equivalent of. `QuirkyEm` carries the
+// comment that it is last. This catches an enumerator inserted in the middle or removed, but would
+// miss one appended after `QuirkyEm`; closing that properly needs a count in CSSUnitType.h, a header
+// this file shares with the tokenizer.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcUnitTypeCount(void)
+{
+    return static_cast<uint32_t>(CSSUnitType::QuirkyEm) + 1;
 }
 
 } // extern "C"

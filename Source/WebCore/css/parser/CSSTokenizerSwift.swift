@@ -4,6 +4,15 @@
 // compile on WTF::KeyValuePair instantiated over them. See CSSTokenizerSwiftTypes.h.
 public import WebCore_Private.CSSTokenizerSwiftTypes
 
+// The CSS unit vocabulary lives in its own submodule of the module map, separate
+// from the one above: a header can appear in only one submodule, and the calc
+// simplification code needs `CSSUnitType`'s constants beside the enum.
+//
+// `internal`, not `public`: nothing this file exposes names `CSSUnitType`. The two
+// `@_expose(Cxx)` entries at the bottom take spans and a sink, and `numericToken`'s `unit:`
+// parameter is private.
+internal import WebCore_Private.CSSUnitsSwiftTypes
+
 // Swift tokenizer for the CSS parser: a port of CSSTokenizer.cpp and
 // CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
 //

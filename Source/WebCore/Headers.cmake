@@ -1116,6 +1116,8 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS
     css/CSSStyleSheet.h
     css/CSSSubstitutionValue.h
     css/CSSToLengthConversionData.h
+    css/CSSUnitConversions.h
+    css/CSSUnitType.h
     css/CSSUnits.h
     css/CSSValue.h
     css/CSSValueList.h
