@@ -707,19 +707,27 @@ CSSCalcSymbolTable simplificationSymbolTable(uint32_t kind)
     }
 }
 
-// The four trees the differential builds directly, because no parse produces them.
+// The eight trees the differential builds directly, because no parse produces them.
 //
 // THE PRECEDENT IS `constructRootShape` ABOVE and the reason is the same, but the kinds are
 // different: there it was a `Negate` or `Invert` at the ROOT of a tree; here it is `Deg2Rad` and
 // `Invert` at all, as kinds the first slice claims and simplifies. Measured, not assumed: every
 // parse-reachable `Deg2Rad` sits inside a `Product` (`sin(r * 1deg)`) and every parse-reachable
 // `Invert` does too (`calc(1 / r)` is `Product{1, Invert{Symbol}}`), and the first slice declines
-// `Product` -- so without these four, `Deg2Rad` and `Invert` are reached by the corpus and never
-// once simplified, which is a kind counted as covered whose handling has never executed.
+// `Product` -- so without these, `Deg2Rad` and `Invert` are reached by the corpus and never once
+// simplified, which is a kind counted as covered whose handling has never executed.
 //
-// The symbol is `CSSValueR` so that the swept symbol table resolves it; a symbol the table does not
-// bind would leave shapes 0, 1 and 3 inert across the whole sweep.
-constexpr unsigned simplificationConstructedShapeCount = 4;
+// SHAPES 4 TO 7 CLOSE THE THREE NAMED A2 COVERAGE GAPS, and they are a level below the one shapes 0
+// to 3 close. There the ALTERNATIVE was unreachable; here the alternative is reached and simplified
+// -- guards 3, 12 and 12b are green for `Min`, `Max`, `Clamp` and `Hypot` -- while specific OUTCOMES
+// of it have never executed. "Reached is not the same as simplified" has a level under it: "simplified
+// is not the same as every branch taken". Each was measured unreachable from a parsed corpus with
+// corpusprobe.cpp, whose note 7 carries the per-expression evidence, and the sharpest is shape 4:
+// `buildMinMax` is the island's ONLY construction selector, the only rewrite that produces a kind that
+// was not in the input, and it had never run, because the conversion condition is MONOTONE under
+// canonicalization -- `clamp(none, 1px, 1em)` arrives already converted, as `min(1px, 1em)` with no
+// `Clamp` in it.
+constexpr unsigned simplificationConstructedShapeCount = 8;
 
 std::optional<CSSCalc::Tree> constructSimplificationShape(unsigned shape)
 {
@@ -766,9 +774,107 @@ std::optional<CSSCalc::Tree> constructSimplificationShape(unsigned shape)
     case 3: {
         // `Invert{Symbol}`, number-typed. A bare `Invert` is unreachable through a parse because
         // division always builds the `Product` wrapper around it.
+        //
+        // The symbol is `CSSValueR` here and in shapes 0, 1 and 6 so that the swept symbol table
+        // resolves it; a symbol the table does not bind would leave those shapes inert across the
+        // whole sweep.
         auto child = CSSCalc::makeChild(CSSCalc::Symbol { .id = CSSValueR, .unit = CSSUnitType::Number });
         auto op = CSSCalc::Invert { .a = CSSCalc::copy(child) };
         auto type = typeOf(op, child);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 4: {
+        // `clamp(none, 1px, 1em)`, i.e. `convertToMin` SUCCEEDING -- the one path in the whole island
+        // that calls `CSSCalcSwiftBuilder::buildMinMax`, and the only rewrite in the simplifier that
+        // produces an operation kind that was not in the input (`+Simplification.cpp:1018`-`:1044`).
+        //
+        // WHY NO PARSE REACHES IT. `convertToMin` fires when `val` is a `Numeric` and the present
+        // bound is a different alternative or a different unit -- and that condition is MONOTONE
+        // under canonicalization, so a bound that mismatches at a swept tuple mismatched at the
+        // parse baseline too, where the parse's own simplification already converted it. Measured:
+        // `clamp(none, 1px, 1em)` as TEXT arrives as `min(1px, 1em)` with no `Clamp` in the tree at
+        // all. The symbol route does not rescue it either -- `calcAllowedSymbols()` declares all four
+        // symbols `CSSUnitType::Number` and `simplify(Symbol&)` takes the unit from the NODE, so no
+        // symbol table can make a bound mismatch.
+        //
+        // The mismatch here is `CanonicalDimension` against `NonCanonicalDimension`, which holds at
+        // cd:none and DISSOLVES at cd:16px and cd:32px -- there `1em` canonicalizes to a `Px` and the
+        // `clamp()` folds to a leaf instead. So this shape reaches `buildMinMax` on one third of the
+        // sweep, and the harness asserts that it reached it at least once rather than assuming the
+        // tuple that does is present.
+        auto minimum = CSSCalc::ChildOrNone { CSS::Keyword::None { } };
+        auto value = CSSCalc::makeChild(CSSCalc::CanonicalDimension { .value = 1, .dimension = CSSCalc::CanonicalDimension::Dimension::Length });
+        auto maximum = CSSCalc::makeChild(CSSCalc::NonCanonicalDimension { .value = 1, .unit = CSSUnitType::Em });
+        auto op = CSSCalc::Clamp { .min = WTF::move(minimum), .val = CSSCalc::copy(value), .max = CSSCalc::ChildOrNone { CSSCalc::copy(maximum) } };
+        auto type = typeOf(op, value);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 5: {
+        // `clamp(none, 1px, 1)`, i.e. `convertToMin` FAILING -- `toType(Min { 1px, 1 })` returns
+        // `std::nullopt` because a `<length>` and a `<number>` do not merge, at which point the C++
+        // `simplify` returns `nullopt` and rebuilds the `Clamp` itself.
+        //
+        // THE ISLAND CANNOT DO THAT, AND THIS IS THE SHAPE THAT PROVES IT DECLINES INSTEAD. By the
+        // time `buildMinMax` answers false, `rewrite` has already pushed two operands where the
+        // parent expects one and there is no `pop`, so a false is a whole-tree decline
+        // (CSSCalcSimplificationSwift.swift's `rewriteConvertedMinMax` argues why that is exact). The
+        // decline blames `Clamp`, an alternative the island HANDLES, so it lands in guard 3d's
+        // per-alternative count rather than failing -- and that count was expected to be ZERO on the
+        // parsed corpus, which is not the same as the mechanism being untested. This is the case that
+        // tests it.
+        //
+        // A `Clamp` whose type does not merge is not reachable through the parser at all, since the
+        // parser's own type check rejects `clamp(none, 1px, 1)`. So this is a boundary contract test,
+        // not a coverage test, and its being unreachable by input is the point.
+        auto minimum = CSSCalc::ChildOrNone { CSS::Keyword::None { } };
+        auto value = CSSCalc::makeChild(CSSCalc::CanonicalDimension { .value = 1, .dimension = CSSCalc::CanonicalDimension::Dimension::Length });
+        auto maximum = CSSCalc::makeChild(CSSCalc::Number { .value = 1 });
+        auto op = CSSCalc::Clamp { .min = WTF::move(minimum), .val = CSSCalc::copy(value), .max = CSSCalc::ChildOrNone { CSSCalc::copy(maximum) } };
+        auto type = typeOf(op, value);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 6: {
+        // `min(r)`, i.e. `simplifyForMinMax`'s one-child early return (`+Simplification.cpp:408`).
+        //
+        // WHY NO PARSE REACHES IT: that return does not require the child to be resolved, so `min(r)`
+        // as TEXT folds to `calc(r)` during the parse's own simplification and no `Min` survives to
+        // be handed to either arm. The island's version is `foldMinMax`'s `folded.count == 1 ->
+        // promoteTerm`, which produces `.replacedByTerm` for an unresolved symbol and `.leaf` for a
+        // resolved one -- two different paths, and the swept symbol table selects between them.
+        //
+        // `clamp(none, VAL, none)` (`:1013`) is unreachable for the identical reason and is not given
+        // a shape of its own: it is the same `promoteTerm` call from `foldClamp`'s `childCount == 1`
+        // arm, and a second shape would exercise one more line of dispatch for one more tree.
+        auto child = CSSCalc::makeChild(CSSCalc::Symbol { .id = CSSValueR, .unit = CSSUnitType::Number });
+        auto op = CSSCalc::Min { .children = CSSCalc::Children { Vector<CSSCalc::Child>::from(CSSCalc::copy(child)) } };
+        auto type = typeOf(op, child);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 7: {
+        // `hypot(10%, 20%)`, i.e. `simplify(Hypot&)`'s `PercentageTag` arm (`+Simplification.cpp:1269`).
+        //
+        // WHY NO PARSE REACHES IT: `hypot(10%, 20%)` as TEXT constant-folds during the parse, and no
+        // swept symbol table can produce a `Percentage` leaf -- `calcAllowedSymbols()` declares all
+        // four symbols `CSSUnitType::Number`.
+        //
+        // IT IS ALSO THE ONLY TEST OF A CLAIM THE ISLAND MAKES BY DERIVATION RATHER THAN BY CARRYING
+        // THE VALUE. The C++ stamps `Type::determinePercentHint(options.category)` onto the folded
+        // `Percentage`; the island writes `percentHint: 0` and argues that is exact because
+        // `determinePercentHint` is non-`None` for exactly `LengthPercentage` and `AnglePercentage`,
+        // `percentageResolveToDimension` is true for exactly those two, and the percentage arm is only
+        // entered when it is FALSE. That argument was never exercised, because the arm never ran. Now
+        // the category axis tests it: at `Number` the arm folds and the hint must be 0 on both arms,
+        // and at `LengthPercentage`/`AnglePercentage` the tag must become `FailureTag` and the `Hypot`
+        // must be rebuilt. `--full` sweeps all eleven categories, which is the stronger arm.
+        // `.hint = { }` is `Type::PercentHintValue`'s `None`, which is what `makeNumeric` builds
+        // for a parsed `<percentage>` (CSSCalcTree.cpp:196-:197) and therefore what a parse would
+        // have produced. Spelled rather than defaulted because `-Wmissing-designated-field-initializers`
+        // is an error in this build, which is the right direction: a `hint` chosen by omission in a
+        // shape that exists to test hint handling is exactly the silent thing to avoid.
+        auto first = CSSCalc::makeChild(CSSCalc::Percentage { .value = 10, .hint = { } });
+        auto second = CSSCalc::makeChild(CSSCalc::Percentage { .value = 20, .hint = { } });
+        auto op = CSSCalc::Hypot { .children = CSSCalc::Children { Vector<CSSCalc::Child>::from(CSSCalc::copy(first), CSSCalc::copy(second)) } };
+        auto type = typeOf(op, first);
         return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
     }
     default:

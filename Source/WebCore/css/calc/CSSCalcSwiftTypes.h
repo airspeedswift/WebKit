@@ -783,6 +783,10 @@ struct CSSCalcSwiftSimplificationOptions {
     // `CSS::Category`'s underlying value. Carried for completeness -- the island's `switch` on it
     // is the predicate below -- and inert for everything else.
     uint8_t category;
+    // `options.allowZeroValueLengthRemovalFromSum`. LIVE since A2d: `simplify(Sum&)` reads it at
+    // CSSCalcTree+Simplification.cpp:611, and `isLengthUnit` below is the other half of that one
+    // site. It is not a rare flag -- four production callers set it -- so declining when it is set
+    // would not have been an acceptable coverage answer.
     bool allowZeroValueLengthRemovalFromSum;
     // Whether `options.conversionData` holds a value. The island cannot be given
     // `CSSToLengthConversionData` and does not want it: every use of it is inside
@@ -935,6 +939,35 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // reason `CSSCalcSwiftNumericResult::alternative` gives: it is `makeNumeric`'s own choice, so the
     // island never classifies a `CSSUnitType` itself.
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const;
+
+    // THE THIRD UPCALL, and A2d's only new C++: `isLength(toNumericIdentity(...))`
+    // (CSSCalcTree+NumericIdentity.h:215), which `simplify(Sum&)` reads at
+    // CSSCalcTree+Simplification.cpp:611 to decide whether a zero-valued term can be dropped from a
+    // sum.
+    //
+    // IN C++ BECAUSE THE ANSWER IS A 48-OF-64 MEMBERSHIP SET over a generated unit enum, and
+    // transcribing it -- in either direction -- is the duplicated table this port counts as goop by
+    // name. Two alternatives were considered and both were rejected on named grounds rather than on
+    // taste:
+    //
+    //   - A DENYLIST IN SWIFT. The non-length non-canonical units are only eight (`Rad`, `Grad`,
+    //     `Turn`, `Ms`, `Khz`, `X`, `Dpi`, `Dpcm`), so the island could name them and answer "length"
+    //     for everything else. Rejected because it is a DENYLIST: a new angle or time unit added to
+    //     `CSSUnitType` would be silently classified as a length and silently REMOVED from every sum
+    //     that had a zero of it. The island's standing rule is allowlist-not-denylist (see
+    //     `CSSCalcSwiftNodeKind::Operation` above), and this is the one place where breaking it
+    //     produces a wrong value rather than a decline.
+    //   - A `bool isLength` FIELD ON `CSSCalcSwiftNodeInfo`. Free in bytes (18 -> 19 live of 24, see
+    //     `alternative`), and rejected on COST rather than size: `info()` runs for every node of
+    //     every tree on the LANDED serialization island's path too, and this would put a 56-case
+    //     switch on it to answer a question one operation asks about zero-valued terms.
+    //
+    // NOT ON ANY HOT PATH, which is what makes the upcall the cheap answer: the island answers three
+    // of the four numeric kinds itself from `unitType` (`Number` and `Percentage` are never lengths;
+    // a `CanonicalDimension` is one exactly when its unit is `Px`), so this is reached ONLY for a
+    // `NonCanonicalDimension` term, and only when that term's accumulated value is exactly zero and
+    // `allowZeroValueLengthRemovalFromSum` is set. `calc(0em + 1px)` reaches it; nothing else does.
+    WEBCORE_EXPORT bool isLengthUnit(uint16_t unitType) const;
 
 private:
     CSSCalcSwiftOperandStack* m_operands;

@@ -2175,6 +2175,25 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double valu
     return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number };
 }
 
+bool CSSCalcSwiftBuilder::isLengthUnit(uint16_t unitType) const
+{
+    // `isLength(id)` from :611, with the `id` recovered the same way the caller there gets it. The
+    // REAL predicate is called rather than restated, which is the whole point of the upcall: the
+    // 48-of-64 membership set exists exactly once in the program, in
+    // CSSCalcTree+NumericIdentity.h:215, and this adds no second statement of it.
+    //
+    // Routed through a `NonCanonicalDimension` because that is the only numeric kind the island asks
+    // about (see the declaration): `toNumericIdentity(const NonCanonicalDimension&)` is the overload
+    // that maps a `CSSUnitType` onto an identity, and it is the same overload :610 reaches for a
+    // non-canonical term. The `.value` is inert -- `toNumericIdentity` reads only `unit`.
+    //
+    // A unit outside the 56 `toNumericIdentity` enumerates lands on its `ASSERT_NOT_REACHED` branch
+    // and comes back as `NumericIdentity::Number`, which `isLength` answers false for -- the
+    // conservative direction, and the one that leaves the term in the sum rather than removing it.
+    // Unreachable from the island: it only calls this for a leaf it read out of a node C++ built.
+    return isLength(toNumericIdentity(NonCanonicalDimension { .value = 0, .unit = static_cast<CSSUnitType>(unitType) }));
+}
+
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
 // Test-only, and compiled out otherwise so the production path pays no load for them. Same set and
 // same reasons as the serialization island's at CSSCalcTree+Serialization.cpp:1277.
