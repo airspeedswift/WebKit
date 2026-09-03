@@ -897,6 +897,39 @@ template<typename Op> static constexpr bool hasChildOrNoneArgument = []<size_t..
     return (std::same_as<std::remove_cvref_t<std::tuple_element_t<I, Op>>, ChildOrNone> || ...);
 }(std::make_index_sequence<std::tuple_size_v<Op>> { });
 
+// THE PINNING OF `CSSCalcSwiftAlternative` TO `Node`. This is the whole drift story for the
+// boundary's second discriminant, and it lives here because this is the nearest translation unit
+// that can see both the enum and the variant.
+//
+// One assert per alternative, expanded from the SAME list that declares the enumerators, so an
+// enumerator that gained no assert is not expressible. `WTF::alternativeIndexV` (StdLibExtras.h:620)
+// carries its own `static_assert(count == 1)`, so a type that appears twice in `Node` is rejected
+// here too, and a type that appears zero times fails to instantiate rather than silently answering
+// the past-the-end index.
+#define CSS_CALC_SWIFT_PIN_ALTERNATIVE(name, type) \
+    static_assert(WTF::alternativeIndexV<type, Node> == static_cast<size_t>(CSSCalcSwiftAlternative::name), \
+        "CSSCalcSwiftAlternative::" #name " is not Node's index for " #type);
+CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_PIN_ALTERNATIVE)
+#undef CSS_CALC_SWIFT_PIN_ALTERNATIVE
+
+// And the count, which is what makes an ADDED alternative a build failure rather than an
+// alternative the island cannot name. The left side counts the list; the right side is the variant
+// itself. Neither is "the last enumerator + 1", which is the spelling that let
+// `webCoreCSSCalcNodeKindCount` read 19 when the answer was 23.
+//
+// `WTF::VariantSizeV` and not `std::variant_size_v`: WTF's `Variant` is an alias for
+// `mpark::variant` (Variant.h:2466), so the `std` spelling instantiates an undefined template and
+// the error names `std::variant_size` rather than the alias. Measured, not assumed -- it was the
+// only failure in the first syntax check of this block.
+static_assert(numberOfCSSCalcSwiftAlternatives == WTF::VariantSizeV<Node>);
+
+// The struct's size, asserted rather than reasoned about, because the reasoning is written at
+// length in CSSCalcSwiftTypes.h and a comment cannot fail. 8 + 4 + 2 + 1 + 1 + 1 + 1 = 18 live
+// bytes, aligned to 8. The `alternative` field added here rides in padding that already existed,
+// so this number is the same before and after it; a field that does grow the struct trips this and
+// has to justify moving the AArch64 return further away from x0/x1.
+static_assert(sizeof(CSSCalcSwiftNodeInfo) == 24);
+
 CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
 {
     // One `switchOn` over the 41-alternative Variant, answering every question at once. The five
@@ -908,15 +941,26 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         .valueID = static_cast<uint16_t>(CSSValueInvalid),
         .unitType = static_cast<uint8_t>(CSSUnitType::Unknown),
         .kind = CSSCalcSwiftNodeKind::Operation,
+        .percentHint = 0,
+        // The variant's own discriminant, read directly. No switch and no table, on either side of
+        // the boundary: `CSSCalcSwiftAlternative` is pinned to `Node`'s alternative order by the
+        // asserts below, so the cast is the identity on the numbering rather than a mapping.
+        .alternative = static_cast<CSSCalcSwiftAlternative>(m_node->value.index()),
     };
 
     WTF::switchOn(*m_node,
         [&]<Numeric T>(const T& leaf) {
             if constexpr (std::same_as<T, Number>)
                 out.kind = CSSCalcSwiftNodeKind::Number;
-            else if constexpr (std::same_as<T, Percentage>)
+            else if constexpr (std::same_as<T, Percentage>) {
                 out.kind = CSSCalcSwiftNodeKind::Percentage;
-            else if constexpr (std::same_as<T, CanonicalDimension>)
+                // `Type::PercentHint` is numbered from 1 (CSSCalcType.h:53) so that 0 is
+                // `PercentHintValue`'s internal `None`; this is that representation unchanged, and
+                // no sentinel is invented. Read here rather than by a second accessor because the
+                // simplification island needs it for every percentage it folds -- see
+                // `CSSCalcSwiftNodeInfo::percentHint`, which prices the byte it costs.
+                out.percentHint = leaf.hint ? static_cast<uint8_t>(*leaf.hint) : 0;
+            } else if constexpr (std::same_as<T, CanonicalDimension>)
                 out.kind = CSSCalcSwiftNodeKind::CanonicalDimension;
             else
                 out.kind = CSSCalcSwiftNodeKind::NonCanonicalDimension;
@@ -926,6 +970,15 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         [&](const Symbol& leaf) {
             out.kind = CSSCalcSwiftNodeKind::Symbol;
             out.valueID = static_cast<uint16_t>(leaf.id);
+            // THE NODE'S OWN UNIT, WHICH IS NOT THE SYMBOL TABLE'S. `simplify(Symbol&)` is
+            // `makeNumeric(value->value, root.unit)` (+Simplification.cpp:516-524): the VALUE comes
+            // from `CSSCalcSymbolTable` and the UNIT from `Symbol::unit`, which the parser took from
+            // `CSSCalcSymbolsAllowed` (CSSCalcTree+Parser.cpp:1582). Those are two independently
+            // populated `HashMap`s and they can disagree, so an island that took the unit from the
+            // table's answer would fold `Symbol{r, Deg}` under a `{r -> 1px}` table into a length
+            // where the C++ makes an angle. Carried here, at no cost in size -- `unitType` was
+            // already inert for a `Symbol` and it is the same byte the four numeric leaves fill.
+            out.unitType = static_cast<uint8_t>(leaf.unit);
         },
         [&](const SiblingCount&) {
             out.kind = CSSCalcSwiftNodeKind::SiblingCount;
@@ -1154,6 +1207,26 @@ CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
     // just given, so reaching here means the two disagree, which would mean the tree changed under a
     // borrow -- and returning a default-constructed handle would turn that into a silent wrong
     // serialization instead of a stop.
+    RELEASE_ASSERT(found);
+    return CSSCalcSwiftNode { found };
+}
+
+// Defined HERE rather than beside the simplification island that uses it, and the reason is the
+// count. `info().childCount` is `childNodeCount` above, which counts exactly what
+// `forEachChildNodeOfChild` yields -- including the two kinds whose `tuple_size` 0 makes
+// `forAllChildNodes` lie about them. An accessor for the same children in a different translation
+// unit would need its own copy of that walker, and a boundary whose count and whose indices came
+// from two different walkers is a boundary that can disagree with itself. One walker, two orders.
+CSSCalcSwiftNode CSSCalcSwiftNode::childInTreeOrder(uint32_t index) const
+{
+    const Child* found = nullptr;
+    uint32_t current = 0;
+    forEachChildNodeOfChild(*m_node, [&](const Child& child) {
+        if (current++ == index)
+            found = &child;
+    });
+    // Not a clamp and not a null return, for the reason `childAt` gives: the island only ever
+    // indexes below the `childCount` it was just given, so reaching here means the two disagree.
     RELEASE_ASSERT(found);
     return CSSCalcSwiftNode { found };
 }

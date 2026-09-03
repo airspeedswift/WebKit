@@ -28,11 +28,18 @@ namespace WebCore {
 namespace CSSCalc {
 
 struct AnchorSide;
+struct Child;
 struct Tree;
 
 // Makes a copy of the tree.
 Tree copy(const Tree&);
 AnchorSide copy(const AnchorSide&);
+// The subtree copy the two above bottom out in. It was already written and already the only
+// definition of what copying a node means; it was `static` because nothing outside
+// CSSCalcTree+Copy.cpp had asked for it. The simplification island's `pushCopyOf` asks, and routing
+// it here rather than writing a copy at the boundary is what keeps one implementation of the
+// operation in the program.
+Child copy(const Child&);
 
 } // namespace CSSCalc
 } // namespace WebCore

@@ -33,7 +33,7 @@ ENABLE_LLVM_PROFILE_GENERATION_DEFINES_YES = ENABLE_LLVM_PROFILE_GENERATION=1;
 WK_PGO_GEN_FLAGS = $(WK_PGO_GEN_FLAGS_$(ENABLE_LLVM_PROFILE_GENERATION));
 WK_PGO_GEN_FLAGS_YES = -fprofile-generate;
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES) $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES);
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_TOKENIZER_DEFINES) $(WK_USE_SWIFT_CSS_COLOR_FAST_PATHS_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_DEFINES) $(WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK_DEFINES);
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 
 // Selects the Swift CSS tokenizer island (CSSTokenizerSwift.swift) as the scanner the
@@ -95,6 +95,42 @@ WK_USE_SWIFT_CSS_CALC_SERIALIZATION_DEFINES_YES = USE_SWIFT_CSS_CALC_SERIALIZATI
 // CSSCalcTree+Serialization.h rather than left to produce a link error.
 WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES = $(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES_$(WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK));
 WK_USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK_DEFINES_YES = USE_SWIFT_CSS_CALC_SERIALIZATION_NO_FALLBACK=1;
+
+// Selects the Swift calc() SIMPLIFICATION island (CSSCalcSimplificationSwift.swift) as the
+// simplifier CSSCalc::copyAndSimplify(const Tree&, ...) uses. Off by default, both simplifiers
+// compiled in either way -- the same arrangement, and for the same reasons, as the four flags above.
+//
+// A fourth separate flag rather than a reuse of the serialization one, even though the two islands
+// sit on the same tree and share a boundary header. They sit on unrelated ENTRY POINTS, which is
+// what the argument has always turned on: simplification runs at parse time and at
+// specified-to-computed conversion, serialization runs from `cssText` and getComputedStyle, and a
+// document can reach either without the other. An A/B that could only move both at once would
+// charge each island's result to the other -- and here it would do so on a shared corpus, which is
+// the case where that mistake is hardest to see.
+WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_DEFINES = $(WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_DEFINES_$(WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION));
+WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_DEFINES_YES = USE_SWIFT_CSS_CALC_SIMPLIFICATION=1;
+
+// Compiles the C++ arm of `copyAndSimplify(const Tree&, ...)` OUT, leaving the island as the only
+// implementation of that entry.
+//
+// ITS REACH IS DELIBERATELY SHORT AND THAT IS NOT A COVERAGE STATEMENT. Unlike the serialization
+// equivalent above, this mode cannot remove the simplifier: the 42 per-operation `simplify`
+// overloads have a caller in StyleCalculationTree+Conversion.cpp that is not this island,
+// `copyAndSimplify(const Child&, ...)` is both the internal recursion and CSSCalcTree+Parser.cpp's
+// entry, and `canonicalize` is called from CSSCalcTree+Evaluation.cpp. So the *deletable* count
+// this mode establishes is a DEPENDENCY zero, not a coverage one, and it must be reported as such.
+//
+// What it is actually for is the coverage ASSERTION: with the C++ arm gone, a decline is a stop
+// rather than a silent fallback, and "the island never declines on the corpus" becomes a claim the
+// build enforces rather than one the differential has to be trusted to notice. A decline is
+// invisible in an output comparison, because the C++ answer for a declined tree is the answer the
+// comparison already trusts.
+//
+// Mutually exclusive with WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE and requires
+// WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION=YES, both asserted in CSSCalcTree+Simplification.h rather
+// than left to produce a link error.
+WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK_DEFINES = $(WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK_DEFINES_$(WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK));
+WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK_DEFINES_YES = USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK=1;
 
 WK_OPTIMIZATION_PROFILE_FILE = $(BUILT_PRODUCTS_DIR)/DerivedSources/WebCore/Profiling/$(arch).profdata;
 WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER = $(WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER_$(USE_INTERNAL_SDK));
