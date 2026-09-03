@@ -43,82 +43,21 @@ import Darwin
 // Swift port of CSSCalcTree+Simplification.cpp's calc() simplification, selected by
 // USE_SWIFT_CSS_CALC_SIMPLIFICATION.
 //
-// WHY THIS IS A SECOND SWIFT PASS OVER THE SAME TREE, AND WHAT IT ADDS. The serializer next
-// door only ever READS a tree. This one rewrites it, and the whole boundary question that shaped
-// the design is how a node gets CONSTRUCTED without the operation kind crossing. The answer, which
-// CSSCalcSwiftTypes.h states at length, is that it never has to: simplification is a tree-to-tree
-// rewrite in which the output node's kind is the input node's kind everywhere except one rule, so
-// `rebuildFrom` recovers the operation from the ORIGINAL node's own variant tag and this file
-// supplies only operands and a count.
+// Handles the four numeric leaves, `Symbol`, `Invert`, `Deg2Rad`, most single-argument and
+// fixed-arity operations, `hypot()`, `min()`/`max()`, `clamp()` and `Sum`; everything else declines
+// the whole tree, including `Product`, `Negate`, `CalcMix`, `Random`, `Anchor`/`AnchorSize` and
+// `sibling-count()`/`sibling-index()`.
 //
-// What this file simplifies. Every tree whose every node is one of
+// A node's own kind never crosses the boundary: `rebuildFrom` recovers it from the original node's
+// variant tag.
 //
-//   - the four numeric leaves, and `Symbol` at any unit its table resolves to,
-//   - `Invert` and `Deg2Rad`, the two implementation-only wrappers,
-//   - 21 of the 34 operations: `mod`, `rem`, `round` in all four strategies, the six
-//     trig functions, `atan2`, `pow`, `sqrt`, `log`, `exp`, `abs`, `sign`, `progress` and
-//     `progress(no-clamp ...)`,
-//   - and four more: `hypot()`, `min()`, `max()` and `clamp()`.
+// The walk is two passes because the builder is an operand stack with no pop: `fold` decides what a
+// subtree collapses to without pushing, and `rewrite` pushes exactly one operand per node -- a
+// single eager pass would strand a folded node's children under its answer.
 //
-// Everything else declines, and a decline is a WHOLE-TREE decline: the C++ arm runs and the Swift
-// operand stack is destroyed unread. That is why this file needs no equivalent of the
-// serializer's "the walk is the decline decision" rule -- a `StringBuilder` cannot be
-// un-appended, but a local `Vector<Child>` can simply be dropped.
-//
-// The kinds still declined, and each for its own reason: `Sum` and `Product` (whose rules
-// reassociate and reorder), `Negate` (whose rules 6.2 to 6.4 rewrite a *child's* children in place),
-// `CalcMix` (normalisation over per-item weights that are not child nodes), `Random`, `Anchor`,
-// `AnchorSize`, `sibling-count()` and `sibling-index()` (all of which need `Style::BuilderState` or
-// the anchor evaluator, which the boundary does not carry and this file does not ask it to).
-//
-// This round added an arity change: everything before rebuilt every unfolded node with exactly the
-// children it came in with, so `rebuildSlot(const Children&)` -- which deliberately takes all
-// remaining operands and ignores the original's count -- had never executed. `min()`'s merge and
-// `hypot()`'s rebuild are the first things in the whole file to run it. This also added the only
-// rewrite that produces a node of a kind that was not in the input, `clamp()` collapsing to `min()`
-// or `max()`, which is `buildMinMax`'s first and only caller.
-//
-// THE PUSH IS LAZY, AND THAT IS THE ONE DESIGN DECISION WORTH ARGUING ABOUT. The obvious shape for a
-// post-order rewriter is "simplify each child, push it, then ask the parent to fold" -- and it does
-// not work, because the builder is an operand STACK with no pop. A parent that folds `mod(1, 2)`
-// into `Number(1)` would leave its two children stranded on the stack under the answer, and the
-// entry point's "exactly one operand" contract would fail for every folded tree in the document.
-// Adding a `discard(n)` to the boundary was the alternative and it was rejected: it is C++ written
-// to facilitate Swift, and it is not needed: a `min(r, 1px)` keeps an unresolved `Symbol` as a
-// survivor, and `clamp(none, r, 1px)` rebuilds as a `min()` over two subtrees, and the answer is
-// still not a `pop`, because `Fold` has cases that say what `rewrite` must push instead. So the work
-// splits in two:
-//
-//   - `fold(_:_:)` decides what a subtree collapses to, PUSHING NOTHING. It is pure apart from the
-//     two `const` lookups on the builder, and it allocates nothing on the C++ side either, so a
-//     subtree that folds away never causes a `makeChild` at all.
-//   - `rewrite(_:_:)` pushes exactly one operand: the folded leaf if there is one, otherwise its
-//     children's operands followed by `rebuildFrom`.
-//
-// The cost is that `fold` is re-entered once per level, so a node at depth d is folded d+1 times --
-// and for a merged `Min`/`Max` the merge plan is computed twice, once in `fold` to learn the arity
-// and once in `rewrite` to push the survivors. Priced rather than assumed, and on the same evidence
-// `childAt`'s linear scan was priced on: a calc expression's tree is a handful of nodes, the deepest
-// in the whole WPT css-values corpus is single digits, and `childInTreeOrder` is already linear per
-// access so the walk is quadratic before this file adds anything. If a measurement finds it, the fix
-// is for `fold` to hand its per-child results down to `rewrite` rather than a boundary change. Having
-// `.mergedChildren` carry the survivor list was rejected for now because the list is dynamically
-// sized, so it would put a heap allocation on a `Fold` value that is constructed for every node at
-// every level, where the common case allocates nothing.
-//
-// THE ARITHMETIC IS PORTED, NOT UPCALLED, and that is the opposite of the choice the serialization
-// pass made for number FORMATTING. The two are different problems. `formatCSSNumberValue` is a
-// CSS-specific algorithm with no Swift equivalent, so a reimplementation would agree on every common
-// value and diverge on subnormals; `std::fmod` and `std::sin` are libm, and Swift reaches the SAME
-// libm. So porting them introduces no second implementation of anything -- `Double`'s IEEE
-// operations and `Darwin`'s transcendentals are the identical machine instructions and the identical
-// library calls -- while an upcall would have been ~30 lines of C++ written purely to let Swift do
-// arithmetic. Every executor below names the C++ expression it reproduces at its site, and the four
-// places where the correspondence rests on something subtler than "same libm call" say so.
-//
-// NO `unsafe`, AND IT IS THE BOUNDARY THAT BUYS IT, exactly as next door: the tree crosses as a
-// borrowed `~Escapable` handle and the output crosses as a `SWIFT_SAFE` builder taken `inout`.
-// Nothing in this file can see a pointer, so there is no marker to justify.
+// The arithmetic is ported rather than upcalled, since Swift's `Double` operations and Darwin's
+// transcendentals are the same libm calls the C++ arm makes. No `unsafe`: the tree crosses as a
+// borrowed `~Escapable` handle and the output as a `SWIFT_SAFE` builder taken `inout`.
 
 /// What simplification did with a tree.
 ///
@@ -211,6 +150,17 @@ private struct NumericLeaf {
         )
     }
 
+/// A canonical `<length>`: `simplify(Sum&)`'s "we removed too much" result.
+    @inline(always)
+    static func canonicalLength(_ value: Double) -> NumericLeaf {
+        return NumericLeaf(
+            kind: .canonicalDimension,
+            value: value,
+            unitType: UInt16(WebCore.CSSUnitType.Px.rawValue),
+            percentHint: 0
+        )
+    }
+
     /// What `CSSCalcSwiftBuilder.pushLeaf` takes.
     @inline(always)
     var boundaryLeaf: WebCore.CSSCalc.CSSCalcSwiftLeaf {
@@ -283,6 +233,14 @@ private enum CalcExecutor {
     @inline(always)
     static func invert(_ a: Double) -> Double {
         return 1.0 / a
+    }
+
+/// `OperatorExecutor<Operator::Sum>` (CSSCalcExecutor.h:94-:97): plain IEEE `a + b`, so the two arms
+/// agree by construction on NaN, signed zero and infinities. What differs is accumulation ORDER,
+/// since `+` is not associative -- `sumMergePlan` accumulates in term index order for that reason.
+    @inline(always)
+    static func sum(_ a: Double, _ b: Double) -> Double {
+        return a + b
     }
 
 /// `OperatorExecutor<Operator::Min>`'s two-`double` overload. NOT `minWithSignedZero`: this executor
@@ -551,20 +509,20 @@ private enum Fold {
 /// `simplify` returned `std::nullopt`: the node keeps its kind and is rebuilt from its simplified
 /// children with the same arity. Carries the alternative, which `foldInvert` needs.
     case unchanged(CalcAlternative)
-    /// The node collapses to one of its own children, unfolded: `return { WTF::move(root.children[i])
-    /// }` at `+Simplification.cpp:409`, `:456` and `:1015`. `rewrite` pushes that subtree's operand
-    /// and nothing else, which is exactly one operand, so the parent's count is unaffected.
-    ///
-    /// One level for now: `rewrite` on the named child re-folds it, so a child that itself collapses
-    /// to a grandchild is handled by the recursion and never needs to be addressed from here. `Sum`
-    /// is the case that needs a second level, because step 8.1 splices a child `Sum`'s children into
-    /// the parent's own child list before the merge runs, and a survivor of that merge can be a
-    /// grandchild that `rewrite` has no single child to delegate to.
-    ///
-    /// Never produced when the promoted term is a leaf -- see `promoteTerm`, which returns the leaf
-    /// itself in that case. That is what keeps the file's `.leaf` invariant exact: the C++ returns the
-    /// child, so if the child is a `Numeric` the parent's `switchOn` sees a `Numeric`.
+/// The node collapses to one of its own children, unfolded (`+Simplification.cpp:409`, `:456`,
+/// `:1015`): `rewrite` pushes that subtree's operand and nothing else.
+///
+/// Addresses only a direct child, not a grandchild: `Sum`'s spliced terms need `.replacedBySumTerm`
+/// below instead, since a spliced term can sit at any depth. Never produced when the promoted term is
+/// a leaf -- see `promoteTerm` -- which keeps `.leaf`'s invariant exact.
     case replacedByTerm(child: UInt32)
+/// A `Sum` that collapses to one of its own flattened terms (`simplify(Sum&)`'s `:595`, `:657`,
+/// `:675`), after step 8.1 splices every nested `Sum`'s children into it.
+///
+/// The payload is an origin ordinal, not a child index, since a term can sit at unbounded depth after
+/// splicing: `collectSumTerms` numbers positions in visit order and `pushSumTerm` re-walks to find the
+/// one requested. Never produced when the term is a leaf; see `promoteSumTerm`.
+    case replacedBySumTerm(origin: UInt32)
 /// `clamp()` becoming `min()` or `max()`: the only rewrite that creates an operation kind not in
 /// the input, and the only reason `buildMinMax` exists on the boundary.
     case rebuiltMinMax(isMax: Bool)
@@ -633,10 +591,23 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
         // `progress( <calc-sum>, <calc-sum>, <calc-sum> )`, all three required.
         return childCount == 3
 
-    case .Sum, .Product:
-        // Declined. Their rules reassociate and reorder -- step 8.1 splices a child Sum's children
-        // into the parent, and the zero-term and same-unit merges run over an index-offset table --
-        // which is not a fold of one node.
+    case .Sum:
+        // `simplify(Sum&)` (`:547`-`:714`). The same arity bound `Min`/`Max` take, and for the same
+        // reason: `simplify(Sum&)` opens with `ASSERT(!root.children.isEmpty())`. An empty node would
+        // fall through step 8.1 and rebuild empty, which is the same answer this fold would give -- but
+        // an assertions build fires on the C++ arm and would not here, so this declines rather than
+        // claim a node the C++ arm asserts against. Unreachable through the parser: `calc()` does not
+        // parse.
+        //
+        // No upper bound: `Children` is a variable-arity slot and `rebuildSlot(const Children&)` takes
+        // all remaining operands, so any count is structurally valid on the rebuild side. Step 8.1 can
+        // also make the term count larger than `childCount`, which is what that overload is for.
+        return childCount >= 1
+
+    case .Product:
+        // Declined: rules 9.1 and 9.2 merge every `Number` factor into one running product and
+        // reassociate the rest, which is not a fold of one node. 9.1 is step 8.1 with `Product` in
+        // place of `Sum`.
         return false
 
     case .Negate:
@@ -726,22 +697,16 @@ private func walk(
 
 // MARK: - The simplifier
 
-/// The part of `SimplificationOptions` this file reads.
-///
-/// A `struct`, not a `class`: a class stored property costs dynamic exclusivity enforcement
-/// (`swift_beginAccess`/`swift_endAccess`) on every read, on a recursion that reads this at nearly
-/// every node.
-///
-/// `CSSCalcSwiftSimplificationOptions` carries six fields; this reads one. `range` is read at zero
-/// sites in the C++ simplifier -- the *serializer* clamps against it instead;
-/// `allowZeroValueLengthRemovalFromSum` is read at exactly one site, inside `simplify(Sum&)`, not yet
-/// handled here; `category` is unread so far; `hasConversionData` is subsumed by
-/// `resolveRelativeLength` answering `resolved == false`; and `Stage` is copied through
-/// `copyAndSimplify` and never read.
+/// The two fields of `SimplificationOptions` this file reads, as a `struct` rather than a `class`
+/// (a class stored property costs dynamic exclusivity enforcement on every read).
 private struct CalcSimplification {
     /// `percentageResolveToDimension(options)` (`+Simplification.cpp:86`-`:107`), precomputed in C++
     /// to avoid a second copy of the `CSS::Category` table here.
     let percentageResolveToDimension: Bool
+
+    /// `options.allowZeroValueLengthRemovalFromSum`, read at one C++ site, `:611`. Not rare: several
+    /// production callers pass `true`, so declining when it is set is not an acceptable answer.
+    let allowZeroValueLengthRemovalFromSum: Bool
 
     // MARK: Shared predicates
 
@@ -875,17 +840,17 @@ private extension CalcSimplification {
                 return .declined(.Invert)
             }
             return .unchanged(.Invert)
-        case .replacedByTerm:
-            // The child collapsed to one of its own children -- a single-argument `min()`, or a
-            // `clamp(none, VAL, none)` -- and this file does not carry what that grandchild's
-            // alternative is, so it cannot tell whether rule 7.2 applies to the result. Declining is
-            // exact: a decline runs the C++ arm, which applies 7.2 or not as the tree requires. An
-            // `Invert` is only reachable inside a `Product`, which declines outright, so reaching this
-            // at all needs a constructed tree.
+        case .replacedByTerm, .replacedBySumTerm:
+            // The child collapsed to one of its own children -- a single-argument `min()`, a
+            // `clamp(none, VAL, none)`, or a `Sum` that collapsed to one of its flattened terms -- and
+            // this file does not carry what that term's alternative is, so it cannot tell whether rule
+            // 7.2 applies to the result. Declining is exact: a decline runs the C++ arm, which applies
+            // 7.2 or not as the tree requires. An `Invert` is only reachable inside a `Product`, which
+            // declines outright, so reaching this at all needs a constructed tree.
             return .declined(.Invert)
         case .mergedChildren, .rebuiltMinMax:
-            // Both provably produce a `Min` or a `Max` and never an `Invert`: `.mergedChildren` carries
-            // the alternative and `foldMinMax` is its only producer, and `.rebuiltMinMax` is
+            // Neither can be an `Invert` and both carry what they are: `.mergedChildren` names its
+            // alternative and is produced only by `foldMinMax` and `foldSum`, and `.rebuiltMinMax` is
             // `buildMinMax` by construction. So this is the C++'s `[](auto&)` arm: `nullopt`, and the
             // `Invert` is rebuilt from its one simplified child.
             return .unchanged(.Invert)
@@ -1146,6 +1111,9 @@ private extension CalcSimplification {
         case .Max:
             return foldMinMax(node, info, true, builder)
 
+        case .Sum:
+            return foldSum(node, info, builder)
+
         case .Clamp:
             return foldClamp(node, info, builder)
 
@@ -1225,7 +1193,7 @@ private extension CalcSimplification {
                 CalcExecutor.progressNoClamp
             )
 
-        case .SiblingCount, .SiblingIndex, .Sum, .Product, .Negate,
+        case .SiblingCount, .SiblingIndex, .Product, .Negate,
              .Random, .CalcMix, .Anchor, .AnchorSize:
             // Enumerated by name rather than swept into the `@unknown default` below, so an
             // alternative that is declined on purpose stays distinguishable from one that simply has
@@ -1514,8 +1482,22 @@ private extension CalcSimplification {
             return .leaf(leaf)
         case .declined(let blame):
             return .declined(blame)
-        case .unchanged, .replacedByTerm, .rebuiltMinMax, .mergedChildren:
+        case .unchanged, .replacedByTerm, .replacedBySumTerm, .rebuiltMinMax, .mergedChildren:
             return .replacedByTerm(child: index)
+        }
+    }
+
+    /// `promoteTerm` for a `Sum`, whose terms are addressed by origin ordinal rather than child index,
+    /// since step 8.1 splices nested `Sum`s to any depth. See `Fold.replacedBySumTerm`.
+    @inline(always)
+    func promoteSumTerm(_ folded: Fold, _ origin: UInt32) -> Fold {
+        switch folded {
+        case .leaf(let leaf):
+            return .leaf(leaf)
+        case .declined(let blame):
+            return .declined(blame)
+        case .unchanged, .replacedByTerm, .replacedBySumTerm, .rebuiltMinMax, .mergedChildren:
+            return .replacedBySumTerm(origin: origin)
         }
     }
 
@@ -1737,6 +1719,39 @@ private extension CalcSimplification {
         var mergeable: Bool
         /// Whether the term appears in the rebuilt child list.
         var survives: Bool
+        /// `FirstInstance::merges` (`:602`), `Sum` only: how many later terms merged into this one.
+        /// Carried on the shared slot (rather than a `Sum`-specific one) so `mergeTarget` has one
+        /// definition.
+        var merges: UInt32
+        /// `FirstInstance::canRemove` (`:603`), `Sum` only: whether this zero-valued length may be
+        /// dropped. Always false here -- `simplifyForMinMax` never drops a term.
+        var canRemove: Bool
+    }
+
+    /// An empty slot: a term not yet classified. `survives` defaults to `true`, so a non-`Numeric`
+    /// term survives by construction rather than by an arm remembering to say so.
+    @inline(always)
+    func unclassifiedSlot() -> MergeSlot {
+        return MergeSlot(accumulated: nil, mergeable: false, survives: true, merges: 0, canRemove: false)
+    }
+
+    /// `offsetOfFirstInstance[toNumericIdentity(child)]`, as a scan: the earliest term of the same
+    /// `(kind, unitType)` that `leaf` may merge into. Shared by `mergePlan` and `sumMergePlan`, which
+    /// differ only in what they do with the answer.
+    ///
+    /// Returns the accumulated leaf along with the index, rather than making the caller re-read it --
+    /// avoiding a fall-through where a `nil` leaf could silently look like a new first instance.
+    @inline(always)
+    func mergeTarget(_ slots: [MergeSlot], _ upTo: Int, _ leaf: NumericLeaf) -> (index: Int, accumulated: NumericLeaf)? {
+        for j in 0..<upTo where slots[j].mergeable {
+            guard let accumulated = slots[j].accumulated else {
+                continue
+            }
+            if switchTogether(accumulated, leaf), unitsMatch(accumulated, leaf) {
+                return (j, accumulated)
+            }
+        }
+        return nil
     }
 
     /// Phase 1 of `simplifyForMinMax` (`:418`-`:446`), as values. No dense table: `CSSUnitType` is a
@@ -1749,10 +1764,7 @@ private extension CalcSimplification {
     /// change the result for `Min`/`Max` -- written in term order anyway since it costs nothing and
     /// `Sum` genuinely depends on it.
     func mergePlan(_ folded: [Fold], _ isMax: Bool) -> (slots: [MergeSlot], merges: Int) {
-        var slots = [MergeSlot](
-            repeating: MergeSlot(accumulated: nil, mergeable: false, survives: true),
-            count: folded.count
-        )
+        var slots = [MergeSlot](repeating: unclassifiedSlot(), count: folded.count)
         var merges = 0
         // `bool canMergePercentages = !percentageResolveToDimension(options);` (`:416`).
         let canMergePercentages = !percentageResolveToDimension
@@ -1764,29 +1776,15 @@ private extension CalcSimplification {
                 continue
             }
 
-            // `if (id == NumericIdentity::Percentage && !canMergePercentages) return 0;` -- and the
-            // table entry is LEFT UNSET, which is what makes phase 2 keep every such child. Its leaf
-            // is still recorded, because phase 3 pushes it.
+            // Percentage merges are skipped when disallowed; the table entry is left unset so the
+            // child survives, but its leaf is still recorded for phase 3. `simplify(Sum&)` has no such
+            // skip -- see `sumMergePlan`, which is why the two plans are separate functions.
             if leaf.kind == .percentage, !canMergePercentages {
                 slots[i].accumulated = leaf
                 continue
             }
 
-            // The scan carries the accumulated leaf out with the index, rather than re-reading
-            // `slots[j].accumulated` after the loop: two `if let`s would leave a fall-through where a
-            // set target with a `nil` leaf silently became a new first instance.
-            var target: (index: Int, accumulated: NumericLeaf)?
-            for j in 0..<i where slots[j].mergeable {
-                guard let accumulated = slots[j].accumulated else {
-                    continue
-                }
-                if switchTogether(accumulated, leaf), unitsMatch(accumulated, leaf) {
-                    target = (j, accumulated)
-                    break
-                }
-            }
-
-            if let target {
+            if let target = mergeTarget(slots, i, leaf) {
                 // The surviving alternative, unit and percent hint are the first instance's, which
                 // is exactly what `withValue` carries.
                 let merged = isMax
@@ -1894,38 +1892,264 @@ private extension CalcSimplification {
         // Operands are `(min, val)`; the result's shape is `val`'s, matching the branch above.
         return .leaf(value.withValue(CalcExecutor.max(minimum.value, value.value)))
     }
+
+    // MARK: `Sum`
+
+    /// `simplify(Sum&)` (`+Simplification.cpp:547`-`:714`), css-values-4 steps 8.1 to 8.4.
+    ///
+    /// Step 8.1 splices any child `Sum` into this node's term list first, so terms can sit at any
+    /// depth; `collectSumTerms`/`pushSumTerm` address a term by tree-position ordinal rather than
+    /// child/grandchild index. `isSpliceableSum` tests the child's simplified `Fold`, not the input,
+    /// since a child `Sum` that folded to a leaf is no longer spliceable.
+    ///
+    /// Five size outcomes, in C++ order (`:652`-`:711`): no removals -> `nullopt`; exactly one
+    /// survivor after merges (not after removals) -> that child, `:656` -- `calc(0px + 0px)` under
+    /// the removal flag keeps its survivor rather than collapsing further; zero survivors -> a
+    /// canonical zero length; one survivor after removals -> a scan for it; otherwise rebuild from
+    /// the survivors.
+    ///
+    /// A `Sum` that spliced but merged nothing is not `.unchanged`: `nullopt` means "keeps its
+    /// kind", but `root.children` was already replaced by the flattened term list, so it needs
+    /// `.mergedChildren(.Sum)`. The arity-one check (`:594`) is on the flattened count.
+    func foldSum(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        var origin: UInt32 = 0
+        let terms = collectSumTerms(node, info.childCount, &origin, builder)
+        if let declined = terms.declined {
+            return declined
+        }
+
+        // `if (root.children.size() == 1) return { WTF::move(root.children[0]) };` (`:594`), on the
+        // FLATTENED list. No merge has run, so the term's own fold is the answer.
+        if terms.folds.count == 1 {
+            return promoteSumTerm(terms.folds[0], terms.origins[0])
+        }
+
+        let plan = sumMergePlan(terms.folds, builder)
+
+        // 1. `if (!childrenToRemoveTotal) return { };`
+        if plan.removeTotal == 0 {
+            // ... and the arity is the flattened one, which 8.1 may already have changed.
+            return terms.folds.count == Int(info.childCount) ? .unchanged(.Sum) : .mergedChildren(.Sum)
+        }
+
+        // Term 0 is always the sole merge-survivor here (same proof as `foldMinMax`), so no search is
+        // needed. Its `canRemove` bit is not consulted -- removals aren't applied yet at this test.
+        if terms.folds.count - plan.merges == 1 {
+            return promoteSumTerm(termFold(plan.slots, terms, 0), terms.origins[0])
+        }
+
+        let combined = terms.folds.count - plan.removeTotal
+
+        // A `length` zero is returned because only a `length` node can be removed.
+        if combined == 0 {
+            return .leaf(NumericLeaf.canonicalLength(0))
+        }
+
+        // The C++'s scan condition (non-`Numeric`, or a first instance with `!canRemove`) is exactly
+        // `survives`.
+        if combined == 1 {
+            for k in 0..<plan.slots.count where plan.slots[k].survives {
+                return promoteSumTerm(termFold(plan.slots, terms, k), terms.origins[k])
+            }
+            // Cannot happen per the arithmetic above; if it did, `rebuildFrom` with zero operands is
+            // refused and the tree declines, safer than the C++'s empty `Sum`.
+        }
+
+        // 5. `root.children = WTF::move(combinedChildren); return { };`
+        return .mergedChildren(.Sum)
+    }
+
+    /// A term's own result once the merge has run: the accumulated leaf for a `Numeric` term, else
+    /// the term's own fold. A function rather than an inline expression, since getting it backwards
+    /// (reading the pre-merge leaf) is silent.
+    @inline(always)
+    func termFold(_ slots: [MergeSlot], _ terms: SumTermList, _ index: Int) -> Fold {
+        if let accumulated = slots[index].accumulated {
+            return .leaf(accumulated)
+        }
+        return terms.folds[index]
+    }
+
+    /// Whether step 8.1 splices this child's terms into the parent instead of taking it as one term:
+    /// true exactly when the simplified child is still a `Sum`, i.e. `.unchanged(.Sum)` or
+    /// `.mergedChildren(.Sum)`. Checked by alternative rather than assumed, since several other folds
+    /// also produce those two cases.
+    @inline(always)
+    func isSpliceableSum(_ folded: Fold) -> Bool {
+        switch folded {
+        case .unchanged(let alternative), .mergedChildren(let alternative):
+            return alternative == .Sum
+        case .leaf, .replacedByTerm, .replacedBySumTerm, .rebuiltMinMax, .declined:
+            return false
+        }
+    }
+
+    /// One `Sum`'s flattened term list, as values -- no node handle, since `CSSCalcSwiftNode` is
+    /// `~Escapable` and no Swift container accepts one. Everything here is `Copyable`/`Escapable`, so
+    /// the list can be freely returned and walked.
+    struct SumTermList {
+        /// One entry per term of the flattened list, in order.
+        var folds: [Fold] = []
+        /// The tree-position ordinal each term came from. See `Fold.replacedBySumTerm`.
+        var origins: [UInt32] = []
+        /// The first child that declined, as the `Fold` to return -- same shape as `declinedChild`.
+        var declined: Fold?
+    }
+
+    /// Step 8.1: `node`'s children in tree order, with every child that is still a `Sum` replaced by
+    /// its own post-merge terms. Recurses only through that splice chain, not through `fold`'s own
+    /// recursion, re-deriving each spliced child's flattened list rather than assuming a fixed depth.
+    ///
+    /// `origin` threads through the whole recursion so one ordinal names a term at any depth. Cost is
+    /// exponential in nested-`Sum` depth in theory, but `parseAndSimplify` flattens nested sums during
+    /// the parse, so no stylesheet-derived tree nests here in practice.
+    func collectSumTerms(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ childCount: UInt32,
+        _ origin: inout UInt32,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> SumTermList {
+        var out = SumTermList()
+        // `Int(clamping:)`, not `Int(_:)`, which traps where `Int` is narrower than `UInt32`.
+        out.folds.reserveCapacity(Int(clamping: childCount))
+        out.origins.reserveCapacity(Int(clamping: childCount))
+
+        var index: UInt32 = 0
+        while index < childCount {
+            let child = node.childInTreeOrder(index)
+            let folded = fold(child, builder)
+            if case .declined = folded {
+                // Checked here, not by a sweep afterwards: a declined grandchild must stop the walk
+                // before the parent's plan is computed over a list missing terms.
+                out.declined = folded
+                return out
+            }
+
+            if isSpliceableSum(folded) {
+                let childInfo = child.info()
+                let spliced = collectSumTerms(child, childInfo.childCount, &origin, builder)
+                if let declined = spliced.declined {
+                    out.declined = declined
+                    return out
+                }
+                let childPlan = sumMergePlan(spliced.folds, builder)
+                for k in 0..<childPlan.slots.count where childPlan.slots[k].survives {
+                    out.folds.append(termFold(childPlan.slots, spliced, k))
+                    out.origins.append(spliced.origins[k])
+                }
+            } else {
+                out.folds.append(folded)
+                out.origins.append(origin)
+                origin += 1
+            }
+            index += 1
+        }
+        return out
+    }
+
+    /// `isLength(id) && options.allowZeroValueLengthRemovalFromSum` (`:611`). `.number`/`.percentage`
+    /// never qualify; `.canonicalDimension` qualifies only for `Px`; `.nonCanonicalDimension` (48 of 56
+    /// units) crosses to `isLengthUnit`. The flag is tested first so the upcall is skipped when it
+    /// cannot be used, and the caller only reaches it for a merged value of exactly zero.
+    @inline(always)
+    func lengthRemovalAllowed(
+        _ leaf: NumericLeaf,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Bool {
+        guard allowZeroValueLengthRemovalFromSum else {
+            return false
+        }
+        switch leaf.kind {
+        case .number, .percentage:
+            return false
+        case .canonicalDimension:
+            return leaf.unitType == UInt16(WebCore.CSSUnitType.Px.rawValue)
+        case .nonCanonicalDimension:
+            return builder.isLengthUnit(leaf.unitType)
+        }
+    }
+
+    /// Steps 8.2 to 8.4's first phase (`:607`-`:649`): `simplifyForMinMax`'s `mergePlan`, but with a
+    /// per-bucket `{offset, merges, canRemove}` record (outcomes need the removal count separately),
+    /// `canRemove` recomputed from the merged value on every merge rather than accumulated, and no
+    /// percentage skip (`Sum` merges percentages unconditionally, unlike `Min`/`Max`).
+    ///
+    /// Accumulation runs in term index order because `+` is not associative:
+    /// `calc(1e300px + 1px + -1e300px)` depends on it.
+    func sumMergePlan(
+        _ folded: [Fold],
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> (slots: [MergeSlot], merges: Int, removeTotal: Int) {
+        var slots = [MergeSlot](repeating: unclassifiedSlot(), count: folded.count)
+
+        for i in 0..<folded.count {
+            // `[](const auto&) { }` (`:635`): a non-`Numeric` term is never eligible for merge or
+            // removal, so it always survives.
+            guard case .leaf(let leaf) = folded[i] else {
+                continue
+            }
+
+            if let target = mergeTarget(slots, i, leaf) {
+                let merged = CalcExecutor.sum(target.accumulated.value, leaf.value)
+                slots[target.index].accumulated = target.accumulated.withValue(merged)
+                slots[target.index].merges += 1
+                // `firstInstance.canRemove = canRemoveIfZero && !mergedValue;` (`:624`), spelled as
+                // `if`/`else` rather than `&&` because `&&`'s autoclosure right operand cannot capture
+                // a `borrowing` parameter. This is an assignment, not an accumulation: a slot made
+                // removable by an earlier merge must be cleared when a later merge lands non-zero.
+                if merged == 0 {
+                    slots[target.index].canRemove = lengthRemovalAllowed(leaf, builder)
+                } else {
+                    slots[target.index].canRemove = false
+                }
+                slots[i].survives = false
+            } else {
+                // `firstInstances[id] = { .offset = i + 1, .merges = 0, .canRemove = canRemoveIfZero
+                // && !child.value }` (`:629`-`:633`).
+                slots[i].accumulated = leaf
+                slots[i].mergeable = true
+                // `&&` would capture `builder` in an autoclosure; see the merge arm above.
+                if leaf.value == 0 {
+                    slots[i].canRemove = lengthRemovalAllowed(leaf, builder)
+                }
+            }
+        }
+
+        // `for (auto& firstInstance : firstInstances) if (firstInstance.offset) { ... }` (`:644`-`:649`),
+        // over buckets (`mergeable`), not terms.
+        var merges = 0
+        var removeTotal = 0
+        for i in 0..<slots.count where slots[i].mergeable {
+            merges += Int(slots[i].merges)
+            removeTotal += Int(slots[i].merges) + (slots[i].canRemove ? 1 : 0)
+            if slots[i].canRemove {
+                // The rebuild's own condition, `(firstInstance.offset - 1) == i && !canRemove`
+                // (`:699`), folded into the slot so every site asks it the same way.
+                slots[i].survives = false
+            }
+        }
+
+        return (slots, merges, removeTotal)
+    }
 }
 
 // MARK: - Building the answer
 
 private extension CalcSimplification {
 
-    /// Push exactly ONE operand for this subtree, and report whether the rewrite can continue.
+    /// Push exactly one operand for this subtree, or decline. On `.pushed` the operand stack has
+    /// grown by exactly one; on `.declined` the caller must abandon the tree without inspecting the
+    /// stack. Dispatches on `fold`'s answer: a numeric leaf pushes directly with no children built; a
+    /// collapse (to a child, a `Sum` term, a `min()`/`max()` conversion, or a grandchild) pushes one
+    /// operand for the replacement; merged `Sum`/`Product`/`Min`/`Max` children push their survivors
+    /// and `rebuildFrom` with the new count; everything else rewrites each child then rebuilds.
     ///
-    /// The contract in both directions, because `rebuildFrom`'s correctness rests on it: on
-    /// `.pushed` the operand stack has grown by exactly one, and on `.declined` the caller must
-    /// abandon the tree without inspecting the stack at all.
-    ///
-    /// Six shapes, in the order they are tried:
-    ///
-    ///  1. The subtree folds to a numeric leaf -- `pushLeaf`, and none of its children are ever
-    ///     built at all. That is not just an allocation saved: a folded subtree in the C++ arm
-    ///     builds every intermediate `Child` and then throws them away.
-    ///  2. The subtree is an unresolved `Symbol` -- `pushCopyOf`, which routes to
-    ///     `CSSCalc::copy(const Child&)`, the same copy `copyAndSimplifyChildren` bottoms out in.
-    ///  3. The subtree collapses to one of its own children -- push that child's operand and nothing
-    ///     else, which is still exactly one operand.
-    ///  4. A `clamp()` that became a `min()` or a `max()` -- push its two arguments and `buildMinMax`.
-    ///     This is the only place the file asks for a kind that was not in the input.
-    ///  5. A `min()`/`max()` whose children merged -- push one operand per survivor and `rebuildFrom`
-    ///     with the new count -- the first thing here to change an arity.
-    ///  6. Anything else in scope -- rewrite each child in tree order, then `rebuildFrom`, which
-    ///     recovers the operation from the original's own variant tag.
-    ///
-    /// UNLIKE THE COVERAGE WALK, THIS STOPS AT THE FIRST DECLINE, and the asymmetry is deliberate:
-    /// the walk keeps going because the mask and the count have to describe the whole tree, while
-    /// here there is nothing left to learn and every further push is work on a stack that will be
-    /// destroyed unread.
+    /// Unlike the coverage walk, this stops at the first decline -- there is nothing left to learn,
+    /// and the walk's mask/count already describe the whole tree.
     mutating func rewrite(
         _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
@@ -1945,10 +2169,21 @@ private extension CalcSimplification {
             // nothing for the node itself, avoiding any need for `pop`.
             return rewrite(node.childInTreeOrder(child), &builder)
 
+        case .replacedBySumTerm(let origin):
+            // The same thing for a `Sum`, whose terms are not its children: step 8.1 spliced them in
+            // from any depth, so the answer is addressed by ordinal and resolved by re-walking.
+            return rewriteSumTerm(node, origin, &builder)
+
         case .rebuiltMinMax(let isMax):
             return rewriteConvertedMinMax(node, isMax, &builder)
 
         case .mergedChildren(let alternative):
+            // `Sum` has its own consuming pass, because its survivors are terms of the flattened list
+            // rather than children of the node -- see `rewriteSumChildren`. `Min` and `Max` are the
+            // only other producers of this case, and their survivors are children.
+            if alternative == .Sum {
+                return rewriteSumChildren(node, &builder)
+            }
             return rewriteMergedChildren(node, alternative, &builder)
 
         case .unchanged(let alternative):
@@ -2021,6 +2256,111 @@ private extension CalcSimplification {
         return builder.rebuildFrom(node, survivors) ? .pushed : .declined(alternative)
     }
 
+    /// The `.mergedChildren(.Sum)` half of `rewrite`: step 8.1 and its consuming loop (`:689`-`:711`).
+    /// Separate from `rewriteMergedChildren` because a `Sum`'s survivors are not its children -- step
+    /// 8.1 flattened the list, so a survivor can be a grandchild or deeper, reached through
+    /// `pushSumTerm`'s ordinal re-walk.
+    ///
+    /// The count can go up as well as down: `calc(1px + (1em + 1%))` arrives with two children and
+    /// rebuilds with three. `rebuildSlot` takes all remaining operands regardless of direction.
+    mutating func rewriteSumChildren(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        let info = node.info()
+        var origin: UInt32 = 0
+        let terms = collectSumTerms(node, info.childCount, &origin, builder)
+        if case .declined(let blame) = terms.declined {
+            // Unreachable in practice; checked rather than asserted so a broken boundary falls back
+            // to the C++ arm.
+            return .declined(blame)
+        }
+        let plan = sumMergePlan(terms.folds, builder)
+
+        var survivors: UInt32 = 0
+        for k in 0..<plan.slots.count where plan.slots[k].survives {
+            if let accumulated = plan.slots[k].accumulated {
+                // A `Numeric` survivor is pushed as a leaf, required for the same reason as
+                // `rewriteMergedChildren`: its value may have been accumulated by a nested `Sum`'s
+                // own pass and exists nowhere in the input tree.
+                guard builder.pushLeaf(accumulated.boundaryLeaf) else {
+                    return .declined(nil)
+                }
+            } else {
+                var counter: UInt32 = 0
+                guard let pushed = pushSumTerm(node, info.childCount, terms.origins[k], &counter, &builder) else {
+                    // Would mean the two walks disagreed on ordinals. A decline rather than a trap:
+                    // the C++ arm then runs and the mismatch is a visible finding, not a crash.
+                    return .declined(.Sum)
+                }
+                if case .declined(let blame) = pushed {
+                    return .declined(blame)
+                }
+            }
+            survivors += 1
+        }
+
+        return builder.rebuildFrom(node, survivors) ? .pushed : .declined(.Sum)
+    }
+
+    /// The `.replacedBySumTerm` half of `rewrite`: push the one flattened term the `Sum` collapsed to,
+    /// and nothing else.
+    mutating func rewriteSumTerm(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ origin: UInt32,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        let info = node.info()
+        var counter: UInt32 = 0
+        guard let pushed = pushSumTerm(node, info.childCount, origin, &counter, &builder) else {
+            return .declined(.Sum)
+        }
+        return pushed
+    }
+
+    /// Resolve an origin ordinal back to the tree position it names, and rewrite that subtree.
+    ///
+    /// This is the mirror of `collectSumTerms` and has to stay one: both walk `node`'s children in tree
+    /// order, both call `fold` on each, and both test `isSpliceableSum` on the answer -- so both visit
+    /// the same positions in the same order and assign the same ordinals. `collectSumTerms` numbers the
+    /// non-spliceable ones; this counts them and stops at `target`.
+    ///
+    /// `nil` means "not in this subtree", which at the top level means the ordinal was out of range and
+    /// the caller declines. It is not folded into `Rewrite` as a third case, because "the walk found
+    /// nothing" and "the walk found it and the push failed" need different answers at the call site and
+    /// a single enum would let one be mistaken for the other.
+    mutating func pushSumTerm(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ childCount: UInt32,
+        _ target: UInt32,
+        _ counter: inout UInt32,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite? {
+        var index: UInt32 = 0
+        while index < childCount {
+            let child = node.childInTreeOrder(index)
+            let folded = fold(child, builder)
+            if case .declined(let blame) = folded {
+                return .declined(blame)
+            }
+            if isSpliceableSum(folded) {
+                let childInfo = child.info()
+                if let found = pushSumTerm(child, childInfo.childCount, target, &counter, &builder) {
+                    return found
+                }
+            } else {
+                if counter == target {
+                    // `rewrite` on the term pushes exactly one operand, which is what the collapsed
+                    // `Sum` owes its parent.
+                    return rewrite(child, &builder)
+                }
+                counter += 1
+            }
+            index += 1
+        }
+        return nil
+    }
+
     /// The `.unchanged` half of `rewrite`: the node keeps its own alternative and is rebuilt from
     /// its simplified children.
     mutating func rebuild(
@@ -2087,7 +2427,8 @@ public func cssCalcSimplifySwift(
     }
 
     var simplification = CalcSimplification(
-        percentageResolveToDimension: options.percentageResolveToDimension
+        percentageResolveToDimension: options.percentageResolveToDimension,
+        allowZeroValueLengthRemovalFromSum: options.allowZeroValueLengthRemovalFromSum
     )
 
     if case .declined(let rewriteBlame) = simplification.rewrite(root, &builder) {

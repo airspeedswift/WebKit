@@ -639,6 +639,9 @@ struct CSSCalcSwiftSimplificationOptions {
     // `CSS::Category`'s underlying value. Carried for completeness -- the `switch` on it in Swift
     // is the predicate below -- and inert for everything else.
     uint8_t category;
+    // `options.allowZeroValueLengthRemovalFromSum`. `simplify(Sum&)` reads it at
+    // CSSCalcTree+Simplification.cpp:611, and `isLengthUnit` below is the other half of that one
+    // site. Not a rare flag -- four production callers set it.
     bool allowZeroValueLengthRemovalFromSum;
     // Whether `options.conversionData` holds a value. Swift cannot be given
     // `CSSToLengthConversionData` and does not need it: every use of it is inside
@@ -768,6 +771,24 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // which for these units means "no conversion data", and the dimension is left alone.
     // `alternative` is still reported for the reason `CSSCalcSwiftNumericResult::alternative` gives.
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const;
+
+    // `isLength(toNumericIdentity(...))` (CSSCalcTree+NumericIdentity.h:215), which
+    // `simplify(Sum&)` reads at CSSCalcTree+Simplification.cpp:611 to decide whether a zero-valued
+    // term can be dropped from a sum.
+    //
+    // In C++ because the answer is a 48-of-64 membership set over a generated unit enum, and
+    // transcribing it in either direction would be a duplicated table. A Swift denylist of the
+    // eight non-length non-canonical units (`Rad`, `Grad`, `Turn`, `Ms`, `Khz`, `X`, `Dpi`,
+    // `Dpcm`) was rejected: a new angle or time unit added to `CSSUnitType` would then be silently
+    // classified as a length and removed from every sum with a zero of it. A `bool isLength` field
+    // on `CSSCalcSwiftNodeInfo` was rejected on cost: `info()` runs for every node of every tree,
+    // and this would add a 56-case switch to answer a question only one operation asks.
+    //
+    // Not on any hot path: three of the four numeric kinds are decided in Swift from `unitType`
+    // alone, so this is reached only for a `NonCanonicalDimension` term whose value is exactly
+    // zero with `allowZeroValueLengthRemovalFromSum` set. `calc(0em + 1px)` reaches it; nothing
+    // else does.
+    WEBCORE_EXPORT bool isLengthUnit(uint16_t unitType) const;
 
 private:
     CSSCalcSwiftOperandStack* m_operands;
