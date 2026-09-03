@@ -45,6 +45,41 @@ framework module WebCore_Private [system] {
         export *
     }
 
+    // `CSSCalc::Type`, the css-typed-om numeric type (seven `int8_t` exponents plus a
+    // percent hint), and its algebra: `Type::multiply`, `Type::invert`,
+    // `Type::calculationCategory` and `Type::determinePercentHint`, called from Swift
+    // rather than reimplemented.
+    //
+    // CSSCalcType.h is self-contained enough to be its own boundary submodule: it includes
+    // only `<array>`, `<optional>` and `<wtf/Forward.h>`, and forward-declares both
+    // `CSSUnitType` and `CSS::Category` instead of including their headers.
+    //
+    // `Type` must be spelled with backticks on the Swift side -- ``WebCore.CSSCalc.`Type` ``
+    // -- because the bare name parses as the metatype of the namespace enum, and the
+    // diagnostic ("type 'WebCore.CSSCalc' has no member 'length'") does not name the cause.
+    explicit module CSSCalcTypeSwiftTypes {
+        header "CSSCalcType.h"
+        requires cplusplus
+        export *
+    }
+
+    // `CSS::Category`, the eleven-case numeric category that `Type::determinePercentHint`
+    // takes and `Type::calculationCategory` returns. A submodule of its own rather than a
+    // member of the one above: this header is WebCore's general vocabulary, included by
+    // hundreds of C++ headers, where CSSCalcType.h is specific to this boundary.
+    //
+    // It carries `#include <wtf/Forward.h>` and nothing else.
+    //
+    // `CSSCalcSwiftSimplificationOptions` carries `category` as a raw `uint8_t`; resolving a
+    // percent hint needs `Type::determinePercentHint(options.category)`, which the
+    // `percentageResolveToDimension` bool beside it cannot substitute for, since that bool
+    // cannot distinguish `LengthPercentage` from `AnglePercentage`.
+    explicit module CSSPrimitiveNumericCategorySwiftTypes {
+        header "CSSPrimitiveNumericCategory.h"
+        requires cplusplus
+        export *
+    }
+
     module Core {
         // Workaround for rdar://173516139: PrivateHeaders includes a header
         // "WorkAround173516139.h" that the build system regenerates whenever
@@ -75,6 +110,8 @@ framework module WebCore_Private [system] {
         exclude header "CSSUnitType.h"
         exclude header "CSSUnitConversions.h"
         exclude header "CSSCalcSwiftTypes.h"
+        exclude header "CSSCalcType.h"
+        exclude header "CSSPrimitiveNumericCategory.h"
 
         module * {
             export *

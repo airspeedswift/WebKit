@@ -36,6 +36,25 @@ internal import WebCore_Private.CSSUnitsSwiftTypes
 // `import wtf`, which does not see them under WTF's umbrella module map.
 internal import wtf.Core.MathExtras
 
+// `CSSCalc::Type` and its algebra (`multiply`, `invert`, `calculationCategory`,
+// `determinePercentHint`, `determineType`, `applyPercentHint`) for `Product`'s step 9.4.
+//
+// Called via the boundary rather than reimplemented, so both arms share the one definition in
+// CSSCalcType.cpp. CSSCalcType.h is self-contained (only `<array>`, `<optional>`,
+// `<wtf/Forward.h>`, with `CSSUnitType` and `CSS::Category` forward-declared), which is what lets
+// it be imported directly.
+internal import WebCore_Private.CSSCalcTypeSwiftTypes
+
+// `CSS::Category`, which `Type::determinePercentHint` takes and `Type::calculationCategory` returns.
+//
+// Needed because `percentageResolveToDimension` alone cannot distinguish `LengthPercentage` from
+// `AnglePercentage` for step 9.4's `Category::Percentage` arm.
+internal import WebCore_Private.CSSPrimitiveNumericCategorySwiftTypes
+
+// The `CxxOptional` protocol, for `std::optional<Type>` and `std::optional<CSS::Category>` --
+// needed for the non-deprecated `.value` spelling on the imported optionals.
+internal import Cxx
+
 // libm, for the trig/pow/log/exp functions the C++ arm calls directly (`std::sin` on Darwin is
 // `::sin`), so both arms reach the same functions. Everything else the executors need is stdlib.
 import Darwin
@@ -83,6 +102,11 @@ enum CSSCalcSwiftSimplificationOutcome: UInt8 {
 /// `WebCore::CSSCalc::CSSCalcSwiftAlternative`, aliased for line length.
 private typealias CalcAlternative = WebCore.CSSCalc.CSSCalcSwiftAlternative
 
+/// `WebCore::CSSCalc::Type`: seven `int8_t` exponents and a percent hint, 8 bytes, trivially
+/// copyable. Written with backticks: `WebCore.CSSCalc.Type` unescaped parses as the metatype of the
+/// `WebCore.CSSCalc` namespace enum, not the C++ struct.
+private typealias CalcType = WebCore.CSSCalc.`Type`
+
 /// The value `CSSCalcSwiftLeaf.kind` wants for one of the four numeric leaves. Routed through a
 /// function rather than `kind.rawValue`, since the two enums' agreement is not guaranteed to hold.
 @inline(always)
@@ -108,6 +132,64 @@ private enum NumericKind {
     case percentage
     case canonicalDimension
     case nonCanonicalDimension
+}
+
+/// `Type::PercentHintValue` as the `uint8_t` the boundary carries. A decoder rather than a field
+/// read, since `PercentHintValue`'s storage is private and no accessor returns it: the value is
+/// identified by comparing against each enumerator's own construction.
+@inline(always)
+private func percentHintRawValue(_ hint: CalcType.PercentHintValue) -> UInt8 {
+    if hint == CalcType.PercentHintValue(.Length) {
+        return WebCore.CSSCalc.PercentHint.Length.rawValue
+    }
+    if hint == CalcType.PercentHintValue(.Angle) {
+        return WebCore.CSSCalc.PercentHint.Angle.rawValue
+    }
+    if hint == CalcType.PercentHintValue(.Time) {
+        return WebCore.CSSCalc.PercentHint.Time.rawValue
+    }
+    if hint == CalcType.PercentHintValue(.Frequency) {
+        return WebCore.CSSCalc.PercentHint.Frequency.rawValue
+    }
+    if hint == CalcType.PercentHintValue(.Resolution) {
+        return WebCore.CSSCalc.PercentHint.Resolution.rawValue
+    }
+    if hint == CalcType.PercentHintValue(.Flex) {
+        return WebCore.CSSCalc.PercentHint.Flex.rawValue
+    }
+    // `Type::PercentHintValue::InternalValue::None`, which is 0 and is what the boundary's
+    // `percentHint` field means by 0.
+    return 0
+}
+
+/// The inverse: the `Type::PercentHint` whose raw value this byte is, or `nil` for 0 or an
+/// unrecognized value.
+///
+/// `init?(rawValue:)` on an imported C++ scoped enum does not validate -- it accepts any raw value.
+/// Trusting it here previously let an out-of-range hint alias onto `.length` in
+/// `Type::operator[](PercentHint)`, which folded `calc(10% * 1em / 1em)` to `calc(10px)` where the
+/// C++ gives `calc(10%)`. The six explicit comparisons below are what actually reject.
+@inline(always)
+private func percentHintFromRawValue(_ raw: UInt8) -> WebCore.CSSCalc.PercentHint? {
+    if raw == WebCore.CSSCalc.PercentHint.Length.rawValue {
+        return WebCore.CSSCalc.PercentHint.Length
+    }
+    if raw == WebCore.CSSCalc.PercentHint.Angle.rawValue {
+        return WebCore.CSSCalc.PercentHint.Angle
+    }
+    if raw == WebCore.CSSCalc.PercentHint.Time.rawValue {
+        return WebCore.CSSCalc.PercentHint.Time
+    }
+    if raw == WebCore.CSSCalc.PercentHint.Frequency.rawValue {
+        return WebCore.CSSCalc.PercentHint.Frequency
+    }
+    if raw == WebCore.CSSCalc.PercentHint.Resolution.rawValue {
+        return WebCore.CSSCalc.PercentHint.Resolution
+    }
+    if raw == WebCore.CSSCalc.PercentHint.Flex.rawValue {
+        return WebCore.CSSCalc.PercentHint.Flex
+    }
+    return nil
 }
 
 /// A numeric leaf the file has decided on: everything `makeChildWithValueBasedOn` carries. Needed
@@ -169,6 +251,31 @@ private struct NumericLeaf {
             unitType: unitType,
             kind: leafKindRawValue(kind),
             percentHint: percentHint
+        )
+    }
+
+/// A canonical dimension in a named canonical unit, covering the remaining five dimensions step
+/// 9.4 can produce. The single-dimension helpers above are kept separate so each documents which
+/// C++ site produces it.
+    @inline(always)
+    static func canonical(_ value: Double, _ canonicalUnit: WebCore.CSSUnitType) -> NumericLeaf {
+        return NumericLeaf(
+            kind: .canonicalDimension,
+            value: value,
+            unitType: UInt16(canonicalUnit.rawValue),
+            percentHint: 0
+        )
+    }
+
+/// `makeChild(Percentage { .value = v, .hint = H })`, the three shapes step 9.4's category switch
+/// produces. The hint is the real `Type::PercentHintValue`, not a transcribed constant.
+    @inline(always)
+    static func percentage(_ value: Double, _ hint: CalcType.PercentHintValue) -> NumericLeaf {
+        return NumericLeaf(
+            kind: .percentage,
+            value: value,
+            unitType: UInt16(WebCore.CSSUnitType.Percentage.rawValue),
+            percentHint: percentHintRawValue(hint)
         )
     }
 }
@@ -523,6 +630,24 @@ private enum Fold {
 /// splicing: `collectSumTerms` numbers positions in visit order and `pushSumTerm` re-walks to find the
 /// one requested. Never produced when the term is a leaf; see `promoteSumTerm`.
     case replacedBySumTerm(origin: UInt32)
+/// The node collapses to its grandchild: `Negate(Negate(x))` -> `x` (rule 6.2) and
+/// `Invert(Invert(x))` -> `x` (rule 7.2). Exactly two levels, since neither rule splices -- a third
+/// level is handled by recursion re-folding the grandchild. Never produced when the grandchild is a
+/// leaf; see `promoteGrandchild`.
+    case replacedByGrandchild(child: UInt32, grandchild: UInt32)
+/// `Negate`'s rules 6.3 and 6.4: the child is a `Sum` or `Product` whose children are all numeric,
+/// and the answer is that node with every child's value negated. The C++ mutates the child list in
+/// place; since Swift has no moved-from state, `fold` decides every child is numeric and `rewrite`
+/// pushes one negated leaf per child, then rebuilds the child's own kind. No payload: the negated leaf
+/// list is dynamically sized and `rewrite` re-derives it rather than allocating on every `Fold` value.
+    case negatedChildren
+/// `Product`'s step 9.3 `Sum` arm: after 9.2 merges every `Number` factor into one, the one
+/// remaining factor is a `Sum` whose children are all numeric, multiplied by the merged number.
+///
+/// Kept separate from `.negatedChildren` because `-x` and `x * -1.0` can differ in a NaN's sign bit
+/// (`fneg` vs `fmul` on AArch64), and the C++ uses a unary minus at one site and `*=` at the other.
+/// Addressed by origin ordinal for the same splicing reason as `.replacedBySumTerm`.
+    case scaledSumChildren(origin: UInt32, factor: Double)
 /// `clamp()` becoming `min()` or `max()`: the only rewrite that creates an operation kind not in
 /// the input, and the only reason `buildMinMax` exists on the boundary.
     case rebuiltMinMax(isMax: Bool)
@@ -605,15 +730,14 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
         return childCount >= 1
 
     case .Product:
-        // Declined: rules 9.1 and 9.2 merge every `Number` factor into one running product and
-        // reassociate the rest, which is not a fold of one node. 9.1 is step 8.1 with `Product` in
-        // place of `Sum`.
-        return false
+        // `simplify(Product&)` (`:716`-`:908`), the largest single body in the file. Its `ASSERT` that
+        // children are non-empty is unreachable through the parser, so a shipping build without it
+        // still agrees. No upper bound: steps 9.1-9.3 can grow or shrink the factor count.
+        return childCount >= 1
 
     case .Negate:
-        // Rules 6.2 to 6.4 rewrite a child's children in place (`+Simplification.cpp:927`-`:959`),
-        // which the operand stack cannot express: it would have to hand back a subtree it never held.
-        return false
+        // One slot, so the count cannot be anything but 1 for a parser-built node.
+        return childCount == 1
 
     case .Min, .Max:
         // `simplifyForMinMax` (`:371`-`:482`) asserts non-empty children; unreachable through the
@@ -707,6 +831,14 @@ private struct CalcSimplification {
     /// `options.allowZeroValueLengthRemovalFromSum`, read at one C++ site, `:611`. Not rare: several
     /// production callers pass `true`, so declining when it is set is not an acceptable answer.
     let allowZeroValueLengthRemovalFromSum: Bool
+
+    /// `options.category` as `CSS::Category`'s underlying value, read at one C++ site: step 9.4's
+    /// `Category::Percentage` arm, `Type::determinePercentHint(options.category)`
+    /// (`+Simplification.cpp:885`).
+    ///
+    /// Carried raw rather than decoded, since the only arm that needs it decodes it there and a
+    /// decode that cannot fail at the one use site is not worth a failure channel on the struct.
+    let category: UInt8
 
     // MARK: Shared predicates
 
@@ -813,20 +945,16 @@ private struct CalcSimplification {
 
 private extension CalcSimplification {
 
-    /// `simplify(Invert&)` (`+Simplification.cpp:962`-`:979`).
-    ///
-    /// Rule 7.1 only. Rule 7.2 -- "if root's child is an Invert node, return the child's child" -- is
-    /// declined: it is a boundary limitation, not a scope decision. The child's child is a subtree
-    /// never held here -- `rewrite` pushed the child as one operand and `rebuildFrom` consumed it, and
-    /// the operand stack cannot hand a node's slot back. Declining is exact: the C++ arm runs and
-    /// applies 7.2 itself.
-    ///
-    /// Division always builds a `Product` wrapper, so `calc(1 / r)` parses as `Product{Number(1),
-    /// Invert{Symbol}}`, and an `Invert` only ever appears inside a `Product`, which is declined
-    /// outright. A bare `Invert{Invert{X}}` is reachable only from a programmatically constructed
-    /// tree.
+    /// `simplify(Invert&)` (`+Simplification.cpp:962`-`:979`). Rule 7.2 (`Invert(Invert(x))` -> `x`)
+    /// reaches a grandchild via `childInTreeOrder`/`.replacedByGrandchild`, no boundary change needed.
+    /// Rule 7.1 folds only a `<number>`, so `Invert(Invert(50%))` reaches 7.2 with a `Percentage`
+    /// grandchild; `promoteGrandchild` reports it as a leaf so an enclosing `Product` still folds it.
     @inline(always)
-    func foldInvert(_ a: Fold) -> Fold {
+    func foldInvert(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let a = fold(node.childInTreeOrder(0), builder)
         switch a {
         case .leaf(let leaf):
             guard leaf.kind == .number else {
@@ -837,26 +965,541 @@ private extension CalcSimplification {
             return .leaf(NumericLeaf.number(CalcExecutor.invert(leaf.value)))
         case .unchanged(let childAlternative):
             if childAlternative == .Invert {
-                return .declined(.Invert)
+                // 7.2.
+                return promoteGrandchild(node, 0, 0, builder)
             }
             return .unchanged(.Invert)
-        case .replacedByTerm, .replacedBySumTerm:
-            // The child collapsed to one of its own children -- a single-argument `min()`, a
-            // `clamp(none, VAL, none)`, or a `Sum` that collapsed to one of its flattened terms -- and
-            // this file does not carry what that term's alternative is, so it cannot tell whether rule
-            // 7.2 applies to the result. Declining is exact: a decline runs the C++ arm, which applies
-            // 7.2 or not as the tree requires. An `Invert` is only reachable inside a `Product`, which
-            // declines outright, so reaching this at all needs a constructed tree.
+        case .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild:
+            // The child collapsed to a subtree of itself, and this file does not carry that subtree's
+            // alternative, so it can't tell whether rule 7.2 applies. Declines rather than guesses;
+            // reachable only from a constructed tree, since no CSS spelling of division produces one.
             return .declined(.Invert)
-        case .mergedChildren, .rebuiltMinMax:
-            // Neither can be an `Invert` and both carry what they are: `.mergedChildren` names its
-            // alternative and is produced only by `foldMinMax` and `foldSum`, and `.rebuiltMinMax` is
-            // `buildMinMax` by construction. So this is the C++'s `[](auto&)` arm: `nullopt`, and the
-            // `Invert` is rebuilt from its one simplified child.
+        case .mergedChildren, .rebuiltMinMax, .negatedChildren, .scaledSumChildren:
+            // None of these can be an `Invert`, and each already carries or implies what it is, so
+            // this is the C++'s `[](auto&)` arm: rebuild from the one simplified child.
             return .unchanged(.Invert)
         case .declined(let blame):
             return .declined(blame)
         }
+    }
+
+    /// `simplify(Negate&)` (`+Simplification.cpp:910`-`:960`). Rule 6.1 is a unary minus, not `0 - x`
+    /// or `* -1.0`: both alternatives can disagree with `-x` on the sign bit of a zero or NaN.
+    /// Rules 6.3/6.4 mutate a `Sum`/`Product` child's children in place in the C++; since Swift has
+    /// no moved-from state, `numericChildren` decides every child is numeric and `rewriteNegatedChildren`
+    /// re-derives the list and pushes one negated leaf per child. The two declines below are named
+    /// gaps, not catch-alls.
+    @inline(always)
+    func foldNegate(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let child = node.childInTreeOrder(0)
+        let a = fold(child, builder)
+        switch a {
+        case .leaf(let leaf):
+            // 6.1. The unary minus above.
+            return .leaf(leaf.withValue(-leaf.value))
+
+        case .unchanged(let childAlternative):
+            if childAlternative == .Negate {
+                // 6.2: the grandchild, unfolded. `promoteGrandchild` returns it as a leaf when it
+                // folds to one, keeping `Fold`'s `.leaf` invariant exact.
+                return promoteGrandchild(node, 0, 0, builder)
+            }
+            if childAlternative == .Sum || childAlternative == .Product {
+                // 6.3 / 6.4 on an arity-preserving child.
+                if numericChildren(child, a, builder) != nil {
+                    return .negatedChildren
+                }
+            }
+            // The C++'s `[](auto&)` arm, and the `!all_of(..., isNumeric)` exit of 6.3/6.4: `nullopt`,
+            // so the `Negate` is rebuilt from its one simplified child.
+            return .unchanged(.Negate)
+
+        case .mergedChildren(let childAlternative):
+            if childAlternative == .Product {
+                // 6.4 over a `Product` whose factor list step 9.1/9.2 changed. Reaching this arm does
+                // NOT require every factor numeric -- `productHasNonNumericFactor` looks for one
+                // witness that isn't, which is enough to answer `.unchanged` rather than decline.
+                if productHasNonNumericFactor(child, builder) {
+                    return .unchanged(.Negate)
+                }
+                // No witness: every child folded to `Numeric` or a spliceable `Product`, and this
+                // file cannot re-derive what step 9.1 spliced into the final list. Reachable only
+                // from a constructed tree, since `parseAndSimplify` flattens nested `Product`s.
+                return .declined(.Negate)
+            }
+            if childAlternative == .Sum {
+                // 6.3 over a `Sum` whose term list step 8.1 spliced or whose terms merged.
+                if numericChildren(child, a, builder) != nil {
+                    return .negatedChildren
+                }
+            }
+            return .unchanged(.Negate)
+
+        case .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild:
+            // The child collapsed to a subtree of itself; this file cannot tell whether 6.2, 6.3 or
+            // 6.4 applies to the result, so it declines and lets the C++ arm decide.
+            return .declined(.Negate)
+
+        case .rebuiltMinMax:
+            // A `clamp()` that became a `min()`/`max()`: none of `Negate`/`Sum`/`Product`, so this
+            // is the `[](auto&)` arm with nothing to decline over.
+            return .unchanged(.Negate)
+
+        case .negatedChildren, .scaledSumChildren:
+            // The child's own 6.3/6.4 or 9.3 already fired, leaving all-numeric children this node's
+            // 6.3/6.4 applies to too -- but reporting `.unchanged` would be wrong, so it declines.
+            // A named gap: reachable only from a constructed tree, no CSS spelling produces one.
+            return .declined(.Negate)
+
+        case .declined(let blame):
+            return .declined(blame)
+        }
+    }
+
+    /// `std::ranges::all_of(a->children, isNumeric)` (`+Simplification.cpp:923`, `:938`), over the
+    /// child's post-simplification list (not the parser's original), as leaves. `nil` means at least
+    /// one child is not numeric; every survivor is a leaf whenever this returns non-`nil`.
+    func numericChildren(
+        _ child: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ folded: Fold,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> [NumericLeaf]? {
+        switch folded {
+        case .unchanged(let alternative):
+            guard alternative == .Sum || alternative == .Product else {
+                return nil
+            }
+            // `.unchanged` is the arity-preserving case by definition -- see `Fold.mergedChildren` on
+            // why the two are kept apart -- so the final list IS the node's own children in tree
+            // order.
+            let info = child.info()
+            var leaves: [NumericLeaf] = []
+            // `Int(clamping:)` for the capacity HINT, as `foldChildren` explains: saturating cannot be
+            // wrong here, because `append` grows regardless.
+            leaves.reserveCapacity(Int(clamping: info.childCount))
+            var index: UInt32 = 0
+            while index < info.childCount {
+                guard case .leaf(let leaf) = fold(child.childInTreeOrder(index), builder) else {
+                    return nil
+                }
+                leaves.append(leaf)
+                index += 1
+            }
+            return leaves
+
+        case .mergedChildren(let alternative):
+            guard alternative == .Sum else {
+                // `.Min`/`.Max` are neither a `Sum` nor a `Product`, and `.Product` never reaches here
+                // -- `foldNegate` declines it, because this function has no way to say "cannot
+                // derive" as distinct from "not numeric".
+                return nil
+            }
+            let info = child.info()
+            var origin: UInt32 = 0
+            let terms = collectSumTerms(child, info.childCount, &origin, builder)
+            if terms.declined != nil {
+                // Unreachable: this same walk produced `.mergedChildren(.Sum)` without declining.
+                // Checked rather than asserted, and answered with `nil` so the contract above stays
+                // single-valued -- the caller then rebuilds the `Negate` and the child's own `rewrite`
+                // declines the tree, which is a fallback to the C++ arm either way.
+                return nil
+            }
+            let plan = sumMergePlan(terms.folds, builder)
+            var leaves: [NumericLeaf] = []
+            leaves.reserveCapacity(plan.slots.count)
+            for k in 0..<plan.slots.count where plan.slots[k].survives {
+                // `termFold` and not `terms.folds[k]`: a merged first instance's own fold is its value
+                // BEFORE anything merged into it, and getting that backwards is silent.
+                guard case .leaf(let leaf) = termFold(plan.slots, terms, k) else {
+                    return nil
+                }
+                leaves.append(leaf)
+            }
+            return leaves
+
+        case .leaf, .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild, .rebuiltMinMax,
+             .negatedChildren, .scaledSumChildren, .declined:
+            // None of these left a `Sum`/`Product` in place, and each is refused by `foldNegate`
+            // first. Enumerated rather than defaulted so a new `Fold` case is a compile error here too.
+            return nil
+        }
+    }
+
+    /// True when this `Product`'s final factor list is certain to contain a non-`Numeric` node --
+    /// a witness, not a derivation: one own child that isn't numeric suffices, except a spliceable
+    /// `Product` factor (step 9.1 replaces it with its own children, which can all be numeric), which
+    /// is not a witness and is answered `false` rather than recursed into.
+    func productHasNonNumericFactor(
+        _ child: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Bool {
+        let info = child.info()
+        var index: UInt32 = 0
+        while index < info.childCount {
+            let folded = fold(child.childInTreeOrder(index), builder)
+            switch folded {
+            case .leaf:
+                // A `Numeric`: `isNumeric` is true for it, so it is not a witness.
+                break
+
+            case .unchanged(let alternative), .mergedChildren(let alternative):
+                if alternative != .Product {
+                    return true
+                }
+                // A spliceable `Product`. Not a witness -- see the note above.
+
+            case .rebuiltMinMax:
+                // A `Min` or a `Max`, which `isNumeric` refuses.
+                return true
+
+            case .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild, .negatedChildren,
+                 .scaledSumChildren, .declined:
+                // Unreachable: `productFactors` returned `.mergedChildren(.Product)` for this node,
+                // which means it accepted every child, and it accepts none of these. Answered `false`
+                // rather than `true` so that a `Fold` case added later can only cost a decline, never
+                // produce a `Negate` the C++ would not have rebuilt.
+                return false
+            }
+            index += 1
+        }
+        return false
+    }
+
+    /// `simplify(Product&)` (`+Simplification.cpp:716`-`:908`), step 9, the largest body in the file.
+    /// Five sub-steps: 9.1 splices a nested `Product`'s factors in, 9.2 folds every `<number>` factor
+    /// into one, 9.3 is the distribution special case, 9.4 is the type walk (calling the real
+    /// `Type::multiply`/`invert`/etc., not reimplementing them), 9.5 is "return root". `.mergedChildren`
+    /// is reported unless no factor was spliced or folded, i.e. the list is unchanged.
+    func foldProduct(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        // 9.1 and 9.2, merged exactly as the C++ merges them.
+        var origin: UInt32 = 0
+        let factors = productFactors(node, info.childCount, &origin, builder)
+        if let declined = factors.declined {
+            return declined
+        }
+
+        var finalFactors = factors.survivors
+
+        if let numericProduct = factors.numericProduct {
+            // "If `numericProduct` has a value and `newChildren` is empty, that means all the
+            // children were numbers and the product can be returned directly." (`:750`)
+            if finalFactors.isEmpty {
+                return .leaf(NumericLeaf.number(numericProduct))
+            }
+
+            // 9.3, extended by the C++ itself to `Numeric` and `Invert` factors as well as `Sum`
+            // ones. The arity test is on the list BEFORE the merged number is appended, which is
+            // what `:761`'s note means by "the last child is a singular `number` child".
+            if finalFactors.count == 1, let replacement = distributeNumber(finalFactors[0], numericProduct) {
+                return replacement
+            }
+
+            // "If there was more than one child or no replacement was found, append the product from
+            // step 9.2 into the newChildren array." (`:798`) -- at the END, which is what makes the
+            // list a reordering of the input rather than a copy of it.
+            finalFactors.append(ProductFactor(
+                fold: .leaf(NumericLeaf.number(numericProduct)),
+                origin: Self.mergedNumberOrigin,
+                invertedLeaf: nil,
+                numericSum: false
+            ))
+        }
+
+        // 9.4. `auto productResult = ProductResult { .value = 1, .type = Type { } };` and
+        // `bool success = false;` (`:806`-`:810`) -- `success` starts FALSE and is overwritten by
+        // each iteration, so an empty list falls through to 9.5 rather than folding to `1`.
+        var productValue = 1.0
+        var productType = CalcType()
+        var success = false
+        for factor in finalFactors {
+            success = multiplyProductFactor(factor, &productValue, &productType)
+            if !success {
+                break
+            }
+        }
+
+        if success, let resolvedCategory = productType.calculationCategory().value {
+            switch resolvedCategory {
+            case .Integer, .Number:
+                // `:882`-`:884`. The two categories share one arm in the C++ too.
+                return .leaf(NumericLeaf.number(productValue))
+
+            case .Percentage:
+                // `makeChild(Percentage { .value = ..., .hint = Type::determinePercentHint(
+                // options.category) })` (`:885`-`:886`). The category is the options' one, not the
+                // product's -- `resolvedCategory` is already known to be `Percentage` here, so
+                // passing it would make this arm a constant and lose the whole point of the call.
+                guard let optionsCategory = WebCore.CSS.Category(rawValue: category) else {
+                    // Never taken: `init?(rawValue:)` on an imported C++ scoped enum is failable in
+                    // its signature and non-validating in its body -- it accepts any value of the
+                    // underlying type. The branch is kept because it is the spelling that produces a
+                    // `CSS::Category` to pass, and it costs nothing; it is not a check against a
+                    // boundary that came apart. What does contain an out-of-enum value here is
+                    // `determinePercentHint`'s own `switch`, which falls through to `return { }`.
+                    return .declined(nil)
+                }
+                return .leaf(NumericLeaf.percentage(productValue, CalcType.determinePercentHint(optionsCategory)))
+
+            case .LengthPercentage:
+                // `:887`-`:888`, a LITERAL `PercentHint::Length` in the C++ rather than a
+                // `determinePercentHint` call. Reproduced literally.
+                return .leaf(NumericLeaf.percentage(productValue, CalcType.PercentHintValue(.Length)))
+
+            case .Length:
+                // `:889`-`:890`. `toCSSUnit(Dimension::Length)` is `CSSUnitType::Px`
+                // (CSSCalcTree.h:993), so naming the unit is naming the dimension.
+                return .leaf(NumericLeaf.canonical(productValue, .Px))
+
+            case .Angle:
+                // `:891`-`:892`; `toCSSUnit(Dimension::Angle)` is `Deg` (CSSCalcTree.h:994).
+                return .leaf(NumericLeaf.canonical(productValue, .Deg))
+
+            case .AnglePercentage:
+                // `:893`-`:894`, the other literal hint.
+                return .leaf(NumericLeaf.percentage(productValue, CalcType.PercentHintValue(.Angle)))
+
+            case .Time:
+                // `:895`-`:896`; `toCSSUnit(Dimension::Time)` is `S` (CSSCalcTree.h:995).
+                return .leaf(NumericLeaf.canonical(productValue, .S))
+
+            case .Frequency:
+                // `:897`-`:898`; `toCSSUnit(Dimension::Frequency)` is `Hz` (CSSCalcTree.h:996).
+                return .leaf(NumericLeaf.canonical(productValue, .Hz))
+
+            case .Resolution:
+                // `:899`-`:900`; `toCSSUnit(Dimension::Resolution)` is `Dppx` (CSSCalcTree.h:997).
+                return .leaf(NumericLeaf.canonical(productValue, .Dppx))
+
+            case .Flex:
+                // `:901`-`:902`; `toCSSUnit(Dimension::Flex)` is `Fr` (CSSCalcTree.h:998).
+                return .leaf(NumericLeaf.canonical(productValue, .Fr))
+
+            @unknown default:
+                // A category C++ grew and this file has not been taught. The C++ `switch` is
+                // exhaustive with no `default`, so growing the enum is a build failure THERE; here it
+                // can only be a fall-through to 9.5, which is what an unhandled category would mean.
+                break
+            }
+        }
+
+        // 9.5. Return root.
+        if factors.numericProduct == nil, !factors.spliced {
+            return .unchanged(.Product)
+        }
+        return .mergedChildren(.Product)
+    }
+
+    /// Step 9.3's three arms (`+Simplification.cpp:763`-`:796`), for the single surviving factor.
+    ///
+    /// `nil` is not a decline: it means the caller appends the merged number and falls into 9.4
+    /// instead, exactly as the C++ does at `:798`.
+    @inline(always)
+    func distributeNumber(_ factor: ProductFactor, _ numericProduct: Double) -> Fold? {
+        switch factor.fold {
+        case .leaf(let leaf):
+            // `[&]<Numeric T>(T& numeric) { return makeChildWithValueBasedOn(numeric.value *
+            // numericProduct->value, numeric); }` (`:765`-`:767`). `withValue` IS
+            // `makeChildWithValueBasedOn`: same alternative, same unit, same percent hint. The
+            // factor cannot be a `Number` -- 9.2 folded every one of those away -- so this is the
+            // `Percentage`, `CanonicalDimension` and `NonCanonicalDimension` overloads.
+            return .leaf(leaf.withValue(leaf.value * numericProduct))
+
+        case .unchanged(let alternative), .mergedChildren(let alternative):
+            if alternative == .Sum {
+                // `[&](IndirectNode<Sum>& sum)` (`:768`-`:780`): all-numeric, then scale each child
+                // and hand the SAME node back. `numericSum` is `all_of(sum->children, isNumeric)`
+                // computed where the node was in hand; `nil` here is its `return { }`.
+                guard factor.numericSum else {
+                    return nil
+                }
+                return .scaledSumChildren(origin: factor.origin, factor: numericProduct)
+            }
+            if alternative == .Invert {
+                // `[&](IndirectNode<Invert>& invert)` (`:781`-`:791`). The C++ switches on
+                // `invert->a` and, for a `Numeric` one, returns `makeChildWithValueBasedOn(child.value
+                // * numericProduct->value, child)` -- the child's own value scaled, with the `Invert`
+                // dropped and not reciprocated. That is a defect in the C++ and is reproduced
+                // verbatim rather than fixed.
+                //
+                // `invertedLeaf` is `invert->a` folded, captured where the node was in hand;
+                // `nil` is the C++'s `[](const auto&)` arm.
+                guard let inner = factor.invertedLeaf else {
+                    return nil
+                }
+                return .leaf(inner.withValue(inner.value * numericProduct))
+            }
+            // `[](auto&) -> std::optional<Child> { return { }; }` (`:792`-`:794`).
+            return nil
+
+        case .rebuiltMinMax:
+            // A `clamp()` that became a `min()` or a `max()`: a node, and not one of the three the
+            // C++ names. The same `[](auto&)` arm.
+            return nil
+
+        case .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild, .negatedChildren,
+             .scaledSumChildren, .declined:
+            // Unreachable: `productFactors` refuses every one of these, because for each of them this
+            // file does not carry what the resulting subtree's alternative is and so cannot tell
+            // which of 9.3's arms the C++ would take. Enumerated rather than defaulted so that a new
+            // `Fold` case has to be classified here too, and answered `nil` -- which is the
+            // conservative direction if the guard upstream ever stops holding, since it only skips a
+            // replacement the caller then re-derives in 9.4.
+            return nil
+        }
+    }
+
+    /// One iteration of step 9.4's factor loop (`+Simplification.cpp:812`-`:877`): multiply this
+    /// factor's type into `productType` and its value into `productValue`.
+    ///
+    /// The outer arms multiply the value; the inner (`Invert`) arms divide it and invert the type
+    /// first. `<number>` is the identity type on both sides, so it never touches `productType`.
+    @inline(always)
+    func multiplyProductFactor(
+        _ factor: ProductFactor,
+        _ productValue: inout Double,
+        _ productType: inout CalcType
+    ) -> Bool {
+        switch factor.fold {
+        case .leaf(let leaf):
+            switch leaf.kind {
+            case .number:
+                // "`<number>` is the identity type, so multiplying by it has no effect." (`:815`)
+                productValue *= leaf.value
+                return true
+
+            case .percentage, .canonicalDimension:
+                // `Type::multiply(productResult.type, getType(x))` (`:821`, `:831`). Two arms in the
+                // C++ and two `getType` overloads behind `numericLeafType`, which dispatches on the
+                // leaf's own kind -- one spelling here, two bodies there.
+                guard let factorType = numericLeafType(leaf),
+                      let multiplied = CalcType.multiply(productType, factorType).value else {
+                    return false
+                }
+                productType = multiplied
+                productValue *= leaf.value
+                return true
+
+            case .nonCanonicalDimension:
+                // Not an arm of the C++ switch, so it reaches `[](const auto&) -> bool { return
+                // false; }` (`:874`). A `NonCanonicalDimension` survives `canonicalize` only when
+                // there is no conversion data, and step 9.4 declines to fold in that case rather
+                // than guessing a canonical unit -- which is why this is `false` and not a call to
+                // `determineType` on the non-canonical unit.
+                return false
+            }
+
+        case .unchanged(let alternative), .mergedChildren(let alternative):
+            guard alternative == .Invert, let inner = factor.invertedLeaf else {
+                // Any other surviving node -- a `Sum`, a `Min`, a `Symbol`, a `Product` the splice
+                // could not take -- is the outer `[](const auto&)` arm; and an `Invert` whose `a` is
+                // not `Numeric` is the INNER one (`:868`-`:870`). Both are `false`.
+                return false
+            }
+            switch inner.kind {
+            case .number:
+                // "`<number>` is the identity type, so multiplying / inverting by it has no effect."
+                // (`:840`)
+                productValue /= inner.value
+                return true
+
+            case .percentage, .canonicalDimension:
+                // `Type::multiply(productResult.type, Type::invert(getType(x)))` (`:845`-`:851`,
+                // `:856`-`:862`). Two statements in the C++ and two here, so the order of the two
+                // calls is the C++'s.
+                guard let factorType = numericLeafType(inner) else {
+                    return false
+                }
+                let invertedType = CalcType.invert(factorType)
+                guard let multiplied = CalcType.multiply(productType, invertedType).value else {
+                    return false
+                }
+                productType = multiplied
+                productValue /= inner.value
+                return true
+
+            case .nonCanonicalDimension:
+                // The inner `[](const auto&)` arm, for the same reason the outer one above gives.
+                return false
+            }
+
+        case .rebuiltMinMax:
+            // A converted `min()`/`max()` node: the outer `[](const auto&)` arm.
+            return false
+
+        case .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild, .negatedChildren,
+             .scaledSumChildren, .declined:
+            // Unreachable, for the reason `distributeNumber` states: `productFactors` refuses all of
+            // these. `false` is the conservative answer if that ever stops holding -- it only makes
+            // the node keep its own kind, which is 9.5.
+            return false
+        }
+    }
+
+    /// Which `getType` overload a numeric leaf reaches -- a dispatcher over `NumericKind`, not one
+    /// body shared by two alternatives: `getType(const Percentage&)` applies a conditional percent
+    /// hint that `getType(const CanonicalDimension&)` has no analogue for, so collapsing the two into
+    /// one call previously produced a wrong hint (`calc(10% * 1em / 1em)`; see `percentHintFromRawValue`).
+    /// `nil` means step 9.4 stops folding and the node keeps its kind.
+    @inline(always)
+    func numericLeafType(_ leaf: NumericLeaf) -> CalcType? {
+        switch leaf.kind {
+        case .percentage:
+            return percentageLeafType(leaf)
+
+        case .canonicalDimension:
+            return canonicalDimensionLeafType(leaf)
+
+        case .number:
+            // `getType(const Number&)` is `Type { }` (CSSCalcTree.cpp:346-:349) -- the identity type.
+            // Unreachable: both call sites answer `<number>` before asking, because the C++'s two
+            // `Number` arms do not touch `productResult.type` at all. Answered exactly rather than
+            // declined, so that a future caller cannot be surprised by a `nil` that means nothing.
+            return CalcType()
+
+        case .nonCanonicalDimension:
+            // NOT AN ARM OF STEP 9.4's SWITCH -- it reaches `[](const auto&) -> bool { return false; }`
+            // (`+Simplification.cpp:871`, `:866`). Declined rather than answered with
+            // `determineType(unit)`, because a `NonCanonicalDimension` survives only where there is no
+            // conversion data and the C++ refuses to fold it rather than guessing a canonical unit.
+            // Both call sites already refuse it; this is the same answer written where the dispatch
+            // is, so the two cannot drift apart.
+            return nil
+        }
+    }
+
+    /// `getType(const Percentage&)` (CSSCalcTree.cpp:351-:357): `Type { .percent = 1 }`, plus
+    /// `applyPercentHint` if a hint is present. The zero test must be a literal `!= 0` comparison, not
+    /// `PercentHint(rawValue:)`'s failure -- that init doesn't fail (see `percentHintFromRawValue`) and
+    /// would alias an out-of-range value onto `length` via `applyPercentHint`'s `operator[]`.
+    @inline(always)
+    func percentageLeafType(_ leaf: NumericLeaf) -> CalcType? {
+        var type = CalcType.makePercent()
+        if leaf.percentHint != 0 {
+            guard let hint = percentHintFromRawValue(leaf.percentHint) else {
+                return nil
+            }
+            type.applyPercentHint(hint)
+        }
+        return type
+    }
+
+    /// `getType(const CanonicalDimension&)` (CSSCalcTree.cpp:359-:362) is `determineType(toCSSUnit(d))`,
+    /// called rather than transcribed. `UInt8(exactly:)`, not `UInt8(_:)`, since narrowing the
+    /// boundary's `uint16_t` unit back can fail; an out-of-enum value falls through to step 9.5.
+    @inline(always)
+    func canonicalDimensionLeafType(_ leaf: NumericLeaf) -> CalcType? {
+        guard let rawUnit = UInt8(exactly: leaf.unitType),
+              let unit = WebCore.CSSUnitType(rawValue: rawUnit) else {
+            return nil
+        }
+        return CalcType.determineType(unit)
     }
 
     /// `simplify(Deg2Rad&)` (`+Simplification.cpp:981`-`:996`). Safer than the C++: the C++'s
@@ -1101,7 +1744,13 @@ private extension CalcSimplification {
             return foldSymbol(info, builder)
 
         case .Invert:
-            return foldInvert(fold(node.childInTreeOrder(0), builder))
+            return foldInvert(node, builder)
+
+        case .Negate:
+            return foldNegate(node, builder)
+
+        case .Product:
+            return foldProduct(node, info, builder)
 
         case .Deg2Rad:
             return foldDeg2Rad(fold(node.childInTreeOrder(0), builder))
@@ -1193,7 +1842,7 @@ private extension CalcSimplification {
                 CalcExecutor.progressNoClamp
             )
 
-        case .SiblingCount, .SiblingIndex, .Product, .Negate,
+        case .SiblingCount, .SiblingIndex,
              .Random, .CalcMix, .Anchor, .AnchorSize:
             // Enumerated by name rather than swept into the `@unknown default` below, so an
             // alternative that is declined on purpose stays distinguishable from one that simply has
@@ -1304,10 +1953,11 @@ private extension CalcSimplification {
             )
         }
 
-        // `UInt8(exactly:)` rather than `UInt8(_:)`, which traps: the boundary widens the unit to
-        // `uint16_t` (see `CSSCalcSwiftLeaf.unitType`), so narrowing it back is a conversion that
-        // must be able to fail. A value outside the enum lands in the same place the C++'s
-        // `ASSERT_NOT_REACHED` does in a shipping build -- unchanged -- rather than trapping.
+        // `UInt8(exactly:)`, not `UInt8(_:)`, which traps: narrowing the boundary's `uint16_t` unit
+        // back must be able to fail. `CSSUnitType(rawValue:)` beside it is not a real check, though --
+        // an imported C++ scoped enum's `init?(rawValue:)` accepts any value of the underlying type --
+        // so an out-of-enum value falls to `default` below, matching the C++'s `ASSERT_NOT_REACHED`
+        // behavior in a shipping build.
         guard let raw = UInt8(exactly: unitType), let unit = WebCore.CSSUnitType(rawValue: raw) else {
             return unchanged()
         }
@@ -1482,8 +2132,32 @@ private extension CalcSimplification {
             return .leaf(leaf)
         case .declined(let blame):
             return .declined(blame)
-        case .unchanged, .replacedByTerm, .replacedBySumTerm, .rebuiltMinMax, .mergedChildren:
+        case .unchanged, .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild,
+             .rebuiltMinMax, .mergedChildren, .negatedChildren, .scaledSumChildren:
             return .replacedByTerm(child: index)
+        }
+    }
+
+    /// `promoteTerm` for a node that collapses to its grandchild: `Negate(Negate(x))` and
+    /// `Invert(Invert(x))`. The grandchild is folded here and folded again by `rewrite` -- can't be
+    /// skipped, since (unlike `Negate`) `Invert`'s rule 7.1 doesn't fold every numeric alternative, so
+    /// "the child didn't fold" doesn't imply "the grandchild isn't a leaf".
+    @inline(always)
+    func promoteGrandchild(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ child: UInt32,
+        _ grandchild: UInt32,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let inner = node.childInTreeOrder(child)
+        switch fold(inner.childInTreeOrder(grandchild), builder) {
+        case .leaf(let leaf):
+            return .leaf(leaf)
+        case .declined(let blame):
+            return .declined(blame)
+        case .unchanged, .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild,
+             .rebuiltMinMax, .mergedChildren, .negatedChildren, .scaledSumChildren:
+            return .replacedByGrandchild(child: child, grandchild: grandchild)
         }
     }
 
@@ -1496,7 +2170,8 @@ private extension CalcSimplification {
             return .leaf(leaf)
         case .declined(let blame):
             return .declined(blame)
-        case .unchanged, .replacedByTerm, .replacedBySumTerm, .rebuiltMinMax, .mergedChildren:
+        case .unchanged, .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild,
+             .rebuiltMinMax, .mergedChildren, .negatedChildren, .scaledSumChildren:
             return .replacedBySumTerm(origin: origin)
         }
     }
@@ -1983,7 +2658,28 @@ private extension CalcSimplification {
         switch folded {
         case .unchanged(let alternative), .mergedChildren(let alternative):
             return alternative == .Sum
-        case .leaf, .replacedByTerm, .replacedBySumTerm, .rebuiltMinMax, .declined:
+        case .leaf, .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild, .rebuiltMinMax,
+             .negatedChildren, .scaledSumChildren, .declined:
+            // `.negatedChildren` and `.scaledSumChildren` don't splice either: their child's children
+            // are about to be rewritten by `rewrite`, and splicing would take the untransformed
+            // subtree instead, dropping the negation/scale. Enumerated rather than defaulted since a
+            // new case here needs a value, not a decline.
+            return false
+        }
+    }
+
+    /// The `Product` analogue of `isSpliceableSum`: whether step 9.1 replaces this child with its own
+    /// factors instead of taking it as one factor.
+    ///
+    /// True for `.mergedChildren(.Product)` (step 9.1 spliced or 9.2 folded a `<number>`) as well as
+    /// `.unchanged(.Product)`.
+    @inline(always)
+    func isSpliceableProduct(_ folded: Fold) -> Bool {
+        switch folded {
+        case .unchanged(let alternative), .mergedChildren(let alternative):
+            return alternative == .Product
+        case .leaf, .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild, .rebuiltMinMax,
+             .negatedChildren, .scaledSumChildren, .declined:
             return false
         }
     }
@@ -2135,6 +2831,186 @@ private extension CalcSimplification {
 
         return (slots, merges, removeTotal)
     }
+
+    // MARK: `Product`'s flattened factor list
+
+    /// One surviving factor of a `Product`, as values -- `CSSCalcSwiftNode` is `~Escapable`, so no
+    /// Swift container can hold the node itself. Carries two answers steps 9.3 and 9.4 need but a bare
+    /// `Fold` cannot give: whether a `Sum` factor's children are all numeric, and what an `Invert`
+    /// factor's `a` folded to. Computed once here rather than by a re-walk per question.
+    struct ProductFactor {
+        /// What the factor's own subtree folded to.
+        let fold: Fold
+        /// The ordinal of the tree position it came from. `mergedNumberOrigin` for the synthesised
+        /// `<number>` step 9.2 appends, since that one is never addressed by ordinal.
+        let origin: UInt32
+        /// For a factor that survived as an `Invert`, what its `a` folded to when that is `Numeric`;
+        /// `nil` otherwise (`:790`, `:868`).
+        let invertedLeaf: NumericLeaf?
+        /// For a factor that survived as a `Sum`, `all_of(sum->children, isNumeric)` (`:769`) over
+        /// its post-simplification children; `false` for every other alternative. Computed eagerly
+        /// even though only step 9.3 reads it -- the lazy form would need a full re-walk.
+        let numericSum: Bool
+    }
+
+    /// The result of steps 9.1 and 9.2 over one `Product`: its factors flattened through every
+    /// nested `Product`, with every `<number>` among them folded into a single value.
+    struct ProductFactorList {
+        /// The non-`<number>` factors, in order. This is the C++'s `newChildren` BEFORE `:798`
+        /// appends the merged number, which is the list 9.3's arity test is about.
+        var survivors: [ProductFactor] = []
+        /// `std::optional<Number> numericProduct` (`:730`): the product of every `<number>` factor,
+        /// accumulated in walk order. `nil` when there were none.
+        var numericProduct: Double?
+        /// Whether step 9.1 replaced any child with its own factors, at any depth. Read only by
+        /// 9.5, to tell `.unchanged(.Product)` from `.mergedChildren(.Product)`.
+        var spliced = false
+        /// The first child that declined, as the `Fold` to return. Same shape and same reason as
+        /// `SumTermList.declined`.
+        var declined: Fold?
+    }
+
+    /// The `origin` of the `<number>` step 9.2 synthesises: `UInt32.max`, since that factor exists
+    /// nowhere in the input tree and is never addressed by ordinal.
+    static var mergedNumberOrigin: UInt32 { return UInt32.max }
+
+    /// Steps 9.1 and 9.2 (`+Simplification.cpp:729`-`:748`), as one pass. Recurses only through the
+    /// splice chain, like `collectSumTerms`, re-deriving each spliced child's already-flattened list;
+    /// a nested `Product` contributes its survivors plus one merged number (`n_parent = n_child *
+    /// n_parent_before`, in that order, since `*` is not associative on doubles).
+    ///
+    /// Every unclassifiable factor declines the whole tree here rather than at 9.3/9.4: a factor whose
+    /// alternative this file does not carry cannot be treated as opaque, since 9.1/9.3/9.4 all branch
+    /// on it. See `classifyProductFactor`.
+    func productFactors(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ childCount: UInt32,
+        _ origin: inout UInt32,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> ProductFactorList {
+        var out = ProductFactorList()
+        // `Int(clamping:)` for the capacity HINT, as `collectSumTerms` explains: saturating cannot be
+        // wrong, because `append` grows regardless.
+        out.survivors.reserveCapacity(Int(clamping: childCount))
+
+        var index: UInt32 = 0
+        while index < childCount {
+            let child = node.childInTreeOrder(index)
+            let folded = fold(child, builder)
+            if case .declined = folded {
+                out.declined = folded
+                return out
+            }
+
+            if isSpliceableProduct(folded) {
+                // 9.1. `for (auto& childProductChild : (*childProduct)->children) processChild(...)`.
+                out.spliced = true
+                let childInfo = child.info()
+                let spliced = productFactors(child, childInfo.childCount, &origin, builder)
+                if let declined = spliced.declined {
+                    out.declined = declined
+                    return out
+                }
+                out.survivors.append(contentsOf: spliced.survivors)
+                if let childProduct = spliced.numericProduct {
+                    out.numericProduct = multipliedNumericProduct(childProduct, out.numericProduct)
+                }
+            } else if case .leaf(let leaf) = folded, leaf.kind == .number {
+                // 9.2 (`:733`-`:737`).
+                out.numericProduct = multipliedNumericProduct(leaf.value, out.numericProduct)
+                origin += 1
+            } else if let factor = classifyProductFactor(child, folded, origin, builder) {
+                // `newChildren.append(WTF::move(child))` (`:739`).
+                out.survivors.append(factor)
+                origin += 1
+            } else {
+                out.declined = .declined(.Product)
+                return out
+            }
+            index += 1
+        }
+        return out
+    }
+
+    /// `numericProduct = Number { .value = childValue->value * numericProduct->value }` (`:734`,
+    /// `:736`). The new factor is the left operand, matching the C++'s order: multiplication is
+    /// commutative for finite doubles but not for the sign of a NaN result, which IEEE-754 leaves
+    /// unspecified.
+    @inline(always)
+    func multipliedNumericProduct(_ value: Double, _ accumulated: Double?) -> Double {
+        if let accumulated {
+            return value * accumulated
+        }
+        return value
+    }
+
+    /// Turn one surviving factor's `Fold` into a `ProductFactor`, answering the two node-dependent
+    /// questions steps 9.3 and 9.4 ask -- or `nil` (a decline, not "opaque") for the five `Fold` cases
+    /// whose alternative this file does not carry.
+    ///
+    /// The `Invert` probe re-folds the grandchild `foldInvert` already folded, trading a repeat fold
+    /// for avoiding a whole ordinal re-walk per `Invert` factor.
+    func classifyProductFactor(
+        _ child: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ folded: Fold,
+        _ origin: UInt32,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> ProductFactor? {
+        switch folded {
+        case .leaf:
+            // A `Numeric` that is not a `Number` -- 9.2 took those. Both questions are `Invert`'s and
+            // `Sum`'s, so neither applies.
+            return ProductFactor(fold: folded, origin: origin, invertedLeaf: nil, numericSum: false)
+
+        case .unchanged(let alternative), .mergedChildren(let alternative):
+            if alternative == .Invert {
+                // `invert->a`, folded: an `Invert` surviving as `Invert` means `a` is a
+                // `Percentage`, `CanonicalDimension`, `NonCanonicalDimension`, or non-`Numeric`.
+                let inner = fold(child.childInTreeOrder(0), builder)
+                if case .leaf(let leaf) = inner {
+                    return ProductFactor(fold: folded, origin: origin, invertedLeaf: leaf, numericSum: false)
+                }
+                return ProductFactor(fold: folded, origin: origin, invertedLeaf: nil, numericSum: false)
+            }
+            if alternative == .Sum {
+                // `std::ranges::all_of(sum->children, isNumeric)` (`:769`) over the child's final,
+                // post-splice list -- see `numericChildren`.
+                return ProductFactor(
+                    fold: folded,
+                    origin: origin,
+                    invertedLeaf: nil,
+                    numericSum: numericChildren(child, folded, builder) != nil
+                )
+            }
+            // Any other surviving node: opaque to 9.3 and 9.4, which both have a catch-all arm for it.
+            return ProductFactor(fold: folded, origin: origin, invertedLeaf: nil, numericSum: false)
+
+        case .rebuiltMinMax:
+            // A `clamp()` that became a `min()`/`max()`: a known node kind, but 9.1/9.3/9.4 have no
+            // arm for it, so it is opaque rather than a decline.
+            return ProductFactor(fold: folded, origin: origin, invertedLeaf: nil, numericSum: false)
+
+        case .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild:
+            // The factor collapsed to a subtree of itself whose alternative this file does not
+            // carry, so 9.1/9.3/9.4 cannot classify it; declining is exact since the C++ arm then
+            // applies whatever rule the tree needs. Unreachable from a parse -- `parseAndSimplify`
+            // simplifies incrementally, so the collapse already happened before the enclosing
+            // `Product` was built -- only from a constructed tree.
+            return nil
+
+        case .negatedChildren, .scaledSumChildren:
+            // Treating these as opaque would be wrong, not just imprecise: both leave a node whose
+            // children are about to be rewritten, and for `.negatedChildren` that node may be a
+            // `Product`, so skipping it would miss step 9.1's splice. Unreachable from a parse for the
+            // same reason as the case above.
+            return nil
+
+        case .declined:
+            // Handled by the caller before this is reached; answered `nil` rather than trapped so
+            // that the contract is single-valued.
+            return nil
+        }
+    }
 }
 
 // MARK: - Building the answer
@@ -2178,17 +3054,70 @@ private extension CalcSimplification {
             return rewriteConvertedMinMax(node, isMax, &builder)
 
         case .mergedChildren(let alternative):
-            // `Sum` has its own consuming pass, because its survivors are terms of the flattened list
-            // rather than children of the node -- see `rewriteSumChildren`. `Min` and `Max` are the
-            // only other producers of this case, and their survivors are children.
+            // `Sum` and `Product` each have their own pass because their survivors are terms of a
+            // flattened list, not children of the node; `Min`/`Max` survivors are children.
             if alternative == .Sum {
                 return rewriteSumChildren(node, &builder)
             }
+            if alternative == .Product {
+                return rewriteProductChildren(node, &builder)
+            }
             return rewriteMergedChildren(node, alternative, &builder)
+
+        case .replacedByGrandchild(let child, let grandchild):
+            // `Negate`'s rule 6.2 and `Invert`'s rule 7.2: `return { WTF::move(a->a) }`, one level
+            // deeper than `.replacedByTerm`. The intermediate `let` is required: `childInTreeOrder`
+            // returns a `~Escapable` view, and chaining two in one expression has nothing to borrow
+            // from.
+            let inner = node.childInTreeOrder(child)
+            return rewrite(inner.childInTreeOrder(grandchild), &builder)
+
+        case .negatedChildren:
+            return rewriteNegatedChildren(node, &builder)
+
+        case .scaledSumChildren(let origin, let factor):
+            // `Product`'s step 9.3 `Sum` arm: the answer is that `Sum` with every child scaled.
+            return rewriteScaledSumFactor(node, origin, factor, &builder)
 
         case .unchanged(let alternative):
             return rebuild(node, alternative, &builder)
         }
+    }
+
+    /// The `.negatedChildren` half of `rewrite`: `Negate`'s rules 6.3 and 6.4. `rebuildFrom` runs on
+    /// the child, not the `Negate` (`+Simplification.cpp:939`, `:954`), so the `Negate` disappears and
+    /// contributes only the sign. Every child is pushed as a leaf, never re-rewritten, since
+    /// `numericChildren` guarantees every final child is numeric.
+    ///
+    /// The unary minus (`:934`, `:949`: `child.value = -child.value`) flips a NaN's sign bit rather
+    /// than propagating it -- not the same as `* -1.0`; see `Fold.scaledSumChildren`.
+    mutating func rewriteNegatedChildren(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        let child = node.childInTreeOrder(0)
+        guard let leaves = numericChildren(child, fold(child, builder), builder) else {
+            // Unreachable: `fold` returned `.negatedChildren`, which it does only after this same call
+            // returned a list. Checked rather than asserted, so that a boundary that came apart is a
+            // fallback to the C++ arm and not a node rebuilt from operands that were never pushed.
+            return .declined(.Negate)
+        }
+
+        // Counted alongside the loop rather than narrowed from `leaves.count`: `rebuildFrom` wants a
+        // `UInt32`, and this is the number actually pushed.
+        var pushed: UInt32 = 0
+        for leaf in leaves {
+            guard builder.pushLeaf(leaf.withValue(-leaf.value).boundaryLeaf) else {
+                // A contract violation, as in `rewrite`'s `.leaf` arm: the leaf was synthesised here,
+                // so there is no input alternative to blame.
+                return .declined(nil)
+            }
+            pushed += 1
+        }
+
+        // `rebuildSlot(const Children&)` takes all remaining operands and ignores the original's
+        // count, which is what lets the arity change.
+        return builder.rebuildFrom(child, pushed) ? .pushed : .declined(.Negate)
     }
 
     /// `convertToMin`/`convertToMax` (`+Simplification.cpp:1018`-`:1044`): a fresh `min()`/`max()`
@@ -2361,6 +3290,161 @@ private extension CalcSimplification {
         return nil
     }
 
+    /// The `.mergedChildren(.Product)` half of `rewrite`: pushes steps 9.1/9.2's replacement of
+    /// `root.children` as the single consuming pass. A `Product`'s factors are neither its children
+    /// (9.1 splices from any depth) nor a merge plan (9.2's folded `<number>` exists nowhere in the
+    /// input). The merged number is appended last, matching the C++'s order, not the input's --
+    /// `Product{2, x}` rebuilds as `Product{x, 2}`. A `.leaf` factor is pushed as a leaf rather than
+    /// re-rewritten, since it may already have been folded by a nested `Product`'s own pass.
+    mutating func rewriteProductChildren(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        let info = node.info()
+        var origin: UInt32 = 0
+        let factors = productFactors(node, info.childCount, &origin, builder)
+        if case .declined(let blame) = factors.declined {
+            // Unreachable: `fold` returned `.mergedChildren(.Product)`, which it does only after this
+            // same walk found no declining factor. Checked rather than asserted, so that a boundary
+            // that came apart is a fallback to the C++ arm rather than a tree built from a short
+            // factor list.
+            return .declined(blame)
+        }
+
+        var pushedFactors: UInt32 = 0
+        for factor in factors.survivors {
+            if case .leaf(let leaf) = factor.fold {
+                guard builder.pushLeaf(leaf.boundaryLeaf) else {
+                    return .declined(nil)
+                }
+            } else {
+                var counter: UInt32 = 0
+                guard let resolved = pushProductFactor(node, info.childCount, factor.origin, nil, &counter, &builder) else {
+                    // The ordinal named a position the re-walk did not reach, which can only mean the
+                    // two walks disagreed. A decline rather than a trap, exactly as
+                    // `rewriteSumChildren` argues.
+                    return .declined(.Product)
+                }
+                if case .declined(let blame) = resolved {
+                    return .declined(blame)
+                }
+            }
+            pushedFactors += 1
+        }
+
+        if let numericProduct = factors.numericProduct {
+            // `newChildren.append(makeChild(*numericProduct))` (`:798`). Reached only when 9.3 found
+            // no replacement, which is what `fold` decided; the two agree because both re-derive the
+            // same list from the same walk.
+            guard builder.pushLeaf(NumericLeaf.number(numericProduct).boundaryLeaf) else {
+                return .declined(nil)
+            }
+            pushedFactors += 1
+        }
+
+        // `rebuildSlot(const Children&)` takes ALL the remaining operands and ignores the original's
+        // own count, which is the line that lets the arity change in either direction.
+        return builder.rebuildFrom(node, pushedFactors) ? .pushed : .declined(.Product)
+    }
+
+    /// The `.scaledSumChildren` half of `rewrite`: `Product`'s step 9.3 `Sum` arm
+    /// (`+Simplification.cpp:768`-`:780`) as the single consuming pass.
+    ///
+    /// The whole `Product` disappears and the answer is the `Sum`, exactly as `.replacedByTerm`'s
+    /// node disappears -- so one operand is pushed for the entire subtree, and `rebuildFrom` is
+    /// called ON THE `Sum`, which is what rewrapping the C++'s `IndirectNode` does.
+    mutating func rewriteScaledSumFactor(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ origin: UInt32,
+        _ factor: Double,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        let info = node.info()
+        var counter: UInt32 = 0
+        guard let resolved = pushProductFactor(node, info.childCount, origin, factor, &counter, &builder) else {
+            return .declined(.Product)
+        }
+        return resolved
+    }
+
+    /// Resolve a factor's origin ordinal back to the tree position it names, and either rewrite that
+    /// subtree or push it as a scaled `Sum`. Mirrors `productFactors`' walk exactly (same order, same
+    /// ordinals), so the two agree without either knowing which factors survived. `scale` carries both
+    /// jobs in one walk: `nil` pushes the surviving factor, a value scales a `Sum` child by it.
+    mutating func pushProductFactor(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ childCount: UInt32,
+        _ target: UInt32,
+        _ scale: Double?,
+        _ counter: inout UInt32,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite? {
+        var index: UInt32 = 0
+        while index < childCount {
+            let child = node.childInTreeOrder(index)
+            let folded = fold(child, builder)
+            if case .declined(let blame) = folded {
+                return .declined(blame)
+            }
+            if isSpliceableProduct(folded) {
+                let childInfo = child.info()
+                if let found = pushProductFactor(child, childInfo.childCount, target, scale, &counter, &builder) {
+                    return found
+                }
+            } else {
+                if counter == target {
+                    guard let scale else {
+                        // `rewrite` on the factor pushes exactly one operand, which is what the
+                        // rebuilt `Product` owes for this slot.
+                        return rewrite(child, &builder)
+                    }
+                    return pushScaledSum(child, folded, scale, &builder)
+                }
+                counter += 1
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    /// `for (auto& child : sum->children) child.value *= numericProduct->value;` and
+    /// `return { Child { WTF::move(sum) } };` (`+Simplification.cpp:771`-`:779`).
+    ///
+    /// `rebuildFrom` is called on the `Sum`, not on the `Product`, which is the whole rewrite: the
+    /// C++ hands the `Sum`'s own `IndirectNode` back and the `Product` contributes only the factor.
+    ///
+    /// A `*=`, not a negation-shaped transform: `Fold.scaledSumChildren` records why this is not
+    /// shared with `rewriteNegatedChildren` -- `-x` and `x * -1.0` are free to differ in the sign
+    /// bit of a NaN, so `:773`'s `*=` is reproduced as a `*` and `:934`'s unary minus as a unary
+    /// minus.
+    ///
+    /// Every child is a leaf whenever this runs, by `numericChildren`'s own guard -- which is what
+    /// lets this be a straight push loop with no `pushSumTerm` for a non-`Numeric` survivor.
+    mutating func pushScaledSum(
+        _ sum: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ folded: Fold,
+        _ scale: Double,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        guard let leaves = numericChildren(sum, folded, builder) else {
+            // Unreachable: `fold` produced `.scaledSumChildren` only after this same call returned a
+            // list. Checked rather than asserted, for the reason `rewriteNegatedChildren` gives.
+            return .declined(.Product)
+        }
+
+        var pushedChildren: UInt32 = 0
+        for leaf in leaves {
+            guard builder.pushLeaf(leaf.withValue(leaf.value * scale).boundaryLeaf) else {
+                // A contract violation: the leaf was synthesised here, so there is no input
+                // alternative to blame.
+                return .declined(nil)
+            }
+            pushedChildren += 1
+        }
+
+        return builder.rebuildFrom(sum, pushedChildren) ? .pushed : .declined(.Product)
+    }
+
     /// The `.unchanged` half of `rewrite`: the node keeps its own alternative and is rebuilt from
     /// its simplified children.
     mutating func rebuild(
@@ -2428,7 +3512,8 @@ public func cssCalcSimplifySwift(
 
     var simplification = CalcSimplification(
         percentageResolveToDimension: options.percentageResolveToDimension,
-        allowZeroValueLengthRemovalFromSum: options.allowZeroValueLengthRemovalFromSum
+        allowZeroValueLengthRemovalFromSum: options.allowZeroValueLengthRemovalFromSum,
+        category: options.category
     )
 
     if case .declined(let rewriteBlame) = simplification.rewrite(root, &builder) {
