@@ -790,6 +790,72 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // else does.
     WEBCORE_EXPORT bool isLengthUnit(uint16_t unitType) const;
 
+    // The fourth upcall, and the only place `Style::BuilderState` reaches this boundary.
+    //
+    // Covers three style-coupled operations: `sibling-count()`, `sibling-index()`
+    // (`+Simplification.cpp:527`-`:544`) and `random()` (`:1350`-`:1402`). None of the three can be
+    // answered in Swift, and all three fail for one reason: `Style::BuilderState` carries the
+    // element, its parent's child list and the document's random base-value cache, and is not
+    // reducible to anything that crosses a POD boundary. That is the same reason `resolveSymbol`'s
+    // `HashMap` and `resolveRelativeLength`'s `CSSToLengthConversionData` stay here, and why this is
+    // an upcall rather than a field: Swift names what it wants and C++ owns the object that
+    // answers.
+    //
+    // One entry for three operations, with no selector at all: no operation kind ever crosses in
+    // the construction direction, because C++ recovers the operation from the node's own variant
+    // tag, the same principle `rebuildFrom` rests on. Two other shapes were rejected: separate
+    // named methods for each operation, which repeats the conversion-data guard three times and
+    // puts a discriminant on the boundary that the node already carries; and a three-case Swift
+    // `@c` selector enum, which trades two declarations for one plus an enum plus three
+    // `static_assert`s plus a `switch` -- not fewer of anything.
+    //
+    // This one is 25 lines, one declaration, and the discriminant cannot be gotten wrong because it
+    // is never stated: a tree-counting node arrives as a `SiblingCount` or a `SiblingIndex` and the
+    // implementation reads which; the `random()` case is the same `get_if` it needed anyway to reach
+    // the key. The 3-way tag test is on a path taken only by three rare kinds.
+    //
+    // Not a precomputed field on `CSSCalcSwiftSimplificationOptions`, which would otherwise be the
+    // cheapest possible crossing (one per `copyAndSimplify` instead of one per node), for the reason
+    // `isLengthUnit` above gives: `siblingCount()` and `siblingIndex()` walk the element's parent's
+    // child list, so a field would run that walk for every `calc()` in every stylesheet to answer a
+    // question almost none of them ask. `random()` could not use one at all -- its answer depends on
+    // the node's key.
+    //
+    // `resolved == false` is exactly the C++'s `std::nullopt`: no conversion data, no builder state,
+    // no element for a tree-counting function, no cached base value for a key, or a node of an
+    // alternative this does not serve (a contract violation, checked rather than asserted). The node
+    // is copied through unchanged in every one of those cases, matching what `copyAndSimplify` does
+    // with a `std::nullopt` from `simplify`.
+    //
+    // `CSSCalcSwiftNumericResult` is reused rather than adding a two-field struct, and the two
+    // fields beyond `value` and `resolved` are truthful here rather than inert: all three operations
+    // produce a plain `<number>` -- `makeChild(Number { ... })` at `:534` and `:543`, and a
+    // `<random-key>` base value is a `<number [0,1]>` by definition -- so `unitType` is
+    // `CSSUnitType::Number` and `alternative` is `Number` because that is what the answer is.
+    //
+    // Why the `<random-key>` needs the node and must not become a POD. `Random::Sharing` is a
+    // `Variant<SharingAuto, Key, SharingFixed>` over a `CSS::CustomIdent` (an `AtomString`), a
+    // `CSSPropertyID`, a `RandomFunction`, indices and two optional keywords
+    // (CSSCalcRandomSharing.h), and `resolveRandomBaseValue` hashes the whole of it into a
+    // `RandomCachingKey` to look up a value cached on the Document and on the element. Transcribing
+    // that key across the boundary would be a duplicated table and a second hash of it, and two arms
+    // hashing differently would hand the same key two different `random()` values -- a wrong
+    // stylesheet, not a decline.
+    //
+    // The `SharingFixed` arm is decided here, in C++, rather than in Swift. `simplify(Random&)`
+    // resolves a `fixed <number>` locally when it is a `Raw` and answers nothing when it is a
+    // `Calc`, rather than going through `resolveRandomBaseValue`, whose own fixed arm would run
+    // `Style::toStyle` and evaluate the `Calc`. That `Raw`/`Calc` discrimination is over
+    // `CSS::Number<CSS::ClosedUnitRange>`, another `Variant`, with no numeric channel to Swift:
+    // `CSSCalcSwiftOperationInfo` reports only `randomSharingIsFixed`, because serialization needs
+    // the fixed value as text and gets it through `CSSCalcSwiftOperationPart::randomFixedValue`.
+    // Adding a numeric channel would take `CSSCalcSwiftOperationInfo` from 12 bytes to 24 and its
+    // return from registers to an indirect `sret`, for more new C++ than the four-line branch below
+    // -- the two dispositions are indistinguishable to Swift either way, since a `Calc` fixed value
+    // comes back `resolved == false` and the node is copied through, matching `std::nullopt` from
+    // the C++ arm.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const CSSCalcSwiftNode&) const;
+
 private:
     CSSCalcSwiftOperandStack* m_operands;
     const SimplificationOptions* m_options;

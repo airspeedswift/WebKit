@@ -602,6 +602,76 @@ private enum CalcExecutor {
         }
         return (progress - from) / (to - from)
     }
+
+    /// `OperatorExecutor<Operator::Random>` (CSSCalcExecutor.h:506-:559).
+    ///
+    /// css-values-5 § 9.4: pick a value in `[min, max]` from a base value in `[0, 1]`, snapped to a
+    /// `step` grid when given. The base value is cached on the Document/element and reaches this file
+    /// through `resolveStyleCoupledValue`.
+    ///
+    /// The five early exits are each a different non-finite case, transcribed one for one because
+    /// they don't agree: a NaN bound gives NaN, an infinite minimum gives that infinity, an infinite
+    /// range gives NaN, an infinite step count falls back to the unstepped formula. `max < min` is a
+    /// comparison, not a `max(min, max)` call, which matters for signed zero.
+    @inline(always)
+    static func random(_ randomBaseValue: Double, _ minimum: Double, _ maximum: Double, _ step: Double?) -> Double {
+        if minimum.isNaN || maximum.isNaN {
+            return Double.nan
+        }
+        if minimum.isInfinite {
+            return minimum
+        }
+
+        // `if (max < min) max = min;` -- "If the maximum value is less than the minimum value, it
+        // behaves as if it's equal to the minimum value."
+        let upperBound = maximum < minimum ? minimum : maximum
+
+        let range = upperBound - minimum
+        if range.isInfinite {
+            return Double.nan
+        }
+
+        guard let step else {
+            return minimum + randomBaseValue * range
+        }
+        if step.isNaN {
+            return Double.nan
+        }
+        if step <= 0 {
+            return minimum + randomBaseValue * range
+        }
+
+        // "Let epsilon be step / 1000."
+        let epsilon = step / 1000.0
+
+        // "Let N be the largest integer such that min + N * step is less than or equal to max."
+        var n = (range / step).rounded(.down)
+        if n.isInfinite {
+            return minimum + randomBaseValue * range
+        }
+
+        // "If N produces a value that is not within epsilon of max, but N+1 would produce a value
+        // within epsilon of max, set N to N+1."
+        let distanceToMax = upperBound - (minimum + (n * step))
+        if distanceToMax.magnitude > epsilon {
+            let distanceToMaxPlus1 = upperBound - (minimum + ((n + 1) * step))
+            if distanceToMaxPlus1.magnitude < epsilon {
+                n = n + 1
+            }
+        }
+
+        // "Let step index be a random integer less than N+1, given R."
+        let stepIndex = roundDown(randomBaseValue * (n + 1.0), 1.0)
+
+        // "Let value be min + step index * step."
+        let value = minimum + stepIndex * step
+
+        // "If step index is N and value is within epsilon of max, return max."
+        if stepIndex == n && (upperBound - value).magnitude < epsilon {
+            return upperBound
+        }
+        return value
+    }
 }
 
 // MARK: - What a subtree folded to
@@ -672,6 +742,38 @@ private enum Rewrite {
 }
 
 // MARK: - The traversal that decides, and reports
+
+/// Whether a node of this alternative is a leaf whose `.unchanged` answer must be pushed as a copy
+/// rather than handed to `rebuildFrom`. Only `Symbol` (unresolved `<calc-keyword>`) and
+/// `SiblingCount`/`SiblingIndex` (no conversion data/element) can reach here as leaves; the four
+/// numeric leaves never reach `rebuild` at all, and every other alternative is an `IndirectNode` with
+/// slots that `rebuildFrom` handles directly.
+private func isCopiedLeafAlternative(_ alternative: CalcAlternative) -> Bool {
+    switch alternative {
+    case .Symbol, .SiblingCount, .SiblingIndex:
+        return true
+
+    case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
+        // Leaves, but they never arrive: see above. `false` is unreachable rather than wrong, and it
+        // is spelled out so that the reason is here and not only in the prose.
+        return false
+
+    case .Sum, .Product, .Negate, .Invert, .Deg2Rad,
+         .Min, .Max, .Clamp,
+         .RoundNearest, .RoundUp, .RoundDown, .RoundToZero, .Mod, .Rem,
+         .Sin, .Cos, .Tan, .Asin, .Acos, .Atan, .Atan2,
+         .Pow, .Sqrt, .Hypot, .Log, .Exp, .Abs, .Sign,
+         .Random, .Progress, .ProgressNoClamp, .CalcMix, .Anchor, .AnchorSize:
+        // Every operation. `rebuildFrom` recovers the kind from the original's own variant tag and
+        // fills its slots, which is the whole point of that method.
+        return false
+
+    @unknown default:
+        // An alternative C++ grew and this file has not been taught. `false` routes it to
+        // `rebuildFrom`, which is where an untaught alternative was already going.
+        return false
+    }
+}
 
 /// Whether this file can simplify a node of this alternative with this many children. The child
 /// count is part of the check: the boundary reads `childCount` and asks `rebuildFrom` to consume
@@ -762,12 +864,13 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
         return false
 
     case .Random:
-        // Needs `Style::BuilderState` for `resolveRandomBaseValue`, which the boundary does not carry.
-        return false
+        // `random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )`; the key is not a child, so
+        // `childCount` is 2 or 3 regardless of whether a key is present.
+        return childCount == 2 || childCount == 3
 
     case .SiblingCount, .SiblingIndex:
-        // Both read `conversionData->styleBuilderState()->element()` (`:527`-`:544`).
-        return false
+        // Leaves (`isLeaf` true on both), so there is no arity to check.
+        return true
 
     case .Anchor, .AnchorSize:
         // Need the anchor position evaluator. Also the one place `rebuildFrom`'s tuple conformance
@@ -1842,8 +1945,13 @@ private extension CalcSimplification {
                 CalcExecutor.progressNoClamp
             )
 
-        case .SiblingCount, .SiblingIndex,
-             .Random, .CalcMix, .Anchor, .AnchorSize:
+        case .SiblingCount, .SiblingIndex:
+            return foldSiblingFunction(node, alternative, builder)
+
+        case .Random:
+            return foldRandom(node, info, builder)
+
+        case .CalcMix, .Anchor, .AnchorSize:
             // Enumerated by name rather than swept into the `@unknown default` below, so an
             // alternative that is declined on purpose stays distinguishable from one that simply has
             // not been taught.
@@ -1916,6 +2024,79 @@ private extension CalcSimplification {
             // Declining is the only answer that cannot be silently wrong.
             return .declined(.Symbol)
         }
+    }
+
+    /// `simplify(SiblingCount&)` and `simplify(SiblingIndex&)` (`+Simplification.cpp:527`-`:544`):
+    /// resolve the tree-counting functions against the styled element. Both are leaves with nothing
+    /// to recurse into; `resolveStyleCoupledValue` picks the right C++ method off the node's own tag.
+    ///
+    /// `resolved == false` is not a decline -- it means no conversion data/builder state/element, and
+    /// the C++ copies the leaf through unchanged, which is `.unchanged` here. `sibling-count()` widens
+    /// its integer result to a `Number` via `static_cast<double>`, as the C++ does.
+    @inline(always)
+    func foldSiblingFunction(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ alternative: CalcAlternative,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let resolved = builder.resolveStyleCoupledValue(node)
+        guard resolved.resolved else {
+            return .unchanged(alternative)
+        }
+        return .leaf(NumericLeaf.number(resolved.value))
+    }
+
+    /// `simplify(Random&)` (`+Simplification.cpp:1350`-`:1402`): fold `random()` once its bounds are
+    /// resolved numerics of one type and its `<random-key>` names a base value.
+    ///
+    /// The `<random-key>` is not a child; only `min`, `max` and the optional `step` are (tree indices
+    /// 0, 1, 2). All present operands must be the same numeric alternative and unit
+    /// (`switchTogether`/`unitsMatch`), checked against `max` and `step` separately (both anchored on
+    /// `min`, matching the C++). `min` must also be `fullyResolved`, so a `NonCanonicalDimension`
+    /// never folds here. The result is shaped like `min` (`NumericLeaf.withValue`), so a `random()`
+    /// over percentages keeps `min`'s percent hint.
+    @inline(always)
+    func foldRandom(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let minimumFold = fold(node.childInTreeOrder(0), builder)
+        guard case .leaf(let minimum) = minimumFold else {
+            return foldFailed(minimumFold, .Random)
+        }
+
+        let maximumFold = fold(node.childInTreeOrder(1), builder)
+        guard case .leaf(let maximum) = maximumFold else {
+            return foldFailed(maximumFold, .Random)
+        }
+        guard switchTogether(minimum, maximum), unitsMatch(minimum, maximum), fullyResolved(minimum) else {
+            return .unchanged(.Random)
+        }
+
+        // `root.step` is present exactly when there is a third child, as with `round()`'s second
+        // argument and `log()`'s base.
+        var step: Double? = nil
+        if info.childCount > 2 {
+            let stepChildFold = fold(node.childInTreeOrder(2), builder)
+            guard case .leaf(let stepLeaf) = stepChildFold else {
+                return foldFailed(stepChildFold, .Random)
+            }
+            guard switchTogether(minimum, stepLeaf), unitsMatch(minimum, stepLeaf) else {
+                return .unchanged(.Random)
+            }
+            step = stepLeaf.value
+        }
+
+        // The `<random-key>`. `resolved == false` covers all three of the C++'s causes (no
+        // conversion data/builder state, an unresolved element-scoped key, or a `Calc` fixed value) --
+        // none of which is a decline; the C++ leaves the node in the tree and so does this.
+        let baseValue = builder.resolveStyleCoupledValue(node)
+        guard baseValue.resolved else {
+            return .unchanged(.Random)
+        }
+
+        return .leaf(minimum.withValue(CalcExecutor.random(baseValue.value, minimum.value, maximum.value, step)))
     }
 
     /// `simplify(NonCanonicalDimension&)` (`:505`-`:513`) / `canonicalize`
@@ -3447,6 +3628,14 @@ private extension CalcSimplification {
 
     /// The `.unchanged` half of `rewrite`: the node keeps its own alternative and is rebuilt from
     /// its simplified children.
+    ///
+    /// The three leaves that reach here are copied, not rebuilt: an unresolved `Symbol`, and
+    /// `SiblingCount`/`SiblingIndex` with no live builder state or no element -- the leaves whose
+    /// `simplify` overload can return `std::nullopt`. The four numeric leaves never reach here:
+    /// `fold` answers `.leaf` for them and `rewrite` pushes that through `pushLeaf`.
+    ///
+    /// Not `@inline(always)`: `rebuild` and `rewrite` are mutually recursive, so the optimizer would
+    /// decline it anyway.
     mutating func rebuild(
         _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
         _ alternative: CalcAlternative,
@@ -3454,9 +3643,19 @@ private extension CalcSimplification {
     ) -> Rewrite {
         let info = node.info()
 
-        if alternative == .Symbol {
-            // An unresolved `<calc-keyword>`. A leaf, so `rebuildFrom` would refuse it -- there are
-            // no slots to fill -- and a deep copy is what `copyAndSimplify` does for it.
+        if isCopiedLeafAlternative(alternative) {
+            // An unresolved `<calc-keyword>`, or a tree-counting function with nothing to resolve
+            // against. A leaf, so `rebuildFrom` would refuse it -- there are no slots to fill -- and
+            // a deep copy is what `copyAndSimplify` does for it.
+            //
+            // `pushCopyOf` is exact here, not merely conservative: with `simplify` returning
+            // `std::nullopt`, `copyAndSimplify(const Child&)` (`:1808`-`:1822`) ends at
+            // `makeChild(WTF::move(simplified), getType(root))`, and for a `Leaf Op`,
+            // `copyAndSimplifyChildren` (`:1785`-`:1788`) is `return op;` with the type unread --
+            // `makeChild` for a `Leaf` is `ChildConstruction<T>::make(T&&, Type)`, which discards the
+            // `Type` and yields `Child { WTF::move(op) }` (CSSCalcTree.h:916-:919). `pushCopyOf`
+            // routes to `CSSCalc::copy(const Child&)`, whose `Leaf` overload is `return { root };`
+            // (CSSCalcTree+Copy.cpp:95-:99) -- the same `Child` from the same leaf value.
             builder.pushCopyOf(node)
             return .pushed
         }
@@ -3474,8 +3673,12 @@ private extension CalcSimplification {
         }
 
         // Pops `childCount` operands and pushes one node of the original's kind. `false` is a
-        // decline rather than an impossibility: it covers a leaf, an `Anchor`/`AnchorSize` whose
-        // tuple conformance is a lie, and an arity that does not match a fixed-slot operation.
+        // decline rather than an impossibility: it covers an `Anchor`/`AnchorSize` whose tuple
+        // conformance is a lie, and an arity that does not match a fixed-slot operation.
+        //
+        // A leaf cannot reach here: `isCopiedLeafAlternative` above routes every leaf that can reach
+        // `rebuild` to the copy. An `@unknown` leaf C++ grows would still land here, which is why the
+        // check stays.
         return builder.rebuildFrom(node, info.childCount) ? .pushed : .declined(alternative)
     }
 }

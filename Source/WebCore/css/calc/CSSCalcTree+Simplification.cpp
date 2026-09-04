@@ -2072,6 +2072,79 @@ bool CSSCalcSwiftBuilder::buildMinMax(bool isMax, uint32_t childCount)
     return true;
 }
 
+// The two shapes every `CSSCalcSwiftNumericResult` answer takes, written once instead of
+// duplicated across `resolveSymbol` and `resolveRelativeLength`. `CSSUnitType::Unknown` and the
+// inert `Number` alternative are the values `CSSCalcSwiftNumericResult`'s own comments specify for
+// `resolved == false`.
+static constexpr CSSCalcSwiftNumericResult unresolvedNumber { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number };
+
+// A resolved plain `<number>`. `toCSSUnit(const Number&)` is `CSSUnitType::Number`
+// unconditionally (CSSCalcTree.h:1008), so the unit is that function's answer rather than a
+// guess, and the alternative is `Number` because `makeChild(Number { ... })` is what the C++
+// builds.
+static constexpr CSSCalcSwiftNumericResult resolvedNumber(double value)
+{
+    return { .value = value, .unitType = static_cast<uint16_t>(CSSUnitType::Number), .resolved = true, .alternative = CSSCalcSwiftAlternative::Number };
+}
+
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const CSSCalcSwiftNode& node) const
+{
+    // The guard `simplify(SiblingCount&)`, `(SiblingIndex&)` and `(Random&)` all open with (`:528`,
+    // `:538`, `:1352`). For `random()` it runs deliberately before the sharing is looked at, so a
+    // `fixed` value that needs neither conversion data nor a builder state still answers nothing
+    // without them -- hoisting the fixed arm above this would fold `random(fixed 0.5, 1px, 3px)` in
+    // a context where the C++ leaves it alone.
+    if (!m_options->conversionData || !m_options->conversionData->styleBuilderState())
+        return unresolvedNumber;
+
+    // `protect(...)` exactly as `:534`, `:543` and `:1387` write it, matching the checked access, not
+    // just the same call.
+    CheckedPtr builderState = protect(m_options->conversionData->styleBuilderState());
+
+    // Dispatch comes from the node's own variant tag. `get_if` rather than `switchOn`, as
+    // `childInSerializationOrder` uses it: three comparisons instead of a 41-alternative
+    // instantiation. Any other alternative falls through to `unresolvedNumber` at the bottom -- a
+    // contract violation, unreachable since this is only called from the three matching `fold` arms
+    // -- so it's checked rather than asserted, falling back to the C++ path instead of reading the
+    // wrong alternative.
+    if (auto* random = get_if<IndirectNode<Random>>(node.m_node)) {
+        // `:1375`-`:1386`: a `fixed <number>` resolves here when it is a `Raw` and answers nothing when
+        // it is a `Calc`, which needs full evaluation. Deliberately not routed through
+        // `resolveRandomBaseValue` below, whose fixed arm would run `Style::toStyle` and evaluate
+        // that `Calc` -- a value simplification is not entitled to.
+        if (auto* sharingFixed = std::get_if<Random::SharingFixed>(&(*random)->sharing)) {
+            return WTF::switchOn(sharingFixed->value,
+                [](const CSS::Number<CSS::ClosedUnitRange>::Raw& raw) { return resolvedNumber(raw.value); },
+                [](const CSS::Number<CSS::ClosedUnitRange>::Calc&) { return unresolvedNumber; }
+            );
+        }
+        // `:1388`: every other sharing alternative resolves through the shared resolver, which is the
+        // same function `evaluate(const IndirectNode<Random>&)` calls (CSSCalcTree+Evaluation.cpp:238),
+        // so the two arms cannot disagree about which cache slot a key names.
+        if (auto randomBaseValue = resolveRandomBaseValue((*random)->sharing, *builderState))
+            return resolvedNumber(*randomBaseValue);
+        return unresolvedNumber;
+    }
+
+    // The second guard, easy to miss: `:530` and `:540` require an element. `siblingCount()` on a
+    // builder state with no element does not answer 0 -- it's simply not a question the C++ asks,
+    // and the C++ returns `std::nullopt` so the function stays in the tree. Placed below the
+    // `random()` branch because `simplify(Random&)` does not require an element; only the
+    // `element-scoped` sharing alternatives do, and `resolveRandomBaseValue` checks that itself
+    // (CSSCalcTree+Evaluation.cpp:242, :252).
+    if (!builderState->element())
+        return unresolvedNumber;
+
+    // `simplify(SiblingCount&)` and `simplify(SiblingIndex&)` (`:527`-`:544`), whole. `siblingIndex()`
+    // is 1-based; `siblingCount()` is a count. Dispatch is read directly from the node's variant
+    // tag, so the two can never be swapped across the boundary.
+    if (WTF::holdsAlternative<SiblingCount>(*node.m_node))
+        return resolvedNumber(static_cast<double>(builderState->siblingCount()));
+    if (WTF::holdsAlternative<SiblingIndex>(*node.m_node))
+        return resolvedNumber(static_cast<double>(builderState->siblingIndex()));
+    return unresolvedNumber;
+}
+
 CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, uint16_t unit) const
 {
     // The same call `simplify(Symbol&)` makes at :521. An id and the node's unit are passed in; C++
@@ -2079,7 +2152,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, u
     auto value = m_options->symbolTable.get(static_cast<CSSValueID>(valueID));
     if (!value) {
         // `std::nullopt` from the C++, which copies the `Symbol` through unchanged. Not a failure.
-        return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number };
+        return unresolvedNumber;
     }
 
     // The value from the table and the unit from the node -- `makeNumeric(value->value, root.unit)`
@@ -2138,7 +2211,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double valu
     // measured in pixels.
     if (auto lengthUnit = CSS::toLengthUnit(static_cast<CSSUnitType>(unitType)); lengthUnit && m_options->conversionData)
         return { .value = Style::resolveLength(value, *lengthUnit, *m_options->conversionData), .unitType = static_cast<uint16_t>(toCSSUnit(CanonicalDimension::Dimension::Length)), .resolved = true, .alternative = CSSCalcSwiftAlternative::CanonicalDimension };
-    return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number };
+    return unresolvedNumber;
 }
 
 bool CSSCalcSwiftBuilder::isLengthUnit(uint16_t unitType) const
