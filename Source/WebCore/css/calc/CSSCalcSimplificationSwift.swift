@@ -764,8 +764,9 @@ private func isCopiedLeafAlternative(_ alternative: CalcAlternative) -> Bool {
          .Sin, .Cos, .Tan, .Asin, .Acos, .Atan, .Atan2,
          .Pow, .Sqrt, .Hypot, .Log, .Exp, .Abs, .Sign,
          .Random, .Progress, .ProgressNoClamp, .CalcMix, .Anchor, .AnchorSize:
-        // Every operation. `rebuildFrom` recovers the kind from the original's own variant tag and
-        // fills its slots, which is the whole point of that method.
+        // Every operation: `rebuildFrom` recovers the kind from the original's variant tag and fills its
+        // slots -- including `Anchor`/`AnchorSize`, whose `.unchanged` instead routes to `rebuildAnchor`
+        // since their `<anchor-side>` subtree must not be pushed as an operand.
         return false
 
     @unknown default:
@@ -873,10 +874,12 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
         return true
 
     case .Anchor, .AnchorSize:
-        // Need the anchor position evaluator. Also the one place `rebuildFrom`'s tuple conformance
-        // does not cover: `tuple_size` is 0 for both (CSSCalcSwiftTypes.h), so even a pass-through
-        // rebuild is unavailable.
-        return false
+        // The two whose children the boundary answers for by hand: `Anchor` has the `<anchor-side>` when
+        // it's a `<percentage>` subtree plus the fallback, `AnchorSize` has the fallback alone -- bound 2 and
+        // 1, checked exactly against `operationInfo()`'s `anchorSideIsKeyword`/`hasFallback` in
+        // `foldAnchorFunction`, which is the only place both halves are in scope. Both are `IndirectNode`s
+        // with slots, so `rebuildFrom` fills them via its two hand-written arms.
+        return alternative == .Anchor ? childCount <= 2 : childCount <= 1
 
     @unknown default:
         // An alternative C++ grew and this file has not been taught. Declining is the only safe
@@ -1951,10 +1954,13 @@ private extension CalcSimplification {
         case .Random:
             return foldRandom(node, info, builder)
 
-        case .CalcMix, .Anchor, .AnchorSize:
-            // Enumerated by name rather than swept into the `@unknown default` below, so an
-            // alternative that is declined on purpose stays distinguishable from one that simply has
-            // not been taught.
+        case .Anchor, .AnchorSize:
+            return foldAnchorFunction(node, info, alternative, builder)
+
+        case .CalcMix:
+            // Enumerated by name rather than swept into the `@unknown default` below, so a known
+            // decline -- normalisation over per-item weights that are not child nodes -- stays
+            // distinguishable from an alternative that has not been taught.
             return .declined(alternative)
 
         @unknown default:
@@ -2097,6 +2103,85 @@ private extension CalcSimplification {
         }
 
         return .leaf(minimum.withValue(CalcExecutor.random(baseValue.value, minimum.value, maximum.value, step)))
+    }
+
+    /// Where the fallback `<length-percentage>` sits among an anchor function's children.
+    ///
+    /// `Anchor`/`AnchorSize` declare `tuple_size` 0, so the boundary answers for their children by
+    /// hand: an `Anchor` has the `<anchor-side>` (when it's a `<percentage>` subtree, not a keyword)
+    /// then the fallback; an `AnchorSize` has the fallback alone.
+    @inline(always)
+    func anchorFallbackIndex(
+        _ alternative: CalcAlternative,
+        _ operation: WebCore.CSSCalc.CSSCalcSwiftOperationInfo
+    ) -> UInt32 {
+        // `anchorSideIsKeyword` is inert for `AnchorSize`, so the alternative is tested first rather
+        // than the flag being trusted for a kind that does not carry it.
+        return (alternative == .Anchor && !operation.anchorSideIsKeyword) ? 1 : 0
+    }
+
+    /// `simplify(Anchor&)` and `simplify(AnchorSize&)` (`+Simplification.cpp:1692`-`:1744`): resolve
+    /// against the anchor position evaluator, substituting the fallback on failure. One function for
+    /// both, since `resolveStyleCoupledValue` reads which off the node's own variant tag.
+    ///
+    /// Three dispositions: RESOLVED, a canonical `<length>` (after folding the discarded fallback for
+    /// its upcalls); THE EVALUATION ANSWERED NOTHING, so the fallback substitutes via `promoteTerm`
+    /// (non-numeric becomes `.replacedByTerm`, numeric becomes the leaf itself); or NO CONVERSION
+    /// DATA/BUILDER STATE, rebuilt with nothing marked.
+    ///
+    /// The `<anchor-side>` subtree is deliberately NOT folded: the C++ copies it rather than
+    /// simplifying (`:1797`), so `anchor(--a calc(25% + 25%))` keeps its unfolded `Sum` on the C++ arm
+    /// too. The child count and `operationInfo()`'s record must agree, or this declines.
+    @inline(always)
+    func foldAnchorFunction(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+        _ alternative: CalcAlternative,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        let operation = node.operationInfo()
+        let fallbackIndex = anchorFallbackIndex(alternative, operation)
+        guard fallbackIndex + (operation.hasFallback ? 1 : 0) == info.childCount else {
+            return .declined(alternative)
+        }
+
+        let resolved = builder.resolveStyleCoupledValue(node)
+        if resolved.resolved {
+            // `simplify` always ends at a `CanonicalDimension`, so the check is on the alternative,
+            // not the unit -- a boundary that came apart declines rather than building the wrong leaf.
+            guard resolved.alternative == .CanonicalDimension else {
+                return .declined(alternative)
+            }
+
+            // The discarded fallback is still folded here for its upcalls, even though its value is
+            // thrown away: `copyAndSimplify` simplifies children before `simplify` runs on the node, so
+            // the C++ arm has already simplified the fallback it discards, and that simplification can
+            // have an observable effect (e.g. marking a property invalid at computed-value time).
+            // Done in `fold` rather than `rewrite`, since a parent that folds this node away never
+            // calls `rewrite` on it at all.
+            if operation.hasFallback {
+                _ = fold(node.childInTreeOrder(fallbackIndex), builder)
+            }
+
+            return .leaf(NumericLeaf(
+                kind: .canonicalDimension,
+                value: resolved.value,
+                unitType: resolved.unitType,
+                percentHint: 0
+            ))
+        }
+
+        if resolved.substituteFallback, operation.hasFallback {
+            // Routed through `promoteTerm`, not a bare `.replacedByTerm`: the C++ returns the fallback
+            // child itself, so a `Numeric` fallback must reach the parent as a `.leaf` or the parent
+            // (e.g. a wrapping `Sum`) will treat it as an opaque subtree and fail to fold
+            // (`calc(anchor(top, 1px) + 1em)` must become `17px`, not `calc(1px + 16px)`).
+            return promoteTerm(fold(node.childInTreeOrder(fallbackIndex), builder), fallbackIndex)
+        }
+
+        // Both remaining dispositions rebuild the node with its simplified fallback; they differ only
+        // in whether the C++ marked the property invalid, which this file need not repeat.
+        return .unchanged(alternative)
     }
 
     /// `simplify(NonCanonicalDimension&)` (`:505`-`:513`) / `canonicalize`
@@ -3301,6 +3386,36 @@ private extension CalcSimplification {
         return builder.rebuildFrom(child, pushed) ? .pushed : .declined(.Negate)
     }
 
+    /// `rebuild` for a surviving `anchor()`/`anchor-size()`: the fallback is the only operand, and the
+    /// `<anchor-side>` subtree is deliberately not one, since the C++ copies rather than simplifies it
+    /// (`copyAndSimplifyChildren(const IndirectNode<Anchor>&)`, `.side = copy(anchor->side)`, `:1797`)
+    /// -- `anchor(--a calc(25% + 25%))` keeps its unfolded `Sum`, and folding it would be wrong. The
+    /// side comes off the original inside `rebuildFrom` through the same `CSSCalc::copy`.
+    ///
+    /// The coverage walk still descends into the side, so an untaught alternative there declines the
+    /// whole tree -- conservative, since the C++ arm would have copied it regardless.
+    mutating func rebuildAnchor(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ alternative: CalcAlternative,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        let operation = node.operationInfo()
+
+        // Named `pushedFallback`, not `pushed`: the selftest's control asserts each `pushed`-style
+        // counter name is unique in the file, and a second `pushed` would collide with
+        // `rewriteNegatedChildren`'s.
+        var pushedFallback: UInt32 = 0
+        if operation.hasFallback {
+            let fallback = rewrite(node.childInTreeOrder(anchorFallbackIndex(alternative, operation)), &builder)
+            if case .declined(let blame) = fallback {
+                return .declined(blame)
+            }
+            pushedFallback = 1
+        }
+
+        return builder.rebuildFrom(node, pushedFallback) ? .pushed : .declined(alternative)
+    }
+
     /// `convertToMin`/`convertToMax` (`+Simplification.cpp:1018`-`:1044`): a fresh `min()`/`max()`
     /// over `clamp()`'s two surviving arguments, via `buildMinMax`, the boundary's only construction
     /// selector.
@@ -3642,6 +3757,12 @@ private extension CalcSimplification {
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
         let info = node.info()
+
+        if alternative == .Anchor || alternative == .AnchorSize {
+            // The two alternatives whose children are answered by hand at the boundary, and whose
+            // `<anchor-side>` child must not be pushed as an operand. See `rebuildAnchor`.
+            return rebuildAnchor(node, alternative, &builder)
+        }
 
         if isCopiedLeafAlternative(alternative) {
             // An unresolved `<calc-keyword>`, or a tree-counting function with nothing to resolve

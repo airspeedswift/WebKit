@@ -2002,12 +2002,31 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const CSSCalcSwiftNode& original, uint32_t
             if constexpr (requires { *alternative; }) {
                 using Op = std::remove_cvref_t<decltype(*alternative)>;
                 if constexpr (std::same_as<Op, Anchor> || std::same_as<Op, AnchorSize>) {
-                    // Both declare `tuple_size` 0 (CSSCalcTree.h:1317, "FIXME
-                    // (webkit.org/b/280798): make Anchor and AnchorSize tuple-like") while holding
-                    // an `AnchorSide` and an optional fallback, so `WTF::apply` would yield no
-                    // slots and build them empty. A decline rather than an assert: it is reachable
-                    // by input, not only by a boundary defect.
-                    return std::nullopt;
+                    // Both declare `tuple_size` 0 (CSSCalcTree.h:1317, "FIXME (webkit.org/b/280798):
+                    // make Anchor and AnchorSize tuple-like") while holding an `AnchorSide`, an
+                    // optional `<anchor-size>` dimension and an optional fallback, so `WTF::apply`
+                    // yields no slots and would build them empty. Handled with explicit slot lists
+                    // instead of the generic path.
+                    //
+                    // These mirror `copyAndSimplifyChildren`'s own two overloads, with the fallback
+                    // taken from the cursor. `elementName` and `dimension` are copied; `side` is
+                    // copied via `CSSCalc::copy` rather than simplified, matching the C++ overload,
+                    // which writes `.side = copy(anchor->side)` and does not simplify the
+                    // `<anchor-side>` subtree -- simplifying it would fold
+                    // `anchor(--a calc(25% + 25%))` to `anchor(--a 50%)`, which the C++ does not do.
+                    //
+                    // `rebuildSlot(const std::optional<Child>&, ...)` is reused for the fallback, so
+                    // presence still follows the original and the cursor contract matches every
+                    // other slot shape.
+                    auto op = [&] {
+                        if constexpr (std::same_as<Op, Anchor>)
+                            return Anchor { .elementName = alternative->elementName, .side = copy(alternative->side), .fallback = rebuildSlot(alternative->fallback, cursor) };
+                        else
+                            return AnchorSize { .elementName = alternative->elementName, .dimension = alternative->dimension, .fallback = rebuildSlot(alternative->fallback, cursor) };
+                    }();
+                    if (!cursor.ok || !cursor.exhausted())
+                        return std::nullopt;
+                    return makeChild(WTF::move(op), getType(alternative));
                 } else {
                     auto op = WTF::apply([&](const auto& ...x) { return Op { rebuildSlot(x, cursor)... }; }, *alternative);
                     if (!cursor.ok || !cursor.exhausted())
@@ -2076,7 +2095,7 @@ bool CSSCalcSwiftBuilder::buildMinMax(bool isMax, uint32_t childCount)
 // duplicated across `resolveSymbol` and `resolveRelativeLength`. `CSSUnitType::Unknown` and the
 // inert `Number` alternative are the values `CSSCalcSwiftNumericResult`'s own comments specify for
 // `resolved == false`.
-static constexpr CSSCalcSwiftNumericResult unresolvedNumber { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number };
+static constexpr CSSCalcSwiftNumericResult unresolvedNumber { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = false };
 
 // A resolved plain `<number>`. `toCSSUnit(const Number&)` is `CSSUnitType::Number`
 // unconditionally (CSSCalcTree.h:1008), so the unit is that function's answer rather than a
@@ -2084,8 +2103,28 @@ static constexpr CSSCalcSwiftNumericResult unresolvedNumber { .value = 0, .unitT
 // builds.
 static constexpr CSSCalcSwiftNumericResult resolvedNumber(double value)
 {
-    return { .value = value, .unitType = static_cast<uint16_t>(CSSUnitType::Number), .resolved = true, .alternative = CSSCalcSwiftAlternative::Number };
+    return { .value = value, .unitType = static_cast<uint16_t>(CSSUnitType::Number), .resolved = true, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = false };
 }
+
+// A resolved canonical `<length>`. Both `simplify(Anchor&)` and `simplify(AnchorSize&)` end at
+// `CanonicalDimension { .value = *result, .dimension = CanonicalDimension::Dimension::Length }`
+// (`:1716`, `:1743`).
+//
+// The unit is `toCSSUnit(Dimension::Length)`, read out of the header (CSSCalcTree.h:992) rather
+// than the literal `CSSUnitType::CSS_PX`: this value gets pushed back through `pushLeaf`, which
+// calls `makeNumeric` again, and the round trip has to land on the same alternative. Writing `Px`
+// here would duplicate "the canonical length unit is px" elsewhere in the program.
+static constexpr CSSCalcSwiftNumericResult resolvedCanonicalLength(double value)
+{
+    return { .value = value, .unitType = static_cast<uint16_t>(toCSSUnit(CanonicalDimension::Dimension::Length)), .resolved = true, .alternative = CSSCalcSwiftAlternative::CanonicalDimension, .substituteFallback = false };
+}
+
+// The C++ reaches `std::exchange(node.fallback, { })`: there was a builder state and evaluation
+// answered nothing, so the node is replaced by its fallback -- or, having none, is rebuilt with
+// the property marked invalid at computed-value time. See
+// `CSSCalcSwiftNumericResult::substituteFallback` for why this cannot be the same answer as
+// `unresolvedNumber`.
+static constexpr CSSCalcSwiftNumericResult substituteAnchorFallback { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = true };
 
 CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const CSSCalcSwiftNode& node) const
 {
@@ -2124,6 +2163,68 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const CS
         if (auto randomBaseValue = resolveRandomBaseValue((*random)->sharing, *builderState))
             return resolvedNumber(*randomBaseValue);
         return unresolvedNumber;
+    }
+
+    // The failure tail of both anchor functions, written once. `:1710`-`:1714` and `:1737`-`:1740`
+    // are the same three lines twice in the C++, and this is the one place saying what an anchor
+    // function does when evaluation answers nothing. See
+    // `CSSCalcSwiftNumericResult::substituteFallback` for why the answer cannot be
+    // `unresolvedNumber`.
+    auto anchorEvaluationFailed = [&](bool hasFallback) {
+        // https://drafts.csswg.org/css-anchor-position-1/#anchor-valid
+        // "If any of these conditions are false, the anchor() function resolves to its specified
+        // fallback value. If no fallback value is specified, it makes the declaration referencing it
+        // invalid at computed-value time."
+        //
+        // The fallback is not touched here. `:1714` is `std::exchange(anchor.fallback, { })`, which
+        // both reads and clears the fallback on the per-arm copy; this reports "substitute the
+        // fallback" instead and mutates nothing, since the answer here is an operand pushed for the
+        // fallback subtree rather than the fallback `Child` moved out of the node.
+        if (!hasFallback)
+            builderState->setCurrentPropertyInvalidAtComputedValueTime();
+        return substituteAnchorFallback;
+    };
+
+    // `simplify(Anchor&)` (`:1692`-`:1717`), whole, placed above the element guard because it does
+    // not require an element -- `AnchorPositionEvaluator::evaluate` finds its own
+    // (`AnchorPositionEvaluator.cpp:897`) and answers nothing when there is none.
+    //
+    // `EvaluationOptions` is built here because it cannot cross the boundary. Note `.range` is
+    // `CSS::All`, not `m_options->range`: an anchor is evaluated unclamped even inside a property
+    // with a range. The four members are copied one for one from `:1697`-`:1702`.
+    if (auto* anchor = get_if<IndirectNode<Anchor>>(node.m_node)) {
+        auto result = evaluateWithoutFallback(**anchor, EvaluationOptions {
+            .category = m_options->category,
+            .range = CSS::All,
+            .conversionData = m_options->conversionData,
+            .symbolTable = m_options->symbolTable
+        });
+        if (result)
+            return resolvedCanonicalLength(*result);
+        return anchorEvaluationFailed(static_cast<bool>((*anchor)->fallback));
+    }
+
+    // `simplify(AnchorSize&)` (`:1719`-`:1744`), whole. `Style::toStyle(CSS::CustomIdent,
+    // BuilderState&)` and `builderState->styleScopeOrdinal()` are the two things a
+    // `Style::ScopedName` needs, and neither is expressible across the boundary -- the same reason
+    // the `<random-key>` handling above stays here: it would require transcribing an `AtomString`
+    // and a scope ordinal to build a value only C++ consumes.
+    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(node.m_node)) {
+        std::optional<Style::ScopedName> anchorSizeScopedName;
+        if ((*anchorSize)->elementName) {
+            anchorSizeScopedName = Style::ScopedName {
+                .name = Style::toStyle(*(*anchorSize)->elementName, *builderState).value,
+                .scopeOrdinal = builderState->styleScopeOrdinal()
+            };
+        }
+
+        // `anchorSize.dimension` is a `std::optional<AnchorSizeDimension>`, passed through as one:
+        // `evaluateSize` substitutes `defaultDimensionForPropertyID(propertyID)` for an absent
+        // dimension (`AnchorPositionEvaluator.cpp:1023`), so reporting just `hasDimension` would not
+        // be enough to reconstruct it.
+        if (auto result = Style::AnchorPositionEvaluator::evaluateSize(*builderState, anchorSizeScopedName, (*anchorSize)->dimension))
+            return resolvedCanonicalLength(*result);
+        return anchorEvaluationFailed(static_cast<bool>((*anchorSize)->fallback));
     }
 
     // The second guard, easy to miss: `:530` and `:540` require an element. `siblingCount()` on a
@@ -2171,6 +2272,10 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, u
         .unitType = static_cast<uint16_t>(CSSUnitType::Unknown),
         .resolved = true,
         .alternative = static_cast<CSSCalcSwiftAlternative>(leaf.value.index()),
+        // Never set by this lookup: only the two anchor functions have a fallback to substitute.
+        // Written out explicitly rather than left to default-initialise, so it reads as a
+        // statement rather than an omission.
+        .substituteFallback = false,
     };
     WTF::switchOn(leaf,
         [&]<Numeric T>(const T& numeric) {
@@ -2204,13 +2309,13 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double valu
     // guarantee, so an unchecked dereference would be UB on a constructible input. This reports
     // "no answer" instead -- the dimension stays as it is.
     //
-    // An `if` with an initializer, the resolved case first, the unresolved one as the fallthrough:
-    // a canonical `CSSUnitType` rather than a `CanonicalDimension::Dimension`, so the reverse
-    // mapping stays `makeNumeric`'s and `Dimension` never crosses; and `toCSSUnit` is called rather
-    // than `CSSUnitType::Px` written out, so there is no second place saying a resolved length is
-    // measured in pixels.
+    // An `if` with an initializer, the resolved case first, the unresolved one as the fallthrough.
+    // `resolvedCanonicalLength` is that literal, written once: a canonical `CSSUnitType` rather
+    // than a `CanonicalDimension::Dimension`, so the reverse mapping stays `makeNumeric`'s and
+    // `Dimension` never crosses; and it calls `toCSSUnit` rather than writing `CSSUnitType::Px` out,
+    // so there is no second place saying a resolved length is measured in pixels.
     if (auto lengthUnit = CSS::toLengthUnit(static_cast<CSSUnitType>(unitType)); lengthUnit && m_options->conversionData)
-        return { .value = Style::resolveLength(value, *lengthUnit, *m_options->conversionData), .unitType = static_cast<uint16_t>(toCSSUnit(CanonicalDimension::Dimension::Length)), .resolved = true, .alternative = CSSCalcSwiftAlternative::CanonicalDimension };
+        return resolvedCanonicalLength(Style::resolveLength(value, *lengthUnit, *m_options->conversionData));
     return unresolvedNumber;
 }
 

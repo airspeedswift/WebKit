@@ -619,10 +619,35 @@ struct CSSCalcSwiftNumericResult {
     // Inert (`Number`) when `resolved` is false. `canonicalizeUnit` always answers
     // `CanonicalDimension` when it resolves, by construction, and fills it there anyway.
     CSSCalcSwiftAlternative alternative;
+
+    // A third state, needed because `resolved == false` is ambiguous for `anchor()` and
+    // `anchor-size()` in a way it is not for any other user of this struct. Every other lookup
+    // here has two outcomes -- an answer, or "leave the node alone" -- but the two anchor
+    // functions have three (`+Simplification.cpp:1692`-`:1744`), and the two that both report
+    // `resolved == false` produce different trees:
+    //
+    //   - no conversion data or no builder state: the opening guard returns `{ }`, and
+    //     `copyAndSimplify` rebuilds the node with its simplified fallback still on it.
+    //     `substituteFallback == false`.
+    //   - the evaluation answered nothing: the C++ reached `std::exchange(node.fallback, { })`, so
+    //     the node is replaced by its fallback, or the property is marked invalid at
+    //     computed-value time if it had none. `substituteFallback == true`.
+    //   - it resolved to a `CanonicalDimension` length. `resolved == true`.
+    //
+    // Swift cannot derive the middle case, since `CSSCalcSwiftSimplificationOptions` carries only
+    // `hasConversionData`, not whether a `Style::BuilderState` hangs off it, so it is reported
+    // rather than reconstructed. Which rebuild path to take is `info.hasFallback`, already on the
+    // boundary.
+    //
+    // Free in bytes: 12 live bytes became 13 in a struct that aligns to 8, so `sizeof` is 16
+    // before and after, held by the `static_assert` below.
+    //
+    // False for every lookup but the two anchor ones, and mutually exclusive with `resolved`.
+    bool substituteFallback;
 };
 
-// 8 + 2 + 1 + 1 = 12 live bytes, aligned to 8. See `alternative` above: this is the assert that
-// makes "the field is free" a check rather than a claim.
+// 8 + 2 + 1 + 1 + 1 = 13 live bytes, aligned to 8. See `alternative` and `substituteFallback` above:
+// this is the assert that makes "the field is free" a check rather than a claim.
 static_assert(sizeof(CSSCalcSwiftNumericResult) == 16);
 
 // The parts of `CSSCalc::SimplificationOptions` Swift reads, from one crossing.
@@ -709,18 +734,11 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // one operand or none, following the original's shape for `std::optional<Child>` and
     // `ChildOrNone`.
     //
-    // Returns false, reported as a decline, for a contract violation: too few operands, a
-    // mismatched arity, or a leaf.
-    //
-    // `Anchor` and `AnchorSize` are served by two hand-written cases rather than by the tuple
-    // conformance -- they declare `tuple_size` 0 (CSSCalcTree.h:1317, "FIXME webkit.org/b/280798"),
-    // so `WTF::apply` yields no slots. `copyAndSimplifyChildren`'s own two overloads
-    // (`+Simplification.cpp:1795`-`:1807`) take `elementName`, `side` and `dimension` off the
-    // original exactly as they do, with the fallback taken from the cursor, so the two arms cannot
-    // disagree about the non-fallback parts of the node. This does not fix the FIXME: doing so
-    // would change what `forAllChildNodes` yields for every other caller, including simplification
-    // and the computed-style-dependency walk.
+    // Returns false, reported as a decline, for a contract violation: too few operands, a mismatched
+    // arity, a leaf, or an `Anchor`/`AnchorSize` -- both declare `tuple_size` 0 (CSSCalcTree.h:1317,
+    // "FIXME webkit.org/b/280798"), so generic reconstruction would build them empty.
     WEBCORE_EXPORT bool rebuildFrom(const CSSCalcSwiftNode& original, uint32_t childCount);
+
 
     // Pop `childCount` operands and push a FRESH `min()` or `max()` built from them.
     //
@@ -832,6 +850,31 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // produce a plain `<number>` -- `makeChild(Number { ... })` at `:534` and `:543`, and a
     // `<random-key>` base value is a `<number [0,1]>` by definition -- so `unitType` is
     // `CSSUnitType::Number` and `alternative` is `Number` because that is what the answer is.
+    //
+    // `Anchor` and `AnchorSize` join the same entry, still with no selector. They are the last two
+    // style-coupled operations and fail for the same reason the other three do, one step further
+    // out: `Style::BuilderState` carries the element, its style and the anchor-position machinery,
+    // `Style::ScopedName` needs `Style::toStyle` plus the state's scope ordinal, and
+    // `Style::AnchorPositionEvaluator` reaches renderers -- none of it reduces to a POD. The
+    // dispatch is still the node's own variant tag, so which of the five operations this is standing
+    // on is never named, and the 3-way tag test at the bottom became a 5-way one.
+    //
+    // The answer for these two is a `CanonicalDimension`, not a `Number` -- `simplify(Anchor&)` ends
+    // at `CanonicalDimension { .value = *result, .dimension = Dimension::Length }` -- so `unitType`
+    // is `toCSSUnit(Dimension::Length)` read out of the header rather than the literal `Px`, and
+    // `alternative` is `CanonicalDimension`.
+    //
+    // They also need a third outcome, `CSSCalcSwiftNumericResult::substituteFallback` -- see that
+    // field. It is the only reason the struct grew, and it grew by nothing (see "free in bytes"
+    // there).
+    //
+    // The invalid mark is set here, in C++, deliberately.
+    // `setCurrentPropertyInvalidAtComputedValueTime()` on a `Style::BuilderState` is not reachable
+    // from Swift, and a second boundary entry meaning "mark it" would put the `if (!node.fallback)`
+    // test in Swift where C++ already has the node -- a shim re-deriving a decision the input
+    // already carries. The mark is monotone with no public clear, so a repeated call cannot be
+    // distinguished from a single one, which is what makes it safe on a path `fold` may re-enter for
+    // a node whose parent did not fold.
     //
     // Why the `<random-key>` needs the node and must not become a POD. `Random::Sharing` is a
     // `Variant<SharingAuto, Key, SharingFixed>` over a `CSS::CustomIdent` (an `AtomString`), a
