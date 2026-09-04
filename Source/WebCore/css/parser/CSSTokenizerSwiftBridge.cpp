@@ -80,6 +80,28 @@
 #include "StyleComputedStyle.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleComputedStyle+SettersInlines.h"
+// The builder-state fixture (conversion-data kinds 3 and 4). `Style::BuilderState` is required by
+// `simplify(SiblingCount&)`, `simplify(SiblingIndex&)`, `simplify(Random&)`, `simplify(Anchor&)` and
+// `simplify(AnchorSize&)`, and `BuilderContext` holds a non-null `const Ref<const Document>`, so a
+// real `Document` is mandatory.
+//
+// Building one from nothing but a `Document` has WebCore precedent: five production sites already
+// do it, e.g. CSSPropertyParserConsumer+Transform.cpp:432-433
+// (`Style::BuilderState::create(dummyStyle, Style::BuilderContext { document })`) and
+// StyleCustomPropertyRegistry.cpp:201-202. The construction recipe below follows TestWebKitAPI's,
+// at Tests/WebCore/DocumentOrder.cpp:56-67.
+#include "AnchorPositionEvaluator.h"
+#include "CSSCalcRandomCachingKey.h"
+#include "Document.h"
+#include "DocumentInlines.h"
+#include "ElementInlines.h"
+#include "HTMLBodyElement.h"
+#include "HTMLDivElement.h"
+#include "HTMLHtmlElement.h"
+#include "NodeInlines.h"
+#include "ProcessWarming.h"
+#include "Settings.h"
+#include "StyleBuilderState.h"
 // WebCoreSwift-Generated.h is module-scoped, so any translation unit that includes it must declare
 // every Swift boundary type in the module, not just the ones this file calls.
 // WebCoreSwiftBoundaryTypes.h states that requirement once.
@@ -92,6 +114,7 @@
 #include <optional>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/URL.h>
 #include <wtf/text/Latin1Character.h>
 #include <wtf/text/WTFString.h>
 
@@ -550,8 +573,10 @@ static bool subtreeContainsNaN(const CSSCalc::Child& root)
 // the style rather than a copy: a style built per call and returned by value would leave the
 // options pointing at a dead object. WebCore also links with -no_inits.
 //
-// `styleBuilderState()` is null, which is what makes `SiblingCount`, `SiblingIndex`, `Random`,
-// `Anchor` and `AnchorSize` return `nullopt` from their `simplify` on both sides.
+// `styleBuilderState()` is null for conversion-data kinds 1 and 2, which is what makes
+// `SiblingCount`, `SiblingIndex`, `Random`, `Anchor` and `AnchorSize` return `nullopt` from their
+// `simplify` on both sides at those kinds. Kinds 3 and 4 -- `simplificationBuilderStateAtFontSize`
+// below -- are the same two styles with a live `Style::BuilderState` attached.
 //
 // `setFontDescription`, not `setFontDescriptionWithoutUpdate` -- this is load-bearing.
 // `WithoutUpdate` leaves `FontCascade::m_fonts` null (StyleComputedStyleBase.cpp:233 only rebuilds
@@ -565,7 +590,13 @@ static bool subtreeContainsNaN(const CSSCalc::Child& root)
 // null to non-null, and the metrics the units resolve from differ between the two font sizes
 // (xHeight 7.1797 vs 14.3594, capHeight 10.5859 vs 21.1719, lineSpacing 18 vs 37), which is what
 // lets the two-size design below prove the conversion data is actually read.
-const Style::ComputedStyle& simplificationStyleAtFontSize(float fontSize)
+//
+// Non-const; the const wrapper below is what everything else uses. `Style::BuilderState::create`
+// takes `ComputedStyle&`, and `BuilderState::siblingCount()` writes
+// `m_style.setUsesTreeCountingFunctions()` on it, so the builder-state kinds need a mutable
+// reference to the same object kinds 1 and 2 use. Sharing it is what makes comparing kind 3 against
+// kind 1 change only `styleBuilderState()`, rather than comparing two different fixtures.
+static Style::ComputedStyle& simplificationStyleStorageAtFontSize(float fontSize)
 {
     static NeverDestroyed<Style::ComputedStyle> style16 = [] {
         auto style = Style::ComputedStyle::create();
@@ -588,6 +619,125 @@ const Style::ComputedStyle& simplificationStyleAtFontSize(float fontSize)
     // size proves the conversion data is actually read.
     return fontSize > 16 ? style32.get() : style16.get();
 }
+
+const Style::ComputedStyle& simplificationStyleAtFontSize(float fontSize)
+{
+    return simplificationStyleStorageAtFontSize(fontSize);
+}
+
+// MARK: - The builder-state fixture: conversion-data kinds 3 and 4
+//
+// Five `simplify` overloads (`SiblingCount`, `SiblingIndex`, `Random`, `Anchor`, `AnchorSize`)
+// return `nullopt` on both arms when `options.conversionData->styleBuilderState()` is null, so
+// this fixture supplies a real one.
+//
+// The element is the third of five siblings, so `siblingCount()` is 5 and `siblingIndex()` is 3
+// -- distinguishable, unlike with a single sibling. No Page, Frame or style resolution is needed.
+//
+// `BuilderContext` is left at its default except four fields: `treeResolutionState` and
+// `rootElementStyle` stay null (matching production and kinds 1/2 respectively), and
+// `parentStyle` is set to the style itself rather than left null, because
+// `CSSToLengthConversionData`'s `parentStyle()` unconditionally dereferences it
+// (CSSToLengthConversionData.cpp:56, StyleBuilderState.h:127) -- a null there is UB.
+struct SimplificationBuilderStateFixture {
+    RefPtr<Settings> settings;
+    RefPtr<Document> document;
+    // The third of the five `<div>`s.
+    RefPtr<Element> element;
+    // Re-created between the two arms; see `resetSimplificationBuilderStates`.
+    std::optional<UniqueRef<Style::BuilderState>> state16;
+    std::optional<UniqueRef<Style::BuilderState>> state32;
+};
+
+static SimplificationBuilderStateFixture& simplificationBuilderStateFixture()
+{
+    static NeverDestroyed<SimplificationBuilderStateFixture> fixture = [] {
+        SimplificationBuilderStateFixture f;
+        // Registers the qualified names `HTMLHtmlElement::create` and friends look up. Omitting it
+        // is not a soft failure -- it is what TestWebKitAPI's own recipe does first.
+        ProcessWarming::initializeNames();
+        f.settings = Settings::create(nullptr);
+        f.document = Document::create(*f.settings, aboutBlankURL());
+        Ref documentElement = HTMLHtmlElement::create(*f.document);
+        f.document->appendChild(documentElement);
+        Ref body = HTMLBodyElement::create(*f.document);
+        documentElement->appendChild(body);
+        for (unsigned i = 0; i < 5; ++i) {
+            Ref div = HTMLDivElement::create(*f.document);
+            body->appendChild(div);
+            if (i == 2)
+                f.element = div.ptr();
+        }
+        return f;
+    }();
+    return fixture.get();
+}
+
+// Destroys and rebuilds both `BuilderState`s, leaving the Document and the element tree alone.
+//
+// Must run between the two comparison arms: the anchor `simplify` overloads set a bit
+// (`m_invalidAtComputedValueTimeProperties`, StyleBuilderState.cpp:324-327) with no public way
+// to clear it, so the state is replaced instead of reused.
+//
+// The Document and element are NOT rebuilt: `random()`'s base value is cached on them by
+// `RandomCachingKey`, and rebuilding would give the two arms different values for the same key.
+//
+// A `CheckedPtr` to a `BuilderState` must not outlive it (`CanMakeCheckedPtr`'s destructor
+// RELEASE_ASSERTs), so callers build `SimplificationOptions` after this call and drop them
+// before the next one.
+//
+// The anchor overloads' `std::exchange(node.fallback, { })` looks like it mutates the input, but
+// `copyAndSimplifyChildren` (CSSCalcTree+Simplification.cpp:1795-1807) already hands each arm a
+// freshly built `Anchor`/`AnchorSize`, not the input's node, so each arm only mutates its own
+// copy.
+static void resetSimplificationBuilderStates()
+{
+    auto& fixture = simplificationBuilderStateFixture();
+    auto make = [&](float fontSize) {
+        auto& style = simplificationStyleStorageAtFontSize(fontSize);
+        return Style::BuilderState::create(style, Style::BuilderContext {
+            .document = *fixture.document,
+            .parentStyle = &style,
+            .element = fixture.element,
+        });
+    };
+    // Cleared before either is rebuilt so that the old objects are gone before the new ones exist,
+    // rather than two live states briefly sharing one style.
+    fixture.state16 = std::nullopt;
+    fixture.state32 = std::nullopt;
+    fixture.state16.emplace(make(16.0f));
+    fixture.state32.emplace(make(32.0f));
+}
+
+static Style::BuilderState& simplificationBuilderStateAtFontSize(float fontSize)
+{
+    auto& fixture = simplificationBuilderStateFixture();
+    if (!fixture.state16)
+        resetSimplificationBuilderStates();
+    return fontSize > 16 ? fixture.state32->get() : fixture.state16->get();
+}
+
+// Did either anchor overload mark the current property invalid at computed-value time during the
+// run that just happened? The current property is null here, so `cssPropertyID()` is
+// `CSSPropertyInvalid` and the bit index is 0, which still works as a channel for "this happened" --
+// the only externally visible effect of `simplify(Anchor&)` on a node with no fallback.
+static bool simplificationBuilderStateFlaggedInvalid(float fontSize)
+{
+    return simplificationBuilderStateAtFontSize(fontSize).isCurrentPropertyInvalidAtComputedValueTime();
+}
+
+// Which font size a conversion-data kind selects, and whether it carries a builder state.
+// 0 none, 1 a style at 16px, 2 the same at 32px, 3 16px WITH a builder state, 4 32px with one.
+static float simplificationConversionDataFontSize(uint32_t kind)
+{
+    return (kind == 2 || kind == 4) ? 32.0f : 16.0f;
+}
+
+static bool simplificationConversionDataCarriesBuilderState(uint32_t kind)
+{
+    return kind >= 3;
+}
+
 
 // Nine symbol tables, keyed by kind. Kinds 3..8 are the only way to bind a `Symbol` to a value the
 // CSS number grammar cannot spell as a literal -- NaN, an infinity, a negative zero, a subnormal or
@@ -1609,7 +1759,9 @@ struct CSSCalcSimplificationOptionsSpec {
     uint32_t category;
     double rangeMinimum;
     double rangeMaximum;
-    // 0 none, 1 a style at 16px, 2 the same at 32px.
+    // 0 none, 1 a style at 16px, 2 the same at 32px, 3 the 16px style with a live
+    // `Style::BuilderState`, 4 the 32px style with one. Kinds 3 and 4 are the only ones at which
+    // `SiblingCount`, `SiblingIndex`, `Random`, `Anchor` and `AnchorSize` do anything at all.
     uint32_t conversionDataKind;
     // 0 empty, 1 num, 2 px, 3 NaN, 4 +inf, 5 -inf, 6 -0, 7 subnormal, 8 INT_MAX.
     uint32_t symbolTableKind;
@@ -1660,6 +1812,16 @@ struct CSSCalcSimplificationComparison {
     uint64_t islandKindMask;
     uint32_t cppLength;
     uint32_t swiftLength;
+    // Did this side call `BuilderState::setCurrentPropertyInvalidAtComputedValueTime()`?
+    //
+    // The only observable effect of `simplify(Anchor&)` and `simplify(AnchorSize&)` on a node with
+    // no fallback. Both return `std::exchange(node.fallback, { })`, which is `nullopt` when there is
+    // no fallback -- indistinguishable in the output tree from the answer every case gave before
+    // conversion-data kinds 3 and 4 existed. Without this field, `anchor(top)` would look tested
+    // without actually being tested. Read after each run from a freshly created builder state; see
+    // `resetSimplificationBuilderStates`.
+    uint32_t cppInvalidAtComputedValueTime;
+    uint32_t swiftInvalidAtComputedValueTime;
 };
 
 // The layout is pinned rather than merely described. These two structs cross a `dlsym` boundary
@@ -1670,12 +1832,14 @@ static_assert(sizeof(CSSCalcSimplificationOptionsSpec) == 40);
 static_assert(offsetof(CSSCalcSimplificationOptionsSpec, rangeMinimum) == 8);
 static_assert(offsetof(CSSCalcSimplificationOptionsSpec, conversionDataKind) == 24);
 static_assert(offsetof(CSSCalcSimplificationOptionsSpec, stage) == 36);
-static_assert(sizeof(CSSCalcSimplificationComparison) == 112);
+static_assert(sizeof(CSSCalcSimplificationComparison) == 120);
 static_assert(offsetof(CSSCalcSimplificationComparison, parseCategory) == 84);
 static_assert(offsetof(CSSCalcSimplificationComparison, inputKindMask) == 88);
 static_assert(offsetof(CSSCalcSimplificationComparison, islandKindMask) == 96);
 static_assert(offsetof(CSSCalcSimplificationComparison, cppLength) == 104);
 static_assert(offsetof(CSSCalcSimplificationComparison, swiftLength) == 108);
+static_assert(offsetof(CSSCalcSimplificationComparison, cppInvalidAtComputedValueTime) == 112);
+static_assert(offsetof(CSSCalcSimplificationComparison, swiftInvalidAtComputedValueTime) == 116);
 
 WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplification(const char*, size_t, const CSSCalcSimplificationOptionsSpec*, char*, size_t, char*, size_t);
 WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplificationConstructed(unsigned, const CSSCalcSimplificationOptionsSpec*, char*, size_t, char*, size_t);
@@ -1687,6 +1851,9 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcChildAlternativeCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingCount(void);
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingIndex(void);
 
 // ENTRIES 11 AND 12 compare `canonicalize` directly, parameterized over the full `CSSUnitType`
 // range rather than only the units a parsed CSS corpus happens to use.
@@ -1748,14 +1915,32 @@ static std::atomic<unsigned> s_simplifyComparisonDeclines;
 // One `SimplificationOptions` from one spec, shared by the two comparison entries below and by
 // `webCoreCSSCalcCompareCanonicalization`, so all three read the same conversion data rather than
 // building three copies that could drift.
+//
+// The returned options hold a `CheckedPtr` to the builder state at kinds 3 and 4, so the result
+// must be destroyed before `resetSimplificationBuilderStates` runs again -- `CanMakeCheckedPtr`'s
+// destructor RELEASE_ASSERTs the pointer count is zero. Every caller scopes it accordingly.
 static CSSCalc::SimplificationOptions makeSimplificationOptions(const CSSCalcSimplificationOptionsSpec* spec)
 {
+    auto conversionData = [&]() -> std::optional<CSSToLengthConversionData> {
+        if (!spec->conversionDataKind)
+            return std::nullopt;
+        auto fontSize = simplificationConversionDataFontSize(spec->conversionDataKind);
+        if (simplificationConversionDataCarriesBuilderState(spec->conversionDataKind)) {
+            // The TWO-argument constructor, which is the only one that sets `m_styleBuilderState`.
+            // It also derives `m_rootStyle`, `m_parentStyle`, `m_renderView` and
+            // `m_elementForContainerUnitResolution` from the builder state rather than from the
+            // arguments (CSSToLengthConversionData.cpp:52-61), which is why the fixture's
+            // `BuilderContext` leaves `rootElementStyle` null: that keeps the `rem` family behaving
+            // the same at kind 3 as at kind 1, so the axis moves ONE thing.
+            return CSSToLengthConversionData { simplificationStyleAtFontSize(fontSize), simplificationBuilderStateAtFontSize(fontSize) };
+        }
+        return CSSToLengthConversionData { simplificationStyleAtFontSize(fontSize), nullptr, nullptr, nullptr, nullptr };
+    }();
+
     return CSSCalc::SimplificationOptions {
         .category = static_cast<WebCore::CSS::Category>(spec->category),
         .range = WebCore::CSS::Range { spec->rangeMinimum, spec->rangeMaximum },
-        .conversionData = spec->conversionDataKind
-            ? std::optional<CSSToLengthConversionData> { CSSToLengthConversionData { simplificationStyleAtFontSize(spec->conversionDataKind == 2 ? 32.0f : 16.0f), nullptr, nullptr, nullptr, nullptr } }
-            : std::nullopt,
+        .conversionData = WTF::move(conversionData),
         .symbolTable = simplificationSymbolTable(spec->symbolTableKind),
         .allowZeroValueLengthRemovalFromSum = !!spec->allowZeroValueLengthRemovalFromSum,
     };
@@ -1782,16 +1967,38 @@ static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree
         .requiresConversionData = inputTree.requiresConversionData,
     };
 
-    auto options = makeSimplificationOptions(spec);
-
     result.inputKindMask = alternativeMaskOfSubtree(input.root);
     result.inputNodeCount = nodeCountOfSubtree(input.root);
     result.inputRootKind = static_cast<uint32_t>(input.root.value.index());
 
+    // The two comparison runs use separate builder states, and each one's options are scoped so the
+    // `CheckedPtr` inside them is released before the next reset; see
+    // `resetSimplificationBuilderStates` for why the reset is required and why the Document and
+    // element are not rebuilt between runs.
+    //
+    // Scoped to only the kinds that need it: at conversion-data kinds 0..2 nothing touches the
+    // fixture, so the Document is never created and behaviour is unchanged from before this fixture
+    // existed.
+    auto usesBuilderState = simplificationConversionDataCarriesBuilderState(spec->conversionDataKind);
     auto declinesBefore = CSSCalc::webCoreCSSCalcSimplificationDeclineCount();
-    auto cppTree = CSSCalc::copyAndSimplify(input, options, CSSCalc::Simplifier::Cpp);
-    auto swiftTree = CSSCalc::copyAndSimplify(input, options, CSSCalc::Simplifier::Swift);
+    auto runArm = [&](CSSCalc::Simplifier simplifier, uint32_t& invalidFlagOut) {
+        if (usesBuilderState)
+            resetSimplificationBuilderStates();
+        auto armOptions = makeSimplificationOptions(spec);
+        auto out = CSSCalc::copyAndSimplify(input, armOptions, simplifier);
+        invalidFlagOut = usesBuilderState
+            && simplificationBuilderStateFlaggedInvalid(simplificationConversionDataFontSize(spec->conversionDataKind)) ? 1 : 0;
+        return out;
+    };
+    auto cppTree = runArm(CSSCalc::Simplifier::Cpp, result.cppInvalidAtComputedValueTime);
+    auto swiftTree = runArm(CSSCalc::Simplifier::Swift, result.swiftInvalidAtComputedValueTime);
     auto declinesAfter = CSSCalc::webCoreCSSCalcSimplificationDeclineCount();
+
+    // Everything below is diagnostic and shares one further builder state, built after the two
+    // comparison runs so that no `CheckedPtr` from it is alive across either reset above.
+    if (usesBuilderState)
+        resetSimplificationBuilderStates();
+    auto options = makeSimplificationOptions(spec);
 
     result.declined = declinesAfter != declinesBefore ? 1 : 0;
     if (result.declined)
@@ -1953,6 +2160,70 @@ WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void)
     return differs(metrics16.xHeight(), metrics32.xHeight())
         && differs(metrics16.capHeight(), metrics32.capHeight())
         && metrics16.lineSpacing() != metrics32.lineSpacing();
+}
+
+// ENTRY 10b. Does the conversion-data fixture support a live `Style::BuilderState`?
+//
+// A pre-flight check: if any of the five builder-state-requiring `simplify` overloads
+// dereferences something this fixture lacks, the process crashes with EXC_BAD_ACCESS, so every
+// dereference those five perform is exercised here first.
+//
+//   - `element()` non-null.
+//   - `siblingCount() == 5`, `siblingIndex() == 3` -- distinct, so a mixed-up port is caught.
+//   - `lookupCSSRandomBaseValue` on both the document-scoped and element-scoped path.
+//   - `AnchorPositionEvaluator::evaluateSize` returning `nullopt` without crashing (no property
+//     is in flight, so `propertyAllowsAnchorSizeFunction` is false).
+//   - `setCurrentPropertyInvalidAtComputedValueTime()` round-tripped: false, set, true.
+//
+// Leaves the fixture clean: `resetSimplificationBuilderStates` clears the flag it set.
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void)
+{
+    resetSimplificationBuilderStates();
+    auto& state = simplificationBuilderStateAtFontSize(16.0f);
+
+    bool ok = true;
+    ok = ok && state.element();
+    ok = ok && state.siblingCount() == 5;
+    ok = ok && state.siblingIndex() == 3;
+
+    // Both `random()` sharing paths. The values themselves are not checked -- they are a
+    // per-process random draw -- only that both return and that the cache is stable, which is what
+    // lets the two runs agree with each other.
+    CSSCalc::RandomCachingKey key { CSSCalc::RandomCachingKey::Key { .name = std::nullopt, .propertyScoped = std::nullopt } };
+    auto documentScoped = state.lookupCSSRandomBaseValue(key, std::nullopt);
+    auto elementScoped = state.lookupCSSRandomBaseValue(key, CSS::Keyword::ElementScoped { });
+    ok = ok && state.lookupCSSRandomBaseValue(key, std::nullopt) == documentScoped;
+    ok = ok && state.lookupCSSRandomBaseValue(key, CSS::Keyword::ElementScoped { }) == elementScoped;
+
+    // The anchor entry point, with no property in flight. Must be `nullopt`, and must not crash
+    // getting there.
+    ok = ok && !WebCore::Style::AnchorPositionEvaluator::evaluateSize(state, std::nullopt, std::nullopt);
+
+    // The invalid-at-computed-value-time channel, round-tripped.
+    ok = ok && !state.isCurrentPropertyInvalidAtComputedValueTime();
+    state.setCurrentPropertyInvalidAtComputedValueTime();
+    ok = ok && state.isCurrentPropertyInvalidAtComputedValueTime();
+
+    // The 32px state has to be live too, or conversion-data kind 4 is a silent no-op.
+    auto& state32 = simplificationBuilderStateAtFontSize(32.0f);
+    ok = ok && state32.element() == state.element();
+    ok = ok && !state32.isCurrentPropertyInvalidAtComputedValueTime();
+
+    resetSimplificationBuilderStates();
+    return ok;
+}
+
+// The two sibling numbers the fixture actually presents, reported rather than hardcoded, so a
+// fixture that silently became one-sibling (making `sibling-count()` and `sibling-index()`
+// indistinguishable) would show up in the numbers themselves.
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingCount(void)
+{
+    return simplificationBuilderStateAtFontSize(16.0f).siblingCount();
+}
+
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingIndex(void)
+{
+    return simplificationBuilderStateAtFontSize(16.0f).siblingIndex();
 }
 
 // ENTRY 11. One unit, one value, four arms. See the struct above for why there are four.
