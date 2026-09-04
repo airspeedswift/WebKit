@@ -1822,27 +1822,64 @@ Child copyAndSimplify(const Child& root, const SimplificationOptions& options)
     );
 }
 
-// MARK: - Swift calc tree simplification
+// MARK: - The Swift calc simplification port (CSSCalcSimplificationSwift.swift)
 //
-// rebuildFrom() reconstructs a node of the same kind as the input by recovering the operation from
-// the input's own variant tag via switchOn + WTF::apply over its tuple slots, so no operation kind
-// crosses the boundary. The one exception is clamp() collapsing to min()/max(), handled by
-// buildMinMax().
+// Everything C++ still does for Swift is here, and the shape is the same as
+// CSSCalcTree+Serialization.cpp's, with one half added. That file only had to READ the tree; this one has to write one, and the
+// question the whole design answers is how a node gets constructed without the operation kind
+// crossing the boundary.
 //
-// The operand stack is owned by C++: CSSCalc::Child is not Escapable, so no Swift container can
-// hold it.
+// The answer is that the kind never crosses, because it never has to. Simplification rewrites a
+// tree into a tree in which the output node's kind is the input node's kind, everywhere except one
+// rule -- `clamp()` collapsing to `min()`/`max()`. So `rebuildFrom` takes the ORIGINAL node and
+// recovers the operation from its own variant tag, filling the slots generically over the tuple
+// conformance; Swift supplies only the operands and their count. That is why there is no
+// 34-case construction switch here and no operation table in Swift: the one selector that does
+// exist, `buildMinMax`'s `bool`, covers the single exception.
+//
+// The other decision worth stating is that the operands live on a C++-owned stack. No Swift
+// container ever holds a `CSSCalc::Child`, so the `~Escapable` problem that shaped the tokenizer's
+// token buffer does not arise at all -- not because it was priced and accepted, but
+// because the representation was chosen so that it does not exist.
 
-// The outcome numbering is declared in Swift and reaches C++ through the generated header. These
-// static_asserts pin it, so a reordering of the Swift enum is a build failure rather than a silent
-// reinterpretation: `declined` read as `simplified` would install an empty operand stack as the
-// tree.
+// The outcome numbering is declared once, in Swift, and reaches C++ through the generated header.
+// These pin it, so that a reordering of the Swift enum is a build failure here rather than a silent
+// reinterpretation of every simplification: `declined` read as `simplified` would install an EMPTY
+// operand stack's contents as the tree.
 static_assert(!static_cast<uint8_t>(CSSCalcSwiftSimplificationOutcomeSimplified));
 static_assert(static_cast<uint8_t>(CSSCalcSwiftSimplificationOutcomeDeclined) == 1);
 
-// The Swift-side operand stack, forward-declared in CSSCalcSwiftTypes.h so the boundary header
-// stays free of wtf/Vector.h. This is the only reason no Swift type has to hold a `Child`.
+// One surviving `CalcMix` item's weight, and the one boundary shape here that is neither a
+// subtree nor a scalar computed outright.
+//
+// Two cases because a weight has two provenances, and only one is expressible in Swift. Spec
+// steps 2 and 4 produce weights arithmetically -- `(100% - specified sum) / n` and `weight * 100%
+// / total` -- and those cross as a `double`. But `simplify(CalcMix&)`'s `!canNormalize` path
+// (`+Simplification.cpp:1509`-`:1529`) removes items while leaving every survivor's weight alone,
+// and a survivor there can hold a `Calc` weight, a whole `CSSCalcValue` that cannot be reproduced
+// in Swift. So Swift names the item it came from instead, and C++ copies its
+// `std::optional<Weight>` by the index Swift gives rather than by a position C++ assumes.
+//
+// Not in CSSCalcSwiftTypes.h: nothing about it crosses. `pushCalcMixItemWeight` takes the three
+// fields as arguments, so this type stays a detail of the reconstruction.
+struct CalcMixWeightPlan {
+    // The replacement weight, as a `<percentage>` in [0,100]. Meaningful only when `replace` is set;
+    // 0 rather than indeterminate otherwise.
+    double weight;
+    // The item's index in the original item list, when `replace` is not set.
+    uint32_t origin;
+    bool replace;
+};
+
+// Swift's operand stack, forward-declared in CSSCalcSwiftTypes.h so that boundary header can
+// stay free of wtf/Vector.h. One line, and it is the entire reason no Swift type ever has to hold a
+// `Child`.
 struct CSSCalcSwiftOperandStack {
     Vector<Child> value;
+    // The weights the next CalcMix reconstruction pairs with its items, in item order. A separate
+    // stack because a weight is not a subtree; kept as a stack rather than per-node so a nested
+    // CalcMix follows the same consume-the-top discipline as every other slot shape.
+    Vector<CalcMixWeightPlan> calcMixWeights;
 };
 
 // The operands `rebuildFrom` fills a node's slots from: a forward cursor over the top of the stack.
@@ -1855,6 +1892,11 @@ struct RebuildCursor {
     Vector<Child>& stack;
     size_t next;
     size_t end;
+    // The weight stack and the position this node's CalcMix weights start at. Carried on the
+    // cursor rather than reached through the builder, so `rebuildSlot` needs no extra parameter
+    // just for the one slot shape that has a second stack.
+    Vector<CalcMixWeightPlan>& weights;
+    size_t weightBase;
     bool ok { true };
 
     bool exhausted() const { return next >= end; }
@@ -1922,16 +1964,46 @@ static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, 
 {
     // `CalcMix`'s single tuple slot is a `Vector<Item>` rather than a `Children`, because each
     // argument carries an optional weight beside its value; without this overload `WTF::apply`
-    // would not compile for `CalcMix`. The weights come off the original by position, so a rebuild
-    // that changed the item count could not pair them and declines instead of guessing an
-    // alignment.
-    if (cursor.end - cursor.next != original.size()) {
+    // would not compile for `CalcMix`.
+    //
+    // All the remaining operands are taken, as in `rebuildSlot(const Children&)`; the original's
+    // item count is not consulted. `simplify(CalcMix&)` can remove zero-weight and omitted-weight
+    // items and rewrite survivors' weights, so pairing weights to items by position against the
+    // original is wrong in general. Each surviving item's weight is instead looked up by index
+    // through `CalcMixWeightPlan`, never by position or by item count. `weightBase` marks where
+    // this node's own plans start, so a nested `CalcMix` cannot re-read weights a previous consume
+    // already took.
+    size_t itemCount = cursor.end - cursor.next;
+    if (cursor.weights.size() - cursor.weightBase != itemCount) {
+        // Too few weights means the operand and weight stacks got out of step, a contract violation
+        // rather than a possible input; too many is the same fault from the other side. Declines
+        // rather than pairing a prefix.
         cursor.ok = false;
         return { };
     }
-    return WTF::map(original, [&](const auto& item) {
-        return CalcMix::Item { .value = cursor.take(), .weight = item.weight };
-    });
+
+    Vector<CalcMix::Item> items;
+    items.reserveInitialCapacity(itemCount);
+    for (size_t i = 0; i < itemCount; ++i) {
+        auto& plan = cursor.weights[cursor.weightBase + i];
+        std::optional<CalcMix::Item::Weight> weight;
+        if (plan.replace) {
+            // `CalcMix::Item::Weight { double }` is the same construction `simplify(CalcMix&)` uses at each
+            // of its four weight assignments (`:1552`, `:1560`, `:1579`, `:1608`), so a normalised
+            // weight built here matches one built there.
+            weight = CalcMix::Item::Weight { plan.weight };
+        } else if (plan.origin < original.size()) {
+            // The survivor's own weight, whatever it is -- including a `Calc` one or an absent one, which is
+            // why this is an `std::optional<Weight>` copy rather than a value copy.
+            weight = original[plan.origin].weight;
+        } else {
+            cursor.ok = false;
+            return { };
+        }
+        items.append(CalcMix::Item { .value = cursor.take(), .weight = WTF::move(weight) });
+    }
+    cursor.weights.shrink(cursor.weightBase);
+    return items;
 }
 
 bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
@@ -1984,14 +2056,54 @@ void CSSCalcSwiftBuilder::pushCopyOf(const CSSCalcSwiftNode& node)
     m_operands->value.append(copy(*node.m_node));
 }
 
+void CSSCalcSwiftBuilder::pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight)
+{
+    m_operands->calcMixWeights.append(CalcMixWeightPlan { .weight = weight, .origin = origin, .replace = replaceWeight });
+}
+
+// Defined here rather than beside `childAt` in CSSCalcTree+Serialization.cpp, where the other two
+// `CSSCalcSwiftNode` accessors live. `childInTreeOrder` had to sit next to `childNodeCount` so the
+// count and the indices come from one walker; this reads a payload no walker yields --
+// `forAllChildNodes` visits nothing for a weight -- so there is nothing here to stay in step with.
+CSSCalcSwiftCalcMixWeight CSSCalcSwiftNode::calcMixItemWeight(uint32_t index) const
+{
+    // `get_if` rather than `switchOn`, for the reason CSSCalcTree+Serialization.cpp:1322 gives at the
+    // one other place a specific alternative is reached for: a generic visitor instantiates its
+    // fallback once per alternative, costing ~22 KB for an answer only one kind has.
+    auto* calcMix = get_if<IndirectNode<CalcMix>>(m_node);
+    if (!calcMix || index >= (*calcMix)->children.size()) {
+        // Asked about a node that is not a `CalcMix`, or about an item past the end. Not a
+        // `RELEASE_ASSERT` as `childAt` uses: an out-of-range child there would be a wrong
+        // serialization, while "absent" here is a state already handled (spec step 1's omitted
+        // weight), so a safe answer exists.
+        return { };
+    }
+
+    auto& weight = (*calcMix)->children[index].weight;
+    if (!weight)
+        return { };
+    if (auto raw = weight->raw())
+        return { .value = raw->value, .present = true, .isRaw = true };
+    // A `Calc` weight: present, and its value stays in C++. `raw()` is `std::optional<Raw>`
+    // (CSSPrimitiveNumeric.h:120), so this is the same test `isRaw()` is, not a second one.
+    return { .value = 0, .present = true, .isRaw = false };
+}
+
 bool CSSCalcSwiftBuilder::rebuildFrom(const CSSCalcSwiftNode& original, uint32_t childCount)
 {
     auto& stack = m_operands->value;
+    auto& weights = m_operands->calcMixWeights;
     if (childCount > stack.size())
         return false;
 
     size_t base = stack.size() - childCount;
-    RebuildCursor cursor { stack, base, stack.size() };
+    // Only a `CalcMix` reconstruction reads the weight stack, so this must not refuse a node that
+    // has none: every other slot shape leaves `weights` untouched and `weightBase` is inert for
+    // them. Clamped rather than asserted, so a `CalcMix` arriving without its own weights lands on
+    // `rebuildSlot`'s `!=` test (`weights.size() - weightBase` is 0 against a non-zero item count)
+    // rather than on an underflowed `size_t`.
+    size_t weightBase = weights.size() >= childCount ? weights.size() - childCount : weights.size();
+    RebuildCursor cursor { stack, base, stack.size(), weights, weightBase };
 
     // The generic lambda instantiates once per alternative, which is the ~22 KB shape
     // `childInSerializationOrder` avoided with `get_if`. It is not avoidable here and it is not new

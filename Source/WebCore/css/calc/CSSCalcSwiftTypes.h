@@ -264,9 +264,10 @@ static constexpr uint8_t numberOfCSSCalcSwiftAlternatives = 0 CSS_CALC_SWIFT_FOR
 // that runs for `anchor()` and `random()` only.
 //
 // The one *presence* test that is not here is `CalcMix`'s per-item weight: it is per item rather
-// than per node, so surfacing it needs a second per-index accessor beside `childAt`. Instead the
-// `calcMixWeight` upcall writes `' '` and the weight when the item has one and nothing when it does
-// not -- one crossing instead of two, at the cost of that presence decision staying in C++.
+// than per node, so it needs a per-index accessor, which is `CSSCalcSwiftNode::calcMixItemWeight`.
+// The presence test, the `Raw`/`Calc` test and the value all cross now, because `simplify(CalcMix&)`
+// does arithmetic on the weights and produces new ones. The serialization upcall is unchanged and
+// still writes the separator and number in C++ without needing any of them.
 struct CSSCalcSwiftOperationInfo {
     // `Anchor`: the `<anchor-side>` keyword, when `anchorSideIsKeyword`.
     // `AnchorSize`: the `<anchor-size>` dimension keyword, when `hasDimension`.
@@ -303,6 +304,28 @@ struct CSSCalcSwiftOperationInfo {
     // silently writing an argument in the wrong position.
     bool hasFallback;
 };
+
+// One `CalcMix` item's weight: a `<percentage [0,100]>` that may be absent, may be a `Raw`
+// number, or may be a whole nested `calc()`.
+//
+// Three states in two bools rather than a three-case enum, because the two questions are asked
+// separately: spec step 1 counts the absent ones, and the `canNormalize` guard at
+// CSSCalcTree+Simplification.cpp:1509 rejects the `Calc` ones.
+//
+// `isRaw` is the only thing learned about a `Calc` weight. `value` is zero, not indeterminate,
+// when the weight is absent or a `Calc`: a reader that consults it for the wrong state gets a
+// defined wrong answer rather than garbage, and it is not a usable stand-in for either state,
+// since a `Calc` weight can evaluate to anything and `isKnownZero()` (CSSPrimitiveNumeric.h:142)
+// is `isRaw() && value == 0`.
+struct CSSCalcSwiftCalcMixWeight {
+    double value;
+    bool present;
+    bool isRaw;
+};
+
+// 8 + 1 + 1 = 10 live bytes aligned to 8, so this comes back in registers exactly as
+// `CSSCalcSwiftNumericResult` does. The assert is what makes that a check rather than a claim.
+static_assert(sizeof(CSSCalcSwiftCalcMixWeight) == 16);
 
 // One node, described. A plain aggregate of trivial types, so it crosses in registers and needs no
 // annotation and no lifetime -- there is nothing here that points at the tree.
@@ -445,6 +468,21 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // `[[clang::lifetimebound]]`, prefix and nothing else, is the one spelling of six that imports
     // without a #ClangDeclarationImport warning.
     WEBCORE_EXPORT CSSCalcSwiftNode childInTreeOrder(uint32_t index) const [[clang::lifetimebound]];
+
+    // The weight of `CalcMix` item `index` -- the one payload of any alternative that is neither a
+    // child subtree nor a scalar on `info()`.
+    //
+    // A per-index accessor, needed because simplification does arithmetic on the weights: spec
+    // steps 1 to 5 operate on them and normalisation produces new ones, so the value has to cross
+    // and the weight's presence and kind (`Raw`/`Calc`) are decided in Swift rather than in C++.
+    // Serialization does not need this -- its `calcMixWeight` upcall writes the separator and the
+    // number directly in C++ without the value crossing.
+    //
+    // `index` is an item index, which is also a child index: `forAllChildNodes`' hand-written
+    // `CalcMix` overload (CSSCalcTree+Traversal.h:127) yields each item's `value` once, in item
+    // order, and nothing for a weight. So `info().childCount` is the item count and this shares its
+    // bound.
+    WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight calcMixItemWeight(uint32_t index) const;
 
 private:
     // So that `appendOperationArgument` can reach the node it is being asked to write a piece of,
@@ -739,6 +777,23 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // "FIXME webkit.org/b/280798"), so generic reconstruction would build them empty.
     WEBCORE_EXPORT bool rebuildFrom(const CSSCalcSwiftNode& original, uint32_t childCount);
 
+    // Push the weight the next `CalcMix` item pushed as an operand is to carry.
+    //
+    // A second stack beside the operand stack, with the same discipline: `rebuildFrom` on a
+    // `CalcMix` consumes the top `childCount` of both, so operands are pushed first and weights
+    // after.
+    //
+    // `replaceWeight` set means `weight` is a `<percentage>` computed here -- spec step 2's
+    // `(100% - specified sum) / n` or step 4's `weight * 100% / total`. Clear means "the weight of
+    // original item `origin`, unchanged", the only way `simplify(CalcMix&)`'s `!canNormalize` path
+    // (CSSCalcTree+Simplification.cpp:1509) is expressible: it drops items while leaving survivors'
+    // weights alone, and a survivor can hold a `Calc` weight that cannot be reproduced.
+    //
+    // Addressed by index rather than by position, because pairing by original position is wrong
+    // once items can be dropped -- only the caller knows which original item each survivor is.
+    WEBCORE_EXPORT void pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight);
+
+
 
     // Pop `childCount` operands and push a FRESH `min()` or `max()` built from them.
     //
@@ -885,18 +940,19 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // hashing differently would hand the same key two different `random()` values -- a wrong
     // stylesheet, not a decline.
     //
-    // The `SharingFixed` arm is decided here, in C++, rather than in Swift. `simplify(Random&)`
-    // resolves a `fixed <number>` locally when it is a `Raw` and answers nothing when it is a
-    // `Calc`, rather than going through `resolveRandomBaseValue`, whose own fixed arm would run
-    // `Style::toStyle` and evaluate the `Calc`. That `Raw`/`Calc` discrimination is over
-    // `CSS::Number<CSS::ClosedUnitRange>`, another `Variant`, with no numeric channel to Swift:
-    // `CSSCalcSwiftOperationInfo` reports only `randomSharingIsFixed`, because serialization needs
-    // the fixed value as text and gets it through `CSSCalcSwiftOperationPart::randomFixedValue`.
-    // Adding a numeric channel would take `CSSCalcSwiftOperationInfo` from 12 bytes to 24 and its
-    // return from registers to an indirect `sret`, for more new C++ than the four-line branch below
-    // -- the two dispositions are indistinguishable to Swift either way, since a `Calc` fixed value
-    // comes back `resolved == false` and the node is copied through, matching `std::nullopt` from
-    // the C++ arm.
+    // The `SharingFixed` arm is decided here, in C++, rather than in Swift -- the only such
+    // decision left, now that `CSSCalcSwiftNode::calcMixItemWeight` moved `CalcMix`'s per-item
+    // weight presence back to Swift. `simplify(Random&)` resolves a `fixed <number>` locally when
+    // it is a `Raw` and answers nothing when it is a `Calc`, rather than going through
+    // `resolveRandomBaseValue`, whose own fixed arm would run `Style::toStyle` and evaluate the
+    // `Calc`. That `Raw`/`Calc` discrimination is over `CSS::Number<CSS::ClosedUnitRange>`, another
+    // `Variant`, with no numeric channel to Swift: `CSSCalcSwiftOperationInfo` reports only
+    // `randomSharingIsFixed`, because serialization needs the fixed value as text and gets it
+    // through `CSSCalcSwiftOperationPart::randomFixedValue`. Adding a numeric channel would take
+    // `CSSCalcSwiftOperationInfo` from 12 bytes to 24 and its return from registers to an indirect
+    // `sret`, for more new C++ than the four-line branch below -- the two dispositions are
+    // indistinguishable to Swift either way, since a `Calc` fixed value comes back
+    // `resolved == false` and the node is copied through, matching `std::nullopt` from the C++ arm.
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const CSSCalcSwiftNode&) const;
 
 private:

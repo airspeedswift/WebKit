@@ -721,13 +721,13 @@ private enum Fold {
 /// `clamp()` becoming `min()` or `max()`: the only rewrite that creates an operation kind not in
 /// the input, and the only reason `buildMinMax` exists on the boundary.
     case rebuiltMinMax(isMax: Bool)
-    /// A `Children`-slotted node whose children merged: `rewrite` recomputes the merge plan, pushes
-    /// one operand per survivor, and calls `rebuildFrom(node, survivorCount)` with the new count.
-    ///
-    /// Kept apart from `.unchanged` rather than folded into it -- the C++ returns `std::nullopt` for
-    /// both -- so that `fold`'s answer says whether the arity changed, which is the property
-    /// `rebuildSlot(const Children&)` turns on. Carries the alternative for the same reason
-    /// `.unchanged` does.
+/// A `Children`-slotted node whose children merged: `rewrite` recomputes the merge plan, pushes one
+/// operand per survivor, and calls `rebuildFrom` with the new count. Kept apart from `.unchanged`
+/// because the arity may have changed.
+///
+/// `CalcMix` uses this case for every rebuild, even unchanged ones: its rebuild pushes a weight plan
+/// per item on a second stack, and `.unchanged` would leave that stack out of step. See
+/// `foldCalcMix`.
     case mergedChildren(CalcAlternative)
 /// Outside this file's slice, or a boundary contract it will not guess at: the whole tree declines.
 /// The payload is the blame `declineAlternative` reports; `nil` means declined with no single cause.
@@ -861,8 +861,12 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
         return true
 
     case .CalcMix:
-        // Normalisation over per-item weights that are not child nodes.
-        return false
+        // `simplify(CalcMix&)`, the only alternative whose payload is a `Vector<Item>` rather than a
+        // `Child`/`Children`. At least one item is required: with none, the accumulator loop never runs and
+        // `:1685` dereferences an empty `std::optional` -- undefined in a shipping build. Unreachable through
+        // the parser, since `consumeCalcMix` requires at least one `<calc-sum>`. No upper bound: the count
+        // can only shrink.
+        return childCount >= 1
 
     case .Random:
         // `random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )`; the key is not a child, so
@@ -1332,66 +1336,16 @@ private extension CalcSimplification {
         }
 
         if success, let resolvedCategory = productType.calculationCategory().value {
-            switch resolvedCategory {
-            case .Integer, .Number:
-                // `:882`-`:884`. The two categories share one arm in the C++ too.
-                return .leaf(NumericLeaf.number(productValue))
-
-            case .Percentage:
-                // `makeChild(Percentage { .value = ..., .hint = Type::determinePercentHint(
-                // options.category) })` (`:885`-`:886`). The category is the options' one, not the
-                // product's -- `resolvedCategory` is already known to be `Percentage` here, so
-                // passing it would make this arm a constant and lose the whole point of the call.
-                guard let optionsCategory = WebCore.CSS.Category(rawValue: category) else {
-                    // Never taken: `init?(rawValue:)` on an imported C++ scoped enum is failable in
-                    // its signature and non-validating in its body -- it accepts any value of the
-                    // underlying type. The branch is kept because it is the spelling that produces a
-                    // `CSS::Category` to pass, and it costs nothing; it is not a check against a
-                    // boundary that came apart. What does contain an out-of-enum value here is
-                    // `determinePercentHint`'s own `switch`, which falls through to `return { }`.
-                    return .declined(nil)
-                }
-                return .leaf(NumericLeaf.percentage(productValue, CalcType.determinePercentHint(optionsCategory)))
-
-            case .LengthPercentage:
-                // `:887`-`:888`, a LITERAL `PercentHint::Length` in the C++ rather than a
-                // `determinePercentHint` call. Reproduced literally.
-                return .leaf(NumericLeaf.percentage(productValue, CalcType.PercentHintValue(.Length)))
-
-            case .Length:
-                // `:889`-`:890`. `toCSSUnit(Dimension::Length)` is `CSSUnitType::Px`
-                // (CSSCalcTree.h:993), so naming the unit is naming the dimension.
-                return .leaf(NumericLeaf.canonical(productValue, .Px))
-
-            case .Angle:
-                // `:891`-`:892`; `toCSSUnit(Dimension::Angle)` is `Deg` (CSSCalcTree.h:994).
-                return .leaf(NumericLeaf.canonical(productValue, .Deg))
-
-            case .AnglePercentage:
-                // `:893`-`:894`, the other literal hint.
-                return .leaf(NumericLeaf.percentage(productValue, CalcType.PercentHintValue(.Angle)))
-
-            case .Time:
-                // `:895`-`:896`; `toCSSUnit(Dimension::Time)` is `S` (CSSCalcTree.h:995).
-                return .leaf(NumericLeaf.canonical(productValue, .S))
-
-            case .Frequency:
-                // `:897`-`:898`; `toCSSUnit(Dimension::Frequency)` is `Hz` (CSSCalcTree.h:996).
-                return .leaf(NumericLeaf.canonical(productValue, .Hz))
-
-            case .Resolution:
-                // `:899`-`:900`; `toCSSUnit(Dimension::Resolution)` is `Dppx` (CSSCalcTree.h:997).
-                return .leaf(NumericLeaf.canonical(productValue, .Dppx))
-
-            case .Flex:
-                // `:901`-`:902`; `toCSSUnit(Dimension::Flex)` is `Fr` (CSSCalcTree.h:998).
-                return .leaf(NumericLeaf.canonical(productValue, .Fr))
-
-            @unknown default:
-                // A category C++ grew and this file has not been taught. The C++ `switch` is
-                // exhaustive with no `default`, so growing the enum is a build failure THERE; here it
-                // can only be a fall-through to 9.5, which is what an unhandled category would mean.
-                break
+            // `:882`-`:902`, the eleven-case table -- shared verbatim with `zeroValueMatchingChild`
+            // (`:1454`-`:1482`), which is the same table over the same categories with a value of 0.
+            // See `numericLeafForCategory`.
+            //
+            // `nil` falls through to 9.5, which is `@unknown default: break`. It also absorbs the
+            // `CSS::Category(rawValue:)` failure the `Percentage` arm used to spell as `.declined(nil)`:
+            // an imported C++ scoped enum's `init?(rawValue:)` does not validate, so that branch never
+            // fires, and 9.5 is never a wrong answer where a decline would have been a lost fold.
+            if let folded = numericLeafForCategory(resolvedCategory, productValue) {
+                return .leaf(folded)
             }
         }
 
@@ -1606,6 +1560,90 @@ private extension CalcSimplification {
             return nil
         }
         return CalcType.determineType(unit)
+    }
+
+    /// `getType(const Child&)` (CSSCalcTree.cpp:384-:387) for a folded numeric leaf. Separate from
+    /// `numericLeafType`: that one answers `nil` for a `NonCanonicalDimension` (step 9.4 has no arm
+    /// for one), this one has a real overload and answers, so merging the two would make one wrong.
+    @inline(always)
+    func leafType(_ leaf: NumericLeaf) -> CalcType? {
+        switch leaf.kind {
+        case .number:
+            // `getType(const Number&)` is `Type { }` (CSSCalcTree.cpp:346-:349): the identity type.
+            return CalcType()
+        case .percentage:
+            return percentageLeafType(leaf)
+        case .canonicalDimension, .nonCanonicalDimension:
+            return canonicalDimensionLeafType(leaf)
+        }
+    }
+
+    /// The eleven-case `CSS::Category` -> numeric-leaf table, shared by step 9.4's result switch and
+    /// `zeroValueMatchingChild` (same categories, value 0), so a future category can't be taught to
+    /// one caller and not the other. `nil` is each caller's own fall-through.
+    @inline(always)
+    func numericLeafForCategory(_ resolvedCategory: WebCore.CSS.Category, _ value: Double) -> NumericLeaf? {
+        switch resolvedCategory {
+        case .Integer, .Number:
+            // `:882`-`:884` and `:1459`-`:1461`. The two categories share one arm in both C++ bodies.
+            return NumericLeaf.number(value)
+
+        case .Percentage:
+            // `Type::determinePercentHint(options.category)` (`:885`-`:886`, `:1462`-`:1463`). The
+            // category is the options' one, not the resolved one -- `resolvedCategory` is already known
+            // to be `Percentage` here, so passing it would make this arm a constant and lose the whole
+            // point of the call.
+            guard let optionsCategory = WebCore.CSS.Category(rawValue: category) else {
+                // Never taken: an imported C++ scoped enum's `init?(rawValue:)` doesn't validate, so
+                // this can't fail (see `percentHintFromRawValue`). Kept because it's the spelling that
+                // produces a `CSS::Category` to pass, at no cost.
+                return nil
+            }
+            return NumericLeaf.percentage(value, CalcType.determinePercentHint(optionsCategory))
+
+        case .LengthPercentage:
+            // `:887`-`:888` and `:1464`-`:1465`, a LITERAL `PercentHint::Length` in both C++ bodies
+            // rather than a `determinePercentHint` call. Reproduced literally.
+            return NumericLeaf.percentage(value, CalcType.PercentHintValue(.Length))
+
+        case .Length:
+            // `:889`-`:890`, `:1466`-`:1467`. `toCSSUnit(Dimension::Length)` is `CSSUnitType::Px`
+            // (CSSCalcTree.h:993), so naming the unit is naming the dimension.
+            return NumericLeaf.canonical(value, .Px)
+
+        case .Angle:
+            // `:891`-`:892`, `:1468`-`:1469`; `toCSSUnit(Dimension::Angle)` is `Deg`
+            // (CSSCalcTree.h:994).
+            return NumericLeaf.canonical(value, .Deg)
+
+        case .AnglePercentage:
+            // `:893`-`:894`, `:1470`-`:1471`, the other literal hint.
+            return NumericLeaf.percentage(value, CalcType.PercentHintValue(.Angle))
+
+        case .Time:
+            // `:895`-`:896`, `:1472`-`:1473`; `toCSSUnit(Dimension::Time)` is `S` (CSSCalcTree.h:995).
+            return NumericLeaf.canonical(value, .S)
+
+        case .Frequency:
+            // `:897`-`:898`, `:1474`-`:1475`; `toCSSUnit(Dimension::Frequency)` is `Hz`
+            // (CSSCalcTree.h:996).
+            return NumericLeaf.canonical(value, .Hz)
+
+        case .Resolution:
+            // `:899`-`:900`, `:1476`-`:1477`; `toCSSUnit(Dimension::Resolution)` is `Dppx`
+            // (CSSCalcTree.h:997).
+            return NumericLeaf.canonical(value, .Dppx)
+
+        case .Flex:
+            // `:901`-`:902`, `:1478`-`:1479`; `toCSSUnit(Dimension::Flex)` is `Fr`
+            // (CSSCalcTree.h:998).
+            return NumericLeaf.canonical(value, .Fr)
+
+        @unknown default:
+            // A category C++ grew and this file has not been taught. Both C++ `switch`es are exhaustive
+            // with no `default`, so growing the enum is a build failure THERE.
+            return nil
+        }
     }
 
     /// `simplify(Deg2Rad&)` (`+Simplification.cpp:981`-`:996`). Safer than the C++: the C++'s
@@ -1958,10 +1996,7 @@ private extension CalcSimplification {
             return foldAnchorFunction(node, info, alternative, builder)
 
         case .CalcMix:
-            // Enumerated by name rather than swept into the `@unknown default` below, so a known
-            // decline -- normalisation over per-item weights that are not child nodes -- stays
-            // distinguishable from an alternative that has not been taught.
-            return .declined(alternative)
+            return foldCalcMix(node, info, builder)
 
         @unknown default:
             // An alternative C++ grew and this file has not been taught. Blamed by name anyway,
@@ -3328,6 +3363,12 @@ private extension CalcSimplification {
             if alternative == .Product {
                 return rewriteProductChildren(node, &builder)
             }
+            if alternative == .CalcMix {
+                // A `calc-mix()`'s survivors are its children, as `Min`'s and `Max`'s are. It needs its
+                // own pass for the weights, which are not operands and which `rebuildFrom` consumes from a
+                // second stack. See `rewriteCalcMixItems`.
+                return rewriteCalcMixItems(node, &builder)
+            }
             return rewriteMergedChildren(node, alternative, &builder)
 
         case .replacedByGrandchild(let child, let grandchild):
@@ -3914,5 +3955,437 @@ public func cssCalcCanSimplifySwift(_ root: WebCore.CSSCalc.CSSCalcSwiftNode) ->
         // and `true` is the conservative direction anyway: it only ever says "simplifying might
         // change something", which costs a simplification pass and cannot produce a wrong tree.
         return true
+    }
+}
+
+// MARK: - `calc-mix()` -- A6
+
+/// What `simplify(CalcMix&)`'s weight normalisation (spec steps 1 to 5) did to the item list, as
+/// values -- the plan half of the file's fold -> plan -> single-consuming-pass shape.
+///
+/// The C++ mutates `item.weight` in place at four sites (`+Simplification.cpp:1552`, `:1560`, `:1579`,
+/// `:1608`) and moves out of a live vector at five (`:1524`, `:1554`, `:1581`, `:1599`, plus the
+/// `root.children = WTF::move(newChildren)` that follows each) -- the same shape `simplifyForMinMax`
+/// has, and Swift has no moved-from state to mirror it, so the whole of steps 1 to 5 runs over values
+/// here and the tree is touched exactly once, by `rewriteCalcMixItems`.
+///
+/// A `struct` of arrays rather than a `Fold` payload, for the reason `Fold.negatedChildren` gives: a
+/// dynamically-sized plan on a `Fold` value constructed for every node at every level would be a heap
+/// allocation. `rewrite` re-derives this plan instead.
+private struct CalcMixPlan {
+    /// One surviving item, in item order.
+    struct Survivor {
+        /// The item's index in the original item list -- which is also its child index, because
+        /// `forAllChildNodes`'s hand-written `CalcMix` overload (CSSCalcTree+Traversal.h:127) yields each
+        /// item's `value` once in item order and yields nothing for a weight.
+        let index: UInt32
+        /// What the item's `value` folded to. Carried rather than looked up by index, so that the
+        /// accumulator needs no `UInt32` -> `Int` narrowing to justify.
+        let fold: Fold
+        /// The item's effective weight as a `<percentage>`, which is what the accumulator divides by
+        /// 100 (`:1622`).
+        ///
+        /// Meaningful only where `canNormalize` held, which is exactly where the accumulator runs: the
+        /// `!canNormalize` path returns before it (`:1528`), and 0 here for a `Calc` weight is the same
+        /// inert value the boundary reports rather than a claim about what the `calc()` evaluates to.
+        let weight: Double
+        /// Whether the rebuild carries `weight` -- spec step 2's `(100% - specified sum) / n` or step 4's
+        /// `weight * 100% / total` -- or the original item's own weight, unchanged.
+        ///
+        /// `false` is not an optimisation, it is the only spelling of two of the C++'s paths:
+        /// `:1573`-`:1582` leaves a present non-omitted weight alone while removing other items, and
+        /// `:1594`-`:1600` leaves every survivor's weight alone. A survivor of either can hold a `Calc`
+        /// weight, a whole `CSSCalcValue` this cannot reproduce. See `pushCalcMixItemWeight`.
+        let replaceWeight: Bool
+    }
+
+    /// In item order, which is the order `Vector<CalcMix::Item>` is rebuilt in.
+    var survivors: [Survivor] = []
+
+    /// A `Fold` to return instead of running the accumulator.
+    ///
+    /// Three things reach it, and all three are the C++ returning before `:1619`: the `!canNormalize`
+    /// path's two rebuilds (`:1528`, reached whether or not it removed anything), and
+    /// `zeroValueMatchingChild` (`:1516`, `:1589`), which is a fold to a leaf. A decline can also land
+    /// here, from `zeroValueMatchingChild` on a child this cannot type.
+    var early: Fold?
+}
+
+private extension CalcSimplification {
+
+    /// `simplify(CalcMix&)` (`+Simplification.cpp:1445`-`:1690`), the largest body in the file.
+    ///
+    /// Two halves: steps 1-5 normalise weights and drop zero/omitted items, as values (`calcMixPlan`);
+    /// then a weighted sum over an accumulator every item must agree with (`calcMixSum`).
+    ///
+    /// The sum failing is a rebuild, not a decline: `:1681` returns `nullopt` from a `simplify` that
+    /// already mutated `root.children`, so the C++ rebuilds with the normalised weights --
+    /// `calc-mix(10% 25%, 10px 75%)` keeps its `calc-mix()` with explicit weights rather than
+    /// declining. Every rebuild is `.mergedChildren(.CalcMix)`; `.unchanged` is never produced, since
+    /// `rebuildSlot` takes each item's weight from the pushed plan and a generic `rebuild` would leave
+    /// that stack out of step.
+    func foldCalcMix(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Fold {
+        // `copyAndSimplify(const CalcMix::Item&)` (`:1753`-`:1756`) simplifies each item's `value` before
+        // `simplify(root)` ever runs, so every weight decision below is made against the simplified
+        // children -- which is what makes `zeroValueMatchingChild`'s `getType(child.value)` a question
+        // about a folded subtree rather than about the parsed one.
+        let folded = foldChildren(node, info.childCount, builder)
+        if let declined = declinedChild(folded) {
+            return declined
+        }
+
+        let plan = calcMixPlan(node, info.childCount, folded)
+        if let early = plan.early {
+            return early
+        }
+        return calcMixSum(plan)
+    }
+
+    /// Spec steps 1 to 5 (`+Simplification.cpp:1447`-`:1611`), as a plan.
+    ///
+    /// The counting loop matches the C++ exactly, including what it does not do: `total` accumulates
+    /// every `Raw` weight in item order including the zeros, so its rounding is the C++'s addition
+    /// sequence; `!raw.value` is a test against zero that is true for `-0.0` and false for a NaN, and
+    /// `== 0` is the same on both counts; and `isKnownZero()` is `isRaw() && value == 0`
+    /// (CSSPrimitiveNumeric.h:142), so a `Calc` weight is never counted however it would evaluate. The
+    /// boundary reports the three states this needs and nothing is re-derived.
+    func calcMixPlan(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ itemCount: UInt32,
+        _ folded: [Fold]
+    ) -> CalcMixPlan {
+        var canNormalize = true
+        var total = 0.0
+        var numberOfOmittedWeights: UInt32 = 0
+        var numberOfKnownZeroWeights: UInt32 = 0
+
+        // Read once per item and carried, rather than re-crossing the boundary in each of the six
+        // branches below: `calcMixItemWeight` walks to the item, and the branches ask about the same
+        // three fields up to twice each.
+        var isPresent: [Bool] = []
+        var isRaw: [Bool] = []
+        var rawValue: [Double] = []
+        isPresent.reserveCapacity(Int(clamping: itemCount))
+        isRaw.reserveCapacity(Int(clamping: itemCount))
+        rawValue.reserveCapacity(Int(clamping: itemCount))
+
+        var index: UInt32 = 0
+        while index < itemCount {
+            let weight = node.calcMixItemWeight(index)
+            isPresent.append(weight.present)
+            isRaw.append(weight.isRaw)
+            rawValue.append(weight.value)
+
+            if weight.present {
+                if weight.isRaw {
+                    // `[&](const Weight::Raw& raw)` (`:1492`-`:1498`).
+                    if weight.value == 0 {
+                        numberOfKnownZeroWeights += 1
+                    }
+                    total += weight.value
+                } else {
+                    // `[&](const Weight::Calc&)` (`:1499`-`:1501`).
+                    canNormalize = false
+                }
+            } else {
+                numberOfOmittedWeights += 1
+            }
+            index += 1
+        }
+
+        // `item.weight && item.weight->isKnownZero()` is spelled inline at each of the four sites below
+        // as `isPresent[i] && isRaw[i] && rawValue[i] == 0`, rather than hoisted into a helper: every loop
+        // here is a `while` over a `UInt32` with no closure, since `calcMixPlan` takes a `borrowing`
+        // parameter and a closure capturing one is not the shape wanted here.
+        var plan = CalcMixPlan()
+
+        if !canNormalize {
+            // `:1509`-`:1529`. Normalisation is off entirely and the C++ returns `{ }` on every path
+            // out of this branch, so the accumulator never runs and every survivor keeps its own weight.
+            if numberOfKnownZeroWeights == 0 {
+                // `return { }` with `root.children` untouched: rebuilt at the same arity with the same
+                // weights. Every `replaceWeight` is clear, which is the only spelling that can carry a
+                // `Calc` weight through.
+                plan.survivors = calcMixKeepAll(itemCount, folded)
+                plan.early = .mergedChildren(.CalcMix)
+                return plan
+            }
+
+            if itemCount - numberOfKnownZeroWeights == 0 {
+                // "If all the weights are known to be zero, we can simplify all the way down zero value
+                // for the calc-mix itself." (`:1514`-`:1516`)
+                plan.early = zeroValueMatchingChild(folded[0])
+                return plan
+            }
+
+            // `:1518`-`:1526`: drop the known-zero items, leave every other weight alone.
+            index = 0
+            while index < itemCount {
+                let i = Int(index)
+                if !(isPresent[i] && isRaw[i] && rawValue[i] == 0) {
+                    plan.survivors.append(CalcMixPlan.Survivor(
+                        index: index,
+                        fold: folded[i],
+                        weight: rawValue[i],
+                        replaceWeight: false
+                    ))
+                }
+                index += 1
+            }
+            plan.early = .mergedChildren(.CalcMix)
+            return plan
+        }
+
+        if total >= 100 {
+            // `:1531`-`:1562`. Omitted weights become 0 and are removed, specified zeros are removed,
+            // and every remaining weight is scaled -- so every survivor's weight is replaced, in both of
+            // the C++'s two sub-branches. They differ only in whether anything is dropped, which the one
+            // loop below expresses as "an omitted or known-zero item does not survive": with both counts
+            // zero that condition is never true and the loop is `:1558`-`:1561`.
+            let normalizationFactor = 100.0 / total
+            index = 0
+            while index < itemCount {
+                let i = Int(index)
+                if !isPresent[i] || (isRaw[i] && rawValue[i] == 0) {
+                    index += 1
+                    continue
+                }
+                plan.survivors.append(CalcMixPlan.Survivor(
+                    index: index,
+                    fold: folded[i],
+                    // `item.weight->raw()->value * normalizationFactor` (`:1552`, `:1560`). The
+                    // multiply is the C++'s, not a divide by `total / 100`: the two differ in the last
+                    // bit.
+                    weight: rawValue[i] * normalizationFactor,
+                    replaceWeight: true
+                ))
+                index += 1
+            }
+            return plan
+        }
+
+        // `:1563`-`:1611`, `total < 100`. `weightForOmitted` is step 2, and it is computed in both of
+        // the two sub-branches that have omitted weights and in neither of the two that do not -- so it
+        // is computed here and used only where `isPresent` is false, which cannot happen when the count
+        // is zero.
+        //
+        // `Double(numberOfOmittedWeights)` is `static_cast<double>(numberOfOmittedWeights)`, and the
+        // division is by the count of omitted weights rather than by the item count.
+        let weightForOmitted = numberOfOmittedWeights > 0
+            ? (100.0 - total) / Double(numberOfOmittedWeights)
+            : 0.0
+
+        if numberOfKnownZeroWeights > 0, numberOfOmittedWeights == 0 {
+            // `:1584`-`:1601`. Nothing is rewritten; the known-zero items are dropped.
+            if itemCount - numberOfKnownZeroWeights == 0 {
+                plan.early = zeroValueMatchingChild(folded[0])
+                return plan
+            }
+        }
+
+        index = 0
+        while index < itemCount {
+            let i = Int(index)
+            if isPresent[i] {
+                // `:1576`-`:1577`, `:1596`-`:1597`: a known-zero weight is dropped wherever there is
+                // one to drop, and where `numberOfKnownZeroWeights` is 0 this is never true. A present,
+                // non-zero weight is left exactly as it is in all four sub-branches -- `total < 100` has
+                // no normalisation factor.
+                if isRaw[i], rawValue[i] == 0, numberOfKnownZeroWeights > 0 {
+                    index += 1
+                    continue
+                }
+                plan.survivors.append(CalcMixPlan.Survivor(
+                    index: index,
+                    fold: folded[i],
+                    weight: rawValue[i],
+                    replaceWeight: false
+                ))
+            } else {
+                // `item.weight = CalcMix::Item::Weight { weightForOmitted }` (`:1579`, `:1608`). Step 2,
+                // and the item survives.
+                plan.survivors.append(CalcMixPlan.Survivor(
+                    index: index,
+                    fold: folded[i],
+                    weight: weightForOmitted,
+                    replaceWeight: true
+                ))
+            }
+            index += 1
+        }
+        return plan
+    }
+
+    /// Every item surviving with its own weight: the `!canNormalize`, nothing-to-remove rebuild.
+    @inline(always)
+    func calcMixKeepAll(_ itemCount: UInt32, _ folded: [Fold]) -> [CalcMixPlan.Survivor] {
+        var survivors: [CalcMixPlan.Survivor] = []
+        survivors.reserveCapacity(Int(clamping: itemCount))
+        var index: UInt32 = 0
+        while index < itemCount {
+            survivors.append(CalcMixPlan.Survivor(
+                index: index,
+                fold: folded[Int(index)],
+                weight: 0,
+                replaceWeight: false
+            ))
+            index += 1
+        }
+        return survivors
+    }
+
+    /// `zeroValueMatchingChild` (`+Simplification.cpp:1454`-`:1482`): when every weight is known zero,
+    /// `calc-mix()` folds to a zero of the first item's category. `getType` is answered via `leafType`
+    /// for a folded leaf and declined for an operation (a recursive type computation this file can't
+    /// run and no boundary accessor answers) -- a narrow, named gap: `calc-mix(sibling-index() 0%, 2 0%)`
+    /// with no builder state hits it, `calc-mix(1em 0%, 2em 0%)` does not.
+    @inline(always)
+    func zeroValueMatchingChild(_ folded: Fold) -> Fold {
+        guard case .leaf(let leaf) = folded else {
+            return .declined(.CalcMix)
+        }
+        guard let childType = leafType(leaf),
+              let category = childType.calculationCategory().value,
+              // `.value = 0`, written as a literal in all ten of the C++'s arms -- positive zero, which
+              // is what `makeChild(Number { .value = 0 })` builds.
+              let zero = numericLeafForCategory(category, 0) else {
+            return .declined(.CalcMix)
+        }
+        return .leaf(zero)
+    }
+
+    /// The weighted sum (`+Simplification.cpp:1613`-`:1689`): an accumulator every item must agree with
+    /// on alternative AND that alternative's own identity (a `Percentage`'s hint, a
+    /// `CanonicalDimension`'s dimension, a `NonCanonicalDimension`'s unit -- NOT just `unitsMatch`,
+    /// which would pass two percentages with different hints). `std::nullopt` on disagreement is a
+    /// rebuild, not a decline. Weight is `/ 100.0`, not `* 0.01` -- they differ in the last bit, which
+    /// matters for signed zero and NaN.
+    func calcMixSum(_ plan: CalcMixPlan) -> Fold {
+        var accumulated: NumericLeaf?
+
+        for survivor in plan.survivors {
+            // `auto weight = item.weight->raw()->value / 100.0;` (`:1622`). The dereference is
+            // unconditional in the C++ and safe there for the reason it is safe here: every path that
+            // reaches this loop left every survivor with a present `Raw` weight, and the one path that
+            // does not -- `!canNormalize` -- returned at `:1528`.
+            let weight = survivor.weight / 100.0
+
+            guard case .leaf(let leaf) = survivor.fold else {
+                return .mergedChildren(.CalcMix)
+            }
+
+            guard let current = accumulated else {
+                accumulated = leaf.withValue(leaf.value * weight)
+                continue
+            }
+            guard calcMixAccumulatorAgrees(current, leaf) else {
+                return .mergedChildren(.CalcMix)
+            }
+            accumulated = current.withValue(current.value + leaf.value * weight)
+        }
+
+        guard let result = accumulated else {
+            // No survivors, which `isSimplifiableAlternative` already refuses at the source: a
+            // `CalcMix` with no items is where the C++ dereferences an empty `std::optional<Variant<...>>`
+            // at `:1685`, and every path that can empty the list either folds through
+            // `zeroValueMatchingChild` first or keeps at least the item whose weight took `total` to 100.
+            // Rebuilt rather than asserted, which cannot be wrong.
+            return .mergedChildren(.CalcMix)
+        }
+        return .leaf(result)
+    }
+
+    /// Whether the accumulator and this item are the same alternative and agree on that alternative's
+    /// own identity. See `calcMixSum` for why this is not `unitsMatch`.
+    @inline(always)
+    func calcMixAccumulatorAgrees(_ current: NumericLeaf, _ leaf: NumericLeaf) -> Bool {
+        guard current.kind == leaf.kind else {
+            // `!WTF::holdsAlternative<T>(*result)`, all four arms.
+            return false
+        }
+        switch leaf.kind {
+        case .number:
+            // `:1630`-`:1631` has no second test: `Number`'s only member is `value`.
+            return true
+        case .percentage:
+            // `get<Percentage>(*result).hint != value.hint` (`:1643`). The boundary carries the hint as
+            // `Type::PercentHintValue`'s underlying byte with 0 for none, so comparing the bytes is
+            // comparing the values and no `PercentHint` has to be decoded to make the comparison.
+            return current.percentHint == leaf.percentHint
+        case .canonicalDimension:
+            // `get<CanonicalDimension>(*result).dimension != value.dimension` (`:1656`), with the unit
+            // standing in for the dimension: `toCSSUnit` is a bijection onto the six canonical units
+            // (CSSCalcTree.h:992-:1000), so comparing units is comparing dimensions.
+            return current.unitType == leaf.unitType
+        case .nonCanonicalDimension:
+            // `get<NonCanonicalDimension>(*result).unit != value.unit` (`:1669`), and here `unitType` IS
+            // `unit` -- `toCSSUnit(const NonCanonicalDimension&)` is `root.unit` (CSSCalcTree.h:1011).
+            return current.unitType == leaf.unitType
+        }
+    }
+}
+
+private extension CalcSimplification {
+
+    /// The `.mergedChildren(.CalcMix)` half of `rewrite`: the single consuming pass for a `calc-mix()`
+    /// that stays a `calc-mix()`.
+    ///
+    /// Separate from `rewriteMergedChildren` for one reason -- the weights. The survivors are the
+    /// node's own children, as `Min`'s and `Max`'s are and unlike `Sum`'s spliced terms, so each is
+    /// reached by `rewrite(node.childInTreeOrder(index))` and nothing is pushed as a pre-folded leaf: a
+    /// `calc-mix()` item's value is never merged with another item's, so there is no accumulated value
+    /// that exists nowhere in the input tree.
+    ///
+    /// Operands first, then weights: a nested `calc-mix(calc-mix(1px, 2px) 50%, 3px 50%)` consumes its
+    /// inner node's weights inside `rewrite`, so by the time this pushes its own the weight stack is
+    /// back where it started and `rebuildFrom` finds exactly this node's `n` on top of both.
+    mutating func rewriteCalcMixItems(
+        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Rewrite {
+        let info = node.info()
+        let folded = foldChildren(node, info.childCount, builder)
+        if let declined = declinedChild(folded), case .declined(let blame) = declined {
+            // Unreachable: `fold` returned `.mergedChildren(.CalcMix)`, which it does only after this
+            // same walk found no declining child. Checked rather than asserted, so that a boundary that
+            // came apart is a fallback to the C++ arm and not a node rebuilt from a short list.
+            return .declined(blame)
+        }
+
+        let plan = calcMixPlan(node, info.childCount, folded)
+        if let early = plan.early {
+            // Only `.mergedChildren(.CalcMix)` routes here, and `calcMixPlan` sets `early` to exactly
+            // that whenever the survivor list is the whole answer -- this is the `!canNormalize` rebuild
+            // arriving with the plan it needs. Any other early answer would be a `zeroValueMatchingChild`
+            // fold or a decline, and pushing its survivors as an item list would be a wrong tree.
+            guard case .mergedChildren = early else {
+                return .declined(.CalcMix)
+            }
+        }
+
+        // Named `pushedItems`, not `pushed`: `rewriteNegatedChildren`'s counter is spelled `var
+        // pushed: UInt32 = 0` and its selftest asserts that name's uniqueness across the file, so a
+        // second `pushed` here would collide with that check instead of with the diagnostic it exists
+        // for. `foldProduct`'s `pushedFactors`/`pushedChildren` and `rebuildAnchor`'s `pushedFallback`
+        // follow the same rule.
+        var pushedItems: UInt32 = 0
+        for survivor in plan.survivors {
+            if case .declined(let blame) = rewrite(node.childInTreeOrder(survivor.index), &builder) {
+                return .declined(blame)
+            }
+            pushedItems += 1
+        }
+        for survivor in plan.survivors {
+            builder.pushCalcMixItemWeight(survivor.index, survivor.weight, survivor.replaceWeight)
+        }
+
+        // `rebuildSlot(const Vector<CalcMix::Item>&)` takes all the remaining operands and one weight
+        // plan each, so this serves a node that lost items and one that did not, and it is the line that
+        // lets the arity change at all.
+        return builder.rebuildFrom(node, pushedItems) ? .pushed : .declined(.CalcMix)
     }
 }
