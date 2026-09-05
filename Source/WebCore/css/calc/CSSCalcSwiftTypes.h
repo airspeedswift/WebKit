@@ -32,9 +32,14 @@
 // identity, so a handle holding `const Child*` needs `Child` merely forward-declared, which is what
 // CSSCalcTree+Serialization.h has always done. That keeps this header self-contained -- importing
 // CSSCalcTree.h would drag in CSSPrimitiveNumeric.h, CSSCustomIdent.h, CSSValueKeywords.h,
-// CSSCalcRandomSharing.h, wtf/Vector.h and wtf/TZoneMalloc.h -- and avoids an importer defect where
-// the private `Variant` member's destructor is odr-used over incomplete `UniqueRef<Op>`
-// alternatives.
+// CSSCalcRandomSharing.h, wtf/Vector.h and wtf/TZoneMalloc.h.
+//
+// This note used to give a second reason: that it avoided an importer defect where the `Variant`
+// member's destructor is odr-used over incomplete `UniqueRef<Op>` alternatives. THAT REASON WAS
+// WRONG and has been removed. The defect is real (rdar://186742920) but is specific to
+// `std::variant`; `WTF::Variant` is MPark.Variant and imports cleanly, and CSSCalcTree.h now
+// carries the `#if !defined(__swift__)` stand-in for `Child::value` and imports with 0 errors and
+// 0 warnings. The self-containment reason above is the one that still holds.
 //
 // The recursive walk and the sink below import with 0 errors, 0 warnings and 0 `unsafe` markers.
 
