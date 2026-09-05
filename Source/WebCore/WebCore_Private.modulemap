@@ -24,10 +24,22 @@ framework module WebCore_Private [system] {
     }
 
     // The Swift boundary module for the CSS tokenizer, so a Swift file imports only
-    // what it needs rather than the Core umbrella below. Walking that umbrella reaches
-    // JavaScriptCore's private headers, where two inner structs are defined in explicit
-    // submodules that nothing imports, and WTF::KeyValuePair's instantiation over them
-    // then fails to compile, so importing the umbrella from Swift does not build at all.
+    // what it needs rather than the Core umbrella below.
+    //
+    // The original reason was that importing Core did not work at all: walking that
+    // umbrella reaches JavaScriptCore's private headers, where two inner structs are
+    // defined in explicit submodules that nothing imports, and WTF::KeyValuePair's
+    // instantiation over them then fails to compile.
+    //
+    // MEASURED 2026-09-05: that is no longer the case. `internal import
+    // WebCore_Private.Core` type-checks clean under WebCore's own Swift flag set, as
+    // does reaching a type that has no boundary submodule of its own, so the umbrella
+    // is importable now -- plausibly fixed by the `#if !defined(__swift__)` fork these
+    // headers already use. The boundary submodules are still worth keeping for compile
+    // time and so that one boundary cannot reach another's types, but *importability*
+    // is no longer an argument for adding a new one. Harness:
+    // ~/src/webkit-swift-ports/cssprobe/treeimport/swiftprobe.sh.
+    //
     // See CSSTokenizerSwiftTypes.h.
     explicit module CSSTokenizerSwiftTypes {
         header "CSSTokenizerSwiftTypes.h"
