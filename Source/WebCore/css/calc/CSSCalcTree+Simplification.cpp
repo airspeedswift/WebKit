@@ -47,6 +47,7 @@
 // all of them. WebCoreSwiftBoundaryTypes.h says why, and is the one file a newly added Swift port edits.
 #include "WebCoreSwiftBoundaryTypes.h"
 #include <atomic>
+#include <bit>
 #include <wtf/StdLibExtras.h>
 
 namespace WebCore {
@@ -2530,6 +2531,60 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
     CSSCalcSwiftOperandStack hoisted;
     hoisted.value.reserveInitialCapacity(8);
     CSSCalcSwiftBuilder hoistedBuilder { hoisted, options };
+
+    // A fixture that actually FOLDS, unlike the Em/Rem one above which survives as an operator:
+    // `1 + 2 + (-4) + (1/5) + (2*3)`, all `Number`, which exercises the sum merge, the unary minus,
+    // the reciprocal, the product fold and the leaves, and collapses to a single `Number` -- so the
+    // two arms can be compared by VALUE and the timing is not the only thing measured.
+    auto makeFoldFixture = [&] {
+        auto negate = Negate { makeChild(Number { .value = 4 }) };
+        auto invert = Invert { makeChild(Number { .value = 5 }) };
+        Vector<Child> factors;
+        factors.append(makeChild(Number { .value = 2 }));
+        factors.append(makeChild(Number { .value = 3 }));
+        auto product = Product { Children { WTF::move(factors) } };
+
+        Vector<Child> kids;
+        kids.append(makeChild(Number { .value = 1 }));
+        kids.append(makeChild(Number { .value = 2 }));
+        // The type is computed into a local BEFORE the move, never inline beside it: argument
+        // evaluation order is unspecified, so `makeChild(WTF::move(x), toType(x))` can read a
+        // moved-from node whose `UniqueRef` is already null. The Sum fixture above sequences them
+        // the same way for the same reason.
+        auto negateType = toType(negate).value_or(Type { });
+        auto invertType = toType(invert).value_or(Type { });
+        auto productType = toType(product).value_or(Type { });
+        kids.append(makeChild(WTF::move(negate), negateType));
+        kids.append(makeChild(WTF::move(invert), invertType));
+        kids.append(makeChild(WTF::move(product), productType));
+        auto sum = Sum { Children { WTF::move(kids) } };
+        auto sumType = toType(sum).value_or(Type { });
+        return makeChild(WTF::move(sum), sumType);
+    };
+    auto foldFixture = makeFoldFixture();
+
+    // THE ORACLE, run once rather than per iteration. Without it cases 14 and 15 would report a
+    // ratio between a real simplification and whatever the flat pass happens to do, and a pass that
+    // skipped work would look like the win. `RELEASE_ASSERT`, so a shipping build fails too.
+    if (which == 14 || which == 15) {
+        auto cppRoot = copyAndSimplify(foldFixture, options);
+        auto* cppNumber = get_if<Number>(&cppRoot);
+        RELEASE_ASSERT(cppNumber);
+        // `std::bit_cast`, not `memcpy`: WebKit builds with -Wunsafe-buffer-usage-in-libc-call.
+        uint64_t cppBits = std::bit_cast<uint64_t>(cppNumber->value);
+        uint64_t swiftBits = cssCalcFlatSimplifyProbeSwift(foldFixture, 1);
+        RELEASE_ASSERT_WITH_MESSAGE(swiftBits == cppBits,
+            "flat simplifier disagrees with the C++ arm on the fold fixture");
+    }
+
+    if (which == 14)
+        return cssCalcFlatSimplifyProbeSwift(foldFixture, iterations);
+    if (which == 15) {
+        uint64_t sum = 0;
+        for (uint32_t i = 0; i < iterations; ++i)
+            sum += copyAndSimplify(foldFixture, options).index();
+        return sum;
+    }
 
     // R151 PROBE, ahead of the loop deliberately: the gating number for flipping the calc tree to a
     // Swift representation is what one conversion costs with WARM buffers, and the Swift entry point

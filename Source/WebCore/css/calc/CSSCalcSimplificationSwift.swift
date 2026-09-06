@@ -4485,15 +4485,31 @@ private extension CalcSimplification {
 /// storable in an ordinary Swift `Array`, and free of the `~Escapable` problem that forced the
 /// handle design in the first place. Same move as the tokenizer island's offset-in-the-pointer-slot
 /// design.
-struct CalcFlatNode {
+fileprivate struct CalcFlatNode {
     var value: Double
     /// Offset into the child-index side table, not into `nodes`.
     var childStart: UInt32
     var childCount: UInt32
     var valueID: UInt16
     var unitType: UInt8
-    var alternative: UInt8
+    /// The imported C++ enum, stored directly. `UInt8`-backed, so the node stays 24 bytes, and
+    /// switching over it is checked for exhaustiveness where a raw byte would not be.
+    var alternative: CalcAlternative
     var percentHint: UInt8
+
+    /// The four numeric leaves -- the only alternatives that carry a foldable value.
+    var isNumericLeaf: Bool {
+        switch alternative {
+        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension: return true
+        default: return false
+        }
+    }
+
+    /// What makes two leaves addable: `1px + 2px` merges, `1px + 2em` does not, and a `Number`
+    /// never merges with a dimension. The C++ keys its fixed-size identity table on the same pair.
+    func mergesWith(_ other: CalcFlatNode) -> Bool {
+        alternative == other.alternative && unitType == other.unitType && percentHint == other.percentHint
+    }
 }
 
 /// `append(contentsOf: repeatElement(value, count: n))`, which `UniqueArray` does not provide --
@@ -4522,7 +4538,7 @@ extension UniqueArray where Element: Copyable {
 ///
 /// That makes this type `~Copyable` by containment, which is also correct: copying a half-built
 /// flat tree is not a thing any caller should be able to ask for.
-struct CalcFlatTree: ~Copyable {
+fileprivate struct CalcFlatTree: ~Copyable {
     var nodes = UniqueArray<CalcFlatNode>()
     var childIndices = UniqueArray<UInt32>()
 
@@ -4550,7 +4566,7 @@ struct CalcFlatTree: ~Copyable {
             childCount: info.childCount,
             valueID: info.valueID,
             unitType: info.unitType,
-            alternative: info.alternative.rawValue,
+            alternative: info.alternative,
             percentHint: info.percentHint))
 
         let start = childIndices.count
@@ -4569,6 +4585,196 @@ struct CalcFlatTree: ~Copyable {
 ///
 /// The count is returned so the benchmark cannot optimise the traversal away, and because it is the
 /// same number the coverage pre-pass reports -- which is the point: this pass subsumes that one.
+// MARK: The flat simplifier
+//
+// COVERAGE: `Sum`, `Product`, `Negate`, `Invert` and the four numeric leaves, and nothing else.
+// Every other alternative is left exactly as it arrived, which is the honest behaviour for a
+// bounded probe -- it is not a decline channel and must not be read as one. The point is to bound
+// what the flat design costs on the shapes that dominate real calc(), not to be the shipping
+// simplifier.
+//
+// WHAT MAKES IT DIFFERENT FROM THE PORT, and it is the whole reason for the exercise: no recursion,
+// no per-node crossing, no 41-way variant dispatch, no operand stack. `append` builds the array in
+// pre-order DFS, so a parent's index is always LESS than its children's, and one backwards loop
+// therefore visits every child before its parent.
+
+fileprivate extension CalcFlatTree {
+    /// Fold the whole tree, children before parents, in one reverse pass.
+    mutating func simplify() {
+        var i = nodes.count - 1
+        while i >= 0 {
+            simplifyNode(i)
+            i -= 1
+        }
+    }
+
+    /// The `index`th child of node `i`, as an index into `nodes`.
+    private func child(_ i: Int, _ index: Int) -> Int {
+        Int(childIndices[Int(nodes[i].childStart) + index])
+    }
+
+    private mutating func simplifyNode(_ i: Int) {
+        switch nodes[i].alternative {
+        case .Negate:
+            guard nodes[i].childCount == 1 else { return }
+            let a = child(i, 0)
+            if nodes[a].isNumericLeaf {
+                // 6.1. The unary MINUS, not `* -1`: it flips a NaN's sign bit rather than
+                // propagating one, which is the same distinction the port's `Fold` draws.
+                nodes[i] = nodes[a]
+                nodes[i].value = -nodes[a].value
+            } else if nodes[a].alternative == .Negate, nodes[a].childCount == 1 {
+                // 6.2. `negate(negate(x))` is `x`.
+                nodes[i] = nodes[child(a, 0)]
+            }
+
+        case .Invert:
+            guard nodes[i].childCount == 1 else { return }
+            let a = child(i, 0)
+            if nodes[a].alternative == .Number {
+                // 7.1. Only a `Number` inverts to a leaf; inverting a dimension makes a type no
+                // `Child` leaf can represent, which is why this is not `isNumericLeaf`.
+                nodes[i] = nodes[a]
+                nodes[i].value = 1 / nodes[a].value
+            } else if nodes[a].alternative == .Invert, nodes[a].childCount == 1 {
+                // 7.2.
+                nodes[i] = nodes[child(a, 0)]
+            }
+
+        case .Sum:
+            simplifySum(i)
+
+        case .Product:
+            simplifyProduct(i)
+
+        default:
+            // Including the four leaves: `canonicalize` needs conversion data this probe does not
+            // carry, and the other 33 alternatives are out of scope. Left as they arrived.
+            return
+        }
+    }
+
+    /// Steps 8.1 and 8.2: splice nested `Sum`s in, then merge every pair of like terms.
+    private mutating func simplifySum(_ i: Int) {
+        let n = Int(nodes[i].childCount)
+        guard n > 0 else { return }
+
+        // Terms are accumulated at the END of `childIndices` rather than written over this node's
+        // own run, because 8.1 can make the list LONGER than it started -- a nested sum contributes
+        // all of its terms. Repointing `childStart` is O(1) and leaves the old run stranded, which
+        // is the same trade a bump allocator makes.
+        let start = childIndices.count
+        for k in 0..<n {
+            let c = child(i, k)
+            if nodes[c].alternative == .Sum {
+                let inner = Int(nodes[c].childStart)
+                for j in 0..<Int(nodes[c].childCount) {
+                    childIndices.append(childIndices[inner + j])
+                }
+            } else {
+                childIndices.append(UInt32(c))
+            }
+        }
+
+        // 8.2, merged in place over the run just appended. O(k^2) against the C++'s fixed-size
+        // identity table, and deliberately so at this size: a calc sum is a handful of terms, and
+        // the table is the optimisation to make once the design is chosen, not before.
+        var write = start
+        var read = start
+        while read < childIndices.count {
+            let term = Int(childIndices[read])
+            if nodes[term].isNumericLeaf {
+                var merged = false
+                var scan = start
+                while scan < write {
+                    let into = Int(childIndices[scan])
+                    if nodes[into].isNumericLeaf, nodes[into].mergesWith(nodes[term]) {
+                        nodes[into].value += nodes[term].value
+                        merged = true
+                        break
+                    }
+                    scan += 1
+                }
+                if merged {
+                    read += 1
+                    continue
+                }
+            }
+            childIndices[write] = childIndices[read]
+            write += 1
+            read += 1
+        }
+        childIndices.removeLast(childIndices.count - write)
+
+        let count = write - start
+        if count == 1, nodes[Int(childIndices[start])].isNumericLeaf {
+            // 8.3: a sum of one term IS that term.
+            nodes[i] = nodes[Int(childIndices[start])]
+            return
+        }
+        nodes[i].childStart = UInt32(start)
+        nodes[i].childCount = UInt32(count)
+    }
+
+    /// The numeric half of step 9: fold the `Number` factors together, and apply the result to a
+    /// single surviving dimension if that is all that is left.
+    private mutating func simplifyProduct(_ i: Int) {
+        let n = Int(nodes[i].childCount)
+        guard n > 0 else { return }
+
+        var scale = 1.0
+        var numbers = 0
+        var lastNonNumber = -1
+        var nonNumbers = 0
+        for k in 0..<n {
+            let c = child(i, k)
+            if nodes[c].alternative == .Number {
+                scale *= nodes[c].value
+                numbers += 1
+            } else {
+                nonNumbers += 1
+                lastNonNumber = c
+            }
+        }
+        guard numbers > 0 else { return }
+
+        if nonNumbers == 0 {
+            // Every factor was a number.
+            nodes[i] = nodes[child(i, 0)]
+            nodes[i].value = scale
+            return
+        }
+        if nonNumbers == 1, nodes[lastNonNumber].isNumericLeaf {
+            // `2 * 3px` is `6px`. Only valid because the surviving factor is a LEAF: scaling an
+            // operator node would need its whole subtree rewritten, which step 9.3 does and this
+            // probe does not.
+            nodes[i] = nodes[lastNonNumber]
+            nodes[i].value *= scale
+            return
+        }
+        // Mixed, with an operator factor: out of scope, left alone.
+    }
+}
+
+/// Convert and then FOLD, `iterations` times, returning the bit pattern of the resulting root's
+/// value so the caller can check it against the C++ arm rather than trust the timing.
+///
+/// Same hoisting as the conversion probe: the buffers live outside the loop.
+@_expose(Cxx)
+public func cssCalcFlatSimplifyProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ iterations: UInt32) -> UInt64 {
+    var tree = CalcFlatTree()
+    tree.nodes.reserveCapacity(64)
+    tree.childIndices.reserveCapacity(64)
+    var bits: UInt64 = 0
+    for _ in 0..<iterations {
+        tree.reset()
+        let rootIndex = tree.append(root)
+        tree.simplify()
+        bits = tree.nodes[Int(rootIndex)].value.bitPattern
+    }
+    return bits
+}
+
 /// Converts `root` `iterations` times and returns the summed node count.
 ///
 /// THE LOOP IS IN SWIFT, and that is the correction rather than a convenience -- it is the same one
