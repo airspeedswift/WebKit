@@ -280,6 +280,24 @@ private struct NumericLeaf {
     }
 }
 
+/// The merge key for a leaf: its `CSSUnitType` underlying value.
+///
+/// `CSSCalcTree+NumericIdentity.h` exists to give the C++ a *dense* key -- "fixed size ... lookup
+/// tables needed in expression simplification" -- and `toNumericIdentity` is injective on the unit:
+/// `Number`, `Percentage`, each of the six canonical dimensions and each of the 48 non-canonical units
+/// map one-to-one onto a `NumericIdentity`. So the unit already IS the identity, and keying on it
+/// directly gives the same fixed-size table without transcribing a second 56-case enum into this file
+/// and having to keep it in step.
+///
+/// Masked to 7 bits, which loses nothing and is what makes the index total: `CSSUnitType.h` states that
+/// `CSSValue` allocates 7 bits for the value, so no enumerator can exceed 127 and the mask never aliases
+/// two units onto one bucket. The tables are therefore indexed with no bounds trap, whatever value the
+/// boundary hands over.
+@inline(always)
+private func mergeKey(_ leaf: NumericLeaf) -> Int {
+    return Int(leaf.unitType & 0x7F)
+}
+
 // MARK: - The arithmetic
 //
 // A port of `CSSCalcExecutor.h`'s `OperatorExecutor<Operator::X>` specializations, one static
@@ -1209,7 +1227,7 @@ private extension CalcSimplification {
             }
             let info = child.info()
             var origin: UInt32 = 0
-            let terms = collectSumTerms(child, info.childCount, &origin, builder)
+            var terms = collectSumTerms(child, info.childCount, &origin, builder)
             if terms.declined != nil {
                 // Unreachable: this same walk produced `.mergedChildren(.Sum)` without declining.
                 // Checked rather than asserted, and answered with `nil` so the contract above stays
@@ -1217,13 +1235,13 @@ private extension CalcSimplification {
                 // declines the tree, which is a fallback to the C++ arm either way.
                 return nil
             }
-            let plan = sumMergePlan(terms.folds, builder)
+            // `sumMergePlan` merges into `terms.folds`, so a first instance already carries its
+            // accumulated value here; reading the term back is reading the merged result.
+            let plan = sumMergePlan(&terms.folds, builder)
             var leaves: [NumericLeaf] = []
-            leaves.reserveCapacity(plan.slots.count)
-            for k in 0..<plan.slots.count where plan.slots[k].survives {
-                // `termFold` and not `terms.folds[k]`: a merged first instance's own fold is its value
-                // BEFORE anything merged into it, and getting that backwards is silent.
-                guard case .leaf(let leaf) = termFold(plan.slots, terms, k) else {
+            leaves.reserveCapacity(terms.folds.count)
+            for k in 0..<terms.folds.count where plan.survives(k, terms.folds) {
+                guard case .leaf(let leaf) = terms.folds[k] else {
                     return nil
                 }
                 leaves.append(leaf)
@@ -2646,7 +2664,7 @@ private extension CalcSimplification {
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
         let alternative: CalcAlternative = isMax ? .Max : .Min
-        let folded = foldChildren(node, info.childCount, builder)
+        var folded = foldChildren(node, info.childCount, builder)
         if let declined = declinedChild(folded) {
             return declined
         }
@@ -2658,7 +2676,7 @@ private extension CalcSimplification {
             return promoteTerm(folded[0], 0)
         }
 
-        let plan = mergePlan(folded, isMax)
+        let plan = mergePlan(&folded, isMax)
 
         // `if (!numberOfMergeOpportunities) return { };`
         if plan.merges == 0 {
@@ -2672,76 +2690,64 @@ private extension CalcSimplification {
         // into, so it always survives; a non-`Numeric` term and a percentage the merge skipped both
         // always survive; and any merge implies a first instance that survives. So if term 0 were not
         // the only survivor there would be two, contradicting `n - merges == 1`.
+        //
+        // `folded[0]` is the merged value, not the input's: `mergePlan` wrote it back, exactly as the
+        // C++ wrote into `root.children[offset - 1]`.
         if folded.count - plan.merges == 1 {
-            if let accumulated = plan.slots[0].accumulated {
-                return .leaf(accumulated)
-            }
-            // Term 0 is not a `Numeric`, so the answer is the subtree itself.
-            return .replacedByTerm(child: 0)
+            return promoteTerm(folded[0], 0)
         }
 
         return .mergedChildren(alternative)
     }
 
-    /// One term's place in the merge: what it accumulated, whether anything may merge into it, and
-    /// whether it survives. Per term, not per unit identity, which removes the C++'s 512-byte dense
-    /// table (`:414`) in favor of a linear scan (`mergeTarget`).
-    struct MergeSlot {
-        /// The accumulated leaf, or `nil` when the term is not a `Numeric`. A value type, so a merge
-        /// is a copy and there is nothing the tree can observe.
-        var accumulated: NumericLeaf?
-        /// Whether a later term may merge into this one -- true only for a first instance, matching
-        /// the C++'s `offsetOfFirstInstance[id] = i + 1`.
-        var mergeable: Bool
-        /// Whether the term appears in the rebuilt child list.
-        var survives: Bool
-        /// `FirstInstance::merges` (`:602`), `Sum` only: how many later terms merged into this one.
-        /// Carried on the shared slot (rather than a `Sum`-specific one) so `mergeTarget` has one
-        /// definition.
-        var merges: UInt32
-        /// `FirstInstance::canRemove` (`:603`), `Sum` only: whether this zero-valued length may be
-        /// dropped. Always false here -- `simplifyForMinMax` never drops a term.
-        var canRemove: Bool
-    }
+    /// `std::array<size_t, numberOfNumericIdentityTypes> offsetOfFirstInstance` (`:414`), restored:
+    /// the merge is keyed by unit identity in a compile-time fixed-size table, not by a per-term heap
+    /// array. `MergeTable` holds `index + 1`, so 0 means no term of that unit has been seen -- the
+    /// C++'s own encoding, which is what lets the whole table be zero-initialised.
+    typealias MergeTable = InlineArray<128, Int32>
+    /// `FirstInstance::canRemove` (`:603`), one bit per unit identity. A separate table rather than a
+    /// field beside the offset so the common (`Min`/`Max`) case pays for the offsets alone.
+    typealias MergeFlags = InlineArray<128, Bool>
 
-    /// An empty slot: a term not yet classified. `survives` defaults to `true`, so a non-`Numeric`
-    /// term survives by construction rather than by an arm remembering to say so.
-    @inline(always)
-    func unclassifiedSlot() -> MergeSlot {
-        return MergeSlot(accumulated: nil, mergeable: false, survives: true, merges: 0, canRemove: false)
-    }
-
-    /// `offsetOfFirstInstance[toNumericIdentity(child)]`, as a scan: the earliest term of the same
-    /// `(kind, unitType)` that `leaf` may merge into. Shared by `mergePlan` and `sumMergePlan`, which
-    /// differ only in what they do with the answer.
+    /// The `Min`/`Max` merge plan: `simplifyForMinMax`'s `offsetOfFirstInstance` plus its
+    /// `numberOfMergeOpportunities` (`:414`, `:418`).
     ///
-    /// Returns the accumulated leaf along with the index, rather than making the caller re-read it --
-    /// avoiding a fall-through where a `nil` leaf could silently look like a new first instance.
-    @inline(always)
-    func mergeTarget(_ slots: [MergeSlot], _ upTo: Int, _ leaf: NumericLeaf) -> (index: Int, accumulated: NumericLeaf)? {
-        for j in 0..<upTo where slots[j].mergeable {
-            guard let accumulated = slots[j].accumulated else {
-                continue
+    /// `~Copyable` on purpose. The table is 512 bytes, so an accidental copy would be a silent
+    /// regression of exactly the kind this change removes; making one a compile error is free.
+    struct MinMaxMergePlan: ~Copyable {
+        var offsets = MergeTable(repeating: 0)
+        var merges = 0
+
+        /// `if (!offset || (offset - 1) == i)` (`:466`), the C++'s own survivor test, asked of the
+        /// term list rather than stored per term.
+        ///
+        /// Three ways to survive, all in that one condition: a non-`Numeric` term (the C++'s
+        /// `[](const auto&)` arm), a term whose unit was never recorded -- which is how a percentage
+        /// survives when merging percentages is disallowed -- and the first instance of its unit.
+        @inline(always)
+        func survives(_ index: Int, _ folded: [Fold]) -> Bool {
+            guard case .leaf(let leaf) = folded[index] else {
+                return true
             }
-            if switchTogether(accumulated, leaf), unitsMatch(accumulated, leaf) {
-                return (j, accumulated)
-            }
+            let offset = offsets[mergeKey(leaf)]
+            return offset == 0 || Int(offset) - 1 == index
         }
-        return nil
     }
 
-    /// Phase 1 of `simplifyForMinMax` (`:418`-`:446`), as values. No dense table: `CSSUnitType` is a
-    /// bijection onto `NumericIdentity` over every leaf the tree can hold, so the merge keys on the
-    /// `unitType` already carried in `NumericLeaf` and finds a first instance with a linear scan
-    /// instead of a 512-byte table.
+    /// Phase 1 of `simplifyForMinMax` (`:418`-`:446`), and like the C++ it merges **into the term
+    /// list**: `root.children[offset - 1] = evaluate(...)` becomes `folded[target] = .leaf(...)`.
+    ///
+    /// Writing the merged value back is what removes the per-term slot array. The earlier design
+    /// carried an `accumulated` leaf per term because the tree itself is immutable here -- but the
+    /// term list is not the tree, it is this function's own local, and mutating it costs nothing that
+    /// the tree can observe.
     ///
     /// `evaluate` is `CalcExecutor.min`/`.max` (the two-`double` overload, not the signed-zero
     /// helpers). With those executors' NaN short-circuits and signed-zero symmetry, merge order can't
     /// change the result for `Min`/`Max` -- written in term order anyway since it costs nothing and
     /// `Sum` genuinely depends on it.
-    func mergePlan(_ folded: [Fold], _ isMax: Bool) -> (slots: [MergeSlot], merges: Int) {
-        var slots = [MergeSlot](repeating: unclassifiedSlot(), count: folded.count)
-        var merges = 0
+    func mergePlan(_ folded: inout [Fold], _ isMax: Bool) -> MinMaxMergePlan {
+        var plan = MinMaxMergePlan()
         // `bool canMergePercentages = !percentageResolveToDimension(options);` (`:416`).
         let canMergePercentages = !percentageResolveToDimension
 
@@ -2752,32 +2758,35 @@ private extension CalcSimplification {
                 continue
             }
 
-            // Percentage merges are skipped when disallowed; the table entry is left unset so the
-            // child survives, but its leaf is still recorded for phase 3. `simplify(Sum&)` has no such
-            // skip -- see `sumMergePlan`, which is why the two plans are separate functions.
+            // `if (id == NumericIdentity::Percentage && !canMergePercentages) return 0;` (`:423`).
+            // The bucket is left unset, which is exactly how `survives` lets the term through.
+            // `simplify(Sum&)` has no such skip -- see `sumMergePlan`, which is why the two plans are
+            // separate functions.
             if leaf.kind == .percentage, !canMergePercentages {
-                slots[i].accumulated = leaf
                 continue
             }
 
-            if let target = mergeTarget(slots, i, leaf) {
+            let key = mergeKey(leaf)
+            // The bucket's term is a leaf by construction -- only a leaf is ever recorded, and a merge
+            // only ever writes another leaf back. Re-seating rather than trapping keeps the one
+            // invariant `survives` depends on ("the recorded term is the surviving one") true even if
+            // that ever stopped holding, where dropping through would silently delete a term.
+            if plan.offsets[key] != 0, case .leaf(let first) = folded[Int(plan.offsets[key]) - 1] {
                 // The surviving alternative, unit and percent hint are the first instance's, which
-                // is exactly what `withValue` carries.
+                // is exactly what `withValue` carries -- `makeChildWithValueBasedOn(result, aNumeric)`.
                 let merged = isMax
-                    ? CalcExecutor.max(target.accumulated.value, leaf.value)
-                    : CalcExecutor.min(target.accumulated.value, leaf.value)
-                slots[target.index].accumulated = target.accumulated.withValue(merged)
-                slots[i].survives = false
-                merges += 1
-            } else {
-                // `offsetOfFirstInstance[id] = i + 1;` -- the first instance, not yet a merge
-                // opportunity.
-                slots[i].accumulated = leaf
-                slots[i].mergeable = true
+                    ? CalcExecutor.max(first.value, leaf.value)
+                    : CalcExecutor.min(first.value, leaf.value)
+                folded[Int(plan.offsets[key]) - 1] = .leaf(first.withValue(merged))
+                plan.merges += 1
+                continue
             }
+
+            // `offsetOfFirstInstance[id] = i + 1;` -- the first instance, not yet a merge opportunity.
+            plan.offsets[key] = Int32(i + 1)
         }
 
-        return (slots, merges)
+        return plan
     }
 
     // MARK: `clamp()`
@@ -2893,7 +2902,7 @@ private extension CalcSimplification {
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
         var origin: UInt32 = 0
-        let terms = collectSumTerms(node, info.childCount, &origin, builder)
+        var terms = collectSumTerms(node, info.childCount, &origin, builder)
         if let declined = terms.declined {
             return declined
         }
@@ -2904,7 +2913,7 @@ private extension CalcSimplification {
             return promoteSumTerm(terms.folds[0], terms.origins[0])
         }
 
-        let plan = sumMergePlan(terms.folds, builder)
+        let plan = sumMergePlan(&terms.folds, builder)
 
         // 1. `if (!childrenToRemoveTotal) return { };`
         if plan.removeTotal == 0 {
@@ -2914,8 +2923,9 @@ private extension CalcSimplification {
 
         // Term 0 is always the sole merge-survivor here (same proof as `foldMinMax`), so no search is
         // needed. Its `canRemove` bit is not consulted -- removals aren't applied yet at this test.
+        // Its fold is the merged value, which `sumMergePlan` wrote back over the term.
         if terms.folds.count - plan.merges == 1 {
-            return promoteSumTerm(termFold(plan.slots, terms, 0), terms.origins[0])
+            return promoteSumTerm(terms.folds[0], terms.origins[0])
         }
 
         let combined = terms.folds.count - plan.removeTotal
@@ -2928,8 +2938,8 @@ private extension CalcSimplification {
         // The C++'s scan condition (non-`Numeric`, or a first instance with `!canRemove`) is exactly
         // `survives`.
         if combined == 1 {
-            for k in 0..<plan.slots.count where plan.slots[k].survives {
-                return promoteSumTerm(termFold(plan.slots, terms, k), terms.origins[k])
+            for k in 0..<terms.folds.count where plan.survives(k, terms.folds) {
+                return promoteSumTerm(terms.folds[k], terms.origins[k])
             }
             // Cannot happen per the arithmetic above; if it did, `rebuildFrom` with zero operands is
             // refused and the tree declines, safer than the C++'s empty `Sum`.
@@ -2937,17 +2947,6 @@ private extension CalcSimplification {
 
         // 5. `root.children = WTF::move(combinedChildren); return { };`
         return .mergedChildren(.Sum)
-    }
-
-    /// A term's own result once the merge has run: the accumulated leaf for a `Numeric` term, else
-    /// the term's own fold. A function rather than an inline expression, since getting it backwards
-    /// (reading the pre-merge leaf) is silent.
-    @inline(always)
-    func termFold(_ slots: [MergeSlot], _ terms: SumTermList, _ index: Int) -> Fold {
-        if let accumulated = slots[index].accumulated {
-            return .leaf(accumulated)
-        }
-        return terms.folds[index]
     }
 
     /// Whether step 8.1 splices this child's terms into the parent instead of taking it as one term:
@@ -3028,14 +3027,14 @@ private extension CalcSimplification {
 
             if isSpliceableSum(folded) {
                 let childInfo = child.info()
-                let spliced = collectSumTerms(child, childInfo.childCount, &origin, builder)
+                var spliced = collectSumTerms(child, childInfo.childCount, &origin, builder)
                 if let declined = spliced.declined {
                     out.declined = declined
                     return out
                 }
-                let childPlan = sumMergePlan(spliced.folds, builder)
-                for k in 0..<childPlan.slots.count where childPlan.slots[k].survives {
-                    out.folds.append(termFold(childPlan.slots, spliced, k))
+                let childPlan = sumMergePlan(&spliced.folds, builder)
+                for k in 0..<spliced.folds.count where childPlan.survives(k, spliced.folds) {
+                    out.folds.append(spliced.folds[k])
                     out.origins.append(spliced.origins[k])
                 }
             } else {
@@ -3070,18 +3069,53 @@ private extension CalcSimplification {
         }
     }
 
-    /// Steps 8.2 to 8.4's first phase (`:607`-`:649`): `simplifyForMinMax`'s `mergePlan`, but with a
-    /// per-bucket `{offset, merges, canRemove}` record (outcomes need the removal count separately),
-    /// `canRemove` recomputed from the merged value on every merge rather than accumulated, and no
-    /// percentage skip (`Sum` merges percentages unconditionally, unlike `Min`/`Max`).
+    /// The `Sum` merge plan: `std::array<FirstInstance, numberOfNumericIdentityTypes> firstInstances`
+    /// (`:605`), minus the per-bucket `merges` counter, which the C++ only keeps in order to sum it at
+    /// `:644` and which a running total gives for free.
+    ///
+    /// `~Copyable` for the same reason as `MinMaxMergePlan`: 640 bytes of tables, and no copy of them
+    /// is ever wanted.
+    struct SumMergePlan: ~Copyable {
+        var offsets = MergeTable(repeating: 0)
+        /// `FirstInstance::canRemove` (`:603`) per bucket: whether this zero-valued length may be
+        /// dropped.
+        var canRemove = MergeFlags(repeating: false)
+        /// `childrenToRemoveFromMerges` (`:641`).
+        var merges = 0
+        /// `childrenToRemoveTotal` (`:642`).
+        var removeTotal = 0
+
+        /// `if ((firstInstance.offset - 1) == i && !firstInstance.canRemove)` (`:699`), the C++'s own
+        /// survivor test, plus its non-`Numeric` arm. Unlike `Min`/`Max` there is no unrecorded-unit
+        /// case: `simplify(Sum&)` records every `Numeric` term, which is why its condition has no
+        /// `!offset` half.
+        @inline(always)
+        func survives(_ index: Int, _ folded: [Fold]) -> Bool {
+            guard case .leaf(let leaf) = folded[index] else {
+                return true
+            }
+            let key = mergeKey(leaf)
+            return Int(offsets[key]) - 1 == index && !canRemove[key]
+        }
+    }
+
+    /// Steps 8.2 to 8.4's first phase (`:607`-`:649`): `mergePlan` for `Sum`, differing in that it
+    /// tracks removals as well as merges, recomputes `canRemove` from the merged value on every merge
+    /// rather than accumulating it, and has no percentage skip (`Sum` merges percentages
+    /// unconditionally, unlike `Min`/`Max`).
+    ///
+    /// Merges into the term list, as `mergePlan` does and for the same reason.
     ///
     /// Accumulation runs in term index order because `+` is not associative:
     /// `calc(1e300px + 1px + -1e300px)` depends on it.
     func sumMergePlan(
-        _ folded: [Fold],
+        _ folded: inout [Fold],
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
-    ) -> (slots: [MergeSlot], merges: Int, removeTotal: Int) {
-        var slots = [MergeSlot](repeating: unclassifiedSlot(), count: folded.count)
+    ) -> SumMergePlan {
+        var plan = SumMergePlan()
+        // `childrenToRemoveTotal`'s second half (`:647`), kept as a running count of buckets whose
+        // `canRemove` is currently set, since `canRemove` is assigned and can go back to false.
+        var removableBuckets = 0
 
         for i in 0..<folded.count {
             // `[](const auto&) { }` (`:635`): a non-`Numeric` term is never eligible for merge or
@@ -3090,47 +3124,52 @@ private extension CalcSimplification {
                 continue
             }
 
-            if let target = mergeTarget(slots, i, leaf) {
-                let merged = CalcExecutor.sum(target.accumulated.value, leaf.value)
-                slots[target.index].accumulated = target.accumulated.withValue(merged)
-                slots[target.index].merges += 1
+            let key = mergeKey(leaf)
+            // See `mergePlan` on why a non-leaf at the recorded offset re-seats the bucket rather
+            // than dropping through.
+            if plan.offsets[key] != 0, case .leaf(let first) = folded[Int(plan.offsets[key]) - 1] {
+                let merged = CalcExecutor.sum(first.value, leaf.value)
+                folded[Int(plan.offsets[key]) - 1] = .leaf(first.withValue(merged))
+                plan.merges += 1
                 // `firstInstance.canRemove = canRemoveIfZero && !mergedValue;` (`:624`), spelled as
                 // `if`/`else` rather than `&&` because `&&`'s autoclosure right operand cannot capture
-                // a `borrowing` parameter. This is an assignment, not an accumulation: a slot made
+                // a `borrowing` parameter. This is an assignment, not an accumulation: a bucket made
                 // removable by an earlier merge must be cleared when a later merge lands non-zero.
+                let removable: Bool
                 if merged == 0 {
-                    slots[target.index].canRemove = lengthRemovalAllowed(leaf, builder)
+                    removable = lengthRemovalAllowed(leaf, builder)
                 } else {
-                    slots[target.index].canRemove = false
+                    removable = false
                 }
-                slots[i].survives = false
+                if removable != plan.canRemove[key] {
+                    removableBuckets += removable ? 1 : -1
+                    plan.canRemove[key] = removable
+                }
+                continue
+            }
+
+            // `firstInstances[id] = { .offset = i + 1, .merges = 0, .canRemove = canRemoveIfZero
+            // && !child.value }` (`:629`-`:633`).
+            plan.offsets[key] = Int32(i + 1)
+            // `&&` would capture `builder` in an autoclosure; see the merge arm above.
+            let removable: Bool
+            if leaf.value == 0 {
+                removable = lengthRemovalAllowed(leaf, builder)
             } else {
-                // `firstInstances[id] = { .offset = i + 1, .merges = 0, .canRemove = canRemoveIfZero
-                // && !child.value }` (`:629`-`:633`).
-                slots[i].accumulated = leaf
-                slots[i].mergeable = true
-                // `&&` would capture `builder` in an autoclosure; see the merge arm above.
-                if leaf.value == 0 {
-                    slots[i].canRemove = lengthRemovalAllowed(leaf, builder)
-                }
+                removable = false
+            }
+            if removable != plan.canRemove[key] {
+                removableBuckets += removable ? 1 : -1
+                plan.canRemove[key] = removable
             }
         }
 
-        // `for (auto& firstInstance : firstInstances) if (firstInstance.offset) { ... }` (`:644`-`:649`),
-        // over buckets (`mergeable`), not terms.
-        var merges = 0
-        var removeTotal = 0
-        for i in 0..<slots.count where slots[i].mergeable {
-            merges += Int(slots[i].merges)
-            removeTotal += Int(slots[i].merges) + (slots[i].canRemove ? 1 : 0)
-            if slots[i].canRemove {
-                // The rebuild's own condition, `(firstInstance.offset - 1) == i && !canRemove`
-                // (`:699`), folded into the slot so every site asks it the same way.
-                slots[i].survives = false
-            }
-        }
+        // `childrenToRemoveTotal += firstInstance.merges + (firstInstance.canRemove ? 1 : 0)`
+        // (`:647`), summed over buckets. The C++'s loop over the whole table is what the two running
+        // counts replace.
+        plan.removeTotal = plan.merges + removableBuckets
 
-        return (slots, merges, removeTotal)
+        return plan
     }
 
     // MARK: `Product`'s flattened factor list
@@ -3493,19 +3532,21 @@ private extension CalcSimplification {
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
         let info = node.info()
-        let folded = foldChildren(node, info.childCount, builder)
-        let plan = mergePlan(folded, alternative == .Max)
+        var folded = foldChildren(node, info.childCount, builder)
+        let plan = mergePlan(&folded, alternative == .Max)
 
         // Carried as a `UInt32` beside the iteration rather than converted from the array's `Int`:
         // `childInTreeOrder` wants a `UInt32`.
         var index: UInt32 = 0
         var survivors: UInt32 = 0
-        for slot in plan.slots {
+        for i in 0..<folded.count {
             defer { index += 1 }
-            guard slot.survives else {
+            guard plan.survives(i, folded) else {
                 continue
             }
-            if let accumulated = slot.accumulated {
+            // A surviving `Numeric` carries the merged value, which exists nowhere in the input tree,
+            // so it is pushed as a leaf rather than re-rewritten.
+            if case .leaf(let accumulated) = folded[i] {
                 guard builder.pushLeaf(accumulated.boundaryLeaf) else {
                     // A contract violation: the leaf is synthesised here, so there is no input
                     // alternative to blame.
@@ -3535,17 +3576,17 @@ private extension CalcSimplification {
     ) -> Rewrite {
         let info = node.info()
         var origin: UInt32 = 0
-        let terms = collectSumTerms(node, info.childCount, &origin, builder)
+        var terms = collectSumTerms(node, info.childCount, &origin, builder)
         if case .declined(let blame) = terms.declined {
             // Unreachable in practice; checked rather than asserted so a broken boundary falls back
             // to the C++ arm.
             return .declined(blame)
         }
-        let plan = sumMergePlan(terms.folds, builder)
+        let plan = sumMergePlan(&terms.folds, builder)
 
         var survivors: UInt32 = 0
-        for k in 0..<plan.slots.count where plan.slots[k].survives {
-            if let accumulated = plan.slots[k].accumulated {
+        for k in 0..<terms.folds.count where plan.survives(k, terms.folds) {
+            if case .leaf(let accumulated) = terms.folds[k] {
                 // A `Numeric` survivor is pushed as a leaf, required for the same reason as
                 // `rewriteMergedChildren`: its value may have been accumulated by a nested `Sum`'s
                 // own pass and exists nowhere in the input tree.
