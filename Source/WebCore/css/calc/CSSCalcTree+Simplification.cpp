@@ -2487,6 +2487,133 @@ uint64_t webCoreCSSCalcSimplificationSwiftCallCount(void)
 {
     return s_simplificationSwiftCalls.load(std::memory_order_relaxed);
 }
+
+// Per-primitive timing, to split the island's FIXED per-whole-tree cost between the read crossing
+// and the construction upcalls. R144 left that term unattributed and it is the biggest one: an
+// operator tree costs Swift 4,197 retired instructions against the C++ arm's 1,025, and no
+// traversal-side fix touches it.
+//
+// Each case is paired with the C++ arm's equivalent for the SAME output, so the answer is a
+// like-for-like per-primitive ratio and not a bare number. Lives here rather than in the bridge
+// because `CSSCalcSwiftOperandStack` is defined in this file and a builder cannot be constructed
+// without it; the fixture tree is built directly rather than parsed, for the same reason.
+//
+// `sink` is returned so no case can be optimised away.
+uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t iterations)
+{
+    auto options = SimplificationOptions {
+        .category = CSS::Category::Length,
+        .range = CSS::All,
+        .conversionData = std::nullopt,
+        .symbolTable = { },
+        .allowZeroValueLengthRemovalFromSum = false,
+    };
+
+    // A two-child Sum of units that cannot canonicalize without conversion data, so it survives as
+    // an operator node -- the shape the ladder measures.
+    auto makeFixture = [&] {
+        Vector<Child> kids;
+        kids.append(makeChild(NonCanonicalDimension { .value = 1, .unit = CSSUnitType::Em }));
+        kids.append(makeChild(NonCanonicalDimension { .value = 2, .unit = CSSUnitType::Rem }));
+        auto sum = Sum { Children { WTF::move(kids) } };
+        auto type = toType(sum);
+        return makeChild(WTF::move(sum), type.value_or(Type { }));
+    };
+    auto fixture = makeFixture();
+    auto leafChild = makeChild(Number { .value = 1 });
+
+    // HOISTED, and that correction matters. Constructing a `CSSCalcSwiftOperandStack` inside the
+    // loop charges every iteration with the `Vector<Child>`'s first malloc and its free, which the
+    // real path pays ONCE PER WHOLE TREE and not once per leaf. Measured that way `pushLeaf` came
+    // out at 11.6x `makeChild`, and essentially all of it was the allocation. The stack is hoisted
+    // here and shrunk (not freed) between iterations, so what is timed is a STEADY-STATE push.
+    CSSCalcSwiftOperandStack hoisted;
+    hoisted.value.reserveInitialCapacity(8);
+    CSSCalcSwiftBuilder hoistedBuilder { hoisted, options };
+
+    uint64_t sink = 0;
+    for (uint32_t i = 0; i < iterations; ++i) {
+        switch (which) {
+        case 0: {  // READ: info() on a leaf -- the per-node read crossing.
+            auto info = CSSCalcSwiftNode { &leafChild }.info();
+            sink += info.childCount + static_cast<uint32_t>(info.kind);
+            break;
+        }
+        case 1: {  // READ: info() on the operator node.
+            auto info = CSSCalcSwiftNode { &fixture }.info();
+            sink += info.childCount + static_cast<uint32_t>(info.kind);
+            break;
+        }
+        case 2: {  // READ: childInTreeOrder(0) -- the accessor R144 found to be O(N) per call.
+            // The handle is bound to a named node, not to a temporary: `childInTreeOrder` is
+            // `[[clang::lifetimebound]]` on `this`, so `CSSCalcSwiftNode { &fixture }.childInTreeOrder(0)`
+            // in one expression is a dangling read (-Wdangling catches it).
+            auto parent = CSSCalcSwiftNode { &fixture };
+            auto child = parent.childInTreeOrder(0);
+            sink += static_cast<uint32_t>(child.info().kind);
+            break;
+        }
+        case 3: {  // BUILD, Swift's route: one leaf onto the operand stack, steady state.
+            sink += hoistedBuilder.pushLeaf(CSSCalcSwiftLeaf { .value = 1, .unitType = 0, .kind = 0, .percentHint = 0 }) ? 1 : 0;
+            hoisted.value.shrink(0);
+            break;
+        }
+        case 4: {  // BUILD, the C++ arm's route to the SAME leaf.
+            auto built = makeChild(Number { .value = 1 });
+            sink += built.index();
+            break;
+        }
+        case 5: {  // BUILD, Swift's route: deep-copy an input subtree.
+            CSSCalcSwiftOperandStack operands;
+            CSSCalcSwiftBuilder builder { operands, options };
+            builder.pushCopyOf(CSSCalcSwiftNode { &fixture });
+            sink += operands.value.size();
+            break;
+        }
+        case 6: {  // BUILD, the C++ arm's route to the SAME copy.
+            auto copied = copy(fixture);
+            sink += copied.index();
+            break;
+        }
+        case 7: {  // BUILD, Swift's route: two leaves plus a generic reconstruction.
+            CSSCalcSwiftOperandStack operands;
+            CSSCalcSwiftBuilder builder { operands, options };
+            builder.pushLeaf(CSSCalcSwiftLeaf { .value = 1, .unitType = 0, .kind = 0, .percentHint = 0 });
+            builder.pushLeaf(CSSCalcSwiftLeaf { .value = 2, .unitType = 0, .kind = 0, .percentHint = 0 });
+            sink += builder.rebuildFrom(CSSCalcSwiftNode { &fixture }, 2) ? 1 : 0;
+            break;
+        }
+        case 8: {  // BUILD, the C++ arm's route to the same two-child Sum.
+            auto built = makeFixture();
+            sink += built.index();
+            break;
+        }
+        case 9: {  // BUILD: `makeNumeric` alone -- the unit-classification switch `pushLeaf` routes
+                   // a Number through, re-deriving from `unitType` what Swift already stated in
+                   // `kind`. Splits pushLeaf's cost from the operand-stack append below.
+            auto built = makeNumeric(1, CSSUnitType::Number);
+            sink += built.index();
+            break;
+        }
+        case 10: {  // BUILD: the operand-stack append alone, steady state, no allocation.
+            hoisted.value.append(makeChild(Number { .value = 1 }));
+            sink += hoisted.value.size();
+            hoisted.value.shrink(0);
+            break;
+        }
+        case 11: {  // BUILD: the stack's CONSTRUCTION and destruction, once -- the per-whole-tree
+                    // cost the hoisting above removes from cases 3 and 10.
+            CSSCalcSwiftOperandStack fresh;
+            fresh.value.append(makeChild(Number { .value = 1 }));
+            sink += fresh.value.size();
+            break;
+        }
+        default:
+            return 0;
+        }
+    }
+    return sink;
+}
 #endif
 
 // The simplified tree, or `std::nullopt` to mean "run your own simplifier". Nothing done here is

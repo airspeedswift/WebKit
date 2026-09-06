@@ -268,6 +268,10 @@ uint64_t webCoreCSSCalcSimplificationLastKindMask(void);
 // unattributed decline is treated as a failure rather than as a decline.
 uint8_t webCoreCSSCalcSimplificationLastDeclineAlternative(void);
 uint64_t webCoreCSSCalcSimplificationSwiftCallCount(void);
+// Per-primitive timing, so the island's FIXED per-whole-tree cost can be split between the read
+// crossing and the construction upcalls. `which` selects the case; each is paired with the C++
+// arm's equivalent for the same output. See the definition for the case list.
+uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t iterations);
 #endif
 
 } // namespace CSSCalc

@@ -1851,6 +1851,7 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcChildAlternativeCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char*, size_t, bool, uint32_t, uint32_t*);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
 WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingCount(void);
@@ -2149,6 +2150,21 @@ WEBCORE_EXPORT void webCoreCSSCalcSimplificationSetForceDecline(bool force)
 WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationDeclineCount(void)
 {
     return s_simplifyComparisonDeclines.load(std::memory_order_relaxed);
+}
+
+// A FORWARDER, and it has to be one. Everything from `extern "C" {` at :979 is at global scope, so
+// a declaration here does NOT name `CSSCalc::webCoreCSSCalcSimplificationPrimitiveBench` -- it
+// declares a different, C-linkage function, and without this body it would simply fail to link.
+//
+// Worth spelling out because the same shape caused a wrong diagnosis: the entry immediately above
+// is likewise a forwarder, but to `s_simplifyComparisonDeclines` -- the BRIDGE's comparison
+// counter, not the island's `CSSCalc::s_simplificationDeclines`. A harness that dlsym'd
+// `webCoreCSSCalcSimplificationDeclineCount` and drove the island through some path other than the
+// comparison entries therefore read a counter that never moves, which looked exactly like "the
+// Swift arm is never reached" and was written up as a suspected ThinLTO defect. It was not.
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t iterations)
+{
+    return CSSCalc::webCoreCSSCalcSimplificationPrimitiveBench(which, iterations);
 }
 
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationHarnessCallCount(void)
