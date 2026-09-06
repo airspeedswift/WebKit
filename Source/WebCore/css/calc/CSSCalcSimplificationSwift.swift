@@ -4496,16 +4496,45 @@ struct CalcFlatNode {
     var percentHint: UInt8
 }
 
-/// The flat tree, as two reusable buffers. Reused across simplifications rather than allocated per
-/// tree: a `[CalcFlatNode]` is a refcounted buffer, and one retain/release per WHOLE TREE is
-/// acceptable where one per node would not be.
-struct CalcFlatTree {
-    var nodes: [CalcFlatNode] = []
-    var childIndices: [UInt32] = []
+/// `append(contentsOf: repeatElement(value, count: n))`, which `UniqueArray` does not provide --
+/// SE-0527 gives it `append(_:)` and the buffer-copying overloads, but no repeating append.
+///
+/// A helper rather than an open-coded loop at the call site, so the pre-allocation happens once and
+/// cannot be forgotten the next time someone needs this: `reserveCapacity` takes a TOTAL, not an
+/// increment (SE-0527: "on return, the array's capacity becomes `n`"), so it is `count + n` and a
+/// plain `reserveCapacity(n)` would be a silent no-op on any non-empty array.
+extension UniqueArray where Element: Copyable {
+    mutating func append(repeating value: Element, count n: Int) {
+        reserveCapacity(count + n)
+        for _ in 0..<n {
+            append(value)
+        }
+    }
+}
 
+/// The flat tree, as two reusable buffers.
+///
+/// `UniqueArray` (SE-0527), not `Array`. An `Array` is a copy-on-write refcounted buffer, so it
+/// carries a retain/release and a uniqueness check on mutation that this never needs -- the tree is
+/// scratch owned by exactly one simplification and is never shared. `UniqueArray` is uniquely
+/// owned and non-copyable, which is the honest shape and costs neither. Prefer it over `Array`
+/// wherever copyability is not actually wanted.
+///
+/// That makes this type `~Copyable` by containment, which is also correct: copying a half-built
+/// flat tree is not a thing any caller should be able to ask for.
+struct CalcFlatTree: ~Copyable {
+    var nodes = UniqueArray<CalcFlatNode>()
+    var childIndices = UniqueArray<UInt32>()
+
+    /// `removeAll()`, not `removeAll(keepingCapacity: true)`. SE-0527 specifies the latter on
+    /// `UniqueArray`, but the shipping toolchain has only the no-argument form -- the one the
+    /// proposal puts on `RigidArray`, documented as "preserving its allocated capacity", which is
+    /// the behaviour wanted here. A proposal promising an overload that is not there is worth a
+    /// filing; the benchmark is the check that capacity really is preserved, since if it were not,
+    /// the per-conversion malloc this hoisting exists to remove would come straight back.
     mutating func reset() {
-        nodes.removeAll(keepingCapacity: true)
-        childIndices.removeAll(keepingCapacity: true)
+        nodes.removeAll()
+        childIndices.removeAll()
     }
 
     /// Appends `node`'s subtree and returns its index.
@@ -4526,7 +4555,8 @@ struct CalcFlatTree {
 
         let start = childIndices.count
         let count = Int(info.childCount)
-        childIndices.append(contentsOf: repeatElement(0, count: count))
+        // Reserved BEFORE recursing, so a child's own appends cannot move this node's slots.
+        childIndices.append(repeating: 0, count: count)
         for i in 0..<count {
             childIndices[start + i] = append(node[i])
         }
@@ -4556,6 +4586,7 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
     var tree = CalcFlatTree()
     tree.nodes.reserveCapacity(64)
     tree.childIndices.reserveCapacity(64)
+    // `tree` is `~Copyable`, so the loop below borrows it rather than copying per iteration.
     var total: UInt32 = 0
     for _ in 0..<iterations {
         tree.reset()
