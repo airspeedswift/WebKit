@@ -1850,6 +1850,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationHarnessCallCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcChildAlternativeCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char*, size_t, bool, uint32_t, uint32_t*);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
 WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingCount(void);
@@ -2041,6 +2042,56 @@ static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree
     result.cppLength = static_cast<uint32_t>(copyOutSerialization(CSSCalc::serializationForCSS(cppTree, serializationOptions, CSSCalc::Serializer::Cpp), cppOut, cppCapacity));
     result.swiftLength = static_cast<uint32_t>(copyOutSerialization(CSSCalc::serializationForCSS(swiftTree, serializationOptions, CSSCalc::Serializer::Cpp), swiftOut, swiftCapacity));
     return result;
+}
+
+// Throughput of ONE arm of whole-tree simplification, for the round-major driver in
+// cssprobe/validate/calcbench.cpp. This island had never been timed at all: `cssbench` calls
+// `webCoreCSSTokenizerBenchIntegrated`, which builds a `CSSTokenizer` and walks the token range and
+// so never reaches the declaration parser, let alone `copyAndSimplify`. There was no instrument.
+//
+// One entry taking an ARM SELECTOR rather than two frameworks, exactly as
+// `webCoreCSSTokenizerBenchIntegrated` does: both arms then come from one binary and are
+// interleaved inside one process, so there is no cross-build drift to attribute and no framework
+// ordering to control for.
+//
+// The parse happens ONCE, outside the loop, because the thing being timed is simplification and a
+// parse costs far more than one simplification of what it produced. The caller amortises the parse
+// by passing a large `iterations`; the driver divides by it.
+//
+// `fold` exists only to stop the loop being eliminated -- the result is otherwise unused, and the
+// whole body is dead code without it. It folds the root's alternative and the tree's type so that
+// an arm returning a structurally different answer cannot fold identically.
+//
+// NOTE FOR ANYONE READING A NUMBER FROM THIS: in a build with the bridge enabled, the SWIFT arm
+// pays five relaxed atomics per whole-tree call that the C++ arm does not
+// (CSSCalcTree+Simplification.cpp:2516-2523, all `#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)`), so the
+// comparison is biased against Swift by that much. It is a per-TREE cost, not per node, and the
+// driver bounds it with a microbenchmark rather than ignoring it.
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char* text, size_t length, bool useSwift, uint32_t iterations, uint32_t* outParsed)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto parsed = parseCalcExpression(source);
+    if (outParsed)
+        *outParsed = parsed.tree ? 1 : 0;
+    if (!parsed.tree)
+        return 0;
+
+    auto options = CSSCalc::SimplificationOptions {
+        .category = parsed.category,
+        .range = WebCore::CSS::All,
+        .conversionData = std::nullopt,
+        .symbolTable = { },
+        .allowZeroValueLengthRemovalFromSum = false,
+    };
+    auto arm = useSwift ? CSSCalc::Simplifier::Swift : CSSCalc::Simplifier::Cpp;
+
+    uint64_t fold = 0;
+    for (uint32_t i = 0; i < iterations; ++i) {
+        auto simplified = CSSCalc::copyAndSimplify(*parsed.tree, options, arm);
+        fold = fold * 1000003 + static_cast<uint64_t>(simplified.root.index());
+        fold = fold * 1000003 + static_cast<uint64_t>(simplified.type.percent);
+    }
+    return fold;
 }
 
 WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplification(const char* text, size_t length, const CSSCalcSimplificationOptionsSpec* spec, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
