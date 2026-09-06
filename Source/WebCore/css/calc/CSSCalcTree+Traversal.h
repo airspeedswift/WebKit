@@ -136,5 +136,101 @@ template<typename F> void forAllChildNodes(const Child& root, const F& functor)
     WTF::switchOn(root, [&](const auto& root) { forAllChildNodes(*root, functor); });
 }
 
+// MARK: - childNodeCountOf / childNodeAt
+
+// The same set of children `forAllChildNodes` yields, answered by count and by index instead of by
+// visit.
+//
+// `forAllChildNodes` is the wrong shape for both questions: counting with it visits every child,
+// and finding the `index`th with it visits every child *and* has no early exit, so reading a node's
+// children one at a time costs O(children^2) visits. These walk the tuple SLOTS -- of which the
+// widest operation has four -- and consult a `Children`'s size rather than its elements, so both
+// are O(1) in the child count.
+//
+// Everything below mirrors `forAllChildNodes`' `Caller` case for case, deliberately: the three
+// answers have to agree about what a child is, and the cheapest way to keep them agreeing is for
+// the case lists to be diffable against each other.
+
+template<Leaf Op> uint32_t childNodeCountOf(const Op&)
+{
+    return 0;
+}
+
+template<typename Op> uint32_t childNodeCountOf(const Op& root)
+{
+    struct Caller {
+        uint32_t count { 0 };
+
+        void operator()(const Children& children) { count += children.size(); }
+        void operator()(const std::optional<Child>& root) { count += root ? 1 : 0; }
+        void operator()(const ChildOrNone& root) { count += WTF::holdsAlternative<Child>(root) ? 1 : 0; }
+        void operator()(const Child&) { ++count; }
+        void operator()(const CSS::CustomIdent&) { }
+        void operator()(const Random::Sharing&) { }
+        void operator()(const Vector<CalcMix::Item>& items) { count += items.size(); }
+    };
+    Caller caller;
+    WTF::apply([&](const auto& ...x) { (..., caller(x)); }, root);
+    return caller.count;
+}
+
+template<Leaf Op> const Child* childNodeAt(const Op&, uint32_t)
+{
+    return nullptr;
+}
+
+template<typename Op> const Child* childNodeAt(const Op& root, uint32_t index)
+{
+    struct Caller {
+        // Counts down rather than up, so a slot can answer "not mine" by subtracting its own size
+        // without needing to know how many slots came before it.
+        uint32_t remaining;
+        const Child* found { nullptr };
+
+        void operator()(const Children& children)
+        {
+            if (found)
+                return;
+            if (remaining < children.size()) {
+                found = &children[remaining];
+                return;
+            }
+            remaining -= children.size();
+        }
+        void operator()(const std::optional<Child>& root) { single(root ? &*root : nullptr); }
+        void operator()(const ChildOrNone& root) { single(get_if<Child>(&root)); }
+        void operator()(const Child& root) { single(&root); }
+        void operator()(const CSS::CustomIdent&) { }
+        void operator()(const Random::Sharing&) { }
+        void operator()(const Vector<CalcMix::Item>& items)
+        {
+            if (found)
+                return;
+            if (remaining < items.size()) {
+                found = &items[remaining].value;
+                return;
+            }
+            remaining -= items.size();
+        }
+
+        // A slot holding at most one child. `nullptr` means the slot is present in the tuple but
+        // empty -- an absent `std::optional`, or a `ChildOrNone` holding the keyword -- which
+        // `forAllChildNodes` skips and so does this.
+        void single(const Child* child)
+        {
+            if (found || !child)
+                return;
+            if (!remaining) {
+                found = child;
+                return;
+            }
+            --remaining;
+        }
+    };
+    Caller caller { .remaining = index };
+    WTF::apply([&](const auto& ...x) { (..., caller(x)); }, root);
+    return caller.found;
+}
+
 } // namespace CSSCalc
 } // namespace WebCore

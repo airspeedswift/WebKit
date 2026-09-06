@@ -288,6 +288,29 @@ struct Child {
     Child& operator=(Child&&);
     ~Child();
 
+    // MARK: The direct children of this node, by count and by index.
+    //
+    // The same set `forAllChildNodes` yields: a `ChildOrNone` holding the keyword and an absent
+    // `std::optional<Child>` are not children, and `Anchor`/`AnchorSize` are answered for by hand
+    // because they declare `tuple_size` 0 (see the FIXME at webkit.org/b/280798 below). One
+    // implementation serves both, so the count and the indices cannot disagree.
+    //
+    // Both are O(1) in the child count -- they walk the tuple SLOTS, of which the widest operation
+    // has four -- so reading a node's children one at a time is linear rather than quadratic.
+    //
+    // `operator[]` RATHER THAN A NAMED ACCESSOR, and that is not a style choice. Swift's Clang
+    // importer maps `operator[]` to a `subscript` and `operator*` to `pointee`, and those two
+    // spellings alone yield a checked BORROW of a non-copyable C++ type. The identical signature
+    // under any other name -- with `[[clang::lifetimebound]]`, and even with
+    // `swift_attr("@lifetime(borrow self)")`, which states exactly the missing fact -- imports as
+    // `UnsafePointer<Child>` and is rejected under -strict-memory-safety. Measured across sixteen
+    // arms in ~/src/webkit-swift-ports/cssprobe/childreader, with the named/operator pair declared
+    // on one class and exercised in one file; recorded as swift-cpp-interop-notes.md section 97 and
+    // filed as swift-toolchain-filings.md section 48. Renaming this to `childAt` would compile in
+    // C++ and silently remove the Swift calc island's only safe route into the tree.
+    size_t childCount() const;
+    const Child& operator[](size_t index) const LIFETIME_BOUND;
+
 #if !defined(__swift__)
     FORWARD_VARIANT_FUNCTIONS(Child, value)
 #endif
