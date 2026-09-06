@@ -2049,11 +2049,11 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
     }
 }
 
-void CSSCalcSwiftBuilder::pushCopyOf(const CSSCalcSwiftNode& node)
+void CSSCalcSwiftBuilder::pushCopyOf(const Child& node)
 {
     // `CSSCalc::copy(const Child&)`, which is what `copyAndSimplifyChildren` bottoms out in too, so
     // the two cannot disagree about what a copy is.
-    m_operands->value.append(copy(*node.m_node));
+    m_operands->value.append(copy(node));
 }
 
 void CSSCalcSwiftBuilder::pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight)
@@ -2061,16 +2061,16 @@ void CSSCalcSwiftBuilder::pushCalcMixItemWeight(uint32_t origin, double weight, 
     m_operands->calcMixWeights.append(CalcMixWeightPlan { .weight = weight, .origin = origin, .replace = replaceWeight });
 }
 
-// Defined here rather than beside `childAt` in CSSCalcTree+Serialization.cpp, where the other two
-// `CSSCalcSwiftNode` accessors live. `childInTreeOrder` had to sit next to `childNodeCount` so the
-// count and the indices come from one walker; this reads a payload no walker yields --
-// `forAllChildNodes` visits nothing for a weight -- so there is nothing here to stay in step with.
-CSSCalcSwiftCalcMixWeight CSSCalcSwiftNode::calcMixItemWeight(uint32_t index) const
+// Defined here rather than in CSSCalcTree+Serialization.cpp, where the other two node readers live:
+// those two sit next to the child walker so the count and the indices stay in step, while this
+// reads a payload no walker yields -- `forAllChildNodes` visits nothing for a weight -- so there is
+// nothing here to stay in step with.
+CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child& node, uint32_t index)
 {
     // `get_if` rather than `switchOn`, for the reason CSSCalcTree+Serialization.cpp:1322 gives at the
     // one other place a specific alternative is reached for: a generic visitor instantiates its
     // fallback once per alternative, costing ~22 KB for an answer only one kind has.
-    auto* calcMix = get_if<IndirectNode<CalcMix>>(m_node);
+    auto* calcMix = get_if<IndirectNode<CalcMix>>(&node);
     if (!calcMix || index >= (*calcMix)->children.size()) {
         // Asked about a node that is not a `CalcMix`, or about an item past the end. Not a
         // `RELEASE_ASSERT` as `childAt` uses: an out-of-range child there would be a wrong
@@ -2089,7 +2089,7 @@ CSSCalcSwiftCalcMixWeight CSSCalcSwiftNode::calcMixItemWeight(uint32_t index) co
     return { .value = 0, .present = true, .isRaw = false };
 }
 
-bool CSSCalcSwiftBuilder::rebuildFrom(const CSSCalcSwiftNode& original, uint32_t childCount)
+bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount)
 {
     auto& stack = m_operands->value;
     auto& weights = m_operands->calcMixWeights;
@@ -2109,7 +2109,7 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const CSSCalcSwiftNode& original, uint32_t
     // `childInSerializationOrder` avoided with `get_if`. It is not avoidable here and it is not new
     // cost: reconstruction genuinely is per-operation, and `copyAndSimplifyChildren` at :1786 is the
     // same instantiation over the same 41 alternatives already in the binary.
-    auto rebuilt = WTF::switchOn(*original.m_node,
+    auto rebuilt = WTF::switchOn(original,
         [&](const auto& alternative) -> std::optional<Child> {
             if constexpr (requires { *alternative; }) {
                 using Op = std::remove_cvref_t<decltype(*alternative)>;
@@ -2238,7 +2238,7 @@ static constexpr CSSCalcSwiftNumericResult resolvedCanonicalLength(double value)
 // `unresolvedNumber`.
 static constexpr CSSCalcSwiftNumericResult substituteAnchorFallback { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = true };
 
-CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const CSSCalcSwiftNode& node) const
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const Child& node) const
 {
     // The guard `simplify(SiblingCount&)`, `(SiblingIndex&)` and `(Random&)` all open with (`:528`,
     // `:538`, `:1352`). For `random()` it runs deliberately before the sharing is looked at, so a
@@ -2258,7 +2258,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const CS
     // contract violation, unreachable since this is only called from the three matching `fold` arms
     // -- so it's checked rather than asserted, falling back to the C++ path instead of reading the
     // wrong alternative.
-    if (auto* random = get_if<IndirectNode<Random>>(node.m_node)) {
+    if (auto* random = get_if<IndirectNode<Random>>(&node)) {
         // `:1375`-`:1386`: a `fixed <number>` resolves here when it is a `Raw` and answers nothing when
         // it is a `Calc`, which needs full evaluation. Deliberately not routed through
         // `resolveRandomBaseValue` below, whose fixed arm would run `Style::toStyle` and evaluate
@@ -2304,7 +2304,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const CS
     // `EvaluationOptions` is built here because it cannot cross the boundary. Note `.range` is
     // `CSS::All`, not `m_options->range`: an anchor is evaluated unclamped even inside a property
     // with a range. The four members are copied one for one from `:1697`-`:1702`.
-    if (auto* anchor = get_if<IndirectNode<Anchor>>(node.m_node)) {
+    if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
         auto result = evaluateWithoutFallback(**anchor, EvaluationOptions {
             .category = m_options->category,
             .range = CSS::All,
@@ -2321,7 +2321,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const CS
     // `Style::ScopedName` needs, and neither is expressible across the boundary -- the same reason
     // the `<random-key>` handling above stays here: it would require transcribing an `AtomString`
     // and a scope ordinal to build a value only C++ consumes.
-    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(node.m_node)) {
+    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
         std::optional<Style::ScopedName> anchorSizeScopedName;
         if ((*anchorSize)->elementName) {
             anchorSizeScopedName = Style::ScopedName {
@@ -2351,9 +2351,9 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const CS
     // `simplify(SiblingCount&)` and `simplify(SiblingIndex&)` (`:527`-`:544`), whole. `siblingIndex()`
     // is 1-based; `siblingCount()` is a count. Dispatch is read directly from the node's variant
     // tag, so the two can never be swapped across the boundary.
-    if (WTF::holdsAlternative<SiblingCount>(*node.m_node))
+    if (WTF::holdsAlternative<SiblingCount>(node))
         return resolvedNumber(static_cast<double>(builderState->siblingCount()));
-    if (WTF::holdsAlternative<SiblingIndex>(*node.m_node))
+    if (WTF::holdsAlternative<SiblingIndex>(node))
         return resolvedNumber(static_cast<double>(builderState->siblingIndex()));
     return unresolvedNumber;
 }
@@ -2566,7 +2566,7 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
         case 5: {  // BUILD, Swift's route: deep-copy an input subtree.
             CSSCalcSwiftOperandStack operands;
             CSSCalcSwiftBuilder builder { operands, options };
-            builder.pushCopyOf(CSSCalcSwiftNode { &fixture });
+            builder.pushCopyOf(fixture);
             sink += operands.value.size();
             break;
         }
@@ -2580,7 +2580,7 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
             CSSCalcSwiftBuilder builder { operands, options };
             builder.pushLeaf(CSSCalcSwiftLeaf { .value = 1, .unitType = 0, .kind = 0, .percentHint = 0 });
             builder.pushLeaf(CSSCalcSwiftLeaf { .value = 2, .unitType = 0, .kind = 0, .percentHint = 0 });
-            sink += builder.rebuildFrom(CSSCalcSwiftNode { &fixture }, 2) ? 1 : 0;
+            sink += builder.rebuildFrom(fixture, 2) ? 1 : 0;
             break;
         }
         case 8: {  // BUILD, the C++ arm's route to the same two-child Sum.
@@ -2637,7 +2637,7 @@ static std::optional<Tree> trySimplifyWithSwiftIsland(const Tree& tree, const Si
         .percentageResolveToDimension = percentageResolveToDimension(options),
     };
 
-    auto result = cssCalcSimplifySwift(CSSCalcSwiftNode { &tree.root }, builder, swiftOptions);
+    auto result = cssCalcSimplifySwift(tree.root, builder, swiftOptions);
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
     s_simplificationSwiftCalls.fetch_add(1, std::memory_order_relaxed);
@@ -2743,7 +2743,7 @@ bool canSimplify(const Tree& tree, const SimplificationOptions& options, Simplif
     // alternatives -- a `switch` on a discriminant with no operand to fail on -- so there is no
     // decline to fall back from.
     if (simplifier == Simplifier::Swift)
-        return cssCalcCanSimplifySwift(CSSCalcSwiftNode { &tree.root });
+        return cssCalcCanSimplifySwift(tree.root);
 
     return canSimplifyWithCpp(tree, options);
 }

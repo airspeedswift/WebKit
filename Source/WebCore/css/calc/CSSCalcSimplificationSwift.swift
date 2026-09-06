@@ -21,9 +21,21 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 // THE POSSIBILITY OF SUCH DAMAGE.
 
-// Only these boundary types are imported, not the WebCore_Private umbrella; see
-// CSSCalcSwiftTypes.h.
+// The boundary's POD record types -- `CSSCalcSwiftNodeInfo`, the builder, the result -- and the
+// three free functions that read a node's scalars. See CSSCalcSwiftTypes.h.
 public import WebCore_Private.CSSCalcSwiftTypes
+
+// `CSSCalc::Child` itself: this file walks the REAL tree, not a handle over it.
+//
+// `Child::operator[]` yields a checked borrow of a child and `Child::childCount()` bounds the loop,
+// so the `CSSCalcSwiftNode` accessor facade is off the reading path entirely. The subscript
+// spelling is load-bearing rather than stylistic -- CSSCalcTree.h explains why at the declaration,
+// and rdar://140443562 is the upstream item that would let it be a named accessor.
+//
+// This is the WebCore_Private umbrella, which CSSCalcSwiftTypes.h's header comment used to say
+// could not be imported at all. It can (R139); `Child` and every operation are safe types once
+// their pointer-bearing members are hidden, which CSSCalcTree.h does.
+internal import WebCore_Private.Core
 
 // The CSS unit vocabulary plus the conversion constants `canonicalize` multiplies by.
 //
@@ -915,14 +927,14 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
 /// calc trees are shallow and no Swift container accepts a `~Escapable` element. Walks the whole tree
 /// even after the first decline, so the mask describes the full tree rather than a truncated prefix.
 private func walk(
-    _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+    _ node: borrowing WebCore.CSSCalc.Child,
     _ nodeCount: inout UInt32,
     _ kindMask: inout UInt64,
     _ blame: inout CalcAlternative?
 ) -> Bool {
     // One crossing per node: `info()` answers the discriminant, the child count and every POD
     // payload together, because they all come off the same variant tag.
-    let info = node.info()
+    let info = WebCore.CSSCalc.swiftNodeInfo(node)
     nodeCount += 1
 
     kindMask |= UInt64(1) << UInt64(info.alternative.rawValue)
@@ -938,7 +950,7 @@ private func walk(
     while index < info.childCount {
         // Tree order, not serialization order: `childAt` sorts a `Sum`'s/`Product`'s children by unit for
         // the serializer, which would silently permute a multi-unit sum here.
-        if !walk(node.childInTreeOrder(index), &nodeCount, &kindMask, &blame) {
+        if !walk(node[Int(index)], &nodeCount, &kindMask, &blame) {
             everyNodeSimplifiable = false
         }
         index += 1
@@ -1074,15 +1086,15 @@ private struct CalcSimplification {
 private extension CalcSimplification {
 
     /// `simplify(Invert&)` (`+Simplification.cpp:962`-`:979`). Rule 7.2 (`Invert(Invert(x))` -> `x`)
-    /// reaches a grandchild via `childInTreeOrder`/`.replacedByGrandchild`, no boundary change needed.
+    /// reaches a grandchild via the child subscript and `.replacedByGrandchild`, no boundary change needed.
     /// Rule 7.1 folds only a `<number>`, so `Invert(Invert(50%))` reaches 7.2 with a `Percentage`
     /// grandchild; `promoteGrandchild` reports it as a leaf so an enclosing `Product` still folds it.
     @inline(always)
     func foldInvert(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
-        let a = fold(node.childInTreeOrder(0), builder)
+        let a = fold(node[0], builder)
         switch a {
         case .leaf(let leaf):
             guard leaf.kind == .number else {
@@ -1119,11 +1131,10 @@ private extension CalcSimplification {
     /// gaps, not catch-alls.
     @inline(always)
     func foldNegate(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
-        let child = node.childInTreeOrder(0)
-        let a = fold(child, builder)
+        let a = fold(node[0], builder)
         switch a {
         case .leaf(let leaf):
             // 6.1. The unary minus above.
@@ -1137,7 +1148,7 @@ private extension CalcSimplification {
             }
             if childAlternative == .Sum || childAlternative == .Product {
                 // 6.3 / 6.4 on an arity-preserving child.
-                if numericChildren(child, a, builder) != nil {
+                if numericChildren(node[0], a, builder) != nil {
                     return .negatedChildren
                 }
             }
@@ -1150,7 +1161,7 @@ private extension CalcSimplification {
                 // 6.4 over a `Product` whose factor list step 9.1/9.2 changed. Reaching this arm does
                 // NOT require every factor numeric -- `productHasNonNumericFactor` looks for one
                 // witness that isn't, which is enough to answer `.unchanged` rather than decline.
-                if productHasNonNumericFactor(child, builder) {
+                if productHasNonNumericFactor(node[0], builder) {
                     return .unchanged(.Negate)
                 }
                 // No witness: every child folded to `Numeric` or a spliceable `Product`, and this
@@ -1160,7 +1171,7 @@ private extension CalcSimplification {
             }
             if childAlternative == .Sum {
                 // 6.3 over a `Sum` whose term list step 8.1 spliced or whose terms merged.
-                if numericChildren(child, a, builder) != nil {
+                if numericChildren(node[0], a, builder) != nil {
                     return .negatedChildren
                 }
             }
@@ -1191,7 +1202,7 @@ private extension CalcSimplification {
     /// child's post-simplification list (not the parser's original), as leaves. `nil` means at least
     /// one child is not numeric; every survivor is a leaf whenever this returns non-`nil`.
     func numericChildren(
-        _ child: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ child: borrowing WebCore.CSSCalc.Child,
         _ folded: Fold,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> [NumericLeaf]? {
@@ -1203,14 +1214,14 @@ private extension CalcSimplification {
             // `.unchanged` is the arity-preserving case by definition -- see `Fold.mergedChildren` on
             // why the two are kept apart -- so the final list IS the node's own children in tree
             // order.
-            let info = child.info()
+            let info = WebCore.CSSCalc.swiftNodeInfo(child)
             var leaves: [NumericLeaf] = []
             // `Int(clamping:)` for the capacity HINT, as `foldChildren` explains: saturating cannot be
             // wrong here, because `append` grows regardless.
             leaves.reserveCapacity(Int(clamping: info.childCount))
             var index: UInt32 = 0
             while index < info.childCount {
-                guard case .leaf(let leaf) = fold(child.childInTreeOrder(index), builder) else {
+                guard case .leaf(let leaf) = fold(child[Int(index)], builder) else {
                     return nil
                 }
                 leaves.append(leaf)
@@ -1225,7 +1236,7 @@ private extension CalcSimplification {
                 // derive" as distinct from "not numeric".
                 return nil
             }
-            let info = child.info()
+            let info = WebCore.CSSCalc.swiftNodeInfo(child)
             var origin: UInt32 = 0
             var terms = collectSumTerms(child, info.childCount, &origin, builder)
             if terms.declined != nil {
@@ -1261,13 +1272,13 @@ private extension CalcSimplification {
     /// `Product` factor (step 9.1 replaces it with its own children, which can all be numeric), which
     /// is not a witness and is answered `false` rather than recursed into.
     func productHasNonNumericFactor(
-        _ child: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ child: borrowing WebCore.CSSCalc.Child,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Bool {
-        let info = child.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(child)
         var index: UInt32 = 0
         while index < info.childCount {
-            let folded = fold(child.childInTreeOrder(index), builder)
+            let folded = fold(child[Int(index)], builder)
             switch folded {
             case .leaf:
                 // A `Numeric`: `isNumeric` is true for it, so it is not a witness.
@@ -1302,7 +1313,7 @@ private extension CalcSimplification {
     /// `Type::multiply`/`invert`/etc., not reimplementing them), 9.5 is "return root". `.mergedChildren`
     /// is reported unless no factor was spliced or folded, i.e. the list is unchanged.
     func foldProduct(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
@@ -1857,10 +1868,10 @@ private extension CalcSimplification {
     /// `pushCopyOf`, `rebuildFrom` and `buildMinMax` are all `mutating` in Swift and can't be called
     /// on a borrow, which makes "pushes nothing" compiler-checked rather than a comment.
     func fold(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         let alternative = info.alternative
 
         switch alternative {
@@ -1915,7 +1926,7 @@ private extension CalcSimplification {
             return foldProduct(node, info, builder)
 
         case .Deg2Rad:
-            return foldDeg2Rad(fold(node.childInTreeOrder(0), builder))
+            return foldDeg2Rad(fold(node[0], builder))
 
         case .Min:
             return foldMinMax(node, info, false, builder)
@@ -1929,41 +1940,41 @@ private extension CalcSimplification {
             return foldClamp(node, info, builder)
 
         case .RoundNearest:
-            return foldRound(fold(node.childInTreeOrder(0), builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundNearest)
+            return foldRound(fold(node[0], builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundNearest)
         case .RoundUp:
-            return foldRound(fold(node.childInTreeOrder(0), builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundUp)
+            return foldRound(fold(node[0], builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundUp)
         case .RoundDown:
-            return foldRound(fold(node.childInTreeOrder(0), builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundDown)
+            return foldRound(fold(node[0], builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundDown)
         case .RoundToZero:
-            return foldRound(fold(node.childInTreeOrder(0), builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundToZero)
+            return foldRound(fold(node[0], builder), secondOperand(node, info, builder), alternative, CalcExecutor.roundToZero)
 
         case .Mod:
-            return foldBinaryOperation(fold(node.childInTreeOrder(0), builder), fold(node.childInTreeOrder(1), builder), alternative, CalcExecutor.mod)
+            return foldBinaryOperation(fold(node[0], builder), fold(node[1], builder), alternative, CalcExecutor.mod)
         case .Rem:
-            return foldBinaryOperation(fold(node.childInTreeOrder(0), builder), fold(node.childInTreeOrder(1), builder), alternative, CalcExecutor.rem)
+            return foldBinaryOperation(fold(node[0], builder), fold(node[1], builder), alternative, CalcExecutor.rem)
 
         case .Sin:
-            return reshape(simplifyForTrigOperand(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.sin), alternative)
+            return reshape(simplifyForTrigOperand(fold(node[0], builder), alternative, CalcExecutor.sin), alternative)
         case .Cos:
-            return reshape(simplifyForTrigOperand(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.cos), alternative)
+            return reshape(simplifyForTrigOperand(fold(node[0], builder), alternative, CalcExecutor.cos), alternative)
         case .Tan:
-            return reshape(simplifyForTrigOperand(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.tan), alternative)
+            return reshape(simplifyForTrigOperand(fold(node[0], builder), alternative, CalcExecutor.tan), alternative)
 
         case .Asin:
-            return reshape(simplifyForArcTrigOperand(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.asin), alternative)
+            return reshape(simplifyForArcTrigOperand(fold(node[0], builder), alternative, CalcExecutor.asin), alternative)
         case .Acos:
-            return reshape(simplifyForArcTrigOperand(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.acos), alternative)
+            return reshape(simplifyForArcTrigOperand(fold(node[0], builder), alternative, CalcExecutor.acos), alternative)
         case .Atan:
-            return reshape(simplifyForArcTrigOperand(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.atan), alternative)
+            return reshape(simplifyForArcTrigOperand(fold(node[0], builder), alternative, CalcExecutor.atan), alternative)
 
         case .Atan2:
-            return foldAtan2(fold(node.childInTreeOrder(0), builder), fold(node.childInTreeOrder(1), builder))
+            return foldAtan2(fold(node[0], builder), fold(node[1], builder))
 
         case .Pow:
-            return foldTwoNumbers(fold(node.childInTreeOrder(0), builder), fold(node.childInTreeOrder(1), builder), alternative, CalcExecutor.pow)
+            return foldTwoNumbers(fold(node[0], builder), fold(node[1], builder), alternative, CalcExecutor.pow)
 
         case .Sqrt:
-            return foldOneNumber(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.sqrt)
+            return foldOneNumber(fold(node[0], builder), alternative, CalcExecutor.sqrt)
 
         case .Hypot:
             return foldHypot(node, info, builder)
@@ -1974,32 +1985,32 @@ private extension CalcSimplification {
             // overloads, and the C++ picks between them on `root.b` exactly as this picks on the
             // child count.
             if let base = secondOperand(node, info, builder) {
-                return foldTwoNumbers(fold(node.childInTreeOrder(0), builder), base, alternative, CalcExecutor.log)
+                return foldTwoNumbers(fold(node[0], builder), base, alternative, CalcExecutor.log)
             }
-            return foldOneNumber(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.log)
+            return foldOneNumber(fold(node[0], builder), alternative, CalcExecutor.log)
 
         case .Exp:
-            return foldOneNumber(fold(node.childInTreeOrder(0), builder), alternative, CalcExecutor.exp)
+            return foldOneNumber(fold(node[0], builder), alternative, CalcExecutor.exp)
 
         case .Abs:
-            return foldAbs(fold(node.childInTreeOrder(0), builder))
+            return foldAbs(fold(node[0], builder))
 
         case .Sign:
-            return foldSign(fold(node.childInTreeOrder(0), builder))
+            return foldSign(fold(node[0], builder))
 
         case .Progress:
             return foldProgress(
-                fold(node.childInTreeOrder(0), builder),
-                fold(node.childInTreeOrder(1), builder),
-                fold(node.childInTreeOrder(2), builder),
+                fold(node[0], builder),
+                fold(node[1], builder),
+                fold(node[2], builder),
                 alternative,
                 CalcExecutor.progress
             )
         case .ProgressNoClamp:
             return foldProgress(
-                fold(node.childInTreeOrder(0), builder),
-                fold(node.childInTreeOrder(1), builder),
-                fold(node.childInTreeOrder(2), builder),
+                fold(node[0], builder),
+                fold(node[1], builder),
+                fold(node[2], builder),
                 alternative,
                 CalcExecutor.progressNoClamp
             )
@@ -2094,7 +2105,7 @@ private extension CalcSimplification {
     /// its integer result to a `Number` via `static_cast<double>`, as the C++ does.
     @inline(always)
     func foldSiblingFunction(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ alternative: CalcAlternative,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
@@ -2116,16 +2127,16 @@ private extension CalcSimplification {
     /// over percentages keeps `min`'s percent hint.
     @inline(always)
     func foldRandom(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
-        let minimumFold = fold(node.childInTreeOrder(0), builder)
+        let minimumFold = fold(node[0], builder)
         guard case .leaf(let minimum) = minimumFold else {
             return foldFailed(minimumFold, .Random)
         }
 
-        let maximumFold = fold(node.childInTreeOrder(1), builder)
+        let maximumFold = fold(node[1], builder)
         guard case .leaf(let maximum) = maximumFold else {
             return foldFailed(maximumFold, .Random)
         }
@@ -2137,7 +2148,7 @@ private extension CalcSimplification {
         // argument and `log()`'s base.
         var step: Double? = nil
         if info.childCount > 2 {
-            let stepChildFold = fold(node.childInTreeOrder(2), builder)
+            let stepChildFold = fold(node[2], builder)
             guard case .leaf(let stepLeaf) = stepChildFold else {
                 return foldFailed(stepChildFold, .Random)
             }
@@ -2187,12 +2198,12 @@ private extension CalcSimplification {
     /// too. The child count and `operationInfo()`'s record must agree, or this declines.
     @inline(always)
     func foldAnchorFunction(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ alternative: CalcAlternative,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
-        let operation = node.operationInfo()
+        let operation = WebCore.CSSCalc.swiftOperationInfo(node)
         let fallbackIndex = anchorFallbackIndex(alternative, operation)
         guard fallbackIndex + (operation.hasFallback ? 1 : 0) == info.childCount else {
             return .declined(alternative)
@@ -2213,7 +2224,7 @@ private extension CalcSimplification {
             // Done in `fold` rather than `rewrite`, since a parent that folds this node away never
             // calls `rewrite` on it at all.
             if operation.hasFallback {
-                _ = fold(node.childInTreeOrder(fallbackIndex), builder)
+                _ = fold(node[Int(fallbackIndex)], builder)
             }
 
             return .leaf(NumericLeaf(
@@ -2229,7 +2240,7 @@ private extension CalcSimplification {
             // child itself, so a `Numeric` fallback must reach the parent as a `.leaf` or the parent
             // (e.g. a wrapping `Sum`) will treat it as an opaque subtree and fail to fold
             // (`calc(anchor(top, 1px) + 1em)` must become `17px`, not `calc(1px + 16px)`).
-            return promoteTerm(fold(node.childInTreeOrder(fallbackIndex), builder), fallbackIndex)
+            return promoteTerm(fold(node[Int(fallbackIndex)], builder), fallbackIndex)
         }
 
         // Both remaining dispositions rebuild the node with its simplified fallback; they differ only
@@ -2354,14 +2365,14 @@ private extension CalcSimplification {
     /// later.
     @inline(always)
     func secondOperand(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold? {
         guard info.childCount > 1 else {
             return nil
         }
-        return fold(node.childInTreeOrder(1), builder)
+        return fold(node[1], builder)
     }
 
     /// `simplifyForTrig` over an already-folded operand.
@@ -2423,7 +2434,7 @@ private extension CalcSimplification {
     /// `Vector` on too.
     @inline(always)
     func withFoldedChildren<R: ~Copyable>(
-        _ node: WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ childCount: UInt32,
         _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder,
         _ body: (inout OutputSpan<Fold>) -> R
@@ -2434,7 +2445,7 @@ private extension CalcSimplification {
         return withTemporaryAllocation(of: Fold.self, capacity: Int(clamping: childCount)) { folded in
             var index: UInt32 = 0
             while index < childCount {
-                folded.append(fold(node.childInTreeOrder(index), builder))
+                folded.append(fold(node[Int(index)], builder))
                 index += 1
             }
             return body(&folded)
@@ -2480,13 +2491,12 @@ private extension CalcSimplification {
     /// "the child didn't fold" doesn't imply "the grandchild isn't a leaf".
     @inline(always)
     func promoteGrandchild(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ child: UInt32,
         _ grandchild: UInt32,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
-        let inner = node.childInTreeOrder(child)
-        switch fold(inner.childInTreeOrder(grandchild), builder) {
+        switch fold(node[Int(child)][Int(grandchild)], builder) {
         case .leaf(let leaf):
             return .leaf(leaf)
         case .declined(let blame):
@@ -2525,7 +2535,7 @@ private extension CalcSimplification {
     /// Only ever runs over `.leaf` children: any other `Fold` case means `simplify` did not produce a
     /// `Numeric`, which `hypotElement` maps to `.failed` in one place.
     func foldHypot(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
@@ -2676,7 +2686,7 @@ private extension CalcSimplification {
     /// `n - merges == 1` -> return child 0; otherwise -> survivors replace the children
     /// (`.mergedChildren`, which the C++'s single `nullopt` can't distinguish from the no-merges case).
     func foldMinMax(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ isMax: Bool,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
@@ -2815,12 +2825,12 @@ private extension CalcSimplification {
     /// two); one bound `none` -> fold if it agrees with `val`, else convert to `min()`/`max()`;
     /// neither `none` -> fold if all three agree, else rebuild (no conversion in this branch).
     ///
-    /// `Clamp`'s tuple skips an absent bound in tree order, so `childInTreeOrder` already gives
+    /// `Clamp`'s tuple skips an absent bound in tree order, so the child subscript already gives
     /// `[val, max]` / `[min, val]` / `[val]` / `[min, val, max]`. `childCount` gives the arity and
     /// `info.kind`'s `ClampWithNoneMinimum`/`ClampWithNoneMaximum` says which bound is absent when the
     /// arity is 2; the two are cross-checked and a mismatch declines.
     func foldClamp(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
@@ -2917,7 +2927,7 @@ private extension CalcSimplification {
     /// kind", but `root.children` was already replaced by the flattened term list, so it needs
     /// `.mergedChildren(.Sum)`. The arity-one check (`:594`) is on the flattened count.
     func foldSum(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
@@ -3004,7 +3014,7 @@ private extension CalcSimplification {
         }
     }
 
-    /// One `Sum`'s flattened term list, as values -- no node handle, since `CSSCalcSwiftNode` is
+    /// One `Sum`'s flattened term list, as values -- no node handle, since a borrowed `Child` is
     /// `~Escapable` and no Swift container accepts one. Everything here is `Copyable`/`Escapable`, so
     /// the list can be freely returned and walked.
     struct SumTermList {
@@ -3024,7 +3034,7 @@ private extension CalcSimplification {
     /// exponential in nested-`Sum` depth in theory, but `parseAndSimplify` flattens nested sums during
     /// the parse, so no stylesheet-derived tree nests here in practice.
     func collectSumTerms(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ childCount: UInt32,
         _ origin: inout UInt32,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
@@ -3036,8 +3046,7 @@ private extension CalcSimplification {
 
         var index: UInt32 = 0
         while index < childCount {
-            let child = node.childInTreeOrder(index)
-            let folded = fold(child, builder)
+            let folded = fold(node[Int(index)], builder)
             if case .declined = folded {
                 // Checked here, not by a sweep afterwards: a declined grandchild must stop the walk
                 // before the parent's plan is computed over a list missing terms.
@@ -3046,8 +3055,8 @@ private extension CalcSimplification {
             }
 
             if isSpliceableSum(folded) {
-                let childInfo = child.info()
-                var spliced = collectSumTerms(child, childInfo.childCount, &origin, builder)
+                let childInfo = WebCore.CSSCalc.swiftNodeInfo(node[Int(index)])
+                var spliced = collectSumTerms(node[Int(index)], childInfo.childCount, &origin, builder)
                 if let declined = spliced.declined {
                     out.declined = declined
                     return out
@@ -3194,7 +3203,7 @@ private extension CalcSimplification {
 
     // MARK: `Product`'s flattened factor list
 
-    /// One surviving factor of a `Product`, as values -- `CSSCalcSwiftNode` is `~Escapable`, so no
+    /// One surviving factor of a `Product`, as values -- a borrowed `Child` is `~Copyable`, so no
     /// Swift container can hold the node itself. Carries two answers steps 9.3 and 9.4 need but a bare
     /// `Fold` cannot give: whether a `Sum` factor's children are all numeric, and what an `Invert`
     /// factor's `a` folded to. Computed once here rather than by a re-walk per question.
@@ -3243,7 +3252,7 @@ private extension CalcSimplification {
     /// alternative this file does not carry cannot be treated as opaque, since 9.1/9.3/9.4 all branch
     /// on it. See `classifyProductFactor`.
     func productFactors(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ childCount: UInt32,
         _ origin: inout UInt32,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
@@ -3255,8 +3264,7 @@ private extension CalcSimplification {
 
         var index: UInt32 = 0
         while index < childCount {
-            let child = node.childInTreeOrder(index)
-            let folded = fold(child, builder)
+            let folded = fold(node[Int(index)], builder)
             if case .declined = folded {
                 out.declined = folded
                 return out
@@ -3265,8 +3273,8 @@ private extension CalcSimplification {
             if isSpliceableProduct(folded) {
                 // 9.1. `for (auto& childProductChild : (*childProduct)->children) processChild(...)`.
                 out.spliced = true
-                let childInfo = child.info()
-                let spliced = productFactors(child, childInfo.childCount, &origin, builder)
+                let childInfo = WebCore.CSSCalc.swiftNodeInfo(node[Int(index)])
+                let spliced = productFactors(node[Int(index)], childInfo.childCount, &origin, builder)
                 if let declined = spliced.declined {
                     out.declined = declined
                     return out
@@ -3279,7 +3287,7 @@ private extension CalcSimplification {
                 // 9.2 (`:733`-`:737`).
                 out.numericProduct = multipliedNumericProduct(leaf.value, out.numericProduct)
                 origin += 1
-            } else if let factor = classifyProductFactor(child, folded, origin, builder) {
+            } else if let factor = classifyProductFactor(node[Int(index)], folded, origin, builder) {
                 // `newChildren.append(WTF::move(child))` (`:739`).
                 out.survivors.append(factor)
                 origin += 1
@@ -3311,7 +3319,7 @@ private extension CalcSimplification {
     /// The `Invert` probe re-folds the grandchild `foldInvert` already folded, trading a repeat fold
     /// for avoiding a whole ordinal re-walk per `Invert` factor.
     func classifyProductFactor(
-        _ child: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ child: borrowing WebCore.CSSCalc.Child,
         _ folded: Fold,
         _ origin: UInt32,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
@@ -3326,7 +3334,7 @@ private extension CalcSimplification {
             if alternative == .Invert {
                 // `invert->a`, folded: an `Invert` surviving as `Invert` means `a` is a
                 // `Percentage`, `CanonicalDimension`, `NonCanonicalDimension`, or non-`Numeric`.
-                let inner = fold(child.childInTreeOrder(0), builder)
+                let inner = fold(child[0], builder)
                 if case .leaf(let leaf) = inner {
                     return ProductFactor(fold: folded, origin: origin, invertedLeaf: leaf, numericSum: false)
                 }
@@ -3387,7 +3395,7 @@ private extension CalcSimplification {
     /// Unlike the coverage walk, this stops at the first decline -- there is nothing left to learn,
     /// and the walk's mask/count already describe the whole tree.
     func rewrite(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
         switch fold(node, builder) {
@@ -3403,7 +3411,7 @@ private extension CalcSimplification {
         case .replacedByTerm(let child):
             // `return { WTF::move(root.children[i]) }`: pushes one operand for the named child and
             // nothing for the node itself, avoiding any need for `pop`.
-            return rewrite(node.childInTreeOrder(child), &builder)
+            return rewrite(node[Int(child)], &builder)
 
         case .replacedBySumTerm(let origin):
             // The same thing for a `Sum`, whose terms are not its children: step 8.1 spliced them in
@@ -3432,11 +3440,10 @@ private extension CalcSimplification {
 
         case .replacedByGrandchild(let child, let grandchild):
             // `Negate`'s rule 6.2 and `Invert`'s rule 7.2: `return { WTF::move(a->a) }`, one level
-            // deeper than `.replacedByTerm`. The intermediate `let` is required: `childInTreeOrder`
-            // returns a `~Escapable` view, and chaining two in one expression has nothing to borrow
-            // from.
-            let inner = node.childInTreeOrder(child)
-            return rewrite(inner.childInTreeOrder(grandchild), &builder)
+            // deeper than `.replacedByTerm`. Chained subscripts: each yields a borrow of the one
+            // before it, which the old `~Escapable` handle could not express -- it needed an
+            // intermediate `let`, and a `let` is exactly what a borrowed `Child` cannot be bound to.
+            return rewrite(node[Int(child)][Int(grandchild)], &builder)
 
         case .negatedChildren:
             return rewriteNegatedChildren(node, &builder)
@@ -3458,11 +3465,10 @@ private extension CalcSimplification {
     /// The unary minus (`:934`, `:949`: `child.value = -child.value`) flips a NaN's sign bit rather
     /// than propagating it -- not the same as `* -1.0`; see `Fold.scaledSumChildren`.
     func rewriteNegatedChildren(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let child = node.childInTreeOrder(0)
-        guard let leaves = numericChildren(child, fold(child, builder), builder) else {
+        guard let leaves = numericChildren(node[0], fold(node[0], builder), builder) else {
             // Unreachable: `fold` returned `.negatedChildren`, which it does only after this same call
             // returned a list. Checked rather than asserted, so that a boundary that came apart is a
             // fallback to the C++ arm and not a node rebuilt from operands that were never pushed.
@@ -3483,7 +3489,7 @@ private extension CalcSimplification {
 
         // `rebuildSlot(const Children&)` takes all remaining operands and ignores the original's
         // count, which is what lets the arity change.
-        return builder.rebuildFrom(child, pushed) ? .pushed : .declined(.Negate)
+        return builder.rebuildFrom(node[0], pushed) ? .pushed : .declined(.Negate)
     }
 
     /// `rebuild` for a surviving `anchor()`/`anchor-size()`: the fallback is the only operand, and the
@@ -3495,18 +3501,18 @@ private extension CalcSimplification {
     /// The coverage walk still descends into the side, so an untaught alternative there declines the
     /// whole tree -- conservative, since the C++ arm would have copied it regardless.
     func rebuildAnchor(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ alternative: CalcAlternative,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let operation = node.operationInfo()
+        let operation = WebCore.CSSCalc.swiftOperationInfo(node)
 
         // Named `pushedFallback`, not `pushed`: the selftest's control asserts each `pushed`-style
         // counter name is unique in the file, and a second `pushed` would collide with
         // `rewriteNegatedChildren`'s.
         var pushedFallback: UInt32 = 0
         if operation.hasFallback {
-            let fallback = rewrite(node.childInTreeOrder(anchorFallbackIndex(alternative, operation)), &builder)
+            let fallback = rewrite(node[Int(anchorFallbackIndex(alternative, operation))], &builder)
             if case .declined(let blame) = fallback {
                 return .declined(blame)
             }
@@ -3525,13 +3531,13 @@ private extension CalcSimplification {
     /// Exact regardless, since the C++ arm then rebuilds the `Clamp` itself. Expected never to fire in
     /// practice, since the parser's own type check should make the mismatch unreachable.
     func rewriteConvertedMinMax(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ isMax: Bool,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
         var index: UInt32 = 0
         while index < 2 {
-            if case .declined(let blame) = rewrite(node.childInTreeOrder(index), &builder) {
+            if case .declined(let blame) = rewrite(node[Int(index)], &builder) {
                 return .declined(blame)
             }
             index += 1
@@ -3547,16 +3553,16 @@ private extension CalcSimplification {
     /// optimisation, since a merged first instance's value is `evaluate(...)`'s result and exists
     /// nowhere in the input tree.
     func rewriteMergedChildren(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ alternative: CalcAlternative,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         return withFoldedChildren(node, info.childCount, builder) { folded -> Rewrite in
             let plan = mergePlan(&folded, alternative == .Max)
 
             // Carried as a `UInt32` beside the iteration rather than converted from the buffer's `Int`:
-            // `childInTreeOrder` wants a `UInt32`.
+            // the child subscript wants an `Int`.
             var index: UInt32 = 0
             var survivors: UInt32 = 0
             for i in 0..<folded.count {
@@ -3572,7 +3578,7 @@ private extension CalcSimplification {
                         // alternative to blame.
                         return .declined(nil)
                     }
-                } else if case .declined(let blame) = rewrite(node.childInTreeOrder(index), &builder) {
+                } else if case .declined(let blame) = rewrite(node[Int(index)], &builder) {
                     return .declined(blame)
                 }
                 survivors += 1
@@ -3592,10 +3598,10 @@ private extension CalcSimplification {
     /// The count can go up as well as down: `calc(1px + (1em + 1%))` arrives with two children and
     /// rebuilds with three. `rebuildSlot` takes all remaining operands regardless of direction.
     func rewriteSumChildren(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         var origin: UInt32 = 0
         var terms = collectSumTerms(node, info.childCount, &origin, builder)
         if case .declined(let blame) = terms.declined {
@@ -3634,11 +3640,11 @@ private extension CalcSimplification {
     /// The `.replacedBySumTerm` half of `rewrite`: push the one flattened term the `Sum` collapsed to,
     /// and nothing else.
     func rewriteSumTerm(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ origin: UInt32,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         var counter: UInt32 = 0
         guard let pushed = pushSumTerm(node, info.childCount, origin, &counter, &builder) else {
             return .declined(.Sum)
@@ -3658,7 +3664,7 @@ private extension CalcSimplification {
     /// nothing" and "the walk found it and the push failed" need different answers at the call site and
     /// a single enum would let one be mistaken for the other.
     func pushSumTerm(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ childCount: UInt32,
         _ target: UInt32,
         _ counter: inout UInt32,
@@ -3666,21 +3672,20 @@ private extension CalcSimplification {
     ) -> Rewrite? {
         var index: UInt32 = 0
         while index < childCount {
-            let child = node.childInTreeOrder(index)
-            let folded = fold(child, builder)
+            let folded = fold(node[Int(index)], builder)
             if case .declined(let blame) = folded {
                 return .declined(blame)
             }
             if isSpliceableSum(folded) {
-                let childInfo = child.info()
-                if let found = pushSumTerm(child, childInfo.childCount, target, &counter, &builder) {
+                let childInfo = WebCore.CSSCalc.swiftNodeInfo(node[Int(index)])
+                if let found = pushSumTerm(node[Int(index)], childInfo.childCount, target, &counter, &builder) {
                     return found
                 }
             } else {
                 if counter == target {
                     // `rewrite` on the term pushes exactly one operand, which is what the collapsed
                     // `Sum` owes its parent.
-                    return rewrite(child, &builder)
+                    return rewrite(node[Int(index)], &builder)
                 }
                 counter += 1
             }
@@ -3696,10 +3701,10 @@ private extension CalcSimplification {
     /// `Product{2, x}` rebuilds as `Product{x, 2}`. A `.leaf` factor is pushed as a leaf rather than
     /// re-rewritten, since it may already have been folded by a nested `Product`'s own pass.
     func rewriteProductChildren(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         var origin: UInt32 = 0
         let factors = productFactors(node, info.childCount, &origin, builder)
         if case .declined(let blame) = factors.declined {
@@ -3753,12 +3758,12 @@ private extension CalcSimplification {
     /// node disappears -- so one operand is pushed for the entire subtree, and `rebuildFrom` is
     /// called ON THE `Sum`, which is what rewrapping the C++'s `IndirectNode` does.
     func rewriteScaledSumFactor(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ origin: UInt32,
         _ factor: Double,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         var counter: UInt32 = 0
         guard let resolved = pushProductFactor(node, info.childCount, origin, factor, &counter, &builder) else {
             return .declined(.Product)
@@ -3771,7 +3776,7 @@ private extension CalcSimplification {
     /// ordinals), so the two agree without either knowing which factors survived. `scale` carries both
     /// jobs in one walk: `nil` pushes the surviving factor, a value scales a `Sum` child by it.
     func pushProductFactor(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ childCount: UInt32,
         _ target: UInt32,
         _ scale: Double?,
@@ -3780,14 +3785,13 @@ private extension CalcSimplification {
     ) -> Rewrite? {
         var index: UInt32 = 0
         while index < childCount {
-            let child = node.childInTreeOrder(index)
-            let folded = fold(child, builder)
+            let folded = fold(node[Int(index)], builder)
             if case .declined(let blame) = folded {
                 return .declined(blame)
             }
             if isSpliceableProduct(folded) {
-                let childInfo = child.info()
-                if let found = pushProductFactor(child, childInfo.childCount, target, scale, &counter, &builder) {
+                let childInfo = WebCore.CSSCalc.swiftNodeInfo(node[Int(index)])
+                if let found = pushProductFactor(node[Int(index)], childInfo.childCount, target, scale, &counter, &builder) {
                     return found
                 }
             } else {
@@ -3795,9 +3799,9 @@ private extension CalcSimplification {
                     guard let scale else {
                         // `rewrite` on the factor pushes exactly one operand, which is what the
                         // rebuilt `Product` owes for this slot.
-                        return rewrite(child, &builder)
+                        return rewrite(node[Int(index)], &builder)
                     }
-                    return pushScaledSum(child, folded, scale, &builder)
+                    return pushScaledSum(node[Int(index)], folded, scale, &builder)
                 }
                 counter += 1
             }
@@ -3820,7 +3824,7 @@ private extension CalcSimplification {
     /// Every child is a leaf whenever this runs, by `numericChildren`'s own guard -- which is what
     /// lets this be a straight push loop with no `pushSumTerm` for a non-`Numeric` survivor.
     func pushScaledSum(
-        _ sum: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ sum: borrowing WebCore.CSSCalc.Child,
         _ folded: Fold,
         _ scale: Double,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
@@ -3855,11 +3859,11 @@ private extension CalcSimplification {
     /// Not `@inline(always)`: `rebuild` and `rewrite` are mutually recursive, so the optimizer would
     /// decline it anyway.
     func rebuild(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ alternative: CalcAlternative,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
 
         if alternative == .Anchor || alternative == .AnchorSize {
             // The two alternatives whose children are answered by hand at the boundary, and whose
@@ -3889,7 +3893,7 @@ private extension CalcSimplification {
             // Tree order: `rebuildFrom` fills the operation's slots from the operands in the order
             // they were pushed. `childAt` would reorder a `Sum`'s terms by unit, so the loop is
             // written against tree order, which is correct for every alternative.
-            let child = rewrite(node.childInTreeOrder(index), &builder)
+            let child = rewrite(node[Int(index)], &builder)
             if case .declined(let blame) = child {
                 return .declined(blame)
             }
@@ -3921,7 +3925,7 @@ private extension CalcSimplification {
 /// index (0 to 40), not on the 23 serialization kinds.
 @_expose(Cxx)
 public func cssCalcSimplifySwift(
-    _ root: WebCore.CSSCalc.CSSCalcSwiftNode,
+    _ root: borrowing WebCore.CSSCalc.Child,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
     _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions
 ) -> WebCore.CSSCalc.CSSCalcSwiftSimplificationResult {
@@ -3994,8 +3998,8 @@ private func declined(_ kindMask: UInt64, _ nodeCount: UInt32, _ blame: CalcAlte
 /// Total, with no decline channel: every case is enumerated rather than swept into a catch-all, so
 /// growing `CSSCalcTree.h` is a compile error here rather than a silently wrong answer.
 @_expose(Cxx)
-public func cssCalcCanSimplifySwift(_ root: WebCore.CSSCalc.CSSCalcSwiftNode) -> Bool {
-    switch root.info().alternative {
+public func cssCalcCanSimplifySwift(_ root: borrowing WebCore.CSSCalc.Child) -> Bool {
+    switch WebCore.CSSCalc.swiftNodeInfo(root).alternative {
     case .Number, .Percentage, .CanonicalDimension:
         // The three the C++ names explicitly. Note that `NonCanonicalDimension` is NOT among them:
         // its `simplify` canonicalizes when there is conversion data, so it really can change.
@@ -4087,7 +4091,7 @@ private extension CalcSimplification {
     /// `rebuildSlot` takes each item's weight from the pushed plan and a generic `rebuild` would leave
     /// that stack out of step.
     func foldCalcMix(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Fold {
@@ -4118,7 +4122,7 @@ private extension CalcSimplification {
     /// (CSSPrimitiveNumeric.h:142), so a `Calc` weight is never counted however it would evaluate. The
     /// boundary reports the three states this needs and nothing is re-derived.
     func calcMixPlan(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ itemCount: UInt32,
         _ folded: Span<Fold>
     ) -> CalcMixPlan {
@@ -4139,7 +4143,7 @@ private extension CalcSimplification {
 
         var index: UInt32 = 0
         while index < itemCount {
-            let weight = node.calcMixItemWeight(index)
+            let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
             isPresent.append(weight.present)
             isRaw.append(weight.isRaw)
             rawValue.append(weight.value)
@@ -4400,7 +4404,7 @@ private extension CalcSimplification {
     ///
     /// Separate from `rewriteMergedChildren` for one reason -- the weights. The survivors are the
     /// node's own children, as `Min`'s and `Max`'s are and unlike `Sum`'s spliced terms, so each is
-    /// reached by `rewrite(node.childInTreeOrder(index))` and nothing is pushed as a pre-folded leaf: a
+    /// reached by `rewrite(node[Int(index)])` and nothing is pushed as a pre-folded leaf: a
     /// `calc-mix()` item's value is never merged with another item's, so there is no accumulated value
     /// that exists nowhere in the input tree.
     ///
@@ -4408,10 +4412,10 @@ private extension CalcSimplification {
     /// inner node's weights inside `rewrite`, so by the time this pushes its own the weight stack is
     /// back where it started and `rebuildFrom` finds exactly this node's `n` on top of both.
     func rewriteCalcMixItems(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         // The declining child is reported beside the plan rather than through `plan.early`, which
         // `calcMixPlan` can also set to a decline of its own -- and the two are answered with
         // different blame below.
@@ -4444,7 +4448,7 @@ private extension CalcSimplification {
         // follow the same rule.
         var pushedItems: UInt32 = 0
         for survivor in plan.survivors {
-            if case .declined(let blame) = rewrite(node.childInTreeOrder(survivor.index), &builder) {
+            if case .declined(let blame) = rewrite(node[Int(survivor.index)], &builder) {
                 return .declined(blame)
             }
             pushedItems += 1

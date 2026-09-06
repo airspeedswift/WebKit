@@ -432,14 +432,14 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // `unitType`, `valueID`): each of those was a separate `WTF::switchOn` over the same
     // 41-alternative `Variant`, so splitting them would re-derive the same discriminant up to five
     // times per node to answer questions this answers together.
-    WEBCORE_EXPORT CSSCalcSwiftNodeInfo info() const;
+    CSSCalcSwiftNodeInfo info() const;
 
     // Everything the four operation kinds below need beyond `info()`, from one more crossing.
     //
     // Separate from `info()` rather than folded into it because `info()` runs for every node of
     // every tree, and this answers questions only four rare kinds ask. Called only when the kind
     // says to.
-    WEBCORE_EXPORT CSSCalcSwiftOperationInfo operationInfo() const;
+    CSSCalcSwiftOperationInfo operationInfo() const;
 
     // The `index`th child, IN SERIALIZATION ORDER.
     //
@@ -487,7 +487,7 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // `CalcMix` overload (CSSCalcTree+Traversal.h:127) yields each item's `value` once, in item
     // order, and nothing for a weight. So `info().childCount` is the item count and this shares its
     // bound.
-    WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight calcMixItemWeight(uint32_t index) const;
+    CSSCalcSwiftCalcMixWeight calcMixItemWeight(uint32_t index) const;
 
 private:
     // So that `appendOperationArgument` can reach the node it is being asked to write a piece of,
@@ -499,6 +499,27 @@ private:
 
     const Child* m_node;
 };
+
+// MARK: - Reading a node, without a handle
+//
+// The three POD reads above, spelled over a borrowed `CSSCalc::Child` instead of over a
+// `CSSCalcSwiftNode`. These are the implementations; the members forward to them.
+//
+// This is what lets the Swift simplifier walk the real tree. `Child::operator[]` gives it a checked
+// borrow of a child (CSSCalcTree.h says why it must stay an operator), `Child::childCount()` bounds
+// the loop, and these three answer everything else -- so `CSSCalcSwiftNode` is no longer on the
+// reading path and goes away once serialization follows (revisit log R149 step 1b).
+//
+// A `const Child&` PARAMETER is safe to Swift, unlike a `const Child&` RETURN: only the return
+// position imports as `UnsafePointer`. And every return here is a POD by value, which is
+// unrestricted. So none of this needs an annotation, a handle type or an `unsafe` marker.
+//
+// `Child` is incomplete in this header, deliberately -- it stays self-contained and does not
+// include CSSCalcTree.h. That is fine for a parameter; it is only an incomplete RETURN type that
+// makes the importer drop a declaration.
+WEBCORE_EXPORT CSSCalcSwiftNodeInfo swiftNodeInfo(const Child&);
+WEBCORE_EXPORT CSSCalcSwiftOperationInfo swiftOperationInfo(const Child&);
+WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child&, uint32_t index);
 
 // Where the serialization output goes.
 //
@@ -731,7 +752,7 @@ struct CSSCalcSwiftSimplificationOptions {
 //
 // Modelled on `CSSCalcSwiftSink` above: a `SWIFT_SAFE` value struct taken `inout` (the builder
 // lives on the C++ stack for exactly one `copyAndSimplify` call, so a refcounted one would cost a
-// heap allocation per call); every `CSSCalcSwiftNode` parameter by `const&`, never by value; one
+// heap allocation per call); every `Child` parameter by `const&`, never by value; one
 // entry rather than N named methods wherever a selector can carry the choice; and anything whose
 // exact output must match the C++ arm stays an upcall.
 //
@@ -761,7 +782,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // `AnchorSide`, while `Child` was one of ten `static` overloads inside CSSCalcTree+Copy.cpp --
     // which is one line of header and the removal of one `static`, and is the smallest thing that
     // works. Nothing new was written.
-    WEBCORE_EXPORT void pushCopyOf(const CSSCalcSwiftNode&);
+    WEBCORE_EXPORT void pushCopyOf(const Child&);
 
     // Pop `childCount` operands and push back one node of `original`'s own kind, built from them.
     //
@@ -780,7 +801,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // Returns false, reported as a decline, for a contract violation: too few operands, a mismatched
     // arity, a leaf, or an `Anchor`/`AnchorSize` -- both declare `tuple_size` 0 (CSSCalcTree.h:1317,
     // "FIXME webkit.org/b/280798"), so generic reconstruction would build them empty.
-    WEBCORE_EXPORT bool rebuildFrom(const CSSCalcSwiftNode& original, uint32_t childCount);
+    WEBCORE_EXPORT bool rebuildFrom(const Child& original, uint32_t childCount);
 
     // Push the weight the next `CalcMix` item pushed as an operand is to carry.
     //
@@ -958,7 +979,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // `sret`, for more new C++ than the four-line branch below -- the two dispositions are
     // indistinguishable to Swift either way, since a `Calc` fixed value comes back
     // `resolved == false` and the node is copied through, matching `std::nullopt` from the C++ arm.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const CSSCalcSwiftNode&) const;
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const Child&) const;
 
 private:
     CSSCalcSwiftOperandStack* m_operands;

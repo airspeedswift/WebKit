@@ -876,7 +876,7 @@ static_assert(numberOfCSSCalcSwiftAlternatives == WTF::VariantSizeV<Node>);
 // has to justify moving the AArch64 return further away from x0/x1.
 static_assert(sizeof(CSSCalcSwiftNodeInfo) == 24);
 
-CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
+CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
 {
     // One `switchOn` over the 41-alternative Variant, answering every question at once. The five
     // separate accessors this replaced each ran their own, so a leaf cost up to five discriminant
@@ -891,10 +891,10 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         // The variant's own discriminant, read directly. No switch and no table, on either side of
         // the boundary: `CSSCalcSwiftAlternative` is pinned to `Node`'s alternative order by the
         // asserts below, so the cast is the identity on the numbering rather than a mapping.
-        .alternative = static_cast<CSSCalcSwiftAlternative>(m_node->value.index()),
+        .alternative = static_cast<CSSCalcSwiftAlternative>(node.value.index()),
     };
 
-    WTF::switchOn(*m_node,
+    WTF::switchOn(node,
         [&]<Numeric T>(const T& leaf) {
             if constexpr (std::same_as<T, Number>)
                 out.kind = CSSCalcSwiftNodeKind::Number;
@@ -1005,7 +1005,7 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         }
     );
 
-    out.childCount = static_cast<uint32_t>(m_node->childCount());
+    out.childCount = static_cast<uint32_t>(node.childCount());
     return out;
 }
 
@@ -1030,7 +1030,7 @@ static CSSValueID anchorSizeDimensionValueID(Style::AnchorSizeDimension dimensio
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
+CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node)
 {
     CSSCalcSwiftOperationInfo out {
         .valueID = static_cast<uint16_t>(CSSValueInvalid),
@@ -1050,7 +1050,7 @@ CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
     // instantiates its generic fallback once per alternative and costs ~22 KB. `CalcMix` is absent
     // because everything it needs is its child count and its per-item weights, and the weights are
     // an upcall.
-    if (auto* random = get_if<IndirectNode<Random>>(m_node)) {
+    if (auto* random = get_if<IndirectNode<Random>>(&node)) {
         WTF::switchOn((*random)->sharing,
             [&](const Random::SharingAuto&) {
                 // Serializes as omitted; both flags stay false and nothing is written.
@@ -1074,7 +1074,7 @@ CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
         return out;
     }
 
-    if (auto* anchor = get_if<IndirectNode<Anchor>>(m_node)) {
+    if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
         out.hasElementName = (*anchor)->elementName.has_value();
         out.hasFallback = (*anchor)->fallback.has_value();
         if (auto* side = get_if<CSSValueID>(&(*anchor)->side.value)) {
@@ -1084,7 +1084,7 @@ CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
         return out;
     }
 
-    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(m_node)) {
+    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
         out.hasElementName = (*anchorSize)->elementName.has_value();
         out.hasFallback = (*anchorSize)->fallback.has_value();
         if ((*anchorSize)->dimension) {
@@ -1132,6 +1132,24 @@ static const Child* childInSerializationOrder(const Child& node, uint32_t index)
     if (index >= node.childCount())
         return nullptr;
     return &node[index];
+}
+
+// The three POD reads, forwarded. `CSSCalcSwiftNode` is now a handle over a `Child` and nothing
+// more: the Swift simplifier reads the tree directly and only the serialization boundary still
+// takes one. Both these and the handle go when serialization follows (revisit log R149 step 1b).
+CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
+{
+    return swiftNodeInfo(*m_node);
+}
+
+CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
+{
+    return swiftOperationInfo(*m_node);
+}
+
+CSSCalcSwiftCalcMixWeight CSSCalcSwiftNode::calcMixItemWeight(uint32_t index) const
+{
+    return swiftCalcMixItemWeight(*m_node, index);
 }
 
 CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
