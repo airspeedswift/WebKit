@@ -306,8 +306,11 @@ struct Child {
     // `UnsafePointer<Child>` and is rejected under -strict-memory-safety. Measured across sixteen
     // arms in ~/src/webkit-swift-ports/cssprobe/childreader, with the named/operator pair declared
     // on one class and exercised in one file; recorded as swift-cpp-interop-notes.md section 97 and
-    // filed as swift-toolchain-filings.md section 48. Renaming this to `childAt` would compile in
-    // C++ and silently remove the Swift calc island's only safe route into the tree.
+    // swift-toolchain-filings.md section 48, and tracked upstream as rdar://140443562 (extend
+    // borrow accessors to arbitrary imported C++ methods). These two names and no others because
+    // `pointee` and `subscript` are synthesized as address accessors (rdar://108773658). Renaming
+    // this to `childAt` would compile in C++ and silently remove the Swift calc island's only safe
+    // route into the tree.
     size_t childCount() const;
     const Child& operator[](size_t index) const LIFETIME_BOUND;
 
