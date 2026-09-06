@@ -2531,6 +2531,14 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
     hoisted.value.reserveInitialCapacity(8);
     CSSCalcSwiftBuilder hoistedBuilder { hoisted, options };
 
+    // R151 PROBE, ahead of the loop deliberately: the gating number for flipping the calc tree to a
+    // Swift representation is what one conversion costs with WARM buffers, and the Swift entry point
+    // therefore runs the iteration loop itself. Read it against case 13, the C++ arm simplifying the
+    // same fixture end to end, and against the `walk` coverage pre-pass this pass would subsume
+    // (R144: 95.4 + 141.9N + 5.02N^2 instructions).
+    if (which == 12)
+        return cssCalcFlattenProbeSwift(fixture, iterations);
+
     uint64_t sink = 0;
     for (uint32_t i = 0; i < iterations; ++i) {
         switch (which) {
@@ -2606,6 +2614,11 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
             CSSCalcSwiftOperandStack fresh;
             fresh.value.append(makeChild(Number { .value = 1 }));
             sink += fresh.value.size();
+            break;
+        }
+        case 13: {  // The C++ arm simplifying the same fixture end to end -- the denominator case 12
+                    // has to be read against, measured in the same loop rather than across runs.
+            sink += copyAndSimplify(fixture, options).index();
             break;
         }
         default:

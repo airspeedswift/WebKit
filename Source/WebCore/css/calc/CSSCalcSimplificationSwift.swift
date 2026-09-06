@@ -4463,3 +4463,104 @@ private extension CalcSimplification {
         return builder.rebuildFrom(node, pushedItems) ? .pushed : .declined(.CalcMix)
     }
 }
+
+// MARK: - PROBE (R151): what a Swift-owned FLAT tree costs to build
+//
+// Not on any production path. This exists to measure the gating number for flipping the calc tree
+// to a Swift representation: if converting a `CSSCalc::Child` into a flat Swift array is cheap,
+// then simplification can run as a reverse loop over that array -- no 41-way variant dispatch per
+// access, no `UniqueRef<Op>` pointer chase per node, no per-node `Children` vector, no operand
+// stack, and no boundary crossing per node at all. If conversion is expensive, the idea dies here.
+//
+// The pre-registered prediction, from a number already measured rather than a guess: the `walk`
+// coverage pre-pass does exactly this traversal without building anything, and R144 fitted it at
+// `95.4 + 141.9N + 5.02N^2` retired instructions, ~8% of the Swift arm. Conversion should land near
+// that plus the stores, and it REPLACES the pre-pass rather than adding to it, because the same
+// pass can compute `nodeCount`, `kindMask` and the decline predicate on the way through.
+
+/// One node of the flat tree: a plain value, 24 bytes, the same size as the `Child` it mirrors but
+/// with no indirection and nothing refcounted.
+///
+/// Children are named by INDEX, not by pointer, which is what makes the whole structure `Copyable`,
+/// storable in an ordinary Swift `Array`, and free of the `~Escapable` problem that forced the
+/// handle design in the first place. Same move as the tokenizer island's offset-in-the-pointer-slot
+/// design.
+struct CalcFlatNode {
+    var value: Double
+    /// Offset into the child-index side table, not into `nodes`.
+    var childStart: UInt32
+    var childCount: UInt32
+    var valueID: UInt16
+    var unitType: UInt8
+    var alternative: UInt8
+    var percentHint: UInt8
+}
+
+/// The flat tree, as two reusable buffers. Reused across simplifications rather than allocated per
+/// tree: a `[CalcFlatNode]` is a refcounted buffer, and one retain/release per WHOLE TREE is
+/// acceptable where one per node would not be.
+struct CalcFlatTree {
+    var nodes: [CalcFlatNode] = []
+    var childIndices: [UInt32] = []
+
+    mutating func reset() {
+        nodes.removeAll(keepingCapacity: true)
+        childIndices.removeAll(keepingCapacity: true)
+    }
+
+    /// Appends `node`'s subtree and returns its index.
+    ///
+    /// The child-index slots are RESERVED before recursing, so a child's own appends cannot move
+    /// this node's slots and the indices stay valid without a second pass.
+    mutating func append(_ node: borrowing WebCore.CSSCalc.Child) -> UInt32 {
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
+        let me = nodes.count
+        nodes.append(CalcFlatNode(
+            value: info.numericValue,
+            childStart: 0,
+            childCount: info.childCount,
+            valueID: info.valueID,
+            unitType: info.unitType,
+            alternative: info.alternative.rawValue,
+            percentHint: info.percentHint))
+
+        let start = childIndices.count
+        let count = Int(info.childCount)
+        childIndices.append(contentsOf: repeatElement(0, count: count))
+        for i in 0..<count {
+            childIndices[start + i] = append(node[i])
+        }
+        nodes[me].childStart = UInt32(start)
+        return UInt32(me)
+    }
+}
+
+/// Build the flat tree and return its node count.
+///
+/// The count is returned so the benchmark cannot optimise the traversal away, and because it is the
+/// same number the coverage pre-pass reports -- which is the point: this pass subsumes that one.
+/// Converts `root` `iterations` times and returns the summed node count.
+///
+/// THE LOOP IS IN SWIFT, and that is the correction rather than a convenience -- it is the same one
+/// the operand-stack primitive already carries. Two fresh `Array`s per conversion charge every
+/// iteration with two mallocs and two frees that a real implementation pays once for the process,
+/// not once per tree; measured that way the conversion came out at 2338 instructions, against 1457
+/// for the C++ arm's entire simplification, and essentially all of the difference was allocation.
+/// Hoisting them out of the loop measures a STEADY-STATE conversion.
+///
+/// A mutable global would have been the obvious hoist and is not available: `nonisolated(unsafe)`
+/// makes every access an `unsafe` expression under -strict-memory-safety, and this island is at
+/// zero markers. A function-local reused across an in-Swift loop costs nothing and needs no marker.
+@_expose(Cxx)
+public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ iterations: UInt32) -> UInt32 {
+    var tree = CalcFlatTree()
+    tree.nodes.reserveCapacity(64)
+    tree.childIndices.reserveCapacity(64)
+    var total: UInt32 = 0
+    for _ in 0..<iterations {
+        tree.reset()
+        _ = tree.append(root)
+        total &+= UInt32(tree.nodes.count)
+    }
+    return total
+}
