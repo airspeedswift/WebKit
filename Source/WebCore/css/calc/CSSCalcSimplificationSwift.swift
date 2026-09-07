@@ -2744,7 +2744,18 @@ private extension CalcSimplification {
             tag = .failed
             return Double.nan
         }
+        return hypotElement(leaf, &tag)
+    }
 
+    /// The tag transition itself, over a leaf the caller has already unwrapped.
+    ///
+    /// Split out so the FLAT pass shares this state machine rather than transcribing
+    /// `+Simplification.cpp:1216`-`:1264` a second time: the two ports differ only in how they reach
+    /// a child -- a `Fold` here, a `CalcFlatNode.numericLeaf` there -- and a second copy of a
+    /// five-state machine whose failure mode is a silently wrong `hypot()` is exactly the kind of
+    /// duplication this file has been paying down.
+    @inline(always)
+    func hypotElement(_ leaf: NumericLeaf, _ tag: inout HypotTag) -> Double {
         switch tag {
         case .unset:
             // `:1216`-`:1240`, the first iteration.
@@ -4078,9 +4089,10 @@ private extension CalcSimplification {
 /// simplifier a new alternative is one name added here and the two cannot drift: the raw values come
 /// from the imported C++ enum, which is generated from `CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`.
 ///
-/// A computed `static var`, not a `static let`: a stored global is lazily initialised behind a
-/// `swift_once` guard, which is an atomic load on every simplification, and every term here is a
-/// compile-time constant so the optimizer folds the whole expression to one immediate.
+/// A computed `static var`, not a `static let` -- see `mask` itself. The claim that used to stand
+/// here, that "every term is a compile-time constant so the optimizer folds the whole expression to
+/// one immediate", was WRONG and is corrected at `bit`: the terms fold only while the chain is
+/// small enough, and the shift spelling is what keeps it so.
 ///
 /// `NonCanonicalDimension` is here because `simplifyNonCanonicalDimension` ports
 /// `simplify(NonCanonicalDimension&)` (`+Simplification.cpp:506`-`:514`) in full, upcall included.
@@ -4088,11 +4100,34 @@ private extension CalcSimplification {
 /// `canonicalize` would COPY the node where the C++ converts it -- a silent wrong answer rather than
 /// a decline. Adding an alternative here means porting its `simplify`, not editing this list.
 private enum CalcFlatCoverage {
+    /// `&<<`, THE MASKING SHIFT, NOT `<<` -- and it is worth 31 retired instructions per
+    /// simplification on EVERY band, measured.
+    ///
+    /// `UInt64`'s `<<` is the *smart* shift: it is defined for a negative or over-large amount, so
+    /// it lowers to a branchy sequence (over-shift to zero, under-shift to zero, `and` by 63, then
+    /// the shift) -- about eight basic blocks per term. `alternative.rawValue` is not folded at SIL
+    /// level either, because it goes through `RawRepresentable`'s witness, so `mask` reaches LLVM as
+    /// forty copies of that sequence chained by `or`. LLVM folds the chain while it is small and
+    /// STOPS ABOVE A SIZE THRESHOLD, which is why this cost nothing at 27 terms, nothing at 35, and
+    /// +31 instructions per simplification the moment batch E took it to 40 -- a step, not a slope,
+    /// and the reason the "the optimizer folds the whole expression to one immediate" claim that
+    /// used to stand here survived so long. `leaf` measured 603.3 at 35 terms, 634.3 at 40, and
+    /// 603.2 with the five new folds present and their five bits withheld, which is the 2x2 that
+    /// attributes it to the bits rather than to the folds.
+    ///
+    /// `&<<` deletes the branches: the shift amount is an alternative index, there are 41 of them,
+    /// and 41 < 64, so masking by 63 is the identity and no defined behaviour changes. Not `unsafe`,
+    /// not a trap removed -- a shift that cannot overflow, spelled as one.
     @inline(always)
     static func bit(_ alternative: CalcAlternative) -> UInt64 {
-        return UInt64(1) << UInt64(alternative.rawValue)
+        return UInt64(1) &<< UInt64(alternative.rawValue)
     }
 
+    /// A computed `static var`, not a `static let`: a stored global is lazily initialised behind a
+    /// `swift_once` guard, which is an atomic load on every read -- and `CalcFlattenReport.writing`
+    /// reads this once per node, not once per tree. Measured at 10 retired instructions per
+    /// simplification when it was tried, against 0 for the computed form once `bit` stopped
+    /// branching.
     static var mask: UInt64 {
         return bit(.Number)
             | bit(.Percentage)
@@ -4123,6 +4158,11 @@ private enum CalcFlatCoverage {
             | bit(.Acos)
             | bit(.Atan)
             | bit(.Atan2)
+            | bit(.Hypot)
+            | bit(.Log)
+            | bit(.Exp)
+            | bit(.Progress)
+            | bit(.ProgressNoClamp)
             | bit(.Symbol)
             | bit(.SiblingCount)
             | bit(.SiblingIndex)
@@ -5186,6 +5226,18 @@ fileprivate struct CalcFlattenReport {
     /// `nodeCount` still sizes an exact retry.
     var overflowed = false
 
+    /// `CalcFlatCoverage.mask`, evaluated ONCE PER TREE rather than once per node.
+    ///
+    /// `writing` is read at every node of the flattening walk, and the mask is a forty-term
+    /// expression the optimizer folds only sometimes (see `CalcFlatCoverage.bit`). A stored
+    /// property initialised here is one evaluation per `CalcFlattenReport()`, which is one per
+    /// `calcFlatten`, and it is the spelling that makes the cost independent of both the term count
+    /// and the node count. Measured on the 13-node `ladder12` band: 7648.9 retired instructions per
+    /// simplification reading the computed property per node, 7631.2 reading this -- and on the
+    /// single-node `leaf` band, 578.7 against 574.6, so it is not purely a per-node saving either:
+    /// the computed form was evaluated more than once per tree even where there is only one node.
+    let coverageMask = CalcFlatCoverage.mask
+
     /// Whether the nodes written so far can still become a flat tree. Three ways to lose it, and all
     /// three are monotone -- `kindMask` only gains bits -- so once this is false it stays false and
     /// the pass degrades to a plain walk: it keeps crossing and counting, because the count and the
@@ -5195,7 +5247,7 @@ fileprivate struct CalcFlattenReport {
     /// The coverage test is in here rather than only at the end so that a tree bound for the two-pass
     /// `rewrite` pays the walk and not a flattening it will throw away.
     var writing: Bool {
-        return everyNodeSimplifiable && !overflowed && kindMask & ~CalcFlatCoverage.mask == 0
+        return everyNodeSimplifiable && !overflowed && kindMask & ~coverageMask == 0
     }
 }
 
@@ -5572,6 +5624,7 @@ fileprivate extension CalcFlatTree {
         case .Clamp, .RoundNearest, .RoundUp, .RoundDown, .RoundToZero,
              .Mod, .Rem, .Abs, .Sign, .Pow, .Sqrt,
              .Deg2Rad, .Sin, .Cos, .Tan, .Asin, .Acos, .Atan, .Atan2,
+             .Hypot, .Log, .Exp, .Progress, .ProgressNoClamp,
              .Symbol, .SiblingCount, .SiblingIndex, .Anchor, .AnchorSize, .Random:
             simplifyColdNode(i, original, options, builder)
 
@@ -5587,7 +5640,7 @@ fileprivate extension CalcFlatTree {
 
     /// The alternatives a REAL PAGE'S CSS does not hold, behind ONE call site.
     ///
-    /// TWENTY-FIVE CASE LABELS SHARING ONE CALL, and that shape is measured rather than tidy. The hot
+    /// THIRTY CASE LABELS SHARING ONE CALL, and that shape is measured rather than tidy. The hot
     /// switch above names exactly the operations the captured payloads contain -- `calc-real.txt`,
     /// the four `real-sp3-*.css` and `bench.css` hold `max()` twice and no other math function at
     /// all -- and everything else is one entry. Five separate `@inline(never)` arms instead of one
@@ -5665,6 +5718,21 @@ fileprivate extension CalcFlatTree {
         case .Atan2:
             simplifyAtan2(i, options)
 
+        case .Hypot:
+            simplifyHypot(i, options)
+
+        case .Log:
+            simplifyLog(i)
+
+        case .Exp:
+            simplifyNumberToNumber(i, CalcExecutor.exp)
+
+        case .Progress:
+            simplifyProgress(i, options, CalcExecutor.progress)
+
+        case .ProgressNoClamp:
+            simplifyProgress(i, options, CalcExecutor.progressNoClamp)
+
         case .Symbol:
             simplifySymbol(i, options, builder)
 
@@ -5678,7 +5746,7 @@ fileprivate extension CalcFlatTree {
             simplifyRandom(i, original, options, builder)
 
         default:
-            // Unreachable: the caller's switch selects exactly the twenty-five above. Spelled as a
+            // Unreachable: the caller's switch selects exactly the thirty above. Spelled as a
             // return rather than a trap for the reason every other unreachable arm in this file is
             // -- an untaught alternative leaves the node alone, which the mask has already made
             // impossible, rather than killing the process.
@@ -6828,6 +6896,158 @@ fileprivate extension CalcFlatTree {
         setLeaf(i, NumericLeaf.canonicalAngle(CalcExecutor.atan2(a.value, b.value)))
     }
 
+    /// `simplify(Log&)` (`+Simplification.cpp:1282`-`:1306`).
+    ///
+    /// Two shapes, selected by whether `root.b` is present -- which `childCount` answers exactly as
+    /// it does for `round()`, since `forAllChildNodes` counts a `std::optional<Child>` only when it
+    /// holds one. With a base, BOTH operands must be `Number` (`switchTogether` is given only a
+    /// `(const Number&, const Number&)` arm, so this is `pow()`'s predicate and not
+    /// `simplifyForOperation`'s); without one it is the natural log through the shared
+    /// `simplifyNumberToNumber`.
+    ///
+    /// NOT REASSOCIATED. `CalcExecutor.log(a, b)` is `std::log(a) / std::log(b)`, two library calls
+    /// and a divide (`.swift:584`); `log(a) * (1 / log(b))` is a different double for many inputs.
+    @inline(never)
+    private mutating func simplifyLog(_ i: Int) {
+        guard nodes[i].childCount == 2 else {
+            simplifyNumberToNumber(i, CalcExecutor.log)
+            return
+        }
+        guard let aChild = child(i, 0), let bChild = child(i, 1),
+            nodes[aChild].alternative == .Number, nodes[bChild].alternative == .Number else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(CalcExecutor.log(nodes[aChild].value, nodes[bChild].value)))
+    }
+
+    /// `simplify(Progress&)` and `simplify(ProgressNoClamp&)`
+    /// (`+Simplification.cpp:1404`-`:1444`), which are identical but for the executor.
+    ///
+    /// The C++ opens with `value.index() != start.index() || start.index() != end.index()`, an
+    /// equality over the WHOLE 41-alternative variant tag, and only then takes the `Numeric T`
+    /// visitor on `value`. Three numeric leaves of one kind is the same predicate: a non-`Numeric`
+    /// operand fails the visitor whether or not the indices matched, and two `Numeric`s of different
+    /// kinds fail the index test, which `switchTogether` reproduces. The pair is checked the C++'s
+    /// way -- `(value, start)` then `(start, end)` -- rather than transitively, because
+    /// `unitsMatch` is spelled over exactly those two pairs at `:1414`.
+    ///
+    /// `fullyResolved` on `value` alone, so `progress(1em, 2em, 3em)` does not fold. The result is a
+    /// `<number>` whatever the operands were: `progress()` is a ratio, not a quantity.
+    ///
+    /// `CalcExecutor.progress`/`.progressNoClamp` (`.swift:618`, `:627`) carry the `from == to`
+    /// arms -- `0.0` for `progress()`, `+-infinity`/`0.0` for the no-clamp form -- which are the two
+    /// the corpus is least likely to reach; see the commit's non-vacuity note.
+    @inline(never)
+    private mutating func simplifyProgress(
+        _ i: Int,
+        _ options: CalcSimplification,
+        _ operation: (Double, Double, Double) -> Double
+    ) {
+        guard let valueChild = child(i, 0), let startChild = child(i, 1), let endChild = child(i, 2),
+            let value = nodes[valueChild].numericLeaf,
+            let start = nodes[startChild].numericLeaf,
+            let end = nodes[endChild].numericLeaf else {
+            return
+        }
+        guard options.switchTogether(value, start), options.switchTogether(start, end) else {
+            return
+        }
+        guard options.unitsMatch(value, start), options.unitsMatch(start, end),
+            options.fullyResolved(value) else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(operation(value.value, start.value, end.value)))
+    }
+
+    /// `simplify(Hypot&)` (`+Simplification.cpp:1205`-`:1279`), the only stateful fold in the file:
+    /// an optimistic pass over the children carrying a five-state tag, which the C++ cannot
+    /// short-circuit because its evaluation API takes a functor over the whole range.
+    ///
+    /// THREE THINGS THAT LOOK LIKE DETAILS AND ARE NOT.
+    ///
+    /// 1. CHILD ORDER. `sum += value * value` runs in `root.children` order
+    ///    (`CSSCalcExecutor.h:404`-`:416`) and floating-point `+` is not associative, so this walks
+    ///    `firstChild`/`nextSibling` and never a re-sorted or re-linked list.
+    /// 2. THE VALUE IS COMPUTED EVEN AFTER THE TAG FAILS, and only then discarded by the final
+    ///    switch. Observationally identical to an early exit -- kept because it is the C++'s shape
+    ///    and because `.failed` is absorbing, so an early exit would have to prove that.
+    /// 3. THE EMPTY LIST MUST BE "UNCHANGED", not a division and not an index.
+    ///    `OperatorExecutor<Hypot>` returns NaN for an empty range WITHOUT calling the functor
+    ///    (`CSSCalcExecutor.h:406`-`:407`), so `result` stays `monostate` and the trailing
+    ///    `switchOn` takes the catch-all. Returning here is that, and it is also what keeps
+    ///    `firstElement` from being read before it is written.
+    ///
+    /// The state machine itself is `hypotElement`, shared with the two-pass port's `foldHypot`.
+    @inline(never)
+    private mutating func simplifyHypot(_ i: Int, _ options: CalcSimplification) {
+        let childCount = nodes[i].childCount
+        guard childCount > 0 else {
+            return
+        }
+
+        var tag = HypotTag.unset
+        var sumOfSquares = 0.0
+        var firstElement = 0.0
+        var isFirst = true
+        var cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let c = Int(cursor)
+            let value: Double
+            if let leaf = nodes[c].numericLeaf {
+                value = options.hypotElement(leaf, &tag)
+            } else {
+                // The `[&](const auto&)` arm of whichever tag state is live; every one of them sets
+                // `FailureTag` (`:1234`-`:1237`, `:1244`, `:1250`, `:1257`).
+                tag = .failed
+                value = Double.nan
+            }
+            if isFirst {
+                firstElement = value
+                isFirst = false
+            }
+            sumOfSquares += value * value
+            cursor = nodes[c].nextSibling
+        }
+
+        // `std::abs(*range.begin())` for one element, `std::sqrt(sum)` for two or more.
+        // `.magnitude` is `std::abs(double)`: it clears the sign bit, so `hypot(-0px)` is `+0px`.
+        let value = childCount == 1 ? firstElement.magnitude : sumOfSquares.squareRoot()
+
+        switch tag {
+        case .number:
+            setLeaf(i, NumericLeaf.number(value))
+
+        case .percentage:
+            // `Percentage { .value = value, .hint = Type::determinePercentHint(options.category) }`
+            // (`:1271`), spelled as the call rather than as the constant 0 the two-pass port's
+            // `foldHypot` reasons its way to. The two agree -- `percentageResolveToDimension`
+            // (`:87`-`:104`) and `determinePercentHint` (`CSSCalcType.cpp:308`-`:327`) are
+            // non-trivial on exactly `LengthPercentage` and `AnglePercentage`, and this arm is
+            // reachable only when the first is false -- but a transcribed constant that is correct
+            // by a two-step argument is worth less than the call it stands for.
+            guard let optionsCategory = WebCore.CSS.Category(rawValue: options.category) else {
+                // Never taken: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
+                return
+            }
+            setLeaf(i, NumericLeaf.percentage(value, CalcType.determinePercentHint(optionsCategory)))
+
+        case .dimension(let canonicalUnit):
+            // The FIRST child's unit, carried through the tag; every later child had to match it.
+            setLeaf(i, NumericLeaf(
+                kind: .canonicalDimension,
+                value: value,
+                unitType: canonicalUnit,
+                percentHint: 0
+            ))
+
+        case .unset, .failed:
+            // `nullopt`: the node keeps its kind, its cached `Type` and its children. `.unset` is
+            // unreachable (the empty list returned above) but enumerated rather than defaulted, so a
+            // future tag has to be classified.
+            return
+        }
+    }
+
     /// `simplify(Product&)` (`+Simplification.cpp:717`-`:909`), css-values-4 steps 9.1 to 9.5.
     private mutating func simplifyProduct(_ i: Int, _ options: CalcSimplification) {
         guard nodes[i].childCount > 0 else {
@@ -7233,8 +7453,10 @@ fileprivate extension CalcFlatTree {
             // A SWITCH, not a bit test against a mask built from `CalcFlatCoverage.bit`. That mask
             // does not constant-fold: `UInt64(alternative.rawValue)` over an IMPORTED C++ enum
             // leaves the optimizer eight `cond_fail`s and four shifts to run here, per operator
-            // node. `CalcFlatCoverage.mask` has the same shape and gets away with it because it is
-            // read once per TREE.
+            // node. `CalcFlatCoverage.mask` gets away with the same shape because LLVM folds the
+            // whole chain -- but only below a size threshold, which is what `bit`'s `&<<` is for,
+            // and NOT because the mask is "read once per tree": `CalcFlattenReport.writing` reads
+            // it once per node. That claim used to stand here and is corrected at `bit`.
             //
             // THE PRICE IS THE WALK, not the rebuild: `withCalcOriginalNode` costs 192 retired
             // instructions per node stepped past, against `rebuildFrom`'s own 41-way dispatch at
