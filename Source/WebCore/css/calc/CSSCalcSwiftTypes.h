@@ -620,7 +620,7 @@ struct CSSCalcSwiftSerializationResult {
 // direction. The output node's kind is, with one exception, the input node's kind, so
 // `rebuildFrom` recovers it from the original node's own variant tag and reconstructs generically
 // over the tuple conformance. The exception is `clamp()` becoming `min()` or `max()`
-// (CSSCalcTree+Simplification.cpp:1012-1038), handled by `buildMinMax` alone.
+// (CSSCalcTree+Simplification.cpp:1012-1038), handled by `buildOperation` alone.
 
 // A numeric leaf to build, in the one representation the boundary has for one.
 //
@@ -748,35 +748,6 @@ struct CSSCalcSwiftSimplificationOptions {
     bool percentageResolveToDimension;
 };
 
-// MARK: - R151 probe: one node of the FLAT Swift tree
-//
-// Declared here rather than in Swift, and that is the only reason this type is in C++ at all: the
-// emit direction hands the whole tree over in ONE crossing, as a `Span` of these, and a span needs
-// a type both sides can name. `CSSCalcTree+Simplification.h` is not installed as a private header,
-// so it is not reachable from Swift; this boundary header is the one place a shared POD can live.
-//
-// Field order and widths are the flat simplifier's, unchanged: 8 + 4 + 4 + 2 + 1 + 1 + 1 = 21 live
-// bytes in 24, the same size as the `Child` it mirrors, so moving the declaration from Swift to C++
-// changes no layout and no measurement. Children are named by INDEX into a side table, not by
-// pointer, which is what keeps the type `Copyable` and free of the `~Escapable` problem.
-//
-// Nothing production reads this. It is the prototype of the materialisation step R151 item 3 needs
-// -- once the parser builds the flat tree, a `CSSCalc::Child` is built only when a C++ consumer
-// asks for one, and this is that function's input.
-struct CSSCalcSwiftFlatNode {
-    double value;
-    // Offset into the child-index side table, not into the node array.
-    uint32_t childStart;
-    uint32_t childCount;
-    uint16_t valueID;
-    uint8_t unitType;
-    // The discriminant, typed as the enum so a `switch` over it is checked for exhaustiveness.
-    CSSCalcSwiftAlternative alternative;
-    uint8_t percentHint;
-};
-
-static_assert(sizeof(CSSCalcSwiftFlatNode) == 24, "the flat node must stay the size of the Child it mirrors");
-
 // Where the simplification output goes: the construction sink.
 //
 // Modelled on `CSSCalcSwiftSink` above: a `SWIFT_SAFE` value struct taken `inout` (the builder
@@ -848,51 +819,52 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // once items can be dropped -- only the caller knows which original item each survivor is.
     WEBCORE_EXPORT void pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight);
 
-    // TEST-ONLY (R151 gate 3): materialise a whole FLAT tree into one `Child`, in ONE crossing.
+    // Pop `childCount` operands and push a FRESH node of the named `alternative` built from them.
     //
-    // Not the operand-stack route, and deliberately not: the stack's per-node primitives are what
-    // the flat design exists to remove -- `pushCopyOf` measures 1.54x its C++ equivalent and
-    // `2x push + rebuildFrom` 1.64x, with `rebuildFrom` alone at 1396 retired instructions,
-    // because it re-derives the operation from the original node's variant tag with a 41-way
-    // `switchOn` and refills its slots through `WTF::apply`. A flat tree already states each
-    // node's alternative, so nothing has to be re-derived and nothing has to be dispatched per
-    // crossing. The operand stack is used here only as the place the single finished tree lands,
-    // one append per whole tree; it is cleared first, so a benchmark loop is steady-state rather
-    // than growing a vector `iterations` long.
+    // The construction entry that does NOT take an original node, and the one the flat tree uses
+    // for every operator it emits. `rebuildFrom` above recovers the operation from the original
+    // node's variant tag through a 41-way `switchOn` plus `WTF::apply` -- 1396 retired
+    // instructions, measured as primitive 7 against primitive 8 -- and a flat node has no original
+    // to recover from and does not need one: it already states its own alternative.
     //
-    // `__counted_by` plus `noescape` on each buffer means Swift sees two `Span`s, with no pointers
-    // and no `unsafe` marker -- the same recipe `CSSSwiftTokenSink::takeChunk` uses. Both are
-    // required: `counted_by` alone imports as `UnsafeBufferPointer` and `noescape` alone as
-    // pointer-plus-count.
+    // Naming the alternative here is a deliberate reversal of the rule the reading direction keeps
+    // ("no operation kind ever crosses in the construction direction", above). That rule is right
+    // when the output node's kind IS the input node's kind, because then recovering it is free and
+    // stating it is duplication. It stops being right once Swift owns the tree: there is no input
+    // node, so a kind that does not cross is a kind that has to be re-derived from something, and
+    // there is nothing left to re-derive it from.
     //
-    // Coverage is the flat simplifier's own -- `Sum`, `Product`, `Negate`, `Invert` and the four
-    // numeric leaves -- and nothing else, because a flat node carries no way to reconstruct any
-    // other alternative. Returns false rather than building something plausible for anything else,
-    // for an out-of-range index, or for a `toType` that does not merge. Nothing is appended in
-    // that case.
-    WEBCORE_EXPORT bool emitFlatTree(
-        const CSSCalcSwiftFlatNode *__counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount,
-        const uint32_t *__counted_by(indexCount) childIndices __attribute__((noescape)), size_t indexCount,
-        uint32_t rootIndex);
-
-
-
-    // Pop `childCount` operands and push a FRESH `min()` or `max()` built from them.
-    //
-    // The only operation kind simplification ever creates that was not already in the input, and
-    // the only reason a construction selector exists at all: `clamp(none, VAL, MAX)` rewrites to
-    // `min(VAL, MAX)` and `clamp(MIN, VAL, none)` to `max(MIN, VAL)`
-    // (CSSCalcTree+Simplification.cpp:1012-1038). A `bool` rather than a kind, because two is the
-    // whole set and naming it `CSSCalcSwiftNodeKind::Min` would reopen exactly the door principle
-    // one closes.
+    // This subsumes the earlier `buildMinMax(bool isMax, ...)`: `clamp(none, VAL, MAX)` rewriting
+    // to `min(VAL, MAX)` and `clamp(MIN, VAL, none)` to `max(MIN, VAL)`
+    // (CSSCalcTree+Simplification.cpp:1012-1038) is `Min`/`Max` through this same entry, so the
+    // selector is one enum rather than one enum and one `bool`.
     //
     // Unlike `rebuildFrom` this computes a FRESH `toType(...)`, because there is no original node
-    // of this kind to take one from -- which is also why it can fail for a reason that is not a
-    // contract violation: `toType` returns `std::nullopt` when the children's types do not merge,
-    // and the C++ arm returns `std::nullopt` from the rewrite in exactly that case. So false here
-    // means "the C++ would not have made this node either", so this must decline rather than
-    // treat it as impossible.
-    WEBCORE_EXPORT bool buildMinMax(bool isMax, uint32_t childCount);
+    // to take one from -- which is also why it can fail for a reason that is not a contract
+    // violation: `toType` returns `std::nullopt` when the children's types do not merge, and the
+    // C++ arm returns `std::nullopt` from the rewrite in exactly that case. So false there means
+    // "the C++ would not have made this node either", and it must decline rather than treat it as
+    // impossible.
+    //
+    // Serves the `Children`-slotted operations (`Sum`, `Product`, `Min`, `Max`) and the two unary
+    // ones (`Negate`, `Invert`); an alternative outside that set, a mismatched arity, or too few
+    // operands is a contract violation and returns false without touching the stack. Widening the
+    // set is a case each, and it is why `Children` never has to reach Swift: this is the only
+    // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount);
+
+    // Drop every operand.
+    //
+    // The benchmark's, and only the benchmark's: `copyAndSimplify` builds a fresh
+    // `CSSCalcSwiftOperandStack` per call, so nothing on a real path ever re-enters a used one. It
+    // is a member here rather than a line in the benchmark because the stack reaches the timed loop
+    // only through this builder, and the loop has to be on the SWIFT side -- that is what hoists the
+    // flat tree's two buffers across iterations, and allocating them per call read 2338 retired
+    // instructions against 458 hoisted.
+    //
+    // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
+    // that this header stays self-contained and does not pull in wtf/Vector.h.
+    WEBCORE_EXPORT void clearOperands();
 
     // `simplify(Symbol&)` (CSSCalcTree+Simplification.cpp:516-524) in full --
     // `makeNumeric(options.symbolTable.get(id)->value, unit)`.

@@ -753,7 +753,7 @@ private enum Fold {
 /// Addressed by origin ordinal for the same splicing reason as `.replacedBySumTerm`.
     case scaledSumChildren(origin: UInt32, factor: Double)
 /// `clamp()` becoming `min()` or `max()`: the only rewrite that creates an operation kind not in
-/// the input, and the only reason `buildMinMax` exists on the boundary.
+/// the input, and the only reason the boundary has a construction entry that names its own kind.
     case rebuiltMinMax(isMax: Bool)
 /// A `Children`-slotted node whose children merged: `rewrite` recomputes the merge plan, pushes one
 /// operand per survivor, and calls `rebuildFrom` with the new count. Kept apart from `.unchanged`
@@ -884,7 +884,7 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
 
     case .Clamp:
         // `clamp(none, VAL, MAX)` becomes `min(VAL, MAX)` -- the only rule that changes an operation's kind,
-        // and the only reason `buildMinMax` exists on the boundary. 3/2/1 are the only shapes `ChildOrNone`
+        // and the only reason `buildOperation` is reachable from this port. 3/2/1 are the only shapes `ChildOrNone`
         // admits; whether `kind` agrees on WHICH bound is `none` is checked separately in `foldClamp`.
         return childCount >= 1 && childCount <= 3
 
@@ -1987,7 +1987,7 @@ private extension CalcSimplification {
     /// node itself, reporting the result rather than materializing it.
     ///
     /// `builder` is `borrowing` here, so only its `const` upcalls are reachable -- `pushLeaf`,
-    /// `pushCopyOf`, `rebuildFrom` and `buildMinMax` are all `mutating` in Swift and can't be called
+    /// `pushCopyOf`, `rebuildFrom` and `buildOperation` are all `mutating` in Swift and can't be called
     /// on a borrow, which makes "pushes nothing" compiler-checked rather than a comment.
     func fold(
         _ node: borrowing WebCore.CSSCalc.Child,
@@ -3667,10 +3667,10 @@ private extension CalcSimplification {
     }
 
     /// `convertToMin`/`convertToMax` (`+Simplification.cpp:1018`-`:1044`): a fresh `min()`/`max()`
-    /// over `clamp()`'s two surviving arguments, via `buildMinMax`, the boundary's only construction
-    /// selector.
+    /// over `clamp()`'s two surviving arguments, via `buildOperation`, the boundary's construction
+    /// entry for a node with no original to rebuild from.
     ///
-    /// A `false` from `buildMinMax` declines the whole tree rather than rebuilding the `Clamp`: by
+    /// A `false` from `buildOperation` declines the whole tree rather than rebuilding the `Clamp`: by
     /// that point two operands are already pushed where the parent expects one, and there is no `pop`.
     /// Exact regardless, since the C++ arm then rebuilds the `Clamp` itself. Expected never to fire in
     /// practice, since the parser's own type check should make the mismatch unreachable.
@@ -3686,7 +3686,7 @@ private extension CalcSimplification {
             }
             index += 1
         }
-        return builder.buildMinMax(isMax, 2) ? .pushed : .declined(.Clamp)
+        return builder.buildOperation(isMax ? .Max : .Min, 2) ? .pushed : .declined(.Clamp)
     }
 
     /// The `.mergedChildren` half of `rewrite`: `simplifyForMinMax`'s phase 2 (`:458`-`:479`). The
@@ -4701,18 +4701,29 @@ private extension CalcSimplification {
 /// with no indirection and nothing refcounted.
 ///
 /// Children are named by INDEX, not by pointer, which is what makes the whole structure `Copyable`,
-/// storable in an ordinary Swift `Array`, and free of the `~Escapable` problem that forced the
-/// handle design in the first place. Same move as the tokenizer island's offset-in-the-pointer-slot
-/// design.
+/// storable in an ordinary Swift array, and free of the `~Escapable` problem that forced the handle
+/// design in the first place. Same move as the tokenizer island's offset-in-the-pointer-slot design.
 ///
-/// DECLARED IN C++, in CSSCalcSwiftTypes.h, and that is the emit path's doing rather than a
-/// preference: emit hands the whole tree to C++ in ONE crossing, as a `Span` of these, and a span
-/// needs a type both sides can name. Nothing about the layout changed in the move -- same fields,
-/// same order, same 24 bytes, held by a `static_assert` beside the declaration -- so the
-/// conversion and simplification gates measured before the move remain comparable to the ones
-/// measured after it. Reading it back the other way is not available: CSSCalcSwiftTypes.h is what
-/// WebCoreSwift-Generated.h is generated *from*, so it cannot name a Swift `@_expose(Cxx)` type.
-fileprivate typealias CalcFlatNode = WebCore.CSSCalc.CSSCalcSwiftFlatNode
+/// DEFINED IN SWIFT, and that is the point of the exercise rather than an aesthetic preference: the
+/// declaration briefly lived in CSSCalcSwiftTypes.h so that `emitFlatTree` could take a `Span` of
+/// these, and every consequence of that ran the wrong way -- C++ owning the shape of a structure
+/// only Swift builds, a size `static_assert` to keep the two in step, and a boundary type that grows
+/// a field every time the simplifier learns an alternative. Emit no longer takes a span, so nothing
+/// on the C++ side names this type and nothing has to.
+///
+/// `alternative` is the imported C++ enum rather than a Swift mirror of it, so a `switch` here is
+/// checked against the one list (`CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`) and adding a 42nd
+/// alternative is a compile error here rather than a silent passthrough.
+fileprivate struct CalcFlatNode {
+    var value: Double
+    /// Offset into the child-index side table, not into the node array.
+    var childStart: UInt32
+    var childCount: UInt32
+    var valueID: UInt16
+    var unitType: UInt8
+    var alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+    var percentHint: UInt8
+}
 
 fileprivate extension CalcFlatNode {
     /// The four numeric leaves -- the only alternatives that carry a foldable value.
@@ -4721,6 +4732,24 @@ fileprivate extension CalcFlatNode {
         case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension: return true
         default: return false
         }
+    }
+
+    /// This node as the boundary's leaf representation, or nil if it is not one of the four.
+    ///
+    /// The mapping is spelled out rather than taken from the two enums happening to agree on their
+    /// first four raw values. They do agree today, and nothing holds them to it: `CSSCalcSwiftNodeKind`
+    /// is the serializer's 20-case shape list and `CSSCalcSwiftAlternative` is the variant's 41-case
+    /// index, and they are declared in different macro lists three hundred lines apart.
+    var numericLeaf: NumericLeaf? {
+        let kind: NumericKind
+        switch alternative {
+        case .Number: kind = .number
+        case .Percentage: kind = .percentage
+        case .CanonicalDimension: kind = .canonicalDimension
+        case .NonCanonicalDimension: kind = .nonCanonicalDimension
+        default: return nil
+        }
+        return NumericLeaf(kind: kind, value: value, unitType: UInt16(unitType), percentHint: percentHint)
     }
 
     /// What makes two leaves addable: `1px + 2px` merges, `1px + 2em` does not, and a `Number`
@@ -4972,6 +5001,48 @@ fileprivate extension CalcFlatTree {
         }
         // Mixed, with an operator factor: out of scope, left alone.
     }
+
+    /// Materialise the subtree rooted at `i` as a real `CSSCalc::Child`, on the builder's operand
+    /// stack, and report whether it got there.
+    ///
+    /// SWIFT WALKS ITS OWN TREE. That is the whole shape of this function and the reason the flat
+    /// node no longer exists in C++: nothing about the tree crosses, only finished operands and, for
+    /// an operator, the alternative and the arity. Post-order, so every child is an operand on the
+    /// stack before its parent asks for it -- the same discipline the rest of the builder already
+    /// uses, and the reason no Swift container ever holds a `Child`.
+    ///
+    /// What crosses per node, and what does not: `pushLeaf` takes a 16-byte POD and `buildOperation`
+    /// takes an enum and a count. Neither re-derives anything. The predecessor of this function was
+    /// one crossing for the whole tree -- Swift handing over two `Span`s and C++ walking them -- and
+    /// the reason that is gone is not that it was slow but that it required C++ to name the node
+    /// type, which is the inversion running backwards. The cost of the swap is measured, not
+    /// assumed: see the emit gate in `calcbench --primitives`.
+    ///
+    /// Distinct from `rebuildFrom`, which is what the tree-walking port calls: that takes the
+    /// ORIGINAL node and recovers its operation through a 41-way `switchOn` plus `WTF::apply`, at
+    /// 1396 retired instructions. A flat node states its own alternative, so there is nothing to
+    /// recover.
+    ///
+    /// Recursive on tree DEPTH, not on node count, and the deepest calc expression in the whole WPT
+    /// css-values corpus is single digits. An explicit stack would need a Swift buffer to hold it
+    /// and would buy nothing here.
+    func emit(_ i: Int, into builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder) -> Bool {
+        let node = nodes[i]
+
+        if let leaf = node.numericLeaf {
+            // `pushLeaf` owns which alternative a unit means, via `makeNumeric`, so no unit table is
+            // re-derived here -- the same routing the tree-walking port's leaves take.
+            return builder.pushLeaf(leaf.boundaryLeaf)
+        }
+
+        let n = Int(node.childCount)
+        for k in 0..<n {
+            guard emit(child(i, k), into: &builder) else { return false }
+        }
+        // False for anything outside `buildOperation`'s set, which for now is the flat simplifier's
+        // own coverage. Declining rather than building something plausible.
+        return builder.buildOperation(node.alternative, UInt32(n))
+    }
 }
 
 /// Convert and then FOLD, `iterations` times, returning the bit pattern of the resulting root's
@@ -5031,20 +5102,18 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
 /// with real children, and that is the cost that decides whether the flat design wins on the trees
 /// real CSS actually carries.
 ///
-/// EMIT IS ONE CROSSING FOR THE WHOLE TREE, not one per node, and not the operand stack. Swift hands
-/// C++ two `Span`s -- the nodes and the child-index side table -- and C++ walks them. Nothing is
-/// re-dispatched on the way: a flat node already states its alternative, where `rebuildFrom` has to
-/// recover the operation from the original node's variant tag through a 41-way `switchOn` plus
-/// `WTF::apply`, measured at 1396 retired instructions. The builder appears here only as the place
-/// the single finished tree lands; none of its per-node primitives are called.
+/// SWIFT WALKS ITS OWN TREE and pushes finished operands; see `CalcFlatTree.emit`. Nothing about the
+/// flat representation crosses, which is what lets the node be a Swift type. The predecessor took a
+/// `Span` of a C++-declared POD in one crossing per tree; this takes one crossing per node with
+/// nothing dispatched in either, and the difference between the two is what this gate now measures.
 ///
 /// Same hoisting as the other two probes, and for the same measured reason: the two flat buffers
 /// live outside the loop, because allocating them per call read 2338 instructions against 458
 /// hoisted -- 1.6x the C++ arm's whole simplification, which would have refuted the design outright.
-/// The C++ side hoists the operand stack to match, and `emitFlatTree` shrinks rather than frees it.
+/// The C++ side hoists the operand stack to match, and the stack is cleared rather than freed here,
+/// so a benchmark loop is steady-state rather than growing a vector `iterations` long.
 ///
-/// Guarded, because `emitFlatTree` is defined only in a bridge build: a declaration Swift can always
-/// see plus a definition it cannot always link would be an undefined symbol in the shipping dylib.
+/// Guarded, because the fixture the benchmark drives it with is defined only in a bridge build.
 @_expose(Cxx)
 public func cssCalcFlatEmitProbeSwift(
     _ root: borrowing WebCore.CSSCalc.Child,
@@ -5059,7 +5128,8 @@ public func cssCalcFlatEmitProbeSwift(
         tree.reset()
         let rootIndex = tree.append(root)
         tree.simplify()
-        if builder.emitFlatTree(tree.nodes.span, tree.childIndices.span, rootIndex) {
+        builder.clearOperands()
+        if tree.emit(Int(rootIndex), into: &builder) {
             emitted &+= 1
         }
     }
