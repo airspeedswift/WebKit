@@ -2489,6 +2489,126 @@ uint64_t webCoreCSSCalcSimplificationSwiftCallCount(void)
     return s_simplificationSwiftCalls.load(std::memory_order_relaxed);
 }
 
+// MARK: - R151 gate 3: materialising a `Child` tree from the FLAT Swift tree
+//
+// The one shape gates 1 and 2 did not price. Gate 2's fixture collapses to a single `Number`, so
+// emitting its answer is one `makeChild` and proves nothing about a tree that SURVIVES as an
+// operator node, where emit has to rebuild a real `Child` with real children.
+//
+// DIRECT, not through the operand stack. Swift hands the whole flat tree over once and C++ walks
+// it, so there is no per-node crossing and no dispatch to re-derive: a flat node already states
+// its alternative, where `rebuildFrom` has to recover the operation from the original node's
+// variant tag through a 41-way `switchOn` plus `WTF::apply` over the tuple conformance -- 1396
+// retired instructions per call, measured as primitive 7 against primitive 8.
+//
+// This is a probe, and its coverage is the flat simplifier's: `Sum`, `Product`, `Negate`, `Invert`
+// and the four numeric leaves. It is not a decline channel for anything else -- a flat node
+// carries no route back to a `Random::Sharing`, a `CSS::CustomIdent` or a rounding strategy, so
+// any other alternative is a hard false. Widening this is R151 item 2's job, not this gate's.
+//
+// The `Type` is recomputed with `toType` rather than carried, because a flat node does not hold
+// one. That is an honest cost of materialising from a flat representation and is left in: the
+// alternative -- widening `CSSCalcSwiftFlatNode` by eight bytes -- is a design choice R151 item 3
+// should make on evidence, not something to assume here.
+static std::optional<Child> emitFlatSubtree(std::span<const CSSCalcSwiftFlatNode> nodes, std::span<const uint32_t> childIndices, uint32_t index)
+{
+    if (index >= nodes.size())
+        return std::nullopt;
+    auto& node = nodes[index];
+
+    // Bounds-checked against the side table, not against the parent's own claim, so a malformed
+    // flat tree declines rather than reading a neighbour's slot.
+    auto emitChild = [&](uint32_t k) -> std::optional<Child> {
+        size_t slot = static_cast<size_t>(node.childStart) + k;
+        if (slot >= childIndices.size())
+            return std::nullopt;
+        return emitFlatSubtree(nodes, childIndices, childIndices[slot]);
+    };
+
+    // The type is computed into a LOCAL before the move, never inline beside it: argument
+    // evaluation order is unspecified, so `makeChild(WTF::move(op), toType(op))` can read a
+    // moved-from node whose `UniqueRef` is already null. That manifests as an OOM kill with no
+    // output at all, not as anything legible. Same sequencing the bench fixtures use below.
+    auto finish = [](auto&& op) -> std::optional<Child> {
+        auto type = toType(op);
+        if (!type)
+            return std::nullopt;
+        return makeChild(WTF::move(op), *type);
+    };
+
+    switch (node.alternative) {
+    case CSSCalcSwiftAlternative::Number:
+    case CSSCalcSwiftAlternative::CanonicalDimension:
+        // `makeNumeric` owns which `CanonicalDimension::Dimension` a canonical unit means, exactly
+        // as `pushLeaf` routes these two, so no unit table is re-derived here.
+        return makeNumeric(node.value, static_cast<CSSUnitType>(node.unitType));
+
+    case CSSCalcSwiftAlternative::Percentage:
+        // The one leaf `makeNumeric` cannot produce faithfully: it builds `hint = { }`, and a
+        // folded percentage keeps the hint its operand had. `pushLeaf` says the same at :2013.
+        return makeChild(Percentage {
+            .value = node.value,
+            .hint = node.percentHint ? Type::PercentHintValue { static_cast<PercentHint>(node.percentHint) } : Type::PercentHintValue { }
+        });
+
+    case CSSCalcSwiftAlternative::NonCanonicalDimension:
+        // Built directly rather than through `makeNumeric`, which maps unit to alternative and so
+        // cannot express "stays a `NonCanonicalDimension`" for the fourteen units it classifies as
+        // something else. Same reasoning as `pushLeaf`'s at :2024.
+        return makeChild(NonCanonicalDimension { .value = node.value, .unit = static_cast<CSSUnitType>(node.unitType) });
+
+    case CSSCalcSwiftAlternative::Negate:
+    case CSSCalcSwiftAlternative::Invert: {
+        if (node.childCount != 1)
+            return std::nullopt;
+        auto a = emitChild(0);
+        if (!a)
+            return std::nullopt;
+        if (node.alternative == CSSCalcSwiftAlternative::Negate)
+            return finish(Negate { WTF::move(*a) });
+        return finish(Invert { WTF::move(*a) });
+    }
+
+    case CSSCalcSwiftAlternative::Sum:
+    case CSSCalcSwiftAlternative::Product: {
+        Vector<Child> kids;
+        kids.reserveInitialCapacity(node.childCount);
+        for (uint32_t k = 0; k < node.childCount; ++k) {
+            auto child = emitChild(k);
+            if (!child)
+                return std::nullopt;
+            kids.append(WTF::move(*child));
+        }
+        if (node.alternative == CSSCalcSwiftAlternative::Sum)
+            return finish(Sum { Children { WTF::move(kids) } });
+        return finish(Product { Children { WTF::move(kids) } });
+    }
+
+    default:
+        // Outside the flat simplifier's coverage. NOT a decline channel: a flat node states no
+        // route back to these alternatives at all, so this is a contract violation of the probe's
+        // own scope rather than an input it could serve.
+        return std::nullopt;
+    }
+}
+
+bool CSSCalcSwiftBuilder::emitFlatTree(
+    const CSSCalcSwiftFlatNode *__counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount,
+    const uint32_t *__counted_by(indexCount) childIndices __attribute__((noescape)), size_t indexCount,
+    uint32_t rootIndex)
+{
+    // Cleared, not appended to, so a benchmark loop measures a STEADY-STATE emit: the vector's
+    // capacity survives and nothing grows over `iterations`. The previous tree's destructor runs
+    // here, which is the same cost the C++ arm pays destroying `copyAndSimplify`'s temporary.
+    m_operands->value.shrink(0);
+
+    auto emitted = emitFlatSubtree(unsafeMakeSpan(nodes, nodeCount), unsafeMakeSpan(childIndices, indexCount), rootIndex);
+    if (!emitted)
+        return false;
+    m_operands->value.append(WTF::move(*emitted));
+    return true;
+}
+
 // Per-primitive timing, to split the island's FIXED per-whole-tree cost between the read crossing
 // and the construction upcalls. R144 left that term unattributed and it is the biggest one: an
 // operator tree costs Swift 4,197 retired instructions against the C++ arm's 1,025, and no
@@ -2586,6 +2706,35 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
         return sum;
     }
 
+    // R151 GATE 3's ORACLE, and the reason this gate is worth running at all: the fixture must
+    // SURVIVE simplification as an operator node, which is the one shape gates 1 and 2 did not
+    // cover. Three separate assertions, because each catches a different way the gate could pass
+    // while measuring nothing:
+    //
+    //   1. the C++ answer is still a `Sum` -- if the fixture ever folded, emit would cost one
+    //      `makeChild` and the row would silently become a second copy of gate 2;
+    //   2. the Swift arm actually emitted -- `emitFlatTree` returns false rather than building
+    //      something plausible, and a false would otherwise read as a very fast pass;
+    //   3. the two trees are EQUAL BY VALUE, `Child::operator==`, which compares the stored
+    //      `Type` and walks the children -- so a flat pass that skipped work cannot read as the
+    //      win.
+    //
+    // Run once, on a throwaway stack, ahead of the timed loop. `RELEASE_ASSERT`, so a shipping
+    // build fails too.
+    if (which == 16) {
+        auto cppRoot = copyAndSimplify(fixture, options);
+        RELEASE_ASSERT_WITH_MESSAGE(WTF::holdsAlternative<IndirectNode<Sum>>(cppRoot),
+            "R151 gate 3's fixture must survive simplification as an operator node");
+
+        CSSCalcSwiftOperandStack oracleOperands;
+        CSSCalcSwiftBuilder oracleBuilder { oracleOperands, options };
+        RELEASE_ASSERT_WITH_MESSAGE(cssCalcFlatEmitProbeSwift(fixture, oracleBuilder, 1) == 1,
+            "the flat emit path declined the surviving-operator fixture");
+        RELEASE_ASSERT(oracleOperands.value.size() == 1);
+        RELEASE_ASSERT_WITH_MESSAGE(oracleOperands.value[0] == cppRoot,
+            "flat convert+simplify+emit disagrees with the C++ arm on the surviving-operator fixture");
+    }
+
     // R151 PROBE, ahead of the loop deliberately: the gating number for flipping the calc tree to a
     // Swift representation is what one conversion costs with WARM buffers, and the Swift entry point
     // therefore runs the iteration loop itself. Read it against case 13, the C++ arm simplifying the
@@ -2593,6 +2742,24 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
     // (R144: 95.4 + 141.9N + 5.02N^2 instructions).
     if (which == 12)
         return cssCalcFlattenProbeSwift(fixture, iterations);
+
+    // GATE 3: the whole flat pipeline -- convert, simplify, and EMIT a real `CSSCalc::Child` --
+    // on the Em/Rem `Sum`, which survives as an operator node. The denominator is case 13, the
+    // C++ arm's `copyAndSimplify` of the SAME fixture, so no new C++ arm is needed and the two
+    // rows already sit in the same run.
+    //
+    // The builder is HOISTED for the reason case 3's operand stack is: constructing a
+    // `CSSCalcSwiftOperandStack` inside the loop charges every iteration with the `Vector<Child>`'s
+    // first malloc and its free, which the real path pays once per whole tree. `emitFlatTree`
+    // shrinks rather than frees, so what is timed is a steady-state emit. Swift's own two flat
+    // buffers are hoisted the same way, inside the Swift entry point, which is why the loop runs
+    // there and not here.
+    if (which == 16) {
+        CSSCalcSwiftOperandStack emitOperands;
+        emitOperands.value.reserveInitialCapacity(8);
+        CSSCalcSwiftBuilder emitBuilder { emitOperands, options };
+        return cssCalcFlatEmitProbeSwift(fixture, emitBuilder, iterations);
+    }
 
     uint64_t sink = 0;
     for (uint32_t i = 0; i < iterations; ++i) {

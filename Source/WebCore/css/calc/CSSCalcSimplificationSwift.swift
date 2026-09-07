@@ -4497,18 +4497,17 @@ private extension CalcSimplification {
 /// storable in an ordinary Swift `Array`, and free of the `~Escapable` problem that forced the
 /// handle design in the first place. Same move as the tokenizer island's offset-in-the-pointer-slot
 /// design.
-fileprivate struct CalcFlatNode {
-    var value: Double
-    /// Offset into the child-index side table, not into `nodes`.
-    var childStart: UInt32
-    var childCount: UInt32
-    var valueID: UInt16
-    var unitType: UInt8
-    /// The imported C++ enum, stored directly. `UInt8`-backed, so the node stays 24 bytes, and
-    /// switching over it is checked for exhaustiveness where a raw byte would not be.
-    var alternative: CalcAlternative
-    var percentHint: UInt8
+///
+/// DECLARED IN C++, in CSSCalcSwiftTypes.h, and that is the emit path's doing rather than a
+/// preference: emit hands the whole tree to C++ in ONE crossing, as a `Span` of these, and a span
+/// needs a type both sides can name. Nothing about the layout changed in the move -- same fields,
+/// same order, same 24 bytes, held by a `static_assert` beside the declaration -- so the
+/// conversion and simplification gates measured before the move remain comparable to the ones
+/// measured after it. Reading it back the other way is not available: CSSCalcSwiftTypes.h is what
+/// WebCoreSwift-Generated.h is generated *from*, so it cannot name a Swift `@_expose(Cxx)` type.
+fileprivate typealias CalcFlatNode = WebCore.CSSCalc.CSSCalcSwiftFlatNode
 
+fileprivate extension CalcFlatNode {
     /// The four numeric leaves -- the only alternatives that carry a foldable value.
     var isNumericLeaf: Bool {
         switch alternative {
@@ -4813,3 +4812,51 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
     }
     return total
 }
+
+#if ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE
+
+/// R151 GATE 3: convert, simplify, and EMIT a real `CSSCalc::Child`, `iterations` times, returning
+/// how many iterations emitted successfully so the caller can check the count rather than trust the
+/// timing.
+///
+/// The one shape gates 1 and 2 did not price. Gate 2's fixture folds away to a single `Number`, so
+/// its emit is one `makeChild`; a tree that SURVIVES as an operator node has to rebuild a real node
+/// with real children, and that is the cost that decides whether the flat design wins on the trees
+/// real CSS actually carries.
+///
+/// EMIT IS ONE CROSSING FOR THE WHOLE TREE, not one per node, and not the operand stack. Swift hands
+/// C++ two `Span`s -- the nodes and the child-index side table -- and C++ walks them. Nothing is
+/// re-dispatched on the way: a flat node already states its alternative, where `rebuildFrom` has to
+/// recover the operation from the original node's variant tag through a 41-way `switchOn` plus
+/// `WTF::apply`, measured at 1396 retired instructions. The builder appears here only as the place
+/// the single finished tree lands; none of its per-node primitives are called.
+///
+/// Same hoisting as the other two probes, and for the same measured reason: the two flat buffers
+/// live outside the loop, because allocating them per call read 2338 instructions against 458
+/// hoisted -- 1.6x the C++ arm's whole simplification, which would have refuted the design outright.
+/// The C++ side hoists the operand stack to match, and `emitFlatTree` shrinks rather than frees it.
+///
+/// Guarded, because `emitFlatTree` is defined only in a bridge build: a declaration Swift can always
+/// see plus a definition it cannot always link would be an undefined symbol in the shipping dylib.
+@_expose(Cxx)
+public func cssCalcFlatEmitProbeSwift(
+    _ root: borrowing WebCore.CSSCalc.Child,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ iterations: UInt32
+) -> UInt32 {
+    var tree = CalcFlatTree()
+    tree.nodes.reserveCapacity(64)
+    tree.childIndices.reserveCapacity(64)
+    var emitted: UInt32 = 0
+    for _ in 0..<iterations {
+        tree.reset()
+        let rootIndex = tree.append(root)
+        tree.simplify()
+        if builder.emitFlatTree(tree.nodes.span, tree.childIndices.span, rootIndex) {
+            emitted &+= 1
+        }
+    }
+    return emitted
+}
+
+#endif

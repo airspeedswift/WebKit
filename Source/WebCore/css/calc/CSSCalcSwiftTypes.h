@@ -748,6 +748,35 @@ struct CSSCalcSwiftSimplificationOptions {
     bool percentageResolveToDimension;
 };
 
+// MARK: - R151 probe: one node of the FLAT Swift tree
+//
+// Declared here rather than in Swift, and that is the only reason this type is in C++ at all: the
+// emit direction hands the whole tree over in ONE crossing, as a `Span` of these, and a span needs
+// a type both sides can name. `CSSCalcTree+Simplification.h` is not installed as a private header,
+// so it is not reachable from Swift; this boundary header is the one place a shared POD can live.
+//
+// Field order and widths are the flat simplifier's, unchanged: 8 + 4 + 4 + 2 + 1 + 1 + 1 = 21 live
+// bytes in 24, the same size as the `Child` it mirrors, so moving the declaration from Swift to C++
+// changes no layout and no measurement. Children are named by INDEX into a side table, not by
+// pointer, which is what keeps the type `Copyable` and free of the `~Escapable` problem.
+//
+// Nothing production reads this. It is the prototype of the materialisation step R151 item 3 needs
+// -- once the parser builds the flat tree, a `CSSCalc::Child` is built only when a C++ consumer
+// asks for one, and this is that function's input.
+struct CSSCalcSwiftFlatNode {
+    double value;
+    // Offset into the child-index side table, not into the node array.
+    uint32_t childStart;
+    uint32_t childCount;
+    uint16_t valueID;
+    uint8_t unitType;
+    // The discriminant, typed as the enum so a `switch` over it is checked for exhaustiveness.
+    CSSCalcSwiftAlternative alternative;
+    uint8_t percentHint;
+};
+
+static_assert(sizeof(CSSCalcSwiftFlatNode) == 24, "the flat node must stay the size of the Child it mirrors");
+
 // Where the simplification output goes: the construction sink.
 //
 // Modelled on `CSSCalcSwiftSink` above: a `SWIFT_SAFE` value struct taken `inout` (the builder
@@ -818,6 +847,33 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // Addressed by index rather than by position, because pairing by original position is wrong
     // once items can be dropped -- only the caller knows which original item each survivor is.
     WEBCORE_EXPORT void pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight);
+
+    // TEST-ONLY (R151 gate 3): materialise a whole FLAT tree into one `Child`, in ONE crossing.
+    //
+    // Not the operand-stack route, and deliberately not: the stack's per-node primitives are what
+    // the flat design exists to remove -- `pushCopyOf` measures 1.54x its C++ equivalent and
+    // `2x push + rebuildFrom` 1.64x, with `rebuildFrom` alone at 1396 retired instructions,
+    // because it re-derives the operation from the original node's variant tag with a 41-way
+    // `switchOn` and refills its slots through `WTF::apply`. A flat tree already states each
+    // node's alternative, so nothing has to be re-derived and nothing has to be dispatched per
+    // crossing. The operand stack is used here only as the place the single finished tree lands,
+    // one append per whole tree; it is cleared first, so a benchmark loop is steady-state rather
+    // than growing a vector `iterations` long.
+    //
+    // `__counted_by` plus `noescape` on each buffer means Swift sees two `Span`s, with no pointers
+    // and no `unsafe` marker -- the same recipe `CSSSwiftTokenSink::takeChunk` uses. Both are
+    // required: `counted_by` alone imports as `UnsafeBufferPointer` and `noescape` alone as
+    // pointer-plus-count.
+    //
+    // Coverage is the flat simplifier's own -- `Sum`, `Product`, `Negate`, `Invert` and the four
+    // numeric leaves -- and nothing else, because a flat node carries no way to reconstruct any
+    // other alternative. Returns false rather than building something plausible for anything else,
+    // for an out-of-range index, or for a `toType` that does not merge. Nothing is appended in
+    // that case.
+    WEBCORE_EXPORT bool emitFlatTree(
+        const CSSCalcSwiftFlatNode *__counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount,
+        const uint32_t *__counted_by(indexCount) childIndices __attribute__((noescape)), size_t indexCount,
+        uint32_t rootIndex);
 
 
 
