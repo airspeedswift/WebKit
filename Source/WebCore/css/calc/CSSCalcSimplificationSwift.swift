@@ -4109,6 +4109,12 @@ private enum CalcFlatCoverage {
             | bit(.RoundUp)
             | bit(.RoundDown)
             | bit(.RoundToZero)
+            | bit(.Mod)
+            | bit(.Rem)
+            | bit(.Abs)
+            | bit(.Sign)
+            | bit(.Pow)
+            | bit(.Sqrt)
             | bit(.Symbol)
             | bit(.SiblingCount)
             | bit(.SiblingIndex)
@@ -5380,8 +5386,8 @@ fileprivate func withCalcFlatTree<R>(
 // MARK: The flat simplifier
 //
 // COVERAGE: `Sum`, `Product`, `Negate`, `Invert`, `Min`, `Max`, `Clamp`, the four `round()`s,
-// `Symbol`, `SiblingCount`, `SiblingIndex`, `Anchor`, `AnchorSize`, `Random` and the four numeric
-// leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
+// `mod()`, `rem()`, `abs()`, `sign()`, `pow()`, `sqrt()`, `Symbol`, `SiblingCount`,
+// `SiblingIndex`, `Anchor`, `AnchorSize`, `Random` and the four numeric leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
 // honest behaviour for a bounded port -- it is not a decline channel and must not be read as one.
 // `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining alternatives away from
 // here; widening the two together is the work this representation exists to make possible.
@@ -5556,6 +5562,7 @@ fileprivate extension CalcFlatTree {
             simplifyNonCanonicalDimension(i, options, builder)
 
         case .Clamp, .RoundNearest, .RoundUp, .RoundDown, .RoundToZero,
+             .Mod, .Rem, .Abs, .Sign, .Pow, .Sqrt,
              .Symbol, .SiblingCount, .SiblingIndex, .Anchor, .AnchorSize, .Random:
             simplifyColdNode(i, original, options, builder)
 
@@ -5571,7 +5578,7 @@ fileprivate extension CalcFlatTree {
 
     /// The alternatives a REAL PAGE'S CSS does not hold, behind ONE call site.
     ///
-    /// ELEVEN CASE LABELS SHARING ONE CALL, and that shape is measured rather than tidy. The hot
+    /// SEVENTEEN CASE LABELS SHARING ONE CALL, and that shape is measured rather than tidy. The hot
     /// switch above names exactly the operations the captured payloads contain -- `calc-real.txt`,
     /// the four `real-sp3-*.css` and `bench.css` hold `max()` twice and no other math function at
     /// all -- and everything else is one entry. Five separate `@inline(never)` arms instead of one
@@ -5607,6 +5614,24 @@ fileprivate extension CalcFlatTree {
         case .RoundToZero:
             simplifyRound(i, options, CalcExecutor.roundToZero)
 
+        case .Mod:
+            simplifyBinaryOperation(i, options, CalcExecutor.mod)
+
+        case .Rem:
+            simplifyBinaryOperation(i, options, CalcExecutor.rem)
+
+        case .Abs:
+            simplifyAbs(i, options)
+
+        case .Sign:
+            simplifySign(i, options)
+
+        case .Pow:
+            simplifyPow(i)
+
+        case .Sqrt:
+            simplifySqrt(i)
+
         case .Symbol:
             simplifySymbol(i, options, builder)
 
@@ -5620,7 +5645,7 @@ fileprivate extension CalcFlatTree {
             simplifyRandom(i, original, options, builder)
 
         default:
-            // Unreachable: the caller's switch selects exactly the eleven above. Spelled as a
+            // Unreachable: the caller's switch selects exactly the seventeen above. Spelled as a
             // return rather than a trap for the reason every other unreachable arm in this file is
             // -- an untaught alternative leaves the node alone, which the mask has already made
             // impossible, rather than killing the process.
@@ -6619,6 +6644,84 @@ fileprivate extension CalcFlatTree {
             return
         }
         setLeaf(i, a.withValue(operation(a.value, b.value)))
+    }
+
+    /// `simplify(Mod&)` and `simplify(Rem&)` (`+Simplification.cpp:1128`-`:1136`), which are one
+    /// line each onto `simplifyForOperation<Mod|Rem>(root.a, root.b, options)`.
+    ///
+    /// The two-argument shape `round()` reaches through its own `if (root.b)`, so the operand
+    /// lookup is here and the predicate is shared.
+    @inline(never)
+    private mutating func simplifyBinaryOperation(
+        _ i: Int,
+        _ options: CalcSimplification,
+        _ operation: (Double, Double) -> Double
+    ) {
+        guard let aChild = child(i, 0), let bChild = child(i, 1) else {
+            // `isSimplifiableAlternative` has already bounded the arity to 2, so this is a flat tree
+            // disagreeing with itself. Left alone rather than declined: `emit` pushes whatever the
+            // list holds and `rebuildFrom` refuses an operand count its slots cannot take, so the
+            // tree declines there instead of rebuilding something different.
+            return
+        }
+        simplifyForOperation(i, aChild, bChild, options, operation)
+    }
+
+    /// `simplify(Abs&)` (`+Simplification.cpp:1323`-`:1335`): ANY numeric alternative, guarded by
+    /// `magnitudeComparable` alone, with the result carried onto a leaf shaped like the operand --
+    /// `makeChildWithValueBasedOn(executeMathOperation<Abs>(a.value), a)`.
+    ///
+    /// `magnitudeComparable` and NOT `fullyResolved` (`:1327`), which is the other side of the split
+    /// `simplifyForOperation` sits on: a `NonCanonicalDimension` is comparable by magnitude (`:149`)
+    /// and not fully resolved (`:171`), so `abs(-5em)` folds where `mod(5em, 3em)` does not. The
+    /// asymmetry is reproduced, not normalised.
+    @inline(never)
+    private mutating func simplifyAbs(_ i: Int, _ options: CalcSimplification) {
+        guard let aChild = child(i, 0), let a = nodes[aChild].numericLeaf,
+            options.magnitudeComparable(a) else {
+            // The catch-all visitor (`:1331`-`:1333`), plus the guard: the node is left alone.
+            return
+        }
+        setLeaf(i, a.withValue(CalcExecutor.abs(a.value)))
+    }
+
+    /// `simplify(Sign&)` (`+Simplification.cpp:1337`-`:1349`): `abs()`'s guard, and a `Number`
+    /// result whatever the operand's alternative was -- `sign()` is a ratio, not a quantity.
+    ///
+    /// `CalcExecutor.sign` returns the OPERAND when it is neither `> 0` nor `< 0`, so `sign(-0)` is
+    /// `-0` and `sign(NaN)` is `NaN`; that is `CSSCalcExecutor.h`'s own shape and not a shortcut.
+    @inline(never)
+    private mutating func simplifySign(_ i: Int, _ options: CalcSimplification) {
+        guard let aChild = child(i, 0), let a = nodes[aChild].numericLeaf,
+            options.magnitudeComparable(a) else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(CalcExecutor.sign(a.value)))
+    }
+
+    /// `simplify(Pow&)` (`+Simplification.cpp:1175`-`:1188`): both operands must be `Number`, and
+    /// that is the WHOLE predicate -- no `unitsMatch`, no `fullyResolved`, because the parser has
+    /// already type-checked `pow()`'s two arguments to `<number>`. `switchTogether` is given only a
+    /// `(const Number&, const Number&)` arm, so anything else falls to the catch-all.
+    @inline(never)
+    private mutating func simplifyPow(_ i: Int) {
+        guard let aChild = child(i, 0), let bChild = child(i, 1),
+            nodes[aChild].alternative == .Number, nodes[bChild].alternative == .Number else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(CalcExecutor.pow(nodes[aChild].value, nodes[bChild].value)))
+    }
+
+    /// `simplify(Sqrt&)` (`+Simplification.cpp:1190`-`:1203`): a `Number` in, a `Number` out.
+    ///
+    /// `CalcExecutor.sqrt` is `.squareRoot()`, which is IEEE-correctly-rounded, deliberately: it is
+    /// what `std::sqrt` gives and what the C++ arm therefore produces.
+    @inline(never)
+    private mutating func simplifySqrt(_ i: Int) {
+        guard let aChild = child(i, 0), nodes[aChild].alternative == .Number else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(CalcExecutor.sqrt(nodes[aChild].value)))
     }
 
     /// `simplify(Product&)` (`+Simplification.cpp:717`-`:909`), css-values-4 steps 9.1 to 9.5.
