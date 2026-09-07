@@ -1980,6 +1980,21 @@ private extension CalcSimplification {
 
 // MARK: - Folding a whole subtree
 
+/// How far `canonicalize` (`+Simplification.cpp:169`-`:287`) gets on the unit alone.
+///
+/// Twenty-eight of its seventy `CSSUnitType` cases need nothing else: fourteen multiply by a
+/// compile-time constant, and fourteen are units a `NonCanonicalDimension` can never hold. The other
+/// forty-two are font-, viewport- and container-relative lengths, which `Style::resolveLength`
+/// resolves against a `CSSToLengthConversionData` only the C++ builder holds.
+///
+/// Reported rather than resolved so a caller with no builder can still take the twenty-eight: a
+/// single builder-taking entry point would answer "unchanged" for `1cm` whenever the builder is
+/// absent, which is a silent wrong answer and not a decline.
+private enum CanonicalizeStep {
+    case leaf(NumericLeaf)
+    case relativeLength
+}
+
 private extension CalcSimplification {
 
     /// What `copyAndSimplify(const Child&)` (`+Simplification.cpp:1809`-`:1822`) would produce for
@@ -2370,39 +2385,34 @@ private extension CalcSimplification {
         return .unchanged(alternative)
     }
 
-    /// `simplify(NonCanonicalDimension&)` (`:505`-`:513`) / `canonicalize`
-    /// (`+Simplification.cpp:169`-`:287`): canonicalize if there is enough information, otherwise
-    /// leave it alone. Shared by the walk's own case and `foldSymbol`.
+    /// `canonicalize` (`+Simplification.cpp:169`-`:287`) minus its one upcall; see `CanonicalizeStep`
+    /// for why the upcall is reported rather than taken here.
     ///
-    /// `canonicalize`'s seventy `CSSUnitType` cases split three ways: fourteen do arithmetic against a
-    /// compile-time constant (reproduced below, reading the same constants through
-    /// `CSSUnitConversions.h`/`wtf.Core.MathExtras`); fourteen a `NonCanonicalDimension` can never
-    /// hold (enumerated below so they can't silently fall into the upcall arm); and forty-two are
-    /// font-, viewport- and container-relative lengths, resolved through one upcall
-    /// (`resolveRelativeLength`) rather than a transcribed unit table. `resolved == false` there means
-    /// "no conversion data", a normal outcome, and the dimension stays as it is.
+    /// The fourteen constant multiplies read the same constants the C++ reads, through
+    /// `CSSUnitConversions.h`/`wtf.Core.MathExtras` and in the same operand order -- a transcribed
+    /// literal would be a different `double`. The fourteen unreachable units are enumerated rather
+    /// than left to `default`, and must stay that way: `CSS::toLengthUnit`'s domain
+    /// (CSSPrimitiveNumericUnits.h:609-:666) is WIDER than the upcall group, accepting `QuirkyEm`,
+    /// `Px`, `Cm`, `Mm`, `Q`, `In`, `Pt` and `Pc` as well, so any of them dropped from the list would
+    /// route to `resolveRelativeLength` and resolve where the C++ answers `nullopt`.
     @inline(always)
-    func canonicalizedDimension(
-        _ value: Double,
-        _ unitType: UInt16,
-        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
-    ) -> NumericLeaf {
+    func canonicalizeStep(_ value: Double, _ unitType: UInt16) -> CanonicalizeStep {
         // The C++'s `nullopt`: `simplify(NonCanonicalDimension&)` copies the node through unchanged.
-        func unchanged() -> NumericLeaf {
-            return NumericLeaf(kind: .nonCanonicalDimension, value: value, unitType: unitType, percentHint: 0)
+        func unchanged() -> CanonicalizeStep {
+            return .leaf(NumericLeaf(kind: .nonCanonicalDimension, value: value, unitType: unitType, percentHint: 0))
         }
         // `makeCanonical(value, dimension)`. The canonical UNIT is named rather than the
         // `CanonicalDimension::Dimension`, because `Dimension` does not cross the boundary and
         // `makeNumeric` maps the unit back to it (CSSCalcTree.cpp:187) -- so these five spellings are
         // `toCSSUnit(Dimension)` (CSSCalcTree.h:992) read forwards, and there is no sixth: `Fr` is
         // `Dimension::Flex`, which `canonicalize` has no case for.
-        func canonical(_ canonicalized: Double, _ canonicalUnit: WebCore.CSSUnitType) -> NumericLeaf {
-            return NumericLeaf(
+        func canonical(_ canonicalized: Double, _ canonicalUnit: WebCore.CSSUnitType) -> CanonicalizeStep {
+            return .leaf(NumericLeaf(
                 kind: .canonicalDimension,
                 value: canonicalized,
                 unitType: UInt16(canonicalUnit.rawValue),
                 percentHint: 0
-            )
+            ))
         }
 
         // `UInt8(exactly:)`, not `UInt8(_:)`, which traps: narrowing the boundary's `uint16_t` unit
@@ -2464,18 +2474,49 @@ private extension CalcSimplification {
         // Everything else is a font-, viewport- or container-relative length, resolved via upcall
         // rather than a transcribed `CSS::toLengthUnit` table.
         default:
-            let resolved = builder.resolveRelativeLength(value, unitType)
-            guard resolved.resolved else {
-                return unchanged()
-            }
-            // `CanonicalDimension` unconditionally: resolving a length yields a length, and the unit
-            // comes from the upcall's own answer, not a guess here.
-            return NumericLeaf(
-                kind: .canonicalDimension,
-                value: resolved.value,
-                unitType: resolved.unitType,
-                percentHint: 0
-            )
+            return .relativeLength
+        }
+    }
+
+    /// `tryMakeCanonical` (`+Simplification.cpp:182`-`:186`), the one arm of `canonicalize` Swift
+    /// cannot finish on its own: `Style::resolveLength` reads the `CSSToLengthConversionData` the
+    /// builder holds. `resolved == false` is that lambda's `if (conversionData)` answering no, a
+    /// normal outcome, and the dimension stays as it is.
+    @inline(always)
+    func resolvedRelativeLength(
+        _ value: Double,
+        _ unitType: UInt16,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> NumericLeaf {
+        let resolved = builder.resolveRelativeLength(value, unitType)
+        guard resolved.resolved else {
+            return NumericLeaf(kind: .nonCanonicalDimension, value: value, unitType: unitType, percentHint: 0)
+        }
+        // `CanonicalDimension` unconditionally: resolving a length yields a length, and the unit
+        // comes from the upcall's own answer, not a guess here.
+        return NumericLeaf(
+            kind: .canonicalDimension,
+            value: resolved.value,
+            unitType: resolved.unitType,
+            percentHint: 0
+        )
+    }
+
+    /// `simplify(NonCanonicalDimension&)` (`:505`-`:513`) / `canonicalize`
+    /// (`+Simplification.cpp:169`-`:287`), both halves: canonicalize if there is enough information,
+    /// otherwise leave it alone. The two-pass port's spelling, for the walk's own case and
+    /// `foldSymbol`, which both always hold a builder.
+    @inline(always)
+    func canonicalizedDimension(
+        _ value: Double,
+        _ unitType: UInt16,
+        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> NumericLeaf {
+        switch canonicalizeStep(value, unitType) {
+        case .leaf(let leaf):
+            return leaf
+        case .relativeLength:
+            return resolvedRelativeLength(value, unitType, builder)
         }
     }
 
@@ -4074,11 +4115,11 @@ private extension CalcSimplification {
 /// `swift_once` guard, which is an atomic load on every simplification, and every term here is a
 /// compile-time constant so the optimizer folds the whole expression to one immediate.
 ///
-/// `NonCanonicalDimension` IS DELIBERATELY ABSENT even though the flat node has a `numericLeaf`
-/// mapping for it. `simplify(NonCanonicalDimension&)` (`+Simplification.cpp:506`-`:514`) calls
-/// `canonicalize`, which needs the `CSSToLengthConversionData` this pass does not carry, so letting
-/// one through would COPY the node where the C++ converts it -- a silent wrong answer rather than a
-/// decline. Adding it means porting `canonicalize`, not editing this list.
+/// `NonCanonicalDimension` is here because `simplifyNonCanonicalDimension` ports
+/// `simplify(NonCanonicalDimension&)` (`+Simplification.cpp:506`-`:514`) in full, upcall included.
+/// It was absent until then for a reason worth keeping in view: letting one through without
+/// `canonicalize` would COPY the node where the C++ converts it -- a silent wrong answer rather than
+/// a decline. Adding an alternative here means porting its `simplify`, not editing this list.
 private enum CalcFlatCoverage {
     @inline(always)
     static func bit(_ alternative: CalcAlternative) -> UInt64 {
@@ -4089,6 +4130,7 @@ private enum CalcFlatCoverage {
         return bit(.Number)
             | bit(.Percentage)
             | bit(.CanonicalDimension)
+            | bit(.NonCanonicalDimension)
             | bit(.Sum)
             | bit(.Product)
             | bit(.Negate)
@@ -5070,7 +5112,7 @@ fileprivate func withCalcFlatTree<R: ~Copyable>(
 // COVERAGE: `Sum`, `Product`, `Negate`, `Invert` and the four numeric leaves, and nothing else.
 // Every other alternative is left exactly as it arrived, which is the honest behaviour for a bounded
 // port -- it is not a decline channel and must not be read as one. `CalcFlatCoverage.mask` is what
-// keeps a tree holding one of the other 34 away from here; widening the two together is the work this
+// keeps a tree holding one of the other 33 away from here; widening the two together is the work this
 // representation exists to make possible.
 //
 // The four operations below are a full port of their `simplify` overloads, not a sketch: every arm
@@ -5134,12 +5176,14 @@ fileprivate extension CalcFlatTree {
     /// reads -- `allowZeroValueLengthRemovalFromSum` at `:612` and `category` at `:886` -- have one
     /// spelling in this file rather than two.
     ///
-    /// `builder` is `Optional` for exactly one reason, and not as a design preference: the only thing
-    /// read through it here is `lengthRemovalAllowed`'s `isLengthUnit` upcall, and
+    /// `builder` is `Optional` for exactly one reason, and not as a design preference:
     /// `cssCalcFlatSimplifyProbeSwift` -- whose C++ signature is fixed by the benchmark harness that
-    /// calls it -- has no builder to hand over. `nil` cannot change an answer on any tree the
-    /// production route sends here: that route always passes the builder, and the upcall is reached
-    /// only for a `NonCanonicalDimension`, which `CalcFlatCoverage.mask` excludes.
+    /// calls it -- has no builder to hand over. Two things are read through it here,
+    /// `lengthRemovalAllowed`'s `isLengthUnit` and `simplifyNonCanonicalDimension`'s
+    /// `resolveRelativeLength`, and `nil` cannot change an answer on any tree the production route
+    /// sends here, because that route always passes the builder. It CAN change one on the probe's own
+    /// trees, which is why the `nil` behaviour is pinned at each site rather than assumed unreachable:
+    /// a relative length with no conversion data to resolve against is the C++'s `nullopt`.
     mutating func simplify(
         _ options: CalcSimplification,
         _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
@@ -5191,17 +5235,59 @@ fileprivate extension CalcFlatTree {
         case .Product:
             simplifyProduct(i, options)
 
+        case .NonCanonicalDimension:
+            simplifyNonCanonicalDimension(i, options, builder)
+
         default:
-            // Including the four leaves, and for three of them that is a PORT rather than an
+            // Including the other three leaves, and for each of them that is a PORT rather than an
             // omission: `simplify(Number&)` (`+Simplification.cpp:487`), `simplify(Percentage&)`
             // (`:493`) and `simplify(CanonicalDimension&)` (`:500`) each `return { }` with no body,
-            // which is also why `canSimplify` answers false for exactly those three.
-            // `NonCanonicalDimension` is the one leaf that really is unported --
-            // `simplify(NonCanonicalDimension&)` (`:506`) calls `canonicalize`, which needs
-            // conversion data this pass does not carry -- and `CalcFlatCoverage.mask` is what keeps a
-            // tree containing one away from here rather than letting it be copied through silently.
+            // which is also why `canSimplify` answers false for exactly those three -- and true for
+            // the fourth, which is the case just above.
             return
         }
+    }
+
+    /// `simplify(NonCanonicalDimension&)` (`+Simplification.cpp:506`-`:514`), which is `canonicalize`
+    /// (`:169`-`:287`) done in place.
+    ///
+    /// A leaf stays a leaf. The value, the unit and the alternative change and nothing structural
+    /// does, so this is a `setLeaf` and never a `replace`: no promotion, no splice, no link touched,
+    /// and none of the `nextSibling` hazards apply. `setLeaf` clearing `type` is right here and is
+    /// NOT the `:1821` rule -- the C++ takes the `:1818` replacement branch for a leaf, and
+    /// `ChildConstruction<Leaf>::make` discards a leaf's `Type` (CSSCalcTree.h:1016-:1018).
+    ///
+    /// Placement is `simplifyNode` rather than `flatten` because `copyAndSimplify` runs
+    /// `canonicalize` at the node's own position in the post-order (`:1815`-`:1818`), and because
+    /// `flatten` also visits an `anchor()`'s `<anchor-side>` subtree, which `:1798` only COPIES;
+    /// this loop is the one guarded by `insideAnchorSide`.
+    private mutating func simplifyNonCanonicalDimension(
+        _ i: Int,
+        _ options: CalcSimplification,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) {
+        let unit = UInt16(nodes[i].unitType)
+        let leaf: NumericLeaf
+        switch options.canonicalizeStep(nodes[i].value, unit) {
+        case .leaf(let step):
+            leaf = step
+        case .relativeLength:
+            // `tryMakeCanonical`'s `if (conversionData)` (`:183`): with no builder there is no
+            // conversion data to consult, which is the C++'s `nullopt` and leaves the dimension as it
+            // is. Reached only from `cssCalcFlatSimplifyProbeSwift`.
+            guard let builder else {
+                return
+            }
+            leaf = options.resolvedRelativeLength(nodes[i].value, unit, builder)
+        }
+        // `canonicalize` answering `nullopt` is `simplify` returning `{ }`, which leaves the node
+        // alone -- and the leaf handed back is then bit-identical to what the slot already holds, down
+        // to the `percentHint` a non-`Percentage` node always carries as 0
+        // (CSSCalcSwiftTypes.h:376-:389). Skipped rather than written and discarded.
+        guard leaf.kind != .nonCanonicalDimension else {
+            return
+        }
+        setLeaf(i, leaf)
     }
 
     /// `simplify(Negate&)` (`+Simplification.cpp:911`-`:961`), all four arms.
@@ -5484,9 +5570,9 @@ fileprivate extension CalcFlatTree {
                 // three call sites are untouched: promoting a `borrowing` argument into an `Optional`
                 // is a CONSUME, and the diagnostic for it ("'builder' is borrowed and cannot be
                 // consumed") names the call site, not the promotion. A `nil` builder answers false,
-                // which only ever mis-answers a `NonCanonicalDimension` -- an alternative
-                // `CalcFlatCoverage.mask` excludes, and one the production route, which always passes
-                // a builder, cannot reach anyway.
+                // which only ever mis-answers a `NonCanonicalDimension`; the production route always
+                // passes a builder, and the only caller that does not is the benchmark probe, whose
+                // fixture holds `Number` leaves alone.
                 let removable: Bool
                 if merged == 0, let builder {
                     removable = options.lengthRemovalAllowed(leaf, builder)
@@ -5798,8 +5884,9 @@ fileprivate extension CalcFlatTree {
 
             case .nonCanonicalDimension:
                 // Not an arm of the C++ switch, so it reaches `[](const auto&) -> bool { return
-                // false; }` (`:872`-`:874`). Unreachable through `CalcFlatCoverage.mask`, which
-                // excludes the alternative outright; kept because the benchmark probes are not masked.
+                // false; }` (`:872`-`:874`). REACHABLE on the production path now that
+                // `CalcFlatCoverage.mask` admits the alternative: `calc(2 * 1em)` with no conversion
+                // data leaves the `em` uncanonicalized, and it arrives here as a `Product` factor.
                 return false
             }
         }
