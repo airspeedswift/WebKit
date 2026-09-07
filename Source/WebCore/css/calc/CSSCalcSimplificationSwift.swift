@@ -4975,12 +4975,33 @@ fileprivate enum CalcOriginDescent<R> {
 /// the re-derived dispatch this file exists to remove; the closure is non-escaping and specializes
 /// away.
 ///
-/// COST: exactly the nodes at pre-order indices below `target`, plus the target. Pre-order means one
-/// child's subtree contains the target and the ones before it are walked to be counted, so there is
-/// nothing to prune -- an early exit on `index > target` can never fire for a target that exists.
-/// That makes it O(target) per node served this way, and O(N^2) for a tree that is all such nodes;
-/// see the throughput note in the commit that landed it. `Child::childCount()` rather than
-/// `swiftNodeInfo`, because the walk needs the arity and nothing else.
+/// COST, MEASURED AND NOT SMALL: 192 retired instructions per node stepped past. The walk visits
+/// exactly the nodes at pre-order indices below `target`, plus the target -- pre-order means one
+/// child's subtree contains the target and the ones before it are walked to be COUNTED, so there is
+/// nothing to prune; an early exit on `index > target` can never fire for a target that exists. So
+/// this is O(target) per node served, and O(N^2) for a tree that is all such nodes.
+///
+/// The 192 is two generic variant visits per step, not loop overhead: `Child::childCount()` is a
+/// `WTF::switchOn` over 41 alternatives plus a `WTF::apply` over the tuple, and `operator[]` is
+/// another. Measured on `corpus/calc-descent.tsv`, whose paired bands are MIRROR IMAGES -- same node
+/// count, same alternatives, same folds, same emit, the one origin-routed node at pre-order index 1
+/// or at index 2k -- so the difference is the walk and nothing else. Five pairs from k=2 to k=10 fit
+/// 191.0 / 191.9 / 191.9 / 192.4 / 192.2 instructions per extra step: exactly linear, which is what
+/// makes it an attribution rather than a correlation. The C++ arm reads 2374.1 against 2374.7 on the
+/// same pair, so the corpus is genuinely symmetric.
+///
+/// THAT IS THE REAL PRICE OF THIS ROUTE, and it is not the one the design predicted: `rebuildFrom`'s
+/// 41-way dispatch, which the plan called the cost, is roughly 50 to 90 instructions once isolated
+/// (primitives 17 and 18). Named fix, not taken here because none of the alternatives that use this
+/// appears in any real captured payload: have `calcFlatten` record each node's ORIGINAL subtree size
+/// in a side table indexed by origin, and only for a tree whose `kindMask` says an origin route will
+/// be taken. The walk then skips a sibling subtree by reading its size instead of entering it,
+/// making it O(depth) with one `operator[]` per level. It costs a second stack buffer and a
+/// conditional store per node during flattening, which is why it is not free and is not done
+/// speculatively.
+///
+/// `Child::childCount()` rather than `swiftNodeInfo`, because the walk needs the arity and nothing
+/// else; both are the same generic visit.
 ///
 /// A `nil` answer means the flat tree and the tree it was built from disagree about their own shape.
 /// Every caller declines on it rather than reaching for another node.
@@ -6650,9 +6671,14 @@ fileprivate extension CalcFlatTree {
     /// backwards. The price of the swap was measured rather than assumed: 0.9580 to 0.9636 of the
     /// C++ arm, about 3.4 retired instructions per node.
     ///
-    /// Distinct from `rebuildFrom`, which is what the two-pass port calls: that takes the ORIGINAL
-    /// node and recovers its operation through a 41-way `switchOn` plus `WTF::apply`, at 1396 retired
-    /// instructions. A flat node states its own alternative, so there is nothing to recover.
+    /// Distinct from `rebuildFrom`, which is what the two-pass port calls and what
+    /// `calcEmitFromOrigin` calls for the four alternatives no fixed-size node can carry: that takes
+    /// the ORIGINAL node and recovers its operation through a 41-way `switchOn` plus `WTF::apply`.
+    /// A flat node states its own alternative, so there is nothing to recover -- and the dispatch
+    /// that recovery costs is ROUGHLY 50 TO 90 retired instructions, not the 1396 this comment used
+    /// to quote; see the corrected note at `CSSCalcSwiftTypes.h`'s `buildOperation`. What actually
+    /// makes the origin route expensive is the WALK, at 192 instructions per node stepped past
+    /// (`withCalcOriginalNode`).
     ///
     /// Recursive on tree DEPTH, not on node count, and the deepest calc expression in the whole WPT
     /// css-values corpus is single digits.

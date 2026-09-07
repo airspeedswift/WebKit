@@ -823,10 +823,25 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // Pop `childCount` operands and push a FRESH node of the named `alternative` built from them.
     //
     // The construction entry that does NOT take an original node, and the one the flat tree uses
-    // for every operator it emits. `rebuildFrom` above recovers the operation from the original
-    // node's variant tag through a 41-way `switchOn` plus `WTF::apply` -- 1396 retired
-    // instructions, measured as primitive 7 against primitive 8 -- and a flat node has no original
-    // to recover from and does not need one: it already states its own alternative.
+    // for every operator it can build from operands alone. `rebuildFrom` above recovers the
+    // operation from the original node's variant tag through a 41-way `switchOn` plus `WTF::apply`,
+    // and a flat node has no original to recover from and does not need one: it already states its
+    // own alternative.
+    //
+    // WHAT THAT DISPATCH COSTS, measured rather than asserted, and CORRECTED: this comment used to
+    // read "1396 retired instructions, measured as primitive 7 against primitive 8", which was
+    // wrong twice over. Primitive 7 also constructs and destroys a fresh
+    // `CSSCalcSwiftOperandStack` and makes two `pushLeaf` calls, so 7 against 8 was an upper bound
+    // on the whole reconstruction and not a measurement of the dispatch; and 1396 is not that
+    // difference at any build measured since -- primitives 7 and 8 read 1151.4 and 854.2.
+    // Primitives 17 and 18 isolate it (CSSCalcTree+Simplification.cpp): the same two `pushLeaf`s
+    // over a HOISTED stack, with and without the reconstruction, at 1138.5 and 266.1. So
+    // `rebuildFrom` reconstructing a two-child `Sum` is 872 retired instructions INCLUDING the
+    // `Vector<Child>` it allocates, the `makeChild`, and two extra frees at teardown -- against 854
+    // for primitive 8, the C++ arm building the same node directly INCLUDING its two leaves.
+    // Netting the leaves out (2 x primitive 4, 68) puts the dispatch premium at ROUGHLY 50 TO 90
+    // INSTRUCTIONS, about a tenth of the reconstruction. The allocation dominates it, not the
+    // 41-way visit.
     //
     // Naming the alternative here is a deliberate reversal of the rule the reading direction keeps
     // ("no operation kind ever crosses in the construction direction", above). That rule is right

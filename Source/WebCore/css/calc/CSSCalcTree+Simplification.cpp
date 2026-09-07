@@ -2778,6 +2778,30 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
             sink += fresh.value.size();
             break;
         }
+        case 17: {  // BUILD, Swift's route: the SAME two leaves and reconstruction as case 7, but over
+                    // the HOISTED stack. Case 7 also constructs and destroys a fresh
+                    // `CSSCalcSwiftOperandStack` (case 11 prices that alone), so case 7 minus case 8
+                    // is an UPPER BOUND on `rebuildFrom` and not a measurement of it -- the 1396
+                    // figure quoted in CSSCalcSwiftTypes.h came from there. Read this against case 18,
+                    // which is the same thing without the reconstruction.
+            hoistedBuilder.pushLeaf(CSSCalcSwiftLeaf { .value = 1, .unitType = 0, .kind = 0, .percentHint = 0 });
+            hoistedBuilder.pushLeaf(CSSCalcSwiftLeaf { .value = 2, .unitType = 0, .kind = 0, .percentHint = 0 });
+            sink += hoistedBuilder.rebuildFrom(fixture, 2) ? 1 : 0;
+            hoisted.value.shrink(0);
+            break;
+        }
+        case 18: {  // BUILD: case 17 WITHOUT the reconstruction. 17 minus 18 is `rebuildFrom`'s own
+                    // cost -- its 41-way `switchOn`, its `WTF::apply` over the tuple conformance, the
+                    // `Children` vector it allocates and the `makeChild` -- plus the difference
+                    // between destroying one `Sum` over two leaves and destroying two loose leaves,
+                    // which is one extra free. Still an upper bound, but a much tighter one, and the
+                    // stack construction and the two `pushLeaf`s are gone from both sides.
+            hoistedBuilder.pushLeaf(CSSCalcSwiftLeaf { .value = 1, .unitType = 0, .kind = 0, .percentHint = 0 });
+            hoistedBuilder.pushLeaf(CSSCalcSwiftLeaf { .value = 2, .unitType = 0, .kind = 0, .percentHint = 0 });
+            sink += hoisted.value.size();
+            hoisted.value.shrink(0);
+            break;
+        }
         case 13: {  // The C++ arm simplifying the same fixture end to end -- the denominator case 12
                     // has to be read against, measured in the same loop rather than across runs.
             sink += copyAndSimplify(fixture, options).index();
