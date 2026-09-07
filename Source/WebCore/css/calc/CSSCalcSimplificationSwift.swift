@@ -926,42 +926,9 @@ private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCo
     }
 }
 
-/// The coverage traversal. Accumulates the node count and alternative mask, and reports whether
-/// every node it saw is one this file can simplify. Recursive rather than an explicit stack, since
-/// calc trees are shallow and no Swift container accepts a `~Escapable` element. Walks the whole tree
-/// even after the first decline, so the mask describes the full tree rather than a truncated prefix.
-private func walk(
-    _ node: borrowing WebCore.CSSCalc.Child,
-    _ nodeCount: inout UInt32,
-    _ kindMask: inout UInt64,
-    _ blame: inout CalcAlternative?
-) -> Bool {
-    // One crossing per node: `info()` answers the discriminant, the child count and every POD
-    // payload together, because they all come off the same variant tag.
-    let info = WebCore.CSSCalc.swiftNodeInfo(node)
-    nodeCount += 1
-
-    kindMask |= UInt64(1) << UInt64(info.alternative.rawValue)
-
-    var everyNodeSimplifiable = isSimplifiableAlternative(info.alternative, info.childCount)
-    if !everyNodeSimplifiable, blame == nil {
-        // The first unhandled alternative in pre-order is the one reported, so widening this file's
-        // coverage can only move the blame outward.
-        blame = info.alternative
-    }
-
-    var index: UInt32 = 0
-    while index < info.childCount {
-        // Tree order, not serialization order: `childAt` sorts a `Sum`'s/`Product`'s children by unit for
-        // the serializer, which would silently permute a multi-unit sum here.
-        if !walk(node[Int(index)], &nodeCount, &kindMask, &blame) {
-            everyNodeSimplifiable = false
-        }
-        index += 1
-    }
-
-    return everyNodeSimplifiable
-}
+/// The coverage predicate, asked of one node. `calcFlatten` is the traversal that asks it: there is
+/// no separate coverage walk, because a second pass over the same nodes meant a second
+/// `swiftNodeInfo` crossing for an answer the first one already had.
 
 // MARK: - The simplifier
 
@@ -4146,28 +4113,17 @@ private enum CalcFlatCoverage {
 /// holds whatever the abandoned rewrite left on it; `trySimplifyWithSwiftIsland` discards it unread
 /// and runs the C++ path.
 ///
-/// `kindMask` and `nodeCount` come from the coverage walk rather than from the rewrite, because they
-/// have to describe every tree the gate saw, including the ones it declined -- coverage measured
-/// only on the cases that succeeded is not a coverage measurement. Both are keyed on the alternative
-/// index (0 to 40), not on the 23 serialization kinds.
+/// `kindMask` and `nodeCount` come from the flattening pass, which is also the coverage walk, because
+/// they have to describe every tree the gate saw, including the ones it declined -- coverage measured
+/// only on the cases that succeeded is not a coverage measurement. That is why `calcFlatten` keeps
+/// crossing after it stops writing. Both are keyed on the alternative index (0 to 40), not on the 23
+/// serialization kinds.
 @_expose(Cxx)
 public func cssCalcSimplifySwift(
     _ root: borrowing WebCore.CSSCalc.Child,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
     _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions
 ) -> WebCore.CSSCalc.CSSCalcSwiftSimplificationResult {
-    var nodeCount: UInt32 = 0
-    var kindMask: UInt64 = 0
-    var blame: CalcAlternative?
-
-    // Unconditional, so that the count and the mask describe every tree and not only the ones
-    // Swift could take.
-    let everyNodeSimplifiable = walk(root, &nodeCount, &kindMask, &blame)
-
-    guard everyNodeSimplifiable else {
-        return declined(kindMask, nodeCount, blame)
-    }
-
     let simplification = CalcSimplification(
         percentageResolveToDimension: options.percentageResolveToDimension,
         allowZeroValueLengthRemovalFromSum: options.allowZeroValueLengthRemovalFromSum,
@@ -4184,29 +4140,43 @@ public func cssCalcSimplifySwift(
     // waiting for someone to flip a flag.
     //
     // Coverage cannot regress from this. A tree holding any of the other 31 alternatives falls through
-    // to the two-pass `rewrite` below unchanged, and `walk` has already refused outright any tree
-    // holding one that neither port handles -- so the flat path is only ever reached for a tree the
-    // two-pass port would have finished too. What it can do is DIVERGE, which is the point of routing
-    // it here rather than leaving it behind a flag nothing sets.
-    if kindMask & ~CalcFlatCoverage.mask == 0 {
-        let emitted = withCalcFlatTree(root, nodeCount) { tree -> Bool in
-            tree.simplify(simplification, builder)
-            return tree.emit(0, into: &builder)
-        }
+    // to the two-pass `rewrite` below unchanged, and the flattening pass has already refused outright
+    // any tree holding one that neither port handles -- so the flat path is only ever reached for a
+    // tree the two-pass port would have finished too. What it can do is DIVERGE, which is the point of
+    // routing it here rather than leaving it behind a flag nothing sets.
+    var (report, emitted) = withCalcFlatTree(root, calcFlatStackCapacity) { tree in
+        tree.simplify(simplification, builder)
+        return tree.emit(0, into: &builder)
+    }
+
+    // A tree too big for the fixed stack buffer, retried at its exact size. `nodeCount` is exact even
+    // when the first pass overflowed, because the pass keeps counting after it stops writing. This
+    // costs a second crossing per node, which is what EVERY tree paid before the coverage walk was
+    // folded into the flattening pass; above 25 nodes the buffer goes to the heap regardless.
+    if emitted == nil, report.overflowed, report.everyNodeSimplifiable,
+        report.kindMask & ~CalcFlatCoverage.mask == 0 {
+        (report, emitted) = calcFlatSimplifyOversized(root, report.nodeCount, simplification, &builder)
+    }
+
+    if let emitted {
         guard emitted else {
             // `emit` returning false is `buildOperation` refusing, and that has no one alternative to
             // blame: it is either a builder contract violation or `toType` answering `std::nullopt`
             // for children whose types do not merge -- and in that second case the C++ arm returns
             // `std::nullopt` from its own rewrite too. Reported the way the two-pass path reports its
             // own blameless decline, `.declined(nil)`.
-            return declined(kindMask, nodeCount, nil)
+            return declined(report.kindMask, report.nodeCount, nil)
         }
         return WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
-            kindMask: kindMask,
-            nodeCount: nodeCount,
+            kindMask: report.kindMask,
+            nodeCount: report.nodeCount,
             outcome: CSSCalcSwiftSimplificationOutcome.simplified.rawValue,
             declineAlternative: noDeclineAlternative
         )
+    }
+
+    guard report.everyNodeSimplifiable else {
+        return declined(report.kindMask, report.nodeCount, report.blame)
     }
 
     if case .declined(let rewriteBlame) = simplification.rewrite(root, &builder) {
@@ -4214,15 +4184,38 @@ public func cssCalcSimplifySwift(
         // reached, so this is a decline the coverage predicate could not have predicted -- `Invert`'s
         // rule 7.2, or a builder contract that came apart. A decline naming a handled alternative is
         // legitimate; only a `nil` blame is a contract violation.
-        return declined(kindMask, nodeCount, rewriteBlame)
+        return declined(report.kindMask, report.nodeCount, rewriteBlame)
     }
 
     return WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
-        kindMask: kindMask,
-        nodeCount: nodeCount,
+        kindMask: report.kindMask,
+        nodeCount: report.nodeCount,
         outcome: CSSCalcSwiftSimplificationOutcome.simplified.rawValue,
         declineAlternative: noDeclineAlternative
     )
+}
+
+/// The oversized-tree retry, `@inline(never)` and out of line for a reason that was MEASURED rather
+/// than assumed.
+///
+/// `withCalcFlatTree` is `@inline(always)`, which is what folds the fixed-capacity call's
+/// `_isStackAllocationSafe` test and its heap fallback away to a plain `sub sp`. Inlined a SECOND
+/// time at a runtime capacity none of that folds, and the resulting bulk in `cssCalcSimplifySwift`
+/// pushed `CalcFlatTree.simplify` and `emit` back out of line: the single-node band moved -1.6%
+/// against a -12% to -19% on every multi-node band, and the fit across the ladder put the new fixed
+/// per-call cost at about 129 instructions. Kept in its own frame it costs a call on a path taken
+/// only above 25 nodes.
+@inline(never)
+private func calcFlatSimplifyOversized(
+    _ root: borrowing WebCore.CSSCalc.Child,
+    _ nodeCount: UInt32,
+    _ simplification: CalcSimplification,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> (report: CalcFlattenReport, result: Bool?) {
+    return withCalcFlatTree(root, Int(clamping: nodeCount)) { tree in
+        tree.simplify(simplification, builder)
+        return tree.emit(0, into: &builder)
+    }
 }
 
 /// `CSSCalcSwiftSimplificationResult::declineAlternative`'s "did not decline, or declined without
@@ -4974,90 +4967,164 @@ fileprivate struct CalcFlatTree: ~Escapable, ~Copyable {
     var count: Int
 
     @_lifetime(copy storage)
-    init(storage: consuming MutableSpan<CalcFlatNode>) {
+    init(storage: consuming MutableSpan<CalcFlatNode>, count: Int) {
         self.nodes = storage
-        self.count = 0
+        self.count = count
     }
 }
 
-fileprivate extension CalcFlatTree {
-    /// Flatten `node`'s subtree in pre-order and return its index.
+/// Everything the single flattening pass reports about the tree it walked.
+///
+/// This is what the separate `walk` coverage pre-pass used to produce. It is folded into `calcFlatten`
+/// because the two passes read exactly the same thing off exactly the same nodes: `walk` crossed the
+/// boundary once per node for `swiftNodeInfo`, and `flatten` then crossed again for the same answer.
+/// A single-node tree paid that twice, and `walk` was 685 of the 5651 profile samples of one.
+fileprivate struct CalcFlattenReport {
+    /// Every node in the WHOLE tree, including any past the point where writing stopped.
+    var nodeCount: UInt32 = 0
+    /// One bit per `CSSCalcSwiftAlternative` seen, over the whole tree for the same reason.
+    var kindMask: UInt64 = 0
+    /// The first unhandled alternative in pre-order.
+    var blame: CalcAlternative? = nil
+    /// Whether every node is one this file can simplify at all -- the old `walk` return value.
+    var everyNodeSimplifiable = true
+    /// The buffer filled up. Nodes past that point are counted and masked but not written, so
+    /// `nodeCount` still sizes an exact retry.
+    var overflowed = false
+
+    /// Whether the nodes written so far can still become a flat tree. Three ways to lose it, and all
+    /// three are monotone -- `kindMask` only gains bits -- so once this is false it stays false and
+    /// the pass degrades to a plain walk: it keeps crossing and counting, because the count and the
+    /// mask have to describe every tree the gate saw, but it writes nothing more, and it stops paying
+    /// `getType` and `operationInfo` for nodes no flat tree will hold.
     ///
-    /// One `swiftNodeInfo` crossing per node, and it is the last per-node read crossing anything
-    /// makes: every pass downstream reads the flat array. The recursion is over the original
-    /// `CSSCalc::Child` tree and is the only place that tree is walked.
-    ///
-    /// Tree order, not serialization order: `childAt` sorts a `Sum`'s and a `Product`'s children by
-    /// unit for the serializer, which would silently permute a multi-unit sum here.
-    mutating func flatten(_ node: borrowing WebCore.CSSCalc.Child, _ inheritedFlags: UInt8) -> UInt32 {
-        let info = WebCore.CSSCalc.swiftNodeInfo(node)
-        let me = count
-        count += 1
+    /// The coverage test is in here rather than only at the end so that a tree bound for the two-pass
+    /// `rewrite` pays the walk and not a flattening it will throw away.
+    var writing: Bool {
+        return everyNodeSimplifiable && !overflowed && kindMask & ~CalcFlatCoverage.mask == 0
+    }
+}
 
-        var flags = inheritedFlags
-        switch info.kind {
-        case .ClampWithNoneMinimum: flags |= CalcFlatNodeFlags.clampNoneMinimum
-        case .ClampWithNoneMaximum: flags |= CalcFlatNodeFlags.clampNoneMaximum
-        default: break
+/// Flatten `node`'s subtree in pre-order onto `out`, and return its index.
+///
+/// ONE `swiftNodeInfo` crossing per node, and it is the ONLY per-node read crossing this file makes:
+/// this pass IS the coverage walk, and every pass downstream reads the flat array.
+///
+/// Appended rather than written at an index, which is what removes the placeholder fill
+/// `withCalcFlatTree` used to need: `OutputSpan` hands out initialized storage only for what has been
+/// appended, so a buffer sized for the worst case costs a stack pointer adjustment and nothing per
+/// unused slot. Only two links are patched afterwards, both into the written prefix.
+///
+/// `firstChild` is `me + 1` rather than the index child 0 reports, and that is exact rather than an
+/// approximation: appending is pre-order, so a node's first child is always the next slot.
+///
+/// Tree order, not serialization order: `childAt` sorts a `Sum`'s and a `Product`'s children by
+/// unit for the serializer, which would silently permute a multi-unit sum here.
+fileprivate func calcFlatten(
+    _ node: borrowing WebCore.CSSCalc.Child,
+    _ inheritedFlags: UInt8,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ report: inout CalcFlattenReport
+) -> UInt32 {
+    // One crossing per node: `info()` answers the discriminant, the child count and every POD
+    // payload together, because they all come off the same variant tag.
+    let info = WebCore.CSSCalc.swiftNodeInfo(node)
+    report.nodeCount += 1
+    report.kindMask |= UInt64(1) << UInt64(info.alternative.rawValue)
+
+    if !isSimplifiableAlternative(info.alternative, info.childCount) {
+        // The first unhandled alternative in pre-order is the one reported, so widening this file's
+        // coverage can only move the blame outward.
+        if report.blame == nil {
+            report.blame = info.alternative
         }
-
-        // A second crossing, taken only for the one alternative that needs it, on the same rule
-        // `CSSCalcSwiftNode::operationInfo` states: `info()` runs for every node of every tree, and
-        // this answers a question only `anchor()` asks.
-        if info.alternative == .Anchor, !WebCore.CSSCalc.swiftOperationInfo(node).anchorSideIsKeyword {
-            flags |= CalcFlatNodeFlags.anchorSideIsSubtree
-        }
-
-        // `getType(const Child&)` (CSSCalcTree.h:1053), the same accessor `copyAndSimplify` reads the
-        // original's type through at `+Simplification.cpp:1821`. Nothing new was declared for this.
-        //
-        // NOT taken for the seven leaf alternatives, and that is not a micro-optimisation: a leaf's
-        // `Type` is DISCARDED by construction. `ChildConstruction<T>::make(T&&, Type)` for a `Leaf`
-        // ignores its `Type` argument entirely (CSSCalcTree.h:1016-1018), which is the same fact the
-        // two-pass port's `pushCopyOf` comment rests on. Paying a crossing per leaf for a value
-        // nothing can read is the shape this whole exercise exists to remove, and leaves are most of
-        // a real calc tree's nodes.
-        let carriesType: Bool
-        switch info.alternative {
-        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension,
-             .Symbol, .SiblingCount, .SiblingIndex:
-            carriesType = false
-        default:
-            carriesType = true
-        }
-
-        nodes[me] = CalcFlatNode(
-            value: info.numericValue,
-            type: carriesType ? WebCore.CSSCalc.getType(node) : CalcType(),
-            firstChild: CalcFlatNode.noNode,
-            nextSibling: CalcFlatNode.noNode,
-            childCount: info.childCount,
-            origin: UInt32(me),
-            valueID: info.valueID,
-            unitType: info.unitType,
-            alternative: info.alternative,
-            percentHint: info.percentHint,
-            flags: flags)
-
-        var previous = CalcFlatNode.noNode
-        var index: UInt32 = 0
-        while index < info.childCount {
-            // Slot 0 of an `anchor()` with a subtree side IS that side. Everything under it is
-            // marked, so the simplification pass skips the whole subtree on one bit test per node
-            // rather than having to know where the boundary is.
-            let sideRoot = (flags & CalcFlatNodeFlags.anchorSideIsSubtree) != 0 && index == 0
-            let child = flatten(node[Int(index)], sideRoot ? flags | CalcFlatNodeFlags.insideAnchorSide : flags)
-            if previous == CalcFlatNode.noNode {
-                nodes[me].firstChild = child
-            } else {
-                nodes[Int(previous)].nextSibling = child
-            }
-            previous = child
-            index += 1
-        }
-        return UInt32(me)
+        report.everyNodeSimplifiable = false
+    }
+    if out.freeCapacity == 0 {
+        report.overflowed = true
     }
 
+    guard report.writing else {
+        // Walk only. No `getType`, no `operationInfo`, no stores: nothing downstream will read a
+        // tree this pass has already given up on, and the remaining crossings exist solely so that
+        // `nodeCount` and `kindMask` describe the full tree rather than a truncated prefix.
+        var index: UInt32 = 0
+        while index < info.childCount {
+            _ = calcFlatten(node[Int(index)], inheritedFlags, &out, &report)
+            index += 1
+        }
+        return CalcFlatNode.noNode
+    }
+
+    let me = UInt32(out.count)
+
+    var flags = inheritedFlags
+    switch info.kind {
+    case .ClampWithNoneMinimum: flags |= CalcFlatNodeFlags.clampNoneMinimum
+    case .ClampWithNoneMaximum: flags |= CalcFlatNodeFlags.clampNoneMaximum
+    default: break
+    }
+
+    // A second crossing, taken only for the one alternative that needs it, on the same rule
+    // `CSSCalcSwiftNode::operationInfo` states: `info()` runs for every node of every tree, and
+    // this answers a question only `anchor()` asks.
+    if info.alternative == .Anchor, !WebCore.CSSCalc.swiftOperationInfo(node).anchorSideIsKeyword {
+        flags |= CalcFlatNodeFlags.anchorSideIsSubtree
+    }
+
+    // `getType(const Child&)` (CSSCalcTree.h:1053), the same accessor `copyAndSimplify` reads the
+    // original's type through at `+Simplification.cpp:1821`. Nothing new was declared for this.
+    //
+    // NOT taken for the seven leaf alternatives, and that is not a micro-optimisation: a leaf's
+    // `Type` is DISCARDED by construction. `ChildConstruction<T>::make(T&&, Type)` for a `Leaf`
+    // ignores its `Type` argument entirely (CSSCalcTree.h:1016-1018), which is the same fact the
+    // two-pass port's `pushCopyOf` comment rests on. Paying a crossing per leaf for a value
+    // nothing can read is the shape this whole exercise exists to remove, and leaves are most of
+    // a real calc tree's nodes.
+    let carriesType: Bool
+    switch info.alternative {
+    case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension,
+         .Symbol, .SiblingCount, .SiblingIndex:
+        carriesType = false
+    default:
+        carriesType = true
+    }
+
+    out.append(CalcFlatNode(
+        value: info.numericValue,
+        type: carriesType ? WebCore.CSSCalc.getType(node) : CalcType(),
+        firstChild: info.childCount != 0 ? me &+ 1 : CalcFlatNode.noNode,
+        nextSibling: CalcFlatNode.noNode,
+        childCount: info.childCount,
+        origin: me,
+        valueID: info.valueID,
+        unitType: info.unitType,
+        alternative: info.alternative,
+        percentHint: info.percentHint,
+        flags: flags))
+
+    var previous = CalcFlatNode.noNode
+    var index: UInt32 = 0
+    while index < info.childCount {
+        // Slot 0 of an `anchor()` with a subtree side IS that side. Everything under it is
+        // marked, so the simplification pass skips the whole subtree on one bit test per node
+        // rather than having to know where the boundary is.
+        let sideRoot = (flags & CalcFlatNodeFlags.anchorSideIsSubtree) != 0 && index == 0
+        let child = calcFlatten(node[Int(index)], sideRoot ? flags | CalcFlatNodeFlags.insideAnchorSide : flags, &out, &report)
+        // `report.writing` is re-read rather than remembered: a descendant can be the node that
+        // fills the buffer or the node that is not simplifiable, and after either one `child` is
+        // `noNode` and `previous` may name a slot that no longer means what it did.
+        if previous != CalcFlatNode.noNode, report.writing {
+            var written = out.mutableSpan
+            written[Int(previous)].nextSibling = child
+        }
+        previous = child
+        index += 1
+    }
+    return me
+}
+
+fileprivate extension CalcFlatTree {
     /// The `k`th child of node `i`, or nil if it has fewer than `k + 1`.
     ///
     /// O(k). Every hot caller walks the list instead; this is for the fixed operand slots, where `k`
@@ -5074,38 +5141,50 @@ fileprivate extension CalcFlatTree {
     }
 }
 
-/// Flatten `root` into a stack buffer and hand the tree to `body`.
+/// The largest tree the fixed-size stack buffer holds, and it is a stdlib threshold rather than a
+/// taste: `withTemporaryAllocation` uses `Builtin.stackAlloc` only while the request is at most 1024
+/// bytes (`TemporaryAllocation.swift`'s `_isStackAllocationSafe`), and falls back to `malloc` above
+/// that. `CalcFlatNode` is 40 bytes, so 25 nodes is 1000 and 26 would silently start heap-allocating
+/// on every simplification -- and a per-simplification heap buffer was MEASURED at 617 retired
+/// instructions, more than the whole pass. Trees above this take the exact-size retry below, which
+/// pays the malloc it would have paid anyway.
+fileprivate let calcFlatStackCapacity = 25
+
+/// Flatten `root` into a stack buffer of `capacity` nodes and, if the result is usable, hand the tree
+/// to `body`.
 ///
-/// `nodeCount` comes from the coverage walk, which has already visited exactly this node set and
-/// allocated nothing to do it, so the buffer is sized exactly and no growth is possible.
+/// Returns `nil` for `emitted` when `body` did not run, which is one of three things and the report
+/// says which: a node no port handles, an alternative the FLAT port does not cover, or a tree larger
+/// than the buffer. In all three the buffer is scratch that nothing has read, so nothing is
+/// observable -- the same property that makes a whole-tree decline free of the truncation problem
+/// `serializationForCSS` has with a `StringBuilder`.
 ///
-/// `withTemporaryAllocation` (SE-0524) rather than any owned container, and that is the whole reason
-/// the count is threaded in: a `UniqueArray` here was MEASURED at 617 retired instructions per
-/// simplification, against the C++ arm's 127 for an entire single-node tree, so a per-call heap
-/// buffer costs more than the pass it feeds. The stdlib falls back to the heap for a buffer too large
-/// for the stack, so an adversarially wide tree degrades rather than overflowing.
+/// `withTemporaryAllocation` (SE-0524) rather than any owned container: a `UniqueArray` here was
+/// MEASURED at 617 retired instructions per simplification, against the C++ arm's 127 for an entire
+/// single-node tree, so a per-call heap buffer costs more than the pass it feeds.
 ///
-/// `OutputSpan` is append-only, so the buffer is filled with a placeholder and then read back as a
-/// `MutableSpan`. `flatten` writes every slot it will use exactly once before anything reads it, and
-/// `count` bounds every read to the written prefix.
+/// `OutputSpan` is append-only and `calcFlatten` appends, so there is NO placeholder fill: a buffer
+/// sized for the worst case costs a stack pointer adjustment and nothing per unused slot, which is
+/// what lets the capacity be a constant and the coverage walk disappear. `out.mutableSpan` then hands
+/// back exactly the appended prefix, so `count` cannot name a slot nothing wrote.
 @inline(always)
-fileprivate func withCalcFlatTree<R: ~Copyable>(
+fileprivate func withCalcFlatTree<R>(
     _ root: borrowing WebCore.CSSCalc.Child,
-    _ nodeCount: UInt32,
+    _ capacity: Int,
     _ body: (inout CalcFlatTree) -> R
-) -> R {
-    let capacity = Int(clamping: nodeCount)
-    return withTemporaryAllocation(of: CalcFlatNode.self, capacity: capacity) { buffer in
-        let blank = CalcFlatNode(
-            value: 0, type: CalcType(), firstChild: CalcFlatNode.noNode,
-            nextSibling: CalcFlatNode.noNode, childCount: 0, origin: 0, valueID: 0,
-            unitType: 0, alternative: .Number, percentHint: 0, flags: 0)
-        for _ in 0..<capacity {
-            buffer.append(blank)
+) -> (report: CalcFlattenReport, result: R?) {
+    return withTemporaryAllocation(of: CalcFlatNode.self, capacity: capacity) { out in
+        var report = CalcFlattenReport()
+        _ = calcFlatten(root, 0, &out, &report)
+        guard report.writing else {
+            return (report, nil)
         }
-        var tree = CalcFlatTree(storage: buffer.mutableSpan)
-        _ = tree.flatten(root, 0)
-        return body(&tree)
+        // `out.count` into a local first: `mutableSpan` is a MUTATING accessor, so reading the count
+        // in the same expression is two overlapping accesses to `out` and the exclusivity checker
+        // rejects it (#ExclusivityViolation).
+        let written = out.count
+        var tree = CalcFlatTree(storage: out.mutableSpan, count: written)
+        return (report, body(&tree))
     }
 }
 
@@ -6142,22 +6221,6 @@ fileprivate extension CalcFlatTree {
     }
 }
 
-/// Count the nodes of `root`, so a flat tree can be stack-allocated for it.
-///
-/// A separate traversal only in the probes below. On any real path the number comes from `walk`,
-/// which computes it already and allocates nothing to do it -- which is the point: the counting pass
-/// the flat tree needs is a pass that has to run anyway.
-fileprivate func calcFlatNodeCount(_ root: borrowing WebCore.CSSCalc.Child) -> UInt32 {
-    var total: UInt32 = 1
-    let info = WebCore.CSSCalc.swiftNodeInfo(root)
-    var index: UInt32 = 0
-    while index < info.childCount {
-        total += calcFlatNodeCount(root[Int(index)])
-        index += 1
-    }
-    return total
-}
-
 /// The `SimplificationOptions` the two flat probes run under.
 ///
 /// All three fields at their C++ default, which is what a probe wants: the fixtures are timed for the
@@ -6177,13 +6240,15 @@ private var calcFlatProbeOptions: CalcSimplification {
 @_expose(Cxx)
 public func cssCalcFlatSimplifyProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ iterations: UInt32) -> UInt64 {
     var bits: UInt64 = 0
-    let n = calcFlatNodeCount(root)
     let options = calcFlatProbeOptions
     for _ in 0..<iterations {
-        bits = withCalcFlatTree(root, n) { tree in
+        // `nil` means the pass declined the fixture rather than timing it, and 0 is not a bit pattern
+        // any fixture here produces, so the caller's value check catches a probe that measured
+        // nothing.
+        bits = withCalcFlatTree(root, calcFlatStackCapacity) { tree in
             tree.simplify(options, nil)
             return tree.nodes[0].value.bitPattern
-        }
+        }.result ?? 0
     }
     return bits
 }
@@ -6198,9 +6263,8 @@ public func cssCalcFlatSimplifyProbeSwift(_ root: borrowing WebCore.CSSCalc.Chil
 @_expose(Cxx)
 public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ iterations: UInt32) -> UInt32 {
     var total: UInt32 = 0
-    let n = calcFlatNodeCount(root)
     for _ in 0..<iterations {
-        total &+= withCalcFlatTree(root, n) { tree in UInt32(tree.count) }
+        total &+= withCalcFlatTree(root, calcFlatStackCapacity) { tree in UInt32(tree.count) }.result ?? 0
     }
     return total
 }
@@ -6225,14 +6289,13 @@ public func cssCalcFlatEmitProbeSwift(
     _ iterations: UInt32
 ) -> UInt32 {
     var emitted: UInt32 = 0
-    let n = calcFlatNodeCount(root)
     let options = calcFlatProbeOptions
     for _ in 0..<iterations {
         builder.clearOperands()
-        if withCalcFlatTree(root, n, { tree -> Bool in
+        if withCalcFlatTree(root, calcFlatStackCapacity, { tree -> Bool in
             tree.simplify(options, builder)
             return tree.emit(0, into: &builder)
-        }) {
+        }).result == true {
             emitted &+= 1
         }
     }
