@@ -23,25 +23,27 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// This file names `WebCore.CSSUnitType`, so it needs its own import: an import binds the
-// file, not the module, and CSSTokenizerSwift.swift's import next door doesn't cover this
-// file. Without it, `WebCore` resolves to the Swift module of that name and the error reads
-// "no type named 'CSSUnitType' in module 'WebCore'" rather than pointing at a missing import.
+// This file names `WebCore.CSSUnitType`, and an import binds the file rather than the module,
+// so CSSTokenizerSwift.swift's import does not cover it. Without this one, `WebCore` resolves to
+// the Swift module of that name and the error reads "no type named 'CSSUnitType' in module
+// 'WebCore'" rather than naming the missing import.
 //
-// `internal`, not `public`: nothing this file exposes names the type.
-internal import WebCore_Private.CSSTokenizerSwiftTypes
+// `internal`, not `public`: nothing this file exposes names the type. The module is
+// `CSSUnitsSwiftTypes` rather than `CSSTokenizerSwiftTypes` because CSSUnitType.h sits beside
+// the unit-conversion constants, which share its submodule, and a header can be in only one.
+internal import WebCore_Private.CSSUnitsSwiftTypes
 
 // MARK: - The CSS unit-type trie
 //
 // This file requires WebCore's Swift step to compile whole-module
 // (`SWIFT_COMPILATION_MODE = wholemodule`): generic specialization does not cross a Swift file
-// boundary under Xcode's default batch mode, so without whole-module `consumeNumericToken`
-// would call the unspecialized generic trie through a witness table instead of the `UInt8`
-// specialization in this file. Check with `nm` if that setting ever changes.
+// boundary under Xcode's default batch mode, so without it `consumeNumericToken` reaches the
+// unspecialized generic trie through a witness table instead of the `UInt8` specialization in
+// this file.
 
 // The CSS unit-type trie, in Swift.
 //
-//   Source/WebCore/css/parser/CSSParserToken.cpp  cssPrimitiveValueUnitFromTrie (304 lines)
+//   Source/WebCore/css/parser/CSSParserToken.cpp  cssPrimitiveValueUnitFromTrie
 //   Source/WebCore/css/CSSUnits.h                 enum class CSSUnitType
 //
 // `CSSParserToken::stringToUnitType` is the only reason a DimensionToken's unit text has to
@@ -49,19 +51,18 @@ internal import WebCore_Private.CSSTokenizerSwiftTypes
 // resolving the unit here lets only the resolved `CSSUnitType` cross, in the seven bits
 // `CSSParserTokenBits::unit` reserves for it.
 //
-// A transcription of the C++, not a redesign, except for one change: the C++ folds case with
-// `toASCIILower`, which is the identity outside 'A'-'Z' for both widths (ASCIICType.h:189,199,
-// ASCIICType.cpp:30). `trieSymbol` folds 'A'-'Z' the same way and collapses every code unit
-// >= 0x80 to one sentinel, which is safe because every trie edge is 'a'-'z' or '_'.
+// The C++ folds case with `toASCIILower`, which is the identity outside 'A'-'Z' for both widths
+// (ASCIICType.h:189,199, ASCIICType.cpp:30). `trieSymbol` folds 'A'-'Z' the same way and
+// collapses every code unit >= 0x80 to one sentinel, which is safe because every trie edge is
+// 'a'-'z' or '_'.
 //
-// Verified by exhaustive comparison against the C++: 0 mismatches, all 63 reachable units
-// produced. Zero `unsafe` markers; every read is a bounds-checked `Span` subscript, unlike the
-// C++'s `ASSERT(data.data())`, a no-op in Release.
+// Every read is a bounds-checked `Span` subscript, where the C++ has `ASSERT(data.data())`, a
+// no-op in Release.
 
-// `WebCore::CSSUnitType` is imported here rather than mirrored, split into a self-contained
-// `CSSUnitType.h` that the Swift module imports directly; `CSSUnits.h` includes it so no other
-// consumer moves. A mirror would need static asserts to stay pinned to the C++ numbering,
-// since the trie can return only 63 of the 70 enumerators.
+// `WebCore::CSSUnitType` is imported rather than mirrored, out of a self-contained
+// `CSSUnitType.h` that the Swift module imports directly and `CSSUnits.h` includes. A mirror
+// would need static asserts to stay pinned to the C++ numbering, since the trie can return only
+// 63 of the 70 enumerators.
 
 /// The ASCII code units the trie's edges are drawn from, plus the sentinel every non-ASCII
 /// code unit folds to.

@@ -41,25 +41,56 @@
 #include "CSSParserToken.h"
 #include "CSSParserTokenRange.h"
 #include "CSSCalcSwiftTypes.h"
+#include "CSSCalcSymbolTable.h"
 #include "CSSCalcSymbolsAllowed.h"
+#include "CSSCalcTree+Copy.h"
 #include "CSSCalcTree+Parser.h"
 #include "CSSCalcTree+Serialization.h"
 #include "CSSCalcTree+Simplification.h"
 #include "CSSCalcTree.h"
 #include "CSSPrimitiveNumericCategory.h"
+#include "CSSToLengthConversionData.h"
 #include "CSSPropertyParserState.h"
 #include "StyleRule.h"
 #include "CSSSerializationContext.h"
 #include "CSSTokenizer.h"
 #include "CSSTokenizerSwiftTypes.h"
+// `FontCascade::metricsOfPrimaryFont` and `primaryFont` are declared `inline` in FontCascade.h
+// and defined here, so a translation unit that calls either without this include fails
+// -Werror,-Wundefined-inline rather than at link time.
+#include "FontCascadeInlines.h"
+// For the calc simplification comparison's conversion-data axis.
+#include "StyleComputedStyle.h"
+#include "StyleComputedStyle+GettersInlines.h"
+#include "StyleComputedStyle+SettersInlines.h"
+// The builder-state fixture. `Style::BuilderState` is required by `simplify(SiblingCount&)`,
+// `simplify(SiblingIndex&)`, `simplify(Random&)`, `simplify(Anchor&)` and
+// `simplify(AnchorSize&)`, and `BuilderContext` holds a non-null `const Ref<const Document>`, so
+// a real `Document` is mandatory.
+#include "AnchorPositionEvaluator.h"
+#include "CSSCalcRandomCachingKey.h"
+#include "Document.h"
+#include "DocumentInlines.h"
+#include "ElementInlines.h"
+#include "HTMLBodyElement.h"
+#include "HTMLDivElement.h"
+#include "HTMLHtmlElement.h"
+#include "NodeInlines.h"
+#include "ProcessWarming.h"
+#include "Settings.h"
+#include "StyleBuilderState.h"
 // WebCoreSwift-Generated.h is module-scoped, so any translation unit that includes it must
 // declare every Swift boundary type in the module, not just the ones this file calls.
 #include "WebCoreSwiftBoundaryTypes.h"
 #include <array>
 #include <atomic>
+#include <bit>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/URL.h>
 #include <wtf/text/Latin1Character.h>
 #include <wtf/text/WTFString.h>
 
@@ -248,6 +279,562 @@ std::optional<CSSCalc::Tree> constructRootShape(unsigned shape)
         .type = type,
         .stage = CSSCalc::Stage::Specified,
     };
+}
+
+// MARK: - Helpers for the calc simplification comparison entries below
+//
+// Simplification is `Tree -> Tree`, unlike serialization's `Tree -> String`, so comparing two
+// trees needs a definition of equality, of what counts as NaN, and of which alternatives a tree
+// contains. That is what the rest of this block provides.
+
+// A deep, bitwise comparison of two trees. `Tree::operator==` is defaulted and therefore uses
+// `double ==`, which is wrong in both directions here: too strict on NaN, and too weak on signed
+// zero, which `abs`, `mod`, `round(to-zero)` and `sign` can all normalize.
+static bool bitwiseEqualChild(const CSSCalc::Child&, const CSSCalc::Child&);
+
+// Every double compared by bit pattern rather than by value. `bit_cast` rather than `memcmp`, so
+// the comparison is on a value and not on an object representation with padding in it.
+static bool sameBits(double a, double b)
+{
+    return std::bit_cast<uint64_t>(a) == std::bit_cast<uint64_t>(b);
+}
+
+// One overload per slot shape, matching `rebuildSlot` in CSSCalcTree+Simplification.cpp, so that
+// a sixth shape would fail to compile here rather than be compared shallowly.
+static bool bitwiseEqualSlot(const CSSCalc::Child& a, const CSSCalc::Child& b)
+{
+    return bitwiseEqualChild(a, b);
+}
+
+static bool bitwiseEqualSlot(const std::optional<CSSCalc::Child>& a, const std::optional<CSSCalc::Child>& b)
+{
+    if (a.has_value() != b.has_value())
+        return false;
+    return !a || bitwiseEqualChild(*a, *b);
+}
+
+static bool bitwiseEqualSlot(const CSSCalc::ChildOrNone& a, const CSSCalc::ChildOrNone& b)
+{
+    auto* childA = get_if<CSSCalc::Child>(&a);
+    auto* childB = get_if<CSSCalc::Child>(&b);
+    if (!childA || !childB)
+        return !childA && !childB;
+    return bitwiseEqualChild(*childA, *childB);
+}
+
+static bool bitwiseEqualSlot(const CSSCalc::Children& a, const CSSCalc::Children& b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (!bitwiseEqualChild(a[i], b[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool bitwiseEqualSlot(const CSSCalc::Random::Sharing& a, const CSSCalc::Random::Sharing& b)
+{
+    // `operator==` and not a bitwise walk: `Sharing` is never computed, only copied through
+    // unchanged (`copyAndSimplify(const Random::Sharing&)`), so the `double` inside `SharingFixed`
+    // is the same object's value on both sides and cannot have been rounded differently.
+    return a == b;
+}
+
+static bool bitwiseEqualSlot(const Vector<CSSCalc::CalcMix::Item>& a, const Vector<CSSCalc::CalcMix::Item>& b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        // The weight is copied through, so `operator==` for the same reason `Random::Sharing`
+        // gets one; the value is a subtree and gets the bitwise walk.
+        if (a[i].weight != b[i].weight || !bitwiseEqualChild(a[i].value, b[i].value))
+            return false;
+    }
+    return true;
+}
+
+static bool bitwiseEqualAnchorSide(const CSSCalc::AnchorSide& a, const CSSCalc::AnchorSide& b)
+{
+    auto* childA = get_if<CSSCalc::Child>(&a.value);
+    auto* childB = get_if<CSSCalc::Child>(&b.value);
+    if (childA && childB)
+        return bitwiseEqualChild(*childA, *childB);
+    if (childA || childB)
+        return false;
+    return *get_if<CSSValueID>(&a.value) == *get_if<CSSValueID>(&b.value);
+}
+
+static bool bitwiseEqualChild(const CSSCalc::Child& a, const CSSCalc::Child& b)
+{
+    if (a.value.index() != b.value.index())
+        return false;
+
+    return WTF::switchOn(a.value,
+        [&](const auto& alternative) -> bool {
+            using A = std::remove_cvref_t<decltype(alternative)>;
+            const auto& other = *get_if<A>(&b.value);
+            if constexpr (requires { *alternative; }) {
+                using Op = std::remove_cvref_t<decltype(*alternative)>;
+                // The per-node `Type` is one of the things serialization cannot see: two trees
+                // that serialize identically can carry different types.
+                if (!(alternative.type == other.type))
+                    return false;
+                if constexpr (std::same_as<Op, CSSCalc::Anchor>) {
+                    // Not tuple-like (`tuple_size` 0, webkit.org/b/280798), so the generic walk
+                    // below would report every pair of anchors equal.
+                    return alternative->elementName == other->elementName
+                        && bitwiseEqualAnchorSide(alternative->side, other->side)
+                        && bitwiseEqualSlot(alternative->fallback, other->fallback);
+                } else if constexpr (std::same_as<Op, CSSCalc::AnchorSize>) {
+                    return alternative->elementName == other->elementName
+                        && alternative->dimension == other->dimension
+                        && bitwiseEqualSlot(alternative->fallback, other->fallback);
+                } else {
+                    return [&]<size_t... I>(std::index_sequence<I...>) {
+                        return (bitwiseEqualSlot(CSSCalc::get<I>(*alternative), CSSCalc::get<I>(*other)) && ...);
+                    }(std::make_index_sequence<std::tuple_size_v<Op>> { });
+                }
+            } else if constexpr (std::same_as<A, CSSCalc::Number>)
+                return sameBits(alternative.value, other.value);
+            else if constexpr (std::same_as<A, CSSCalc::Percentage>) {
+                // `hint` is the other thing serialization cannot see: it does not appear in
+                // `10%`, and `makeChildWithValueBasedOn` carries it onto a folded percentage.
+                return sameBits(alternative.value, other.value) && alternative.hint == other.hint;
+            } else if constexpr (std::same_as<A, CSSCalc::CanonicalDimension>)
+                return sameBits(alternative.value, other.value) && alternative.dimension == other.dimension;
+            else if constexpr (std::same_as<A, CSSCalc::NonCanonicalDimension>)
+                return sameBits(alternative.value, other.value) && alternative.unit == other.unit;
+            else {
+                // `Symbol`, `SiblingCount`, `SiblingIndex`: no `double` anywhere, so the
+                // defaulted `operator==` is already the bitwise comparison.
+                return alternative == other;
+            }
+        }
+    );
+}
+
+// The whole `Tree`, which is four members and not one. `type`, `stage` and
+// `requiresConversionData` are all invisible to serialization and all three are compared here.
+static bool bitwiseEqualTree(const CSSCalc::Tree& a, const CSSCalc::Tree& b)
+{
+    return a.stage == b.stage
+        && a.requiresConversionData == b.requiresConversionData
+        && a.type == b.type
+        && bitwiseEqualChild(a.root, b.root);
+}
+
+// Visits every node of a subtree, root included, in tree order. Its own walker rather than
+// `forAllChildNodes`, because `Anchor` and `AnchorSize` declare `tuple_size` 0 and the generic
+// traversal yields no children for them.
+template<typename F> static void forEachNodeOfSubtree(const CSSCalc::Child& node, const F& function)
+{
+    function(node);
+
+    auto visitSlot = [&](const auto& slot) {
+        using S = std::remove_cvref_t<decltype(slot)>;
+        if constexpr (std::same_as<S, CSSCalc::Child>)
+            forEachNodeOfSubtree(slot, function);
+        else if constexpr (std::same_as<S, std::optional<CSSCalc::Child>>) {
+            if (slot)
+                forEachNodeOfSubtree(*slot, function);
+        } else if constexpr (std::same_as<S, CSSCalc::ChildOrNone>) {
+            if (auto* child = get_if<CSSCalc::Child>(&slot))
+                forEachNodeOfSubtree(*child, function);
+        } else if constexpr (std::same_as<S, CSSCalc::Children>) {
+            for (const auto& child : slot)
+                forEachNodeOfSubtree(child, function);
+        } else if constexpr (std::same_as<S, Vector<CSSCalc::CalcMix::Item>>) {
+            for (const auto& item : slot)
+                forEachNodeOfSubtree(item.value, function);
+        }
+        // `Random::Sharing` holds no subtree, and falls through deliberately.
+    };
+
+    WTF::switchOn(node.value,
+        [&](const auto& alternative) {
+            if constexpr (requires { *alternative; }) {
+                using Op = std::remove_cvref_t<decltype(*alternative)>;
+                if constexpr (std::same_as<Op, CSSCalc::Anchor>) {
+                    if (auto* child = get_if<CSSCalc::Child>(&alternative->side.value))
+                        forEachNodeOfSubtree(*child, function);
+                    if (alternative->fallback)
+                        forEachNodeOfSubtree(*alternative->fallback, function);
+                } else if constexpr (std::same_as<Op, CSSCalc::AnchorSize>) {
+                    if (alternative->fallback)
+                        forEachNodeOfSubtree(*alternative->fallback, function);
+                } else {
+                    [&]<size_t... I>(std::index_sequence<I...>) {
+                        (visitSlot(CSSCalc::get<I>(*alternative)), ...);
+                    }(std::make_index_sequence<std::tuple_size_v<Op>> { });
+                }
+            }
+        }
+    );
+}
+
+// Bit `1 << index` for every `Node` alternative the subtree contains. Keyed on the variant index
+// rather than on `CSSCalcSwiftNodeKind`, which is what expresses which alternatives were
+// declined.
+static uint64_t alternativeMaskOfSubtree(const CSSCalc::Child& root)
+{
+    uint64_t mask = 0;
+    forEachNodeOfSubtree(root, [&](const CSSCalc::Child& node) {
+        mask |= 1ULL << node.value.index();
+    });
+    return mask;
+}
+
+static uint32_t nodeCountOfSubtree(const CSSCalc::Child& root)
+{
+    uint32_t count = 0;
+    forEachNodeOfSubtree(root, [&](const CSSCalc::Child&) { ++count; });
+    return count;
+}
+
+// Whether any numeric leaf in the subtree is a NaN. Computed from the tree, not from the source
+// text: `calc(0 / 0)` produces a NaN the text does not mention.
+static bool subtreeContainsNaN(const CSSCalc::Child& root)
+{
+    bool found = false;
+    forEachNodeOfSubtree(root, [&](const CSSCalc::Child& node) {
+        WTF::switchOn(node.value,
+            [&]<CSSCalc::Numeric T>(const T& leaf) {
+                if (std::isnan(leaf.value))
+                    found = true;
+            },
+            [](const auto&) { }
+        );
+    });
+    return found;
+}
+
+// A `Style::ComputedStyle` at a chosen font size, kept alive for the process. Function-local
+// statics, not globals, because `CSSToLengthConversionData` holds a reference to the style rather
+// than a copy, and because WebCore links with -no_inits.
+//
+// `setFontDescription`, not `setFontDescriptionWithoutUpdate`: `WithoutUpdate` leaves
+// `FontCascade::m_fonts` null (StyleComputedStyleBase.cpp:233), where the non-`WithoutUpdate` form
+// calls `FontCascade::update(fontSelector)` at :229 and installs a real `FontCascadeFonts`.
+// Without it, `Style::resolveEx` reaches `primaryFont()` through a null `m_fonts` and takes
+// EXC_BAD_ACCESS on the first font-metric-relative unit.
+//
+// Non-const, because `Style::BuilderState::create` takes `ComputedStyle&` and
+// `BuilderState::siblingCount()` writes `m_style.setUsesTreeCountingFunctions()` on it.
+static Style::ComputedStyle& simplificationStyleStorageAtFontSize(float fontSize)
+{
+    static NeverDestroyed<Style::ComputedStyle> style16 = [] {
+        auto style = Style::ComputedStyle::create();
+        auto description = style.fontDescription();
+        description.setComputedSize(16);
+        style.setFontDescription(WTF::move(description));
+        return style;
+    }();
+    static NeverDestroyed<Style::ComputedStyle> style32 = [] {
+        auto style = Style::ComputedStyle::create();
+        auto description = style.fontDescription();
+        description.setComputedSize(32);
+        style.setFontDescription(WTF::move(description));
+        return style;
+    }();
+    // Two present values rather than one: a present/absent boolean would be satisfied by a
+    // `canonicalize` that just returned a constant.
+    return fontSize > 16 ? style32.get() : style16.get();
+}
+
+const Style::ComputedStyle& simplificationStyleAtFontSize(float fontSize)
+{
+    return simplificationStyleStorageAtFontSize(fontSize);
+}
+
+// MARK: - The builder-state fixture: conversion-data kinds 3 and 4
+//
+// Five `simplify` overloads (`SiblingCount`, `SiblingIndex`, `Random`, `Anchor`, `AnchorSize`)
+// return `nullopt` on both paths when `options.conversionData->styleBuilderState()` is null, so
+// this fixture supplies a real one. The element is the third of five siblings, so `siblingCount()`
+// is 5 and `siblingIndex()` is 3.
+//
+// `BuilderContext` is left at its default except that `parentStyle` is set to the style itself
+// rather than left null, because `CSSToLengthConversionData`'s `parentStyle()` unconditionally
+// dereferences it (CSSToLengthConversionData.cpp:56, StyleBuilderState.h:127).
+struct SimplificationBuilderStateFixture {
+    RefPtr<Settings> settings;
+    RefPtr<Document> document;
+    RefPtr<Element> element;
+    // Re-created between the two comparison runs; see `resetSimplificationBuilderStates`.
+    std::optional<UniqueRef<Style::BuilderState>> state16;
+    std::optional<UniqueRef<Style::BuilderState>> state32;
+};
+
+static SimplificationBuilderStateFixture& simplificationBuilderStateFixture()
+{
+    static NeverDestroyed<SimplificationBuilderStateFixture> fixture = [] {
+        SimplificationBuilderStateFixture f;
+        ProcessWarming::initializeNames();
+        f.settings = Settings::create(nullptr);
+        f.document = Document::create(*f.settings, aboutBlankURL());
+        Ref documentElement = HTMLHtmlElement::create(*f.document);
+        f.document->appendChild(documentElement);
+        Ref body = HTMLBodyElement::create(*f.document);
+        documentElement->appendChild(body);
+        for (unsigned i = 0; i < 5; ++i) {
+            Ref div = HTMLDivElement::create(*f.document);
+            body->appendChild(div);
+            if (i == 2)
+                f.element = div.ptr();
+        }
+        return f;
+    }();
+    return fixture.get();
+}
+
+// Destroys and rebuilds both `BuilderState`s, leaving the Document and the element tree alone.
+//
+// Must run between the two comparison paths: the anchor `simplify` overloads set
+// `m_invalidAtComputedValueTimeProperties` (StyleBuilderState.cpp:324-327) with no public way to
+// clear it. The Document and element are not rebuilt, because `random()`'s base value is cached on
+// them by `RandomCachingKey`.
+//
+// A `CheckedPtr` to a `BuilderState` must not outlive it (`CanMakeCheckedPtr`'s destructor
+// RELEASE_ASSERTs), so callers build `SimplificationOptions` after this call and drop them before
+// the next one.
+static void resetSimplificationBuilderStates()
+{
+    auto& fixture = simplificationBuilderStateFixture();
+    auto make = [&](float fontSize) {
+        auto& style = simplificationStyleStorageAtFontSize(fontSize);
+        return Style::BuilderState::create(style, Style::BuilderContext {
+            .document = *fixture.document,
+            .parentStyle = &style,
+            .element = fixture.element,
+        });
+    };
+    // Cleared before either is rebuilt, so the old objects are gone before the new ones exist
+    // rather than two live states briefly sharing one style.
+    fixture.state16 = std::nullopt;
+    fixture.state32 = std::nullopt;
+    fixture.state16.emplace(make(16.0f));
+    fixture.state32.emplace(make(32.0f));
+}
+
+static Style::BuilderState& simplificationBuilderStateAtFontSize(float fontSize)
+{
+    auto& fixture = simplificationBuilderStateFixture();
+    if (!fixture.state16)
+        resetSimplificationBuilderStates();
+    return fontSize > 16 ? fixture.state32->get() : fixture.state16->get();
+}
+
+// Did either anchor overload mark the current property invalid at computed-value time? That is
+// the only externally visible effect of `simplify(Anchor&)` on a node with no fallback.
+static bool simplificationBuilderStateFlaggedInvalid(float fontSize)
+{
+    return simplificationBuilderStateAtFontSize(fontSize).isCurrentPropertyInvalidAtComputedValueTime();
+}
+
+// Which font size a conversion-data kind selects, and whether it carries a builder state.
+// 0 none, 1 a style at 16px, 2 the same at 32px, 3 16px with a builder state, 4 32px with one.
+static float simplificationConversionDataFontSize(uint32_t kind)
+{
+    return (kind == 2 || kind == 4) ? 32.0f : 16.0f;
+}
+
+static bool simplificationConversionDataCarriesBuilderState(uint32_t kind)
+{
+    return kind >= 3;
+}
+
+
+// Nine symbol tables, keyed by kind. Kinds 3..8 are the only way to bind a `Symbol` to a value
+// the CSS number grammar cannot spell as a literal -- NaN, an infinity, a negative zero, a
+// subnormal or 2^31-1 -- so `mod(r, g)` with `r` bound to NaN is the only way to reach
+// `executeMathOperation<Mod>(NaN, NaN)`.
+CSSCalcSymbolTable simplificationSymbolTable(uint32_t kind)
+{
+    constexpr double subnormal = 5e-324;
+    switch (kind) {
+    case 1:
+        return CSSCalcSymbolTable {
+            { CSSValueR, CSSUnitType::Number, 1.0 },
+            { CSSValueG, CSSUnitType::Number, 2.0 },
+            { CSSValueB, CSSUnitType::Number, 3.0 },
+            { CSSValueAlpha, CSSUnitType::Number, 0.5 },
+        };
+    case 2:
+        // A dimension rather than a number, which gives the recursive `copyAndSimplify` inside
+        // `simplify(Symbol&)` real work and makes the percentage-typed operations reachable.
+        return CSSCalcSymbolTable {
+            { CSSValueR, CSSUnitType::Px, 1.0 },
+            { CSSValueG, CSSUnitType::Px, 2.0 },
+            { CSSValueB, CSSUnitType::Px, 3.0 },
+            { CSSValueAlpha, CSSUnitType::Px, 0.5 },
+        };
+    case 3:
+        return CSSCalcSymbolTable {
+            { CSSValueR, CSSUnitType::Number, std::numeric_limits<double>::quiet_NaN() },
+            { CSSValueG, CSSUnitType::Number, std::numeric_limits<double>::quiet_NaN() },
+            { CSSValueB, CSSUnitType::Number, std::numeric_limits<double>::quiet_NaN() },
+            { CSSValueAlpha, CSSUnitType::Number, std::numeric_limits<double>::quiet_NaN() },
+        };
+    case 4:
+        return CSSCalcSymbolTable {
+            { CSSValueR, CSSUnitType::Number, std::numeric_limits<double>::infinity() },
+            { CSSValueG, CSSUnitType::Number, std::numeric_limits<double>::infinity() },
+            { CSSValueB, CSSUnitType::Number, std::numeric_limits<double>::infinity() },
+            { CSSValueAlpha, CSSUnitType::Number, std::numeric_limits<double>::infinity() },
+        };
+    case 5:
+        return CSSCalcSymbolTable {
+            { CSSValueR, CSSUnitType::Number, -std::numeric_limits<double>::infinity() },
+            { CSSValueG, CSSUnitType::Number, -std::numeric_limits<double>::infinity() },
+            { CSSValueB, CSSUnitType::Number, -std::numeric_limits<double>::infinity() },
+            { CSSValueAlpha, CSSUnitType::Number, -std::numeric_limits<double>::infinity() },
+        };
+    case 6:
+        // The value neither the defaulted comparison nor serialization can see: `-0.0 == 0.0`,
+        // and `calc(-0)` serializes as `calc(0)`.
+        return CSSCalcSymbolTable {
+            { CSSValueR, CSSUnitType::Number, -0.0 },
+            { CSSValueG, CSSUnitType::Number, -0.0 },
+            { CSSValueB, CSSUnitType::Number, -0.0 },
+            { CSSValueAlpha, CSSUnitType::Number, -0.0 },
+        };
+    case 7:
+        return CSSCalcSymbolTable {
+            { CSSValueR, CSSUnitType::Number, subnormal },
+            { CSSValueG, CSSUnitType::Number, subnormal },
+            { CSSValueB, CSSUnitType::Number, subnormal },
+            { CSSValueAlpha, CSSUnitType::Number, subnormal },
+        };
+    case 8:
+        // Straddling INT_MAX on purpose: `g` is one above it, so `mod(r, g)` and the four
+        // rounding strategies run either side of a `double -> int` narrowing boundary.
+        return CSSCalcSymbolTable {
+            { CSSValueR, CSSUnitType::Number, 2147483647.0 },
+            { CSSValueG, CSSUnitType::Number, 2147483648.0 },
+            { CSSValueB, CSSUnitType::Number, 2147483647.0 },
+            { CSSValueAlpha, CSSUnitType::Number, 2147483647.0 },
+        };
+    default:
+        return { };
+    }
+}
+
+// Eight trees built directly rather than parsed, because no parse produces them. Every
+// parse-reachable `Deg2Rad` and `Invert` sits inside a `Product`, which is declined here, and the
+// `Min`, `Max`, `Clamp` and `Hypot` branches of shapes 4 to 7 are reached by a parsed corpus
+// without their specific outcome being reached.
+constexpr unsigned simplificationConstructedShapeCount = 8;
+
+std::optional<CSSCalc::Tree> constructSimplificationShape(unsigned shape)
+{
+    auto typeOf = [](const auto& op, const CSSCalc::Child& fallbackTypeSource) {
+        // The operation's own computed type where it has one, and the child's where `toType`
+        // declines, so that no shape carries a type its operation would not have produced.
+        if (auto type = CSSCalc::toType(op))
+            return *type;
+        return CSSCalc::getType(fallbackTypeSource);
+    };
+
+    switch (shape) {
+    case 0: {
+        // `Deg2Rad{Symbol}`. Angle-typed, because that is what `Deg2Rad` wraps.
+        auto child = CSSCalc::makeChild(CSSCalc::Symbol { .id = CSSValueR, .unit = CSSUnitType::Deg });
+        auto op = CSSCalc::Deg2Rad { .angle = CSSCalc::copy(child) };
+        auto type = typeOf(op, child);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 1: {
+        // `Sin{Deg2Rad{Symbol}}`, the shape the parser builds for `sin(<angle>)`, with the angle
+        // a symbol rather than a literal so that it survives the parse-time fold.
+        auto child = CSSCalc::makeChild(CSSCalc::Symbol { .id = CSSValueR, .unit = CSSUnitType::Deg });
+        auto inner = CSSCalc::Deg2Rad { .angle = CSSCalc::copy(child) };
+        auto innerType = typeOf(inner, child);
+        auto innerChild = CSSCalc::makeChild(WTF::move(inner), innerType);
+        auto op = CSSCalc::Sin { .a = CSSCalc::copy(innerChild) };
+        auto type = typeOf(op, innerChild);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 2: {
+        // `Deg2Rad{CanonicalDimension(1deg)}`, the one shape here that folds:
+        // `simplify(Deg2Rad&)` turns a `CanonicalDimension` child into `Number { deg2rad(value) }`
+        // unconditionally (CSSCalcTree+Simplification.cpp:986-990).
+        auto child = CSSCalc::makeChild(CSSCalc::CanonicalDimension { .value = 1, .dimension = CSSCalc::CanonicalDimension::Dimension::Angle });
+        auto op = CSSCalc::Deg2Rad { .angle = CSSCalc::copy(child) };
+        auto type = typeOf(op, child);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 3: {
+        // `Invert{Symbol}`, number-typed. A bare `Invert` is unreachable through a parse, because
+        // division always builds the `Product` wrapper around it. The symbol is `CSSValueR` here
+        // and in shapes 0, 1 and 6 so that the swept symbol table resolves it.
+        auto child = CSSCalc::makeChild(CSSCalc::Symbol { .id = CSSValueR, .unit = CSSUnitType::Number });
+        auto op = CSSCalc::Invert { .a = CSSCalc::copy(child) };
+        auto type = typeOf(op, child);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 4: {
+        // `clamp(none, 1px, 1em)`: `convertToMin` succeeding, the only rewrite in the simplifier
+        // that produces an operation kind not present in the input (`+Simplification.cpp:1018`).
+        //
+        // No parse reaches it: `convertToMin` fires when `val` is a `Numeric` and the present
+        // bound is a different alternative or unit, and that condition is monotone under
+        // canonicalization, so `clamp(none, 1px, 1em)` as text arrives as `min(1px, 1em)` with no
+        // `Clamp` in the tree. The mismatch here is `CanonicalDimension` against
+        // `NonCanonicalDimension`, which holds with no conversion data and dissolves once one is
+        // supplied.
+        auto minimum = CSSCalc::ChildOrNone { CSS::Keyword::None { } };
+        auto value = CSSCalc::makeChild(CSSCalc::CanonicalDimension { .value = 1, .dimension = CSSCalc::CanonicalDimension::Dimension::Length });
+        auto maximum = CSSCalc::makeChild(CSSCalc::NonCanonicalDimension { .value = 1, .unit = CSSUnitType::Em });
+        auto op = CSSCalc::Clamp { .min = WTF::move(minimum), .val = CSSCalc::copy(value), .max = CSSCalc::ChildOrNone { CSSCalc::copy(maximum) } };
+        auto type = typeOf(op, value);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 5: {
+        // `clamp(none, 1px, 1)`: `convertToMin` failing, because `toType(Min { 1px, 1 })` returns
+        // `std::nullopt` when a `<length>` and a `<number>` do not merge, at which point the C++
+        // `simplify` returns `nullopt` and rebuilds the `Clamp` itself.
+        //
+        // The Swift side cannot: by the time `buildMinMax` answers false, `rewrite` has pushed two
+        // operands where the parent expects one and there is no `pop`, so a false answer declines
+        // the whole tree. The parser's own type check rejects this text outright, so this is a
+        // boundary contract test rather than a coverage test.
+        auto minimum = CSSCalc::ChildOrNone { CSS::Keyword::None { } };
+        auto value = CSSCalc::makeChild(CSSCalc::CanonicalDimension { .value = 1, .dimension = CSSCalc::CanonicalDimension::Dimension::Length });
+        auto maximum = CSSCalc::makeChild(CSSCalc::Number { .value = 1 });
+        auto op = CSSCalc::Clamp { .min = WTF::move(minimum), .val = CSSCalc::copy(value), .max = CSSCalc::ChildOrNone { CSSCalc::copy(maximum) } };
+        auto type = typeOf(op, value);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 6: {
+        // `min(r)`: `simplifyForMinMax`'s one-child early return (`+Simplification.cpp:408`). No
+        // parse reaches it, because that return does not require the child to be resolved, so
+        // `min(r)` as text folds to `calc(r)` during the parse's own simplification. The Swift
+        // equivalent is `foldMinMax`'s `folded.count == 1 -> promoteTerm`, which produces
+        // `.replacedByTerm` for an unresolved symbol and `.leaf` for a resolved one; the symbol
+        // table selects which.
+        auto child = CSSCalc::makeChild(CSSCalc::Symbol { .id = CSSValueR, .unit = CSSUnitType::Number });
+        auto op = CSSCalc::Min { .children = CSSCalc::Children { Vector<CSSCalc::Child>::from(CSSCalc::copy(child)) } };
+        auto type = typeOf(op, child);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    case 7: {
+        // `hypot(10%, 20%)`: `simplify(Hypot&)`'s `PercentageTag` arm
+        // (`+Simplification.cpp:1269`). No parse reaches it, because `hypot(10%, 20%)` as text
+        // constant-folds during the parse and no symbol table can produce a `Percentage` leaf.
+        // The C++ stamps `Type::determinePercentHint(options.category)` onto the folded
+        // `Percentage` while the Swift side writes `percentHint: 0`, which agrees because the
+        // percentage arm is only entered where `determinePercentHint` is `None`. Spelled rather
+        // than defaulted because `-Wmissing-designated-field-initializers` is an error here.
+        auto first = CSSCalc::makeChild(CSSCalc::Percentage { .value = 10, .hint = { } });
+        auto second = CSSCalc::makeChild(CSSCalc::Percentage { .value = 20, .hint = { } });
+        auto op = CSSCalc::Hypot { .children = CSSCalc::Children { Vector<CSSCalc::Child>::from(CSSCalc::copy(first), CSSCalc::copy(second)) } };
+        auto type = typeOf(op, first);
+        return CSSCalc::Tree { .root = CSSCalc::makeChild(WTF::move(op), type), .type = type, .stage = CSSCalc::Stage::Specified };
+    }
+    default:
+        return std::nullopt;
+    }
 }
 
 } // namespace
@@ -952,6 +1539,572 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcSwiftCallCount(void)
 WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void)
 {
     return s_calcCompareCalls.load(std::memory_order_relaxed);
+}
+
+// MARK: - calc() simplification comparison entries (CSSCalcSimplificationSwift.swift)
+//
+// A sibling of the serialization block above, not an extension of it: the oracle differs.
+// Serialization is `Tree -> String`, so comparing two strings needed no extra machinery.
+// Simplification is `Tree -> Tree`, so every field below exists because a tree comparison has
+// failure modes a string comparison does not.
+//
+// The non-obvious part: `parseAndSimplify` runs simplification incrementally during the parse, with
+// the same `SimplificationOptions`, at 22 sites in CSSCalcTree+Parser.cpp. A parsed tree is
+// therefore already at a fixed point for the options it was parsed with, so handing it back to
+// `copyAndSimplify` with those same options is the identity on essentially every case. Entry 1
+// parses at a fixed baseline -- `parseCalcExpression`'s options, the production ones from
+// CSSUnevaluatedCalc.cpp:167 -- and simplifies under a caller-supplied set instead, so that when the
+// two differ in a way simplification reads, real work happens.
+
+// The swept options, passed by pointer rather than as nine scalars so that an axis can be added
+// without re-spelling the signature of every entry in four places.
+struct CSSCalcSimplificationOptionsSpec {
+    // Ordinal of `WebCore::CSS::Category`, 0..10, in declaration order.
+    uint32_t category;
+    double rangeMinimum;
+    double rangeMaximum;
+    // 0 none, 1 a style at 16px, 2 the same at 32px, 3 the 16px style with a live
+    // `Style::BuilderState`, 4 the 32px style with one. Kinds 3 and 4 are the only ones at which
+    // `SiblingCount`, `SiblingIndex`, `Random`, `Anchor` and `AnchorSize` do anything at all.
+    uint32_t conversionDataKind;
+    // 0 empty, 1 num, 2 px, 3 NaN, 4 +inf, 5 -inf, 6 -0, 7 subnormal, 8 INT_MAX.
+    uint32_t symbolTableKind;
+    uint32_t allowZeroValueLengthRemovalFromSum;
+    // 0 Stage::Specified, 1 Stage::Computed, applied to the parsed tree before simplifying.
+    uint32_t stage;
+};
+
+// One case's worth of comparison. Mirrored field for field by `struct Comparison` in
+// simplifycheck.cpp; the order is ABI and the two must be edited together.
+struct CSSCalcSimplificationComparison {
+    uint32_t parsed;
+    // The Swift side's decision, and, when it declined, the alternative that caused it. 0xFF means
+    // it declined without naming one.
+    uint32_t declined;
+    uint32_t declineKind;
+    // (a) the verdict: deep, bitwise over leaf doubles, plus every `Type`, the stage and the
+    // conversion-data flag. The only one of the three that can see a signed zero.
+    uint32_t agree;
+    // (b) `Tree::operator==`, defaulted. Reported beside (a) rather than instead of it, since it
+    // disagrees in two directions: too strict on NaN, too weak on signed zero.
+    uint32_t agreeDefaulted;
+    // (c) both result trees through the C++ serializer, so that a serialization defect cannot be
+    // mistaken for one here. Diagnostic only.
+    uint32_t agreeSerialized;
+    uint32_t containsNaN;
+    uint32_t cppChangedInput;
+    uint32_t swiftChangedInput;
+    uint32_t cppIdempotent;
+    uint32_t swiftIdempotent;
+    uint32_t cppCanSimplify;
+    uint32_t swiftCanSimplify;
+    // Whether `canSimplify(t) == false` really implied `copyAndSimplify(t) == t`, which is the
+    // check with information in it: `canSimplify` itself is one bit per tree.
+    uint32_t cppCanSimplifySound;
+    uint32_t swiftCanSimplifySound;
+    uint32_t cppPreservedStageAndFlag;
+    uint32_t swiftPreservedStageAndFlag;
+    uint32_t inputNodeCount;
+    uint32_t outputNodeCount;
+    uint32_t inputRootKind;
+    uint32_t outputRootKind;
+    uint32_t parseCategory;
+    // Masks over `Node` alternative indices. The Swift side's must be a subset of the input's, and
+    // equal to it on any case it did not decline.
+    uint64_t inputKindMask;
+    uint64_t swiftKindMask;
+    uint32_t cppLength;
+    uint32_t swiftLength;
+    // Did this side call `BuilderState::setCurrentPropertyInvalidAtComputedValueTime()`? That is
+    // the only observable effect of `simplify(Anchor&)` and `simplify(AnchorSize&)` on a node with
+    // no fallback: both return `std::exchange(node.fallback, { })`, which is `nullopt` when there
+    // is no fallback, and so is indistinguishable in the output tree. Read after each run from a
+    // freshly created builder state.
+    uint32_t cppInvalidAtComputedValueTime;
+    uint32_t swiftInvalidAtComputedValueTime;
+};
+
+// The layout is pinned rather than merely described. These two structs cross a `dlsym` boundary
+// into a caller that declares its own copies; a field inserted on one side and not the other does
+// not fail to link, it silently shifts every field after it, so a mismatch would compare unrelated
+// fields against each other without any diagnostic.
+static_assert(sizeof(CSSCalcSimplificationOptionsSpec) == 40);
+static_assert(offsetof(CSSCalcSimplificationOptionsSpec, rangeMinimum) == 8);
+static_assert(offsetof(CSSCalcSimplificationOptionsSpec, conversionDataKind) == 24);
+static_assert(offsetof(CSSCalcSimplificationOptionsSpec, stage) == 36);
+static_assert(sizeof(CSSCalcSimplificationComparison) == 120);
+static_assert(offsetof(CSSCalcSimplificationComparison, parseCategory) == 84);
+static_assert(offsetof(CSSCalcSimplificationComparison, inputKindMask) == 88);
+static_assert(offsetof(CSSCalcSimplificationComparison, swiftKindMask) == 96);
+static_assert(offsetof(CSSCalcSimplificationComparison, cppLength) == 104);
+static_assert(offsetof(CSSCalcSimplificationComparison, swiftLength) == 108);
+static_assert(offsetof(CSSCalcSimplificationComparison, cppInvalidAtComputedValueTime) == 112);
+static_assert(offsetof(CSSCalcSimplificationComparison, swiftInvalidAtComputedValueTime) == 116);
+
+WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplification(const char*, size_t, const CSSCalcSimplificationOptionsSpec*, char*, size_t, char*, size_t);
+WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplificationConstructed(unsigned, const CSSCalcSimplificationOptionsSpec*, char*, size_t, char*, size_t);
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationIsSwift(void);
+WEBCORE_EXPORT void webCoreCSSCalcSimplificationSetForceDecline(bool);
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationDeclineCount(void);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationHarnessCallCount(void);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcChildAlternativeCount(void);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char*, size_t, bool, uint32_t, uint32_t*);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingCount(void);
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingIndex(void);
+
+// Compares `canonicalize` directly, parameterized over the full `CSSUnitType` range rather than
+// only the units a parsed CSS corpus happens to use; `canonicalize`
+// (CSSCalcTree+Simplification.cpp:169-287) is a seventy-case `switch`.
+//
+// Four paths, each able to fail where the others cannot: reference arithmetic computed directly
+// from <WebCore/CSSUnitConversions.h> and <wtf/MathExtras.h>, the same headers both ported paths
+// read; `canonicalize` itself, unmediated by a tree walk; the C++ simplifier over a
+// `NonCanonicalDimension`-rooted tree, which is how `canonicalize` is reached in production; and
+// the Swift `canonicalizedDimension` over the same tree object.
+//
+// The unit crosses as a `uint32_t` so that callers can pass values outside the enum too; `built`
+// is 0 for those.
+struct CSSCalcCanonicalizationComparison {
+    double cppValue;
+    double swiftValue;
+    // The `canonicalize`'s own answer. Meaningful only when `referenceResolved`.
+    double referenceValue;
+    uint32_t cppUnitType;
+    uint32_t swiftUnitType;
+    uint32_t referenceUnitType;
+    // `Node`'s alternative index of each path's result root, so that "it stayed a
+    // NonCanonicalDimension" and "it became a CanonicalDimension" are distinguishable.
+    uint32_t cppAlternative;
+    uint32_t swiftAlternative;
+    // Did `canonicalize` return a value at all. `nullopt` for a relative unit with no conversion
+    // data, and for the units a `NonCanonicalDimension` can never hold.
+    uint32_t referenceResolved;
+    // Did the Swift side decline the tree. A decline is invisible in an output comparison.
+    uint32_t swiftDeclined;
+    // 0 = `unitRaw` is outside `CSSUnitType`, so no tree was built and every field above is inert.
+    uint32_t built;
+};
+
+static_assert(sizeof(CSSCalcCanonicalizationComparison) == 56);
+static_assert(offsetof(CSSCalcCanonicalizationComparison, cppUnitType) == 24);
+static_assert(offsetof(CSSCalcCanonicalizationComparison, built) == 52);
+
+WEBCORE_EXPORT CSSCalcCanonicalizationComparison webCoreCSSCalcCompareCanonicalization(double, uint32_t, const CSSCalcSimplificationOptionsSpec*);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcUnitTypeCount(void);
+
+static std::atomic<uint64_t> s_simplifyCompareCalls;
+
+// This file keeps its own decline counter rather than forwarding
+// `CSSCalc::webCoreCSSCalcSimplificationDeclineCount()`, because each comparison below calls the
+// Swift side three times -- once for the answer and twice more for idempotence checks -- so that
+// counter advances by up to three per case, while this one counts one per declining comparison.
+static std::atomic<unsigned> s_simplifyComparisonDeclines;
+
+// One `SimplificationOptions` from one spec, shared by the two comparison entries below and by
+// `webCoreCSSCalcCompareCanonicalization`, so that all three read the same conversion data.
+//
+// The returned options hold a `CheckedPtr` to the builder state at kinds 3 and 4, so the result
+// must be destroyed before `resetSimplificationBuilderStates` runs again: `CanMakeCheckedPtr`'s
+// destructor RELEASE_ASSERTs the pointer count is zero.
+static CSSCalc::SimplificationOptions makeSimplificationOptions(const CSSCalcSimplificationOptionsSpec* spec)
+{
+    auto conversionData = [&]() -> std::optional<CSSToLengthConversionData> {
+        if (!spec->conversionDataKind)
+            return std::nullopt;
+        auto fontSize = simplificationConversionDataFontSize(spec->conversionDataKind);
+        if (simplificationConversionDataCarriesBuilderState(spec->conversionDataKind)) {
+            // The two-argument constructor, the only one that sets `m_styleBuilderState`. It also
+            // derives `m_rootStyle`, `m_parentStyle`, `m_renderView` and
+            // `m_elementForContainerUnitResolution` from the builder state rather than from the
+            // arguments (CSSToLengthConversionData.cpp:52-61), which is why the fixture's
+            // `BuilderContext` leaves `rootElementStyle` null: that keeps the `rem` family
+            // behaving the same at kind 3 as at kind 1.
+            return CSSToLengthConversionData { simplificationStyleAtFontSize(fontSize), simplificationBuilderStateAtFontSize(fontSize) };
+        }
+        return CSSToLengthConversionData { simplificationStyleAtFontSize(fontSize), nullptr, nullptr, nullptr, nullptr };
+    }();
+
+    return CSSCalc::SimplificationOptions {
+        .category = static_cast<WebCore::CSS::Category>(spec->category),
+        .range = WebCore::CSS::Range { spec->rangeMinimum, spec->rangeMaximum },
+        .conversionData = WTF::move(conversionData),
+        .symbolTable = simplificationSymbolTable(spec->symbolTableKind),
+        .allowZeroValueLengthRemovalFromSum = !!spec->allowZeroValueLengthRemovalFromSum,
+    };
+}
+
+// Everything the two comparison entries share. Both arms run on the same input `Tree` object inside
+// one call, which is what makes it impossible to pair a C++ answer for one case with a Swift answer
+// for another.
+static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree&& inputTree, const CSSCalcSimplificationOptionsSpec* spec, uint32_t parseCategory, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
+{
+    CSSCalcSimplificationComparison result { };
+    result.declineKind = 0xFF;
+    result.parsed = 1;
+    result.parseCategory = parseCategory;
+
+    auto input = CSSCalc::Tree {
+        .root = WTF::move(inputTree.root),
+        .type = inputTree.type,
+        // Set here rather than at parse time: a parse always produces `Stage::Specified`, and the
+        // only place in WebCore that writes `Computed` needs conversion data this entry does not
+        // have.
+        .stage = spec->stage ? CSSCalc::Stage::Computed : CSSCalc::Stage::Specified,
+        .requiresConversionData = inputTree.requiresConversionData,
+    };
+
+    result.inputKindMask = alternativeMaskOfSubtree(input.root);
+    result.inputNodeCount = nodeCountOfSubtree(input.root);
+    result.inputRootKind = static_cast<uint32_t>(input.root.value.index());
+
+    // The two comparison runs use separate builder states, and each one's options are scoped so
+    // that the `CheckedPtr` inside them is released before the next reset. Scoped to only the
+    // kinds that need it: at conversion-data kinds 0 to 2 nothing touches the fixture, so the
+    // Document is never created.
+    auto usesBuilderState = simplificationConversionDataCarriesBuilderState(spec->conversionDataKind);
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSimplificationDeclineCount();
+    auto runArm = [&](CSSCalc::Simplifier simplifier, uint32_t& invalidFlagOut) {
+        if (usesBuilderState)
+            resetSimplificationBuilderStates();
+        auto armOptions = makeSimplificationOptions(spec);
+        auto out = CSSCalc::copyAndSimplify(input, armOptions, simplifier);
+        invalidFlagOut = usesBuilderState
+            && simplificationBuilderStateFlaggedInvalid(simplificationConversionDataFontSize(spec->conversionDataKind)) ? 1 : 0;
+        return out;
+    };
+    auto cppTree = runArm(CSSCalc::Simplifier::Cpp, result.cppInvalidAtComputedValueTime);
+    auto swiftTree = runArm(CSSCalc::Simplifier::Swift, result.swiftInvalidAtComputedValueTime);
+    auto declinesAfter = CSSCalc::webCoreCSSCalcSimplificationDeclineCount();
+
+    // Diagnostic from here down, sharing one further builder state built after the two comparison
+    // runs, so that no `CheckedPtr` from it is alive across either reset above.
+    if (usesBuilderState)
+        resetSimplificationBuilderStates();
+    auto options = makeSimplificationOptions(spec);
+
+    result.declined = declinesAfter != declinesBefore ? 1 : 0;
+    if (result.declined)
+        s_simplifyComparisonDeclines.fetch_add(1, std::memory_order_relaxed);
+    result.declineKind = CSSCalc::webCoreCSSCalcSimplificationLastDeclineAlternative();
+    result.swiftKindMask = CSSCalc::webCoreCSSCalcSimplificationLastKindMask();
+
+    result.agree = bitwiseEqualTree(cppTree, swiftTree) ? 1 : 0;
+    result.agreeDefaulted = cppTree == swiftTree ? 1 : 0;
+    result.containsNaN = (subtreeContainsNaN(cppTree.root) || subtreeContainsNaN(swiftTree.root)) ? 1 : 0;
+
+    result.cppChangedInput = bitwiseEqualTree(input, cppTree) ? 0 : 1;
+    result.swiftChangedInput = bitwiseEqualTree(input, swiftTree) ? 0 : 1;
+    result.outputNodeCount = nodeCountOfSubtree(cppTree.root);
+    result.outputRootKind = static_cast<uint32_t>(cppTree.root.value.index());
+
+    // Idempotence, checked per side and reference-free, so it can fail on a case where the two
+    // sides agree with each other. Compared bitwise: the defaulted comparison would report every
+    // NaN result as non-idempotent.
+    result.cppIdempotent = bitwiseEqualTree(CSSCalc::copyAndSimplify(cppTree, options, CSSCalc::Simplifier::Cpp), cppTree) ? 1 : 0;
+    result.swiftIdempotent = bitwiseEqualTree(CSSCalc::copyAndSimplify(swiftTree, options, CSSCalc::Simplifier::Swift), swiftTree) ? 1 : 0;
+
+    result.cppCanSimplify = CSSCalc::canSimplify(input, options, CSSCalc::Simplifier::Cpp) ? 1 : 0;
+    result.swiftCanSimplify = CSSCalc::canSimplify(input, options, CSSCalc::Simplifier::Swift) ? 1 : 0;
+    result.cppCanSimplifySound = (result.cppCanSimplify || !result.cppChangedInput) ? 1 : 0;
+    result.swiftCanSimplifySound = (result.swiftCanSimplify || !result.swiftChangedInput) ? 1 : 0;
+
+    result.cppPreservedStageAndFlag = (cppTree.stage == input.stage && cppTree.requiresConversionData == input.requiresConversionData) ? 1 : 0;
+    result.swiftPreservedStageAndFlag = (swiftTree.stage == input.stage && swiftTree.requiresConversionData == input.requiresConversionData) ? 1 : 0;
+
+    // Both through `Serializer::Cpp`, so a serialization defect shows up there rather than as a
+    // phantom failure here.
+    auto serializationOptions = CSSCalc::SerializationOptions {
+        .range = WebCore::CSS::All,
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+    result.agreeSerialized = CSSCalc::serializationForCSS(cppTree, serializationOptions, CSSCalc::Serializer::Cpp)
+        == CSSCalc::serializationForCSS(swiftTree, serializationOptions, CSSCalc::Serializer::Cpp) ? 1 : 0;
+    result.cppLength = static_cast<uint32_t>(copyOutSerialization(CSSCalc::serializationForCSS(cppTree, serializationOptions, CSSCalc::Serializer::Cpp), cppOut, cppCapacity));
+    result.swiftLength = static_cast<uint32_t>(copyOutSerialization(CSSCalc::serializationForCSS(swiftTree, serializationOptions, CSSCalc::Serializer::Cpp), swiftOut, swiftCapacity));
+    return result;
+}
+
+// Throughput of one path of whole-tree simplification. One entry taking a path selector rather
+// than two frameworks, so that both paths come out of one binary and are interleaved inside one
+// process, with no cross-build drift to attribute.
+//
+// The parse happens once, outside the loop, because the thing being timed is simplification and a
+// parse costs far more than one simplification of what it produced; the caller amortises it by
+// passing a large `iterations`. `fold` exists only to stop the loop being eliminated.
+//
+// With the bridge enabled, the Swift path pays five relaxed atomics per whole-tree call that the
+// C++ path does not (CSSCalcTree+Simplification.cpp:2516-2523), so the comparison is biased against
+// Swift by that much. It is a per-tree cost, not per node.
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char* text, size_t length, bool useSwift, uint32_t iterations, uint32_t* outParsed)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto parsed = parseCalcExpression(source);
+    if (outParsed)
+        *outParsed = parsed.tree ? 1 : 0;
+    if (!parsed.tree)
+        return 0;
+
+    auto options = CSSCalc::SimplificationOptions {
+        .category = parsed.category,
+        .range = WebCore::CSS::All,
+        .conversionData = std::nullopt,
+        .symbolTable = { },
+        .allowZeroValueLengthRemovalFromSum = false,
+    };
+    auto arm = useSwift ? CSSCalc::Simplifier::Swift : CSSCalc::Simplifier::Cpp;
+
+    uint64_t fold = 0;
+    for (uint32_t i = 0; i < iterations; ++i) {
+        auto simplified = CSSCalc::copyAndSimplify(*parsed.tree, options, arm);
+        fold = fold * 1000003 + static_cast<uint64_t>(simplified.root.index());
+        fold = fold * 1000003 + static_cast<uint64_t>(simplified.type.percent);
+    }
+    return fold;
+}
+
+WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplification(const char* text, size_t length, const CSSCalcSimplificationOptionsSpec* spec, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
+{
+    // Counted before the parse filter, so that a caller's call tally matches even for cases that
+    // do not parse: it counts calls made, not cases run.
+    s_simplifyCompareCalls.fetch_add(1, std::memory_order_relaxed);
+
+    CSSCalcSimplificationComparison result { };
+    result.declineKind = 0xFF;
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    auto parsed = parseCalcExpression(source);
+    if (!parsed.tree)
+        return result;
+
+    return compareSimplificationOfTree(WTF::move(*parsed.tree), spec, static_cast<uint32_t>(parsed.category), cppOut, cppCapacity, swiftOut, swiftCapacity);
+}
+
+// The same comparison over a tree built directly rather than parsed; `constructSimplificationShape`
+// says which shapes and why no parse reaches them.
+//
+// Shape 2 is `Deg2Rad{CanonicalDimension(1deg)}`, and `simplify(Deg2Rad&)` folds a
+// `CanonicalDimension` child unconditionally, so this entry reports `cppChangedInput = 1` for it
+// even at the parse baseline. A tree handed back at its own parse fixed point does not change, and
+// that premise does not hold for a constructed tree, which is why this entry is separate.
+WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplificationConstructed(unsigned shape, const CSSCalcSimplificationOptionsSpec* spec, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
+{
+    s_simplifyCompareCalls.fetch_add(1, std::memory_order_relaxed);
+
+    CSSCalcSimplificationComparison result { };
+    result.declineKind = 0xFF;
+
+    auto tree = constructSimplificationShape(shape);
+    if (!tree)
+        return result;
+
+    return compareSimplificationOfTree(WTF::move(*tree), spec, spec->category, cppOut, cppCapacity, swiftOut, swiftCapacity);
+}
+
+// The compile-time default, so that a build which ignored the flag cannot pass as one that
+// honoured it. Reported separately from the entries above, which name their simplifier.
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationIsSwift(void)
+{
+    return CSSCalc::defaultSimplifier == CSSCalc::Simplifier::Swift;
+}
+
+WEBCORE_EXPORT void webCoreCSSCalcSimplificationSetForceDecline(bool force)
+{
+    CSSCalc::webCoreCSSCalcSimplificationSetForceDecline(force);
+}
+
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationDeclineCount(void)
+{
+    return s_simplifyComparisonDeclines.load(std::memory_order_relaxed);
+}
+
+// A forwarder, and it has to be one: at global scope a declaration here would not name
+// `CSSCalc::webCoreCSSCalcSimplificationPrimitiveBench` but declare a C-linkage function of the
+// same name, which would not link.
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t iterations)
+{
+    return CSSCalc::webCoreCSSCalcSimplificationPrimitiveBench(which, iterations);
+}
+
+WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationHarnessCallCount(void)
+{
+    return s_simplifyCompareCalls.load(std::memory_order_relaxed);
+}
+
+// From the variant, never from an enumerator, which can go stale as kinds are added.
+// `VariantSizeV` is also the right-hand side of the assert that pins `CSSCalcSwiftAlternative` in
+// CSSCalcTree+Serialization.cpp.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcChildAlternativeCount(void)
+{
+    return static_cast<uint32_t>(WTF::VariantSizeV<CSSCalc::Node>);
+}
+
+// The category list this file actually iterates, not a recount of the enum.
+//
+// Not fully drift-proof: `CSS::Category` has no count of its own, so a category appended after
+// `AnglePercentage` would be missed by both the assert below and by `calcCategories`. The assert
+// does catch one added in the middle, or one removed. Closing the gap properly needs a count in
+// CSSPrimitiveNumericCategory.h, a header this file does not own.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void)
+{
+    static_assert(calcCategories.size() == static_cast<size_t>(WebCore::CSS::Category::AnglePercentage) + 1);
+    return static_cast<uint32_t>(calcCategories.size());
+}
+
+WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void)
+{
+    return simplificationConstructedShapeCount;
+}
+
+// Does the conversion-data fixture support font-metric-relative units? A style whose
+// `FontCascade::m_fonts` is null takes EXC_BAD_ACCESS inside `Style::resolveEx` for every
+// font-metric unit (`ex`, `cap`, `ch`, `ic`, `lh` and the `r*` forms).
+//
+// Returning `fonts() != nullptr` would not be enough: a fixture whose two styles realized the same
+// font would make the whole conversion-data axis vacuous, since a `canonicalize` that returned a
+// constant would still pass. So this returns true only if both styles have a realized font and
+// their x-heights, cap-heights and line spacings all differ.
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void)
+{
+    auto& cascade16 = simplificationStyleAtFontSize(16.0f).fontCascade();
+    auto& cascade32 = simplificationStyleAtFontSize(32.0f).fontCascade();
+    if (!cascade16.fonts() || !cascade32.fonts())
+        return false;
+
+    auto& metrics16 = cascade16.metricsOfPrimaryFont();
+    auto& metrics32 = cascade32.metricsOfPrimaryFont();
+    // `Markable<float>`, not `std::optional<float>`, taken by `auto` so that the accessor's own
+    // return type decides rather than a conversion that may not exist.
+    auto differs = [](auto a, auto b) {
+        return a && b && *a != *b;
+    };
+    return differs(metrics16.xHeight(), metrics32.xHeight())
+        && differs(metrics16.capHeight(), metrics32.capHeight())
+        && metrics16.lineSpacing() != metrics32.lineSpacing();
+}
+
+// Does the conversion-data fixture support a live `Style::BuilderState`? A pre-flight check: if
+// any of the five builder-state-requiring `simplify` overloads dereferences something this fixture
+// lacks, the process takes EXC_BAD_ACCESS, so every dereference those five perform is exercised
+// here first.
+//
+// Leaves the fixture clean: `resetSimplificationBuilderStates` clears the flag it set.
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void)
+{
+    resetSimplificationBuilderStates();
+    auto& state = simplificationBuilderStateAtFontSize(16.0f);
+
+    bool ok = true;
+    ok = ok && state.element();
+    ok = ok && state.siblingCount() == 5;
+    ok = ok && state.siblingIndex() == 3;
+
+    // Both `random()` sharing paths. The values are a per-process random draw, so only that both
+    // return and that the cache is stable is checked.
+    CSSCalc::RandomCachingKey key { CSSCalc::RandomCachingKey::Key { .name = std::nullopt, .propertyScoped = std::nullopt } };
+    auto documentScoped = state.lookupCSSRandomBaseValue(key, std::nullopt);
+    auto elementScoped = state.lookupCSSRandomBaseValue(key, CSS::Keyword::ElementScoped { });
+    ok = ok && state.lookupCSSRandomBaseValue(key, std::nullopt) == documentScoped;
+    ok = ok && state.lookupCSSRandomBaseValue(key, CSS::Keyword::ElementScoped { }) == elementScoped;
+
+    // The anchor entry point, with no property in flight. Must be `nullopt`, and must not crash
+    // getting there.
+    ok = ok && !WebCore::Style::AnchorPositionEvaluator::evaluateSize(state, std::nullopt, std::nullopt);
+
+    ok = ok && !state.isCurrentPropertyInvalidAtComputedValueTime();
+    state.setCurrentPropertyInvalidAtComputedValueTime();
+    ok = ok && state.isCurrentPropertyInvalidAtComputedValueTime();
+
+    // The 32px state has to be live too, or conversion-data kind 4 is a silent no-op.
+    auto& state32 = simplificationBuilderStateAtFontSize(32.0f);
+    ok = ok && state32.element() == state.element();
+    ok = ok && !state32.isCurrentPropertyInvalidAtComputedValueTime();
+
+    resetSimplificationBuilderStates();
+    return ok;
+}
+
+// Reported rather than hardcoded, so that a fixture which became one-sibling -- making
+// `sibling-count()` and `sibling-index()` indistinguishable -- shows up in the numbers.
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingCount(void)
+{
+    return simplificationBuilderStateAtFontSize(16.0f).siblingCount();
+}
+
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingIndex(void)
+{
+    return simplificationBuilderStateAtFontSize(16.0f).siblingIndex();
+}
+
+// One unit, one value, four paths. See the struct above for why there are four.
+WEBCORE_EXPORT CSSCalcCanonicalizationComparison webCoreCSSCalcCompareCanonicalization(double value, uint32_t unitRaw, const CSSCalcSimplificationOptionsSpec* spec)
+{
+    // Counted on the same tally as the tree-level entries.
+    s_simplifyCompareCalls.fetch_add(1, std::memory_order_relaxed);
+
+    CSSCalcCanonicalizationComparison result { };
+    // Reported rather than asserted: callers may pass values outside the enum on purpose, and a
+    // `static_cast` of an out-of-range value would be UB.
+    if (unitRaw > static_cast<uint32_t>(CSSUnitType::QuirkyEm))
+        return result;
+    result.built = 1;
+
+    auto unit = static_cast<CSSUnitType>(unitRaw);
+    auto options = makeSimplificationOptions(spec);
+
+    // The reference call, reading its conversion data off `options` rather than rebuilding it, so
+    // that all three paths use the same.
+    if (auto canonical = CSSCalc::canonicalize(CSSCalc::NonCanonicalDimension { .value = value, .unit = unit }, options.conversionData)) {
+        result.referenceResolved = 1;
+        result.referenceValue = canonical->value;
+        result.referenceUnitType = static_cast<uint32_t>(CSSCalc::toCSSUnit(canonical->dimension));
+    }
+
+    // Both simplifiers run over the same input `Tree` object.
+    auto root = CSSCalc::makeChild(CSSCalc::NonCanonicalDimension { .value = value, .unit = unit });
+    auto type = CSSCalc::getType(root);
+    auto input = CSSCalc::Tree { .root = WTF::move(root), .type = type, .stage = spec->stage ? CSSCalc::Stage::Computed : CSSCalc::Stage::Specified };
+
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSimplificationDeclineCount();
+    auto cppTree = CSSCalc::copyAndSimplify(input, options, CSSCalc::Simplifier::Cpp);
+    auto swiftTree = CSSCalc::copyAndSimplify(input, options, CSSCalc::Simplifier::Swift);
+    result.swiftDeclined = CSSCalc::webCoreCSSCalcSimplificationDeclineCount() != declinesBefore ? 1 : 0;
+    // Each call runs the Swift side exactly once, since there are no idempotence checks here, so
+    // the counter advances by at most one per case.
+    if (result.swiftDeclined)
+        s_simplifyComparisonDeclines.fetch_add(1, std::memory_order_relaxed);
+
+    // The result leaf, read off the variant tag rather than guessed from the unit. The catch-all
+    // is unreachable for a `NonCanonicalDimension` root, since neither simplifier turns a numeric
+    // leaf into an operation, and it leaves the value at 0 with the alternative still reported.
+    auto readLeaf = [](const CSSCalc::Tree& tree, double& outValue, uint32_t& outUnit, uint32_t& outAlternative) {
+        outAlternative = static_cast<uint32_t>(tree.root.value.index());
+        WTF::switchOn(tree.root.value,
+            [&]<CSSCalc::Numeric T>(const T& numeric) {
+                outValue = numeric.value;
+                outUnit = static_cast<uint32_t>(CSSCalc::toCSSUnit(numeric));
+            },
+            [&](const auto&) { }
+        );
+    };
+    readLeaf(cppTree, result.cppValue, result.cppUnitType, result.cppAlternative);
+    readLeaf(swiftTree, result.swiftValue, result.swiftUnitType, result.swiftAlternative);
+    return result;
+}
+
+// How many `CSSUnitType` enumerators there are, so that a caller's sweep width comes from WebCore
+// rather than a hardcoded count.
+//
+// Spelled as the last enumerator plus one, which `CSSUnitType` has no `variant_size_v` equivalent
+// of. That catches an enumerator inserted in the middle or removed, but would miss one appended
+// after `QuirkyEm`; closing that properly needs a count in CSSUnitType.h.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcUnitTypeCount(void)
+{
+    return static_cast<uint32_t>(CSSUnitType::QuirkyEm) + 1;
 }
 
 } // extern "C"

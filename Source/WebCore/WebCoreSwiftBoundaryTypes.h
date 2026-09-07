@@ -55,7 +55,8 @@
 // also declares.
 #include "CSSTokenizerSwiftTypes.h"
 
-// The calc() serialization boundary types (CSSCalcSerializationSwift.swift).
+// The two calc() boundaries: serialization (CSSCalcSerializationSwift.swift) and
+// simplification (CSSCalcSimplificationSwift.swift), which share one boundary header.
 #include "CSSCalcSwiftTypes.h"
 
 // FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops

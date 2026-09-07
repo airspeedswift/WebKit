@@ -1,53 +1,31 @@
-// Only this file's own boundary types, not the WebCore_Private umbrella: importing
-// that walks ~3,500 headers into JavaScriptCore's, where two inner structs are
-// defined in explicit submodules nothing imports, and the Swift step fails to
-// compile on WTF::KeyValuePair instantiated over them. See CSSTokenizerSwiftTypes.h.
+// Only this file's own boundary types, not the WebCore_Private umbrella: importing that walks
+// ~3,500 headers into JavaScriptCore's, where two inner structs are defined in explicit
+// submodules nothing imports. See CSSTokenizerSwiftTypes.h.
 public import WebCore_Private.CSSTokenizerSwiftTypes
+
+// A separate submodule from the one above: a header can appear in only one submodule, and the
+// calc simplification code needs `CSSUnitType`'s constants beside the enum.
+internal import WebCore_Private.CSSUnitsSwiftTypes
 
 // Swift tokenizer for the CSS parser: a port of CSSTokenizer.cpp and
 // CSSTokenizerInputStream.h, selected by USE_SWIFT_CSS_TOKENIZER (CSSTokenizer.h).
 //
-// Input is a `Span` over the preprocessed string, which C++ already owns and
-// hands out as a contiguous span. Output is a *finished* token:
-// `CSSParserTokenBits`, which is `CSSParserToken`'s own storage, written
-// through the one factory per token kind in CSSParserTokenBits.h — each
-// construction site knows its token kind statically, so no dispatch tag has
-// to cross the boundary.
+// A token leaves here finished: `CSSParserTokenBits` is `CSSParserToken`'s own storage, written
+// through the one factory per token kind in CSSParserTokenBits.h, so no dispatch tag has to cross
+// the boundary. What crosses in place of a pointer is an offset into the input, which C++ turns
+// into a pointer in `resolveValuePointer`; the offset's top bit says whether it indexes the input
+// or the chunk's unescape buffer. Values containing escapes are unescaped into that buffer, which
+// travels alongside each chunk of tokens.
 //
-// What crosses in place of a pointer is an *offset*: `CSSParserToken`
-// already stores a view into the input, so the pointer slot can carry the
-// offset until `resolveValuePointer` runs on the C++ side, and Swift never
-// forms or dereferences a pointer. The offset's top bit says whether it
-// indexes the input or the chunk's unescape buffer.
-//
-// Numbers are not converted here, so C++ keeps calling charactersToDouble
-// and double rounding stays bit-identical; until it runs, the union carries
-// the number's own range, because once a dimension's number and unit have
-// been merged the number is not recoverable from the value. Values
-// containing escapes are unescaped into a buffer this file owns and hands
-// to C++ alongside each chunk of tokens, so nothing has to be re-tokenized
-// in C++.
-//
-// The interior contains no `unsafe` code. Two sites use
-// `Span(_unsafeCxxSpan:)`: the production entry points that receive the
-// source text from C++, `cssTokenizeSwiftAll8` and `cssTokenizeSwiftAll16`.
-// There is no safe way yet to import a `std::span` where the callee is
-// Swift (rdar://186723514).
-//
-// Validated token-by-token against the real CSSTokenizer —
-// CSSTokenizerSwiftBridge.cpp and CSSTokenizerSwiftTest.cpp.
+// Numbers are not converted here, so C++ keeps calling charactersToDouble and double rounding
+// stays bit-identical. Until it runs, the union carries the number's own range, because once a
+// dimension's number and unit have been merged the number is not recoverable from the value.
 
-// `WebCore.CSSParserTokenType` is imported, not mirrored. `CSSParserToken.h` was not
-// self-contained enough to join this file's own Swift-visible submodule, but
-// `CSSParserTokenBits.h` already is, and `CSSParserToken.h` includes it; the enum lives
-// there now, unscoped, so every `IdentToken` elsewhere in the CSS parser still resolves
-// unqualified.
-//
-// Swift sees an unscoped C++ enum as a type with `rawValue` whose enumerators are global
-// constants, so the spelling here is `WebCore.IdentToken` rather than a leading-dot case.
-// That is the whole cost, and it removes a table that would otherwise be transcribed by hand.
+// Swift sees the unscoped `WebCore.CSSParserTokenType` as a type with `rawValue` whose
+// enumerators are global constants, so the spelling here is `WebCore.IdentToken` rather than a
+// leading-dot case.
 
-/// Mirrors CSSParserToken::BlockType. `@c` for the same reason as above.
+/// Mirrors CSSParserToken::BlockType.
 @c
 enum CSSBlockTypeSwift: UInt8 {
     case notBlock = 0, blockStart, blockEnd

@@ -819,61 +819,21 @@ template<typename Op> void serializeCalculationTree(StringBuilder& builder, cons
 static_assert(!static_cast<uint8_t>(CSSCalcSwiftOutcomeSerialized));
 static_assert(static_cast<uint8_t>(CSSCalcSwiftOutcomeDeclined) == 1);
 
-// Walks the direct `Child`-typed children of a node, whatever alternative it holds.
-//
-// `forAllChildNodes` already does this for an operation, and does it generically over the tuple
-// conformance, so the 34 `IndirectNode<Op>` alternatives need no per-op code here. What it cannot
-// be handed is a *leaf*: the `Child` overload at CSSCalcTree+Traversal.h:126 dereferences the
-// alternative, which only `IndirectNode` supports, so the `requires` below is what makes one
-// spelling serve all 41 alternatives.
-//
-// `Anchor` and `AnchorSize` declare `tuple_size` 0 (CSSCalcTree.h:1317, FIXME webkit.org/b/280798:
-// make them tuple-like), so `forAllChildNodes` reports no children for them even though an `Anchor`
-// holds an `AnchorSide` and an optional fallback `Child`. Fixing the FIXME at its source would also
-// change what simplification, evaluation and the computed-style-dependency walk see, since they all
-// traverse with `forAllChildNodes` too; answering for these two nodes here instead keeps the fix
-// local, so `childCount` and `childAt` are accurate without touching those other traversals.
-template<typename Functor> static void forEachChildNodeOfChild(const Child& node, const Functor& functor)
-{
-    if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
-        // In serialization order: the `<anchor-side>` when it is a `<percentage>` subtree rather
-        // than a keyword, then the fallback. `serializeMathFunctionArguments(IndirectNode<Anchor>)`
-        // writes them in exactly that order.
-        if (auto* side = get_if<Child>(&(*anchor)->side.value))
-            functor(*side);
-        if ((*anchor)->fallback)
-            functor(*(*anchor)->fallback);
-        return;
-    }
-    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
-        if ((*anchorSize)->fallback)
-            functor(*(*anchorSize)->fallback);
-        return;
-    }
-
-    WTF::switchOn(node, [&](const auto& alternative) {
-        if constexpr (requires { *alternative; })
-            forAllChildNodes(*alternative, functor);
-    });
-}
-
-// Counts the direct `Child`-typed children. Shared by `info()` and `childAt()`.
-static uint32_t childNodeCount(const Child& node)
-{
-    uint32_t count = 0;
-    forEachChildNodeOfChild(node, [&](const Child&) { ++count; });
-    return count;
-}
+// The direct `Child`-typed children of a node are `Child::childCount()` and `Child::operator[]`
+// (CSSCalcTree.cpp). They answer for exactly the set `forAllChildNodes` yields, including the two
+// alternatives whose `tuple_size` 0 makes it under-report them, and they do so in O(1) per access
+// rather than by visiting every child. One definition of what a child is, on the type itself,
+// reachable from Swift as well as from here.
 
 // MARK: The operations this file serializes as plain math functions
 //
 // An allowlist, and the direction matters: these are the operations for which
 // `serializeMathFunctionPrefix` and `serializeMathFunctionArguments` both resolve to their generic
-// templates above (`:398` and `:545`), i.e. whose whole serialization is
-// `nameLiteralForSerialization(Op::id)`, `(`, the arguments joined with `, `, `)`. An operation
-// added to CSSCalcTree.h is not in this list, so it is declined until someone adds it here -- a
-// denylist would instead serialize a new function through the generic path and be wrong if that
-// function needed a prefix or argument overload of its own.
+// templates above, i.e. whose whole serialization is `nameLiteralForSerialization(Op::id)`, `(`,
+// the arguments joined with `, `, `)`. An operation added to CSSCalcTree.h is not in this list, so
+// it is handed to the C++ serializer until someone adds it here; a denylist would instead serialize
+// a new function through the generic path and be wrong if that function needed a prefix or argument
+// overload of its own.
 //
 // `round()`'s four strategies, `progress(no-clamp ...)`, `Sum`, `Product`, `Negate` and `Invert`
 // are absent because they have prefix overloads; `Random`, `CalcMix`, `Anchor` and `AnchorSize`
@@ -890,14 +850,40 @@ template<typename Op> static constexpr bool isRoundingStrategy = isOneOf<Op,
 
 // Whether any of `Op`'s tuple elements is a `ChildOrNone`, the one argument shape a child count
 // cannot describe: `forAllChildren` visits a bound holding `none` and the serializer writes `none`
-// for it, while `forAllChildNodes` -- what `childNodeCount` uses -- skips it entirely. `Clamp` is
-// the only such operation, handled by *kind* rather than by count; this `static_assert` makes a
+// for it, while `forAllChildNodes`, which `Child::childCount()` uses, skips it entirely. `Clamp` is
+// the only such operation, handled by kind rather than by count; this `static_assert` makes a
 // second one a build failure rather than an argument silently dropped from a stylesheet.
 template<typename Op> static constexpr bool hasChildOrNoneArgument = []<size_t... I>(std::index_sequence<I...>) {
     return (std::same_as<std::remove_cvref_t<std::tuple_element_t<I, Op>>, ChildOrNone> || ...);
 }(std::make_index_sequence<std::tuple_size_v<Op>> { });
 
-CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
+// Pins `CSSCalcSwiftAlternative` to `Node`'s alternative order. This lives here because this is
+// the nearest translation unit that can see both the enum and the variant.
+//
+// One assert per alternative, expanded from the same list that declares the enumerators, so an
+// enumerator that gained no assert is not expressible. `WTF::alternativeIndexV` (StdLibExtras.h:620)
+// carries its own `static_assert(count == 1)`, so a type that appears twice in `Node` is rejected
+// here too, and a type that appears zero times fails to instantiate rather than silently answering
+// the past-the-end index.
+#define CSS_CALC_SWIFT_PIN_ALTERNATIVE(name, type) \
+    static_assert(WTF::alternativeIndexV<type, Node> == static_cast<size_t>(CSSCalcSwiftAlternative::name), \
+        "CSSCalcSwiftAlternative::" #name " is not Node's index for " #type);
+CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_PIN_ALTERNATIVE)
+#undef CSS_CALC_SWIFT_PIN_ALTERNATIVE
+
+// The count is what makes an added alternative a build failure rather than one this file simply
+// cannot name. The left side counts the list; the right side is the variant itself. Neither is
+// "the last enumerator + 1", which does not count an alternative inserted out of order.
+//
+// `WTF::VariantSizeV`, not `std::variant_size_v`: WTF's `Variant` is an alias for `mpark::variant`,
+// so the `std` spelling instantiates an undefined template.
+static_assert(numberOfCSSCalcSwiftAlternatives == WTF::VariantSizeV<Node>);
+
+// 8 + 4 + 2 + 1 + 1 + 1 + 1 = 18 live bytes, aligned to 8. A field that grows the struct trips this
+// and has to justify moving the AArch64 return value out of registers.
+static_assert(sizeof(CSSCalcSwiftNodeInfo) == 24);
+
+CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
 {
     // One `switchOn` over the 41-alternative Variant, answering every question about the node at
     // once, so a leaf costs one discriminant dispatch rather than one per field.
@@ -907,15 +893,35 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         .valueID = static_cast<uint16_t>(CSSValueInvalid),
         .unitType = static_cast<uint8_t>(CSSUnitType::Unknown),
         .kind = CSSCalcSwiftNodeKind::Operation,
+        .percentHint = 0,
+        // The variant's own discriminant, read directly. No switch and no table, on either side of
+        // the boundary: `CSSCalcSwiftAlternative` is pinned to `Node`'s alternative order by the
+        // asserts above, so the cast is the identity on the numbering rather than a mapping.
+        .alternative = static_cast<CSSCalcSwiftAlternative>(node.value.index()),
     };
 
-    WTF::switchOn(*m_node,
+    // `childCount` is filled inside this visit rather than by a trailing `node.childCount()` call,
+    // which would be a second 41-alternative `WTF::switchOn` over a node whose concrete alternative
+    // the visit already has in hand. The four leaf lambdas need do nothing: `childCount` starts at
+    // 0 and `childNodeCountOf` is 0 for every `Leaf` by definition (CSSCalcTree+Traversal.h).
+    //
+    // `Anchor` and `AnchorSize` call `childCount()` anyway, because both declare `tuple_size` 0
+    // (FIXME: webkit.org/b/280798) and `CSSCalcTree.cpp`'s `anchorChildren` answers for them by hand
+    // from a `static` this file cannot see.
+    auto countOf = [&](const auto& operation) { out.childCount = childNodeCountOf(*operation); };
+
+    WTF::switchOn(node,
         [&]<Numeric T>(const T& leaf) {
             if constexpr (std::same_as<T, Number>)
                 out.kind = CSSCalcSwiftNodeKind::Number;
-            else if constexpr (std::same_as<T, Percentage>)
+            else if constexpr (std::same_as<T, Percentage>) {
                 out.kind = CSSCalcSwiftNodeKind::Percentage;
-            else if constexpr (std::same_as<T, CanonicalDimension>)
+                // `Type::PercentHint` is numbered from 1 so that 0 is `PercentHintValue`'s
+                // internal `None`; this is that representation unchanged, with no sentinel
+                // invented. Read here rather than through a second accessor because simplification
+                // needs it for every percentage it folds.
+                out.percentHint = leaf.hint ? static_cast<uint8_t>(*leaf.hint) : 0;
+            } else if constexpr (std::same_as<T, CanonicalDimension>)
                 out.kind = CSSCalcSwiftNodeKind::CanonicalDimension;
             else
                 out.kind = CSSCalcSwiftNodeKind::NonCanonicalDimension;
@@ -925,6 +931,14 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         [&](const Symbol& leaf) {
             out.kind = CSSCalcSwiftNodeKind::Symbol;
             out.valueID = static_cast<uint16_t>(leaf.id);
+            // The node's own unit, not the symbol table's. `simplify(Symbol&)` is
+            // `makeNumeric(value->value, root.unit)`: the value comes from `CSSCalcSymbolTable` and
+            // the unit from `Symbol::unit`, which the parser took from `CSSCalcSymbolsAllowed`.
+            // Those are two independently populated `HashMap`s and they can disagree, so taking the
+            // unit from the table's answer would fold `Symbol{r, Deg}` under a `{r -> 1px}` table
+            // into a length where an angle is correct. `unitType` is inert for a `Symbol` otherwise,
+            // so this costs no space.
+            out.unitType = static_cast<uint8_t>(leaf.unit);
         },
         [&](const SiblingCount&) {
             out.kind = CSSCalcSwiftNodeKind::SiblingCount;
@@ -935,22 +949,24 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
             out.valueID = static_cast<uint16_t>(SiblingIndex::id);
         },
         // The four calc-operator nodes whose serialization is the grouping-parenthesis state machine.
-        [&](const IndirectNode<Sum>&) { out.kind = CSSCalcSwiftNodeKind::Sum; },
-        [&](const IndirectNode<Product>&) { out.kind = CSSCalcSwiftNodeKind::Product; },
-        [&](const IndirectNode<Negate>&) { out.kind = CSSCalcSwiftNodeKind::Negate; },
-        [&](const IndirectNode<Invert>&) { out.kind = CSSCalcSwiftNodeKind::Invert; },
+        [&](const IndirectNode<Sum>& op) { out.kind = CSSCalcSwiftNodeKind::Sum; countOf(op); },
+        [&](const IndirectNode<Product>& op) { out.kind = CSSCalcSwiftNodeKind::Product; countOf(op); },
+        [&](const IndirectNode<Negate>& op) { out.kind = CSSCalcSwiftNodeKind::Negate; countOf(op); },
+        [&](const IndirectNode<Invert>& op) { out.kind = CSSCalcSwiftNodeKind::Invert; countOf(op); },
         // No CSS-level spelling: `serializeCalculationTree` emits this node's child in its place.
-        [&](const IndirectNode<Deg2Rad>&) { out.kind = CSSCalcSwiftNodeKind::Transparent; },
+        [&](const IndirectNode<Deg2Rad>& op) { out.kind = CSSCalcSwiftNodeKind::Transparent; countOf(op); },
         // These four each get their own kind because each has a different serialization shape and
         // a different set of non-tree arguments; `valueID` is the function's own name in all four,
         // exactly as for the generic ones, so none of them costs a name table on the Swift side.
         [&](const IndirectNode<Anchor>&) {
             out.kind = CSSCalcSwiftNodeKind::AnchorFunction;
             out.valueID = static_cast<uint16_t>(Anchor::id);
+            out.childCount = static_cast<uint32_t>(node.childCount());
         },
         [&](const IndirectNode<AnchorSize>&) {
             out.kind = CSSCalcSwiftNodeKind::AnchorSizeFunction;
             out.valueID = static_cast<uint16_t>(AnchorSize::id);
+            out.childCount = static_cast<uint32_t>(node.childCount());
         },
         // `clamp()`, and only because of its `none` bounds. `min` and `max` are `ChildOrNone`, so a
         // bound holding the keyword is an argument the serializer emits but not a child node the
@@ -959,6 +975,7 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         // handed back rather than relied on being unreachable.
         [&](const IndirectNode<Clamp>& clamp) {
             out.valueID = static_cast<uint16_t>(Clamp::id);
+            countOf(clamp);
             bool minIsNone = WTF::holdsAlternative<CSS::Keyword::None>(clamp->min);
             bool maxIsNone = WTF::holdsAlternative<CSS::Keyword::None>(clamp->max);
             if (minIsNone && maxIsNone)
@@ -973,14 +990,16 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         // The two whose `serializeMathFunctionArguments` overload is not a list of calculation
         // trees: `Random`'s `<random-cache-key>` and `CalcMix`'s per-item weights. Both keep being
         // named explicitly rather than falling into the generic lambda below, so that the allowlist
-        // there stays the only other thing that can decline.
-        [&](const IndirectNode<Random>&) {
+        // there stays the only other thing that can hand a tree back.
+        [&](const IndirectNode<Random>& op) {
             out.kind = CSSCalcSwiftNodeKind::RandomFunction;
             out.valueID = static_cast<uint16_t>(Random::id);
+            countOf(op);
         },
-        [&](const IndirectNode<CalcMix>&) {
+        [&](const IndirectNode<CalcMix>& op) {
             out.kind = CSSCalcSwiftNodeKind::CalcMixFunction;
             out.valueID = static_cast<uint16_t>(CalcMix::id);
+            countOf(op);
         },
         // Everything else, classified by the shape of its serialization rather than one case per
         // operation. These operations cost no name here or in Swift: `valueID` carries `Op::id` and
@@ -991,6 +1010,7 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
             static_assert(!hasChildOrNoneArgument<Op>,
                 "a second operation with a ChildOrNone argument needs its own kind the way Clamp has, "
                 "or a `none` bound will be dropped from the serialization");
+            countOf(operation);
             // One place sets `valueID`, because every kind below wants the same thing from it: the
             // operation's own `id`, which for `round()` is the rounding strategy (`nearest`, `up`,
             // `down`, `to-zero`) rather than the function name, since all four share the name and
@@ -1005,7 +1025,6 @@ CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
         }
     );
 
-    out.childCount = childNodeCount(*m_node);
     return out;
 }
 
@@ -1030,7 +1049,7 @@ static CSSValueID anchorSizeDimensionValueID(Style::AnchorSizeDimension dimensio
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
+CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node)
 {
     CSSCalcSwiftOperationInfo out {
         .valueID = static_cast<uint16_t>(CSSValueInvalid),
@@ -1046,11 +1065,10 @@ CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
     };
 
     // `get_if` on the three alternatives that carry anything, rather than a `WTF::switchOn` over
-    // all 41, for the reason `childInSerializationOrder` records: the `switchOn` spelling
-    // instantiates its generic fallback once per alternative and costs ~22 KB. `CalcMix` is absent
-    // because everything it needs is its child count and its per-item weights, and the weights are
-    // an upcall.
-    if (auto* random = get_if<IndirectNode<Random>>(m_node)) {
+    // all 41: the `switchOn` spelling instantiates its generic fallback once per alternative, ~22 KB
+    // of code. `CalcMix` is absent because all it needs is its child count and its per-item weights,
+    // and the weights are an upcall.
+    if (auto* random = get_if<IndirectNode<Random>>(&node)) {
         WTF::switchOn((*random)->sharing,
             [&](const Random::SharingAuto&) {
                 // Serializes as omitted; both flags stay false and nothing is written.
@@ -1074,7 +1092,7 @@ CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
         return out;
     }
 
-    if (auto* anchor = get_if<IndirectNode<Anchor>>(m_node)) {
+    if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
         out.hasElementName = (*anchor)->elementName.has_value();
         out.hasFallback = (*anchor)->fallback.has_value();
         if (auto* side = get_if<CSSValueID>(&(*anchor)->side.value)) {
@@ -1084,7 +1102,7 @@ CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
         return out;
     }
 
-    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(m_node)) {
+    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
         out.hasElementName = (*anchorSize)->elementName.has_value();
         out.hasFallback = (*anchorSize)->fallback.has_value();
         if ((*anchorSize)->dimension) {
@@ -1111,9 +1129,9 @@ CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
 // need this boundary to own a buffer.
 //
 // `get_if` rather than `WTF::switchOn` for the two-alternative test: `switchOn`'s generic fallback
-// lambda is instantiated once per alternative, and each copy re-enters `forEachChildNodeOfChild`
-// and its own `switchOn`, which measured at 10,252 instructions plus 38 leaf lambdas of ~303 each
-// (~22 KB) against 302 instructions for the equivalent `get_if` version.
+// lambda is instantiated once per alternative, and each copy re-entered the child walk and its own
+// `switchOn`, which measured at 10,252 instructions plus 38 leaf lambdas of ~303 each (~22 KB)
+// against 302 instructions for the equivalent `get_if` version.
 static const Child* childInSerializationOrder(const Child& node, uint32_t index)
 {
     const Children* sorts = nullptr;
@@ -1129,13 +1147,27 @@ static const Child* childInSerializationOrder(const Child& node, uint32_t index)
         return &(*sorts)[sortedChildrenMap[index].index];
     }
 
-    const Child* found = nullptr;
-    uint32_t current = 0;
-    forEachChildNodeOfChild(node, [&](const Child& child) {
-        if (current++ == index)
-            found = &child;
-    });
-    return found;
+    if (index >= node.childCount())
+        return nullptr;
+    return &node[index];
+}
+
+// The three POD reads, forwarded. `CSSCalcSwiftNode` is now a handle over a `Child` and nothing
+// more: the Swift simplifier reads the tree directly and only the serialization boundary still
+// takes one. Both these and the handle go when serialization follows (revisit log R149 step 1b).
+CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
+{
+    return swiftNodeInfo(*m_node);
+}
+
+CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
+{
+    return swiftOperationInfo(*m_node);
+}
+
+CSSCalcSwiftCalcMixWeight CSSCalcSwiftNode::calcMixItemWeight(uint32_t index) const
+{
+    return swiftCalcMixItemWeight(*m_node, index);
 }
 
 CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
@@ -1146,6 +1178,18 @@ CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
     // default-constructed handle would turn that into a silent wrong serialization instead of a stop.
     RELEASE_ASSERT(found);
     return CSSCalcSwiftNode { found };
+}
+
+// Tree order is now just `Child::operator[]`, so this is a handle wrap and nothing else. It stays
+// only until the Swift reader borrows a `CSSCalc::Child` directly (revisit log R149 step 1b), at
+// which point it and `CSSCalcSwiftNode` go together.
+//
+// `info().childCount` is `Child::childCount()`, the same walker this indexes, so the count and the
+// indices cannot disagree -- which is what the two-walker arrangement this replaced had to argue
+// for in prose.
+CSSCalcSwiftNode CSSCalcSwiftNode::childInTreeOrder(uint32_t index) const
+{
+    return CSSCalcSwiftNode { &(*m_node)[index] };
 }
 
 void CSSCalcSwiftSink::appendLiteral(uint8_t literal)

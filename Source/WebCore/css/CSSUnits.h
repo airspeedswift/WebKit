@@ -22,43 +22,19 @@
 
 #pragma once
 
-// `CSSUnitType` itself now lives in CSSUnitType.h, split out so that it is self-contained and
-// can be imported into Swift as the real enum rather than mirrored. Everything in this header
-// still declares over it, and every existing consumer of CSSUnits.h is unaffected.
+// `CSSUnitType` is declared in CSSUnitType.h, which is self-contained so that Swift can import
+// the enum itself rather than mirror it. Everything below declares over it.
 #include <WebCore/CSSUnitType.h>
+
+// The unit-conversion constants are in CSSUnitConversions.h for the same reason: Swift's
+// arithmetic `canonicalize` cases read them directly.
+#include <WebCore/CSSUnitConversions.h>
 
 namespace WTF {
 class TextStream;
 }
 
 namespace WebCore {
-
-namespace CSS {
-
-// We always assume 96 CSS pixels in a CSS inch. This is the cold hard truth of the Web.
-// At high DPI, we may scale a CSS pixel, but the ratio of the CSS pixel to the so-called
-// "absolute" CSS length units like inch and pt is always fixed and never changes.
-constexpr double pixelsPerInch = 96;
-
-constexpr double pointsPerInch = 72;
-constexpr double picasPerInch = 6;
-constexpr double mmPerInch = 25.4;
-constexpr double cmPerInch = 2.54;
-constexpr double QPerInch = 25.4 * 4.0;
-
-constexpr double pixelsPerCm = pixelsPerInch / cmPerInch;
-constexpr double pixelsPerMm = pixelsPerInch / mmPerInch;
-constexpr double pixelsPerQ = pixelsPerInch / QPerInch;
-constexpr double pixelsPerPt = pixelsPerInch / pointsPerInch;
-constexpr double pixelsPerPc = pixelsPerInch / picasPerInch;
-constexpr double dppxPerX = 1.0;
-constexpr double dppxPerDpi = 1.0 / pixelsPerInch;
-constexpr double dppxPerDpcm = cmPerInch / pixelsPerInch;
-constexpr double secondsPerMillisecond = 1.0 / 1000.0;
-constexpr double hertzPerKilohertz = 1000.0;
-
-}
-
 
 enum class CSSUnitCategory : uint8_t {
     Number,

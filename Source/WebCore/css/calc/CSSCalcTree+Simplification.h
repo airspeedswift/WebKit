@@ -101,13 +101,87 @@ struct SimplificationOptions {
 };
 
 
+// MARK: Simplifier selection
+
+// Which implementation simplifies the tree. Both are compiled in; this chooses which one the
+// `Tree` entry point below uses, decided at compile time.
+//
+// Named explicitly by the validation bridge rather than taken from `defaultSimplifier`, so tests
+// can compare both implementations regardless of build configuration, and an ignored build flag
+// cannot masquerade as a pass. The same arrangement as `CSSCalc::Serializer`,
+// `CSSTokenizer::Scanner` and `CSSParserFastPaths::ColorScanner`.
+//
+// Declared above `canSimplify` rather than between it and `copyAndSimplify`, since both take it.
+enum class Simplifier : bool { Cpp, Swift };
+
+// `defined() &&` rather than a `#if !defined / #define 0` prologue, which -Werror,-Wundef
+// builds would otherwise require: the flag is only ever defined as 1, by
+// WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION=YES.
+static constexpr Simplifier defaultSimplifier =
+#if defined(USE_SWIFT_CSS_CALC_SIMPLIFICATION) && USE_SWIFT_CSS_CALC_SIMPLIFICATION
+    Simplifier::Swift;
+#else
+    Simplifier::Cpp;
+#endif
+
+// Whether the C++ recursive `copyAndSimplify` walk is compiled in at all.
+//
+// Its reach is shorter than it might look: three things outside this keep the C++ path reachable
+// no matter what:
+//
+//  - the 42 per-operation `simplify(Op&, ...)` overloads below have a caller that is not
+//    `copyAndSimplify` at all: StyleCalculationTree+Conversion.cpp:181 calls `simplify` on a
+//    freshly built operation node during Style conversion;
+//  - `copyAndSimplify(const Child&, ...)` is called by CSSCalcTree+Parser.cpp:1638, and it is also
+//    the recursion the whole family bottoms out in, so it cannot take a Swift arm without Swift
+//    re-entering itself once per node;
+//  - `canonicalize` has a second caller in CSSCalcTree+Evaluation.cpp:143.
+//
+// So this mode guards exactly one thing: the body of `copyAndSimplify(const Tree&, ...)`. With
+// the C++ arm compiled out, a decline becomes a build-enforced stop rather than a silent
+// fallback.
+#if defined(USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK) && USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK
+#if !defined(USE_SWIFT_CSS_CALC_SIMPLIFICATION) || !USE_SWIFT_CSS_CALC_SIMPLIFICATION
+// Diagnosed here rather than left to produce a link error naming `copyAndSimplify`, which is what
+// removing the only other simplifier from a build that still selects one looks like.
+#error "WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK=YES requires WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION=YES: it removes the only other simplifier."
+#endif
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// The validation bridge names `Simplifier::Cpp` explicitly, and this mode removes that
+// implementation. The two cannot be combined; saying so here is cheaper than discovering it as a
+// missing overload inside the bridge.
+#error "WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK=YES is mutually exclusive with WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=YES: the differential needs the C++ arm this mode removes."
+#endif
+#define CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN 0
+#else
+#define CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN 1
+#endif
+
 // MARK: Can Simplify
 
-bool canSimplify(const Tree&, const SimplificationOptions&);
+// Whether simplifying the tree could change it.
+//
+// Both implementations switch only on the root alternative and ignore `SimplificationOptions`
+// entirely: false for `Number`, `Percentage` and `CanonicalDimension`, true for the other 38. The
+// property that matters is that `canSimplify(t) == false` implies `copyAndSimplify(t) == t`. The
+// Swift implementation takes no options, matching what is actually read; a more precise
+// `canSimplify` that started reading them would need that signature to grow with it.
+//
+// The default argument is safe here for the same reason as `copyAndSimplify` below.
+bool canSimplify(const Tree&, const SimplificationOptions&, Simplifier = defaultSimplifier);
 
 // MARK: Copy & Simplify
 
-Tree copyAndSimplify(const Tree&, const SimplificationOptions&);
+// `defaultSimplifier` is `static constexpr` and a default argument is evaluated in the caller's
+// translation unit, so every caller must be built with the same value or callers silently select
+// different implementations. This is a project header rather than a private one, so it cannot be
+// included outside the WebCore target and all of its includers take the define from one place,
+// WebCore.xcconfig's GCC_PREPROCESSOR_DEFINITIONS. If it ever becomes a private header, the
+// simplifier has to be passed explicitly at every call.
+Tree copyAndSimplify(const Tree&, const SimplificationOptions&, Simplifier = defaultSimplifier);
+// No Swift implementation, deliberately: this overload is the recursion the whole `copyAndSimplify`
+// family bottoms out in, so a Swift one here would re-enter Swift once per node. Its one external
+// caller, in CSSCalcTree+Parser.cpp, stays on the C++ path.
 Child copyAndSimplify(const Child&, const SimplificationOptions&);
 
 // MARK: In-place Simplify
@@ -157,6 +231,32 @@ std::optional<Child> simplify(AnchorSize&, const SimplificationOptions&);
 // MARK: Unit Canonicalization
 
 std::optional<CanonicalDimension> canonicalize(NonCanonicalDimension, const std::optional<CSSToLengthConversionData>&);
+
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// Test-only, reached from CSSTokenizerSwiftBridge.cpp, compiled out otherwise. The counter and
+// the switch live beside the code that declines rather than in the bridge: a decline is invisible
+// in an output comparison, since the C++ answer for a declined tree is the same C++ answer
+// already trusted, so the count has to come from the code that declined, not from the code that
+// asked.
+void webCoreCSSCalcSimplificationSetForceDecline(bool);
+unsigned webCoreCSSCalcSimplificationDeclineCount(void);
+// The last walk's node count and kind mask, so a test can assert that the walk really descended
+// through the tree and reached every node kind it claims coverage of. The mask is 64 bits, keyed
+// on `CSSCalcSwiftAlternative` (`Node`'s own 41 variant alternatives);
+// `CSSCalcSwiftSimplificationResult::kindMask` says why that differs from the serialization
+// mask, which is 32 bits over 23 serialization shapes.
+uint32_t webCoreCSSCalcSimplificationLastNodeCount(void);
+uint64_t webCoreCSSCalcSimplificationLastKindMask(void);
+// The `CSSCalcSwiftAlternative` the last walk stopped on, or 0xFF when it did not stop or when no
+// single alternative is responsible. `CSSCalcSwiftSimplificationResult` says why an unattributed
+// stop is treated as a failure.
+uint8_t webCoreCSSCalcSimplificationLastDeclineAlternative(void);
+uint64_t webCoreCSSCalcSimplificationSwiftCallCount(void);
+// Per-primitive timing, so the fixed per-whole-tree cost of the Swift simplifier can be split
+// between the read crossing and the construction upcalls. `which` selects the case; each is paired
+// with the C++ equivalent for the same output. See the definition for the case list.
+uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t iterations);
+#endif
 
 } // namespace CSSCalc
 } // namespace WebCore
