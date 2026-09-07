@@ -74,10 +74,14 @@ import Darwin
 // Swift port of CSSCalcTree+Simplification.cpp's calc() simplification, selected by
 // USE_SWIFT_CSS_CALC_SIMPLIFICATION.
 //
-// Handles the four numeric leaves, `Symbol`, `Invert`, `Deg2Rad`, most single-argument and
-// fixed-arity operations, `hypot()`, `min()`/`max()`, `clamp()` and `Sum`; everything else declines
-// the whole tree, including `Product`, `Negate`, `CalcMix`, `Random`, `Anchor`/`AnchorSize` and
-// `sibling-count()`/`sibling-index()`.
+// Handles all 41 of `CSSCalc::Node`'s alternatives: the four numeric leaves, `Symbol`, `Invert`,
+// `Negate`, `Deg2Rad`, the single-argument and fixed-arity operations, `hypot()`, `min()`/`max()`,
+// `clamp()`, `Sum`, `Product`, `calc-mix()`, `random()`, `anchor()`/`anchor-size()` and
+// `sibling-count()`/`sibling-index()`. What remains is declined per TREE, not per operation:
+// `isSimplifiableAlternative` refuses an arity the boundary's `rebuildFrom` could not fill, and a
+// `fold*` that cannot derive its answer returns `.declined`. That function's `@unknown default:
+// return false` is why the list above can be stated as complete -- an alternative C++ adds later
+// declines on its own rather than being mis-handled by a stale case list here.
 //
 // A node's own kind never crosses the boundary: `rebuildFrom` recovers it from the original node's
 // variant tag.
