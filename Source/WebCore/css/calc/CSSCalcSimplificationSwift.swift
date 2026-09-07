@@ -4182,7 +4182,7 @@ private extension CalcSimplification {
                 // `return { }` with `root.children` untouched: rebuilt at the same arity with the same
                 // weights. Every `replaceWeight` is clear, which is the only spelling that can carry a
                 // `Calc` weight through.
-                plan.survivors = calcMixKeepAll(itemCount, folded)
+                calcMixKeepAll(itemCount, folded, into: &plan.survivors)
                 plan.early = .mergedChildren(.CalcMix)
                 return plan
             }
@@ -4293,10 +4293,19 @@ private extension CalcSimplification {
     }
 
     /// Every item surviving with its own weight: the `!canNormalize`, nothing-to-remove rebuild.
+    ///
+    /// Fills the plan's list through `inout` rather than returning one. A returned `[Survivor]` is a
+    /// second heap buffer per `calc-mix()` node plus ARC on the handoff, which is what
+    /// `#ReturnTypeImplicitCopy` names; appending into the caller's list writes the only buffer there
+    /// ever is. `reserveCapacity` is a total, not an increment, so it counts what the list already
+    /// holds -- zero on the one path that calls this, and correct if that ever stops being true.
     @inline(always)
-    func calcMixKeepAll(_ itemCount: UInt32, _ folded: Span<Fold>) -> [CalcMixPlan.Survivor] {
-        var survivors: [CalcMixPlan.Survivor] = []
-        survivors.reserveCapacity(Int(clamping: itemCount))
+    func calcMixKeepAll(
+        _ itemCount: UInt32,
+        _ folded: Span<Fold>,
+        into survivors: inout [CalcMixPlan.Survivor]
+    ) {
+        survivors.reserveCapacity(survivors.count + Int(clamping: itemCount))
         var index: UInt32 = 0
         while index < itemCount {
             survivors.append(CalcMixPlan.Survivor(
@@ -4307,7 +4316,6 @@ private extension CalcSimplification {
             ))
             index += 1
         }
-        return survivors
     }
 
     /// `zeroValueMatchingChild` (`+Simplification.cpp:1454`-`:1482`): when every weight is known zero,
