@@ -4104,6 +4104,11 @@ private enum CalcFlatCoverage {
             | bit(.Invert)
             | bit(.Min)
             | bit(.Max)
+            | bit(.Clamp)
+            | bit(.RoundNearest)
+            | bit(.RoundUp)
+            | bit(.RoundDown)
+            | bit(.RoundToZero)
             | bit(.Symbol)
             | bit(.SiblingCount)
             | bit(.SiblingIndex)
@@ -4166,12 +4171,25 @@ public func cssCalcSimplifySwift(
 
     if let emitted {
         guard emitted else {
-            // `emit` returning false is `buildOperation` refusing, and that has no one alternative to
-            // blame: it is either a builder contract violation or `toType` answering `std::nullopt`
-            // for children whose types do not merge -- and in that second case the C++ arm returns
-            // `std::nullopt` from its own rewrite too. Reported the way the two-pass path reports its
-            // own blameless decline, `.declined(nil)`.
-            return declined(report.kindMask, report.nodeCount, nil)
+            // `emit` returning false is a construction refusing. Two shapes, and only one of them
+            // has an alternative to name: `buildOperation`'s no-type overload answering
+            // `std::nullopt` from `toType` for a `clamp()` this pass rewrote to a `min()`/`max()`
+            // whose children's types do not merge -- which is the same `std::nullopt`
+            // `convertToMin` returns at `+Simplification.cpp:1021`, so the C++ arm does not build
+            // it either -- and a builder contract violation, which has no one alternative behind
+            // it. Reported the way the two-pass path reports each: `.declined(.Clamp)` from
+            // `rewriteConvertedMinMax`, `.declined(nil)` otherwise. An UNATTRIBUTED decline is one
+            // nobody can close, and `simplifycheck`'s guard 3b fails outright on one.
+            //
+            // ASKED OF `kindMask`, which the flattening pass already computed, rather than of a bit
+            // the fold sets and `emitRoot` reports. That is deliberately coarser -- a tree whose
+            // `clamp()` folded away entirely and that then failed to emit for some other reason
+            // blames `.Clamp` too -- and it is what the cheap answer costs: carrying the precise
+            // one back out widens the closure's return type, which measured 92 retired instructions
+            // per simplification on the single-node band (see `emitRoot`). The two-pass port is
+            // equally coarse for the same class of failure.
+            return declined(report.kindMask, report.nodeCount,
+                report.kindMask & CalcFlatCoverage.bit(.Clamp) != 0 ? .Clamp : nil)
         }
         return WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
             kindMask: report.kindMask,
@@ -4914,6 +4932,18 @@ fileprivate enum CalcFlatNodeFlags {
     /// subtree -- an alternative this file has not been taught, sitting inside a side, still has to
     /// decline the whole tree -- so the distinction has to be a mark rather than an omission.
     static let insideAnchorSide: UInt8 = 1 << 3
+    /// This node's `Type` must be computed FRESH from its operands at emit, not carried.
+    ///
+    /// `clamp()` collapsing to `min()`/`max()` is the one rule in the whole file that changes an
+    /// operation's kind, and `convertToMin`/`convertToMax` (`+Simplification.cpp:1019`-`:1045`)
+    /// compute `toType(min)` rather than reusing the `Clamp`'s type -- which they must, since the
+    /// new node's slots are a subset of the old one's. Every other surviving operation keeps its
+    /// cached type, which is `copyAndSimplify`'s `getType(root)` at `:1821`.
+    ///
+    /// Carried by `replace`, and that is correct rather than incidental: a converted `Min` promoted
+    /// into its parent's slot -- `min(clamp(none, 1px, 2em))` -- is the same `Child` the C++ moves
+    /// up, with the fresh type already on it.
+    static let recomputeType: UInt8 = 1 << 4
 }
 
 /// Where a pre-order descent over the ORIGINAL tree got to.
@@ -5114,6 +5144,7 @@ fileprivate struct CalcFlatTree: ~Escapable, ~Copyable {
     /// stack has no pop, so a fold that gives up after its children are already operands cannot put
     /// the tree back.
     var declined = false
+
 
     @_lifetime(copy storage)
     init(storage: consuming MutableSpan<CalcFlatNode>, count: Int) {
@@ -5348,11 +5379,12 @@ fileprivate func withCalcFlatTree<R>(
 
 // MARK: The flat simplifier
 //
-// COVERAGE: `Sum`, `Product`, `Negate`, `Invert`, `Min`, `Max`, `Symbol`, `SiblingCount`,
-// `SiblingIndex`, `Anchor`, `AnchorSize`, `Random` and the four numeric leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
+// COVERAGE: `Sum`, `Product`, `Negate`, `Invert`, `Min`, `Max`, `Clamp`, the four `round()`s,
+// `Symbol`, `SiblingCount`, `SiblingIndex`, `Anchor`, `AnchorSize`, `Random` and the four numeric
+// leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
 // honest behaviour for a bounded port -- it is not a decline channel and must not be read as one.
-// `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining 25 away from here;
-// widening the two together is the work this representation exists to make possible.
+// `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining alternatives away from
+// here; widening the two together is the work this representation exists to make possible.
 //
 // The six operations below are a full port of their `simplify` overloads, not a sketch: every arm
 // the C++ has, in the C++'s own execution order, including the two arms of `simplify(Negate&)` and
@@ -5523,6 +5555,58 @@ fileprivate extension CalcFlatTree {
         case .NonCanonicalDimension:
             simplifyNonCanonicalDimension(i, options, builder)
 
+        case .Clamp, .RoundNearest, .RoundUp, .RoundDown, .RoundToZero,
+             .Symbol, .SiblingCount, .SiblingIndex, .Anchor, .AnchorSize, .Random:
+            simplifyColdNode(i, original, options, builder)
+
+        default:
+            // Including the other three leaves, and for each of them that is a PORT rather than an
+            // omission: `simplify(Number&)` (`+Simplification.cpp:487`), `simplify(Percentage&)`
+            // (`:493`) and `simplify(CanonicalDimension&)` (`:500`) each `return { }` with no body,
+            // which is also why `canSimplify` answers false for exactly those three -- and true for
+            // the fourth, which is the case just above.
+            return
+        }
+    }
+
+    /// The alternatives a REAL PAGE'S CSS does not hold, behind ONE call site.
+    ///
+    /// ELEVEN CASE LABELS SHARING ONE CALL, and that shape is measured rather than tidy. The hot
+    /// switch above names exactly the operations the captured payloads contain -- `calc-real.txt`,
+    /// the four `real-sp3-*.css` and `bench.css` hold `max()` twice and no other math function at
+    /// all -- and everything else is one entry. Five separate `@inline(never)` arms instead of one
+    /// pushed `CalcFlatTree.simplify` (1544 bytes) out of line and out of `withCalcFlatTree`'s
+    /// specialized body, which cost the SINGLE-NODE band 12.7% -- 73 retired instructions on a tree
+    /// that executes none of the new code, measured with the folds present and the mask bits
+    /// withheld so they were dead. The budget is what matters, not the individual markers: a batch
+    /// that adds an alternative adds an arm HERE, where the enclosing function is already cold and
+    /// already out of line, and the hot switch does not grow.
+    ///
+    /// `@inline(never)` for the same reason each of these already carried it: `simplify` pays this
+    /// function's frame per node, and none of these is reached by a tree a page actually contains.
+    @inline(never)
+    private mutating func simplifyColdNode(
+        _ i: Int,
+        _ original: borrowing WebCore.CSSCalc.Child,
+        _ options: CalcSimplification,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) {
+        switch nodes[i].alternative {
+        case .Clamp:
+            simplifyClamp(i, options)
+
+        case .RoundNearest:
+            simplifyRound(i, options, CalcExecutor.roundNearest)
+
+        case .RoundUp:
+            simplifyRound(i, options, CalcExecutor.roundUp)
+
+        case .RoundDown:
+            simplifyRound(i, options, CalcExecutor.roundDown)
+
+        case .RoundToZero:
+            simplifyRound(i, options, CalcExecutor.roundToZero)
+
         case .Symbol:
             simplifySymbol(i, options, builder)
 
@@ -5536,11 +5620,10 @@ fileprivate extension CalcFlatTree {
             simplifyRandom(i, original, options, builder)
 
         default:
-            // Including the other three leaves, and for each of them that is a PORT rather than an
-            // omission: `simplify(Number&)` (`+Simplification.cpp:487`), `simplify(Percentage&)`
-            // (`:493`) and `simplify(CanonicalDimension&)` (`:500`) each `return { }` with no body,
-            // which is also why `canSimplify` answers false for exactly those three -- and true for
-            // the fourth, which is the case just above.
+            // Unreachable: the caller's switch selects exactly the eleven above. Spelled as a
+            // return rather than a trap for the reason every other unreachable arm in this file is
+            // -- an untaught alternative leaves the node alone, which the mask has already made
+            // impossible, rather than killing the process.
             return
         }
     }
@@ -5694,7 +5777,7 @@ fileprivate extension CalcFlatTree {
     ///   * no conversion data or no builder state -- the opening guard's `{ }`, and the node survives
     ///     with its simplified fallback still on it.
     ///
-    /// A surviving one leaves through `rebuildFrom` on the original (`rebuildFromOriginMask`):
+    /// A surviving one leaves through `rebuildFrom` on the original, which is `emit`'s default arm:
     /// an `AtomString` element name, an `AnchorSide` subtree and an `<anchor-size>` dimension are
     /// none of them things a fixed-size flat node can hold.
     ///
@@ -6336,6 +6419,208 @@ fileprivate extension CalcFlatTree {
         nodes[i].childCount = kept
     }
 
+    /// `simplify(Clamp&)` (`+Simplification.cpp:1009`-`:1106`), all five outcomes.
+    ///
+    /// WHICH BOUNDS ARE THE KEYWORD `none` IS NOT DERIVABLE FROM THE CHILD COUNT.
+    /// `clamp(none, VAL, MAX)` and `clamp(MIN, VAL, none)` both report two children, because
+    /// `Child::operator[]` skips a `ChildOrNone` holding the keyword entirely; the flat node carries
+    /// the answer in `clampNoneMinimum`/`clampNoneMaximum`, captured at flatten from the boundary's
+    /// two dedicated `CSSCalcSwiftNodeKind`s. Both keywords at once is the plain `Clamp` kind and one
+    /// child, which is what the cross-check below tests.
+    ///
+    /// THE TWO COLLAPSE BRANCHES USE DIFFERENT ARGUMENT POSITIONS -- `Min(val, max)` at `:1064` and
+    /// `Max(min, val)` at `:1080` -- and the two-argument executors short-circuit on whichever
+    /// operand is NaN first, so the positions are transcribed rather than normalised. The result is
+    /// shaped like `val` in both, since both call `makeChildWithValueBasedOn(..., val)`.
+    ///
+    /// `magnitudeComparable`, NOT `fullyResolved`: `clamp(none, 1em, 2em)` folds where
+    /// `mod(5em, 3em)` does not, because a `NonCanonicalDimension` is comparable by magnitude
+    /// (`:149`) and not fully resolved (`:171`). The asymmetry is real and is reproduced.
+    ///
+    /// THE NODE PRODUCED BY THE `min()`/`max()` REWRITE IS NEVER RE-SIMPLIFIED. `copyAndSimplify`
+    /// (`:1810`-`:1823`) calls `simplify` exactly once and takes the replacement as-is, so the
+    /// rewritten `Min` does not go through `simplifyForMinMax`. The reverse scan gives that for free:
+    /// node `i` has already been visited when this runs, and nothing revisits it.
+    @inline(never)
+    private mutating func simplifyClamp(_ i: Int, _ options: CalcSimplification) {
+        let childCount = nodes[i].childCount
+        let minimumIsNone = nodes[i].flags & CalcFlatNodeFlags.clampNoneMinimum != 0
+        let maximumIsNone = nodes[i].flags & CalcFlatNodeFlags.clampNoneMaximum != 0
+
+        // The cross-check: exactly one absent bound means two children and vice versa. A mismatch
+        // declines rather than reading a bound out of the wrong slot -- and it must decline rather
+        // than leave the node alone, since `rebuildFrom` would then take the keywords off the
+        // original and produce a node this pass never reasoned about.
+        guard (childCount == 2) == (minimumIsNone || maximumIsNone) else {
+            declined = true
+            return
+        }
+
+        if childCount == 1 {
+            // Both bounds hold the keyword, so child 0 is `val`: "clamp(none, VAL, none) is
+            // equivalent to just calc(VAL)" (`:1014`-`:1016`), returned whatever it is.
+            guard let value = child(i, 0) else {
+                declined = true
+                return
+            }
+            replace(i, with: value)
+            return
+        }
+
+        if childCount == 3 {
+            // Neither bound is `none`: `[min, val, max]`.
+            guard let minimumChild = child(i, 0), let valueChild = child(i, 1),
+                let maximumChild = child(i, 2) else {
+                declined = true
+                return
+            }
+            // `[](const auto&)` (`:1099`-`:1101`): `val` not `Numeric` leaves the node alone, and it
+            // dominates every other test.
+            guard let value = nodes[valueChild].numericLeaf else {
+                return
+            }
+            // `holdsAlternative<T>` against `val`'s own alternative for both bounds (`:1085`); a
+            // non-numeric bound fails it too.
+            guard let minimum = nodes[minimumChild].numericLeaf,
+                let maximum = nodes[maximumChild].numericLeaf,
+                options.switchTogether(value, minimum), options.switchTogether(value, maximum) else {
+                return
+            }
+            guard options.unitsMatch(minimum, value), options.unitsMatch(value, maximum) else {
+                return
+            }
+            // "As units already match, we only have to check that one of the arguments is
+            // `magnitudeComparable`", and the C++ checks `val` (`:1094`).
+            guard options.magnitudeComparable(value) else {
+                return
+            }
+            setLeaf(i, value.withValue(CalcExecutor.clamp(minimum.value, value.value, maximum.value)))
+            return
+        }
+
+        // Exactly one bound is the keyword, so there are two children.
+        if minimumIsNone {
+            // `[val, max]`, and `clamp(none, VAL, MAX)` is `min(VAL, MAX)` (`:1046`-`:1064`).
+            guard let valueChild = child(i, 0), let maximumChild = child(i, 1) else {
+                declined = true
+                return
+            }
+            guard let value = nodes[valueChild].numericLeaf else {
+                // Outcome 2 again, and it dominates the conversion: the `[&]<Numeric T>` visitor
+                // never runs for a non-`Numeric` `val`, so `convertToMin` is not reached.
+                return
+            }
+            guard let maximum = nodes[maximumChild].numericLeaf, options.switchTogether(value, maximum),
+                options.unitsMatch(value, maximum), options.magnitudeComparable(value) else {
+                // All three of the C++'s `convertToMin()` sites (`:1050`, `:1055`, `:1060`), plus
+                // `max` not being a `Numeric` at all, which is the first of them.
+                convertToMinMax(i, isMax: false)
+                return
+            }
+            setLeaf(i, value.withValue(CalcExecutor.min(value.value, maximum.value)))
+            return
+        }
+
+        // `[min, val]`, and `clamp(MIN, VAL, none)` is `max(MIN, VAL)` (`:1065`-`:1080`).
+        guard let minimumChild = child(i, 0), let valueChild = child(i, 1) else {
+            declined = true
+            return
+        }
+        guard let value = nodes[valueChild].numericLeaf else {
+            return
+        }
+        guard let minimum = nodes[minimumChild].numericLeaf, options.switchTogether(minimum, value),
+            options.unitsMatch(minimum, value), options.magnitudeComparable(value) else {
+            convertToMinMax(i, isMax: true)
+            return
+        }
+        setLeaf(i, value.withValue(CalcExecutor.max(minimum.value, value.value)))
+    }
+
+    /// `convertToMin` / `convertToMax` (`+Simplification.cpp:1019`-`:1045`): a `clamp()` with one
+    /// keyword bound that could not be folded becomes the equivalent two-argument `min()`/`max()`.
+    ///
+    /// NO LIST SURGERY AT ALL, and that is the flat representation paying off rather than a
+    /// coincidence: the C++ builds a fresh two-element `Vector<Child>` in `val, max` order for
+    /// `convertToMin` and `min, val` order for `convertToMax`, and the flat child list is ALREADY in
+    /// exactly those orders -- child 0 is whichever of the three slots the keyword did not occupy
+    /// first. So the whole conversion is the kind byte and a flag.
+    ///
+    /// `recomputeType` because the new node's type is `toType(min)` and not the `Clamp`'s; see the
+    /// flag's own comment and `emit`'s `Min`/`Max` arm.
+    ///
+    /// THE C++ HAS A DEFECT HERE THAT THIS CANNOT REPRODUCE. `convertToMin` moves `root.val` and
+    /// `root.max` into its new `Vector` BEFORE testing `toType`, and returns `std::nullopt` on
+    /// failure -- at which point `copyAndSimplify` (`:1818`-`:1821`) rebuilds a `Clamp` from
+    /// children that have been moved from, i.e. an `IndirectNode` holding a null `UniqueRef`.
+    /// `root.val` is always a numeric leaf on this path so it is harmless; `root.max` can be an
+    /// arbitrary subtree. Reachability is unverified and probably nil, since the parser type-checks
+    /// `clamp()`'s three arguments for consistency. There is no moved-from state here: a `toType`
+    /// that fails is `buildOperation` answering false, which declines the whole tree, and the C++ arm
+    /// then runs and executes the same undefined behaviour -- so the port neither fixes nor worsens
+    /// it. Recorded as a to-file WebKit bug and as a safety-ledger entry.
+    private mutating func convertToMinMax(_ i: Int, isMax: Bool) {
+        nodes[i].alternative = isMax ? .Max : .Min
+        nodes[i].flags |= CalcFlatNodeFlags.recomputeType
+    }
+
+    /// `simplifyForRound<Op>` (`+Simplification.cpp:328`-`:337`), shared by `round(nearest|up|down|
+    /// to-zero, ...)` -- `simplify(RoundNearest&)` and its three siblings (`:1108`-`:1126`) are one
+    /// line each onto it.
+    ///
+    /// Branches on the child count rather than on `root.b`, which is the same test: `forAllChildNodes`
+    /// counts a `std::optional<Child>` only when it holds one, and `isSimplifiableAlternative` has
+    /// already bounded the count to 1 or 2.
+    ///
+    /// The one-argument form requires `a` to be a `Number` SPECIFICALLY -- `get_if<Number>` at `:334`,
+    /// not the `Numeric` concept -- so `round(1.5px)` does not fold even though `round(1.5px, 1px)`
+    /// does.
+    @inline(never)
+    private mutating func simplifyRound(_ i: Int, _ options: CalcSimplification, _ operation: (Double, Double) -> Double) {
+        guard let valueChild = child(i, 0) else {
+            declined = true
+            return
+        }
+
+        if nodes[i].childCount == 2 {
+            guard let intervalChild = child(i, 1) else {
+                declined = true
+                return
+            }
+            simplifyForOperation(i, valueChild, intervalChild, options, operation)
+            return
+        }
+
+        guard nodes[valueChild].alternative == .Number else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(operation(nodes[valueChild].value, 1.0)))
+    }
+
+    /// `simplifyForOperation<Op>` (`+Simplification.cpp:299`-`:312`): both operands the same numeric
+    /// alternative (`switchTogether`, `:70`), units matching, the FIRST fully resolved, and the result
+    /// carried onto a leaf shaped like the first -- `makeChildWithValueBasedOn(op(a, b), a)`.
+    ///
+    /// `fullyResolved` and not `magnitudeComparable`, which is the load-bearing half of the split at
+    /// `:155`-`:173`: a `NonCanonicalDimension` is not fully resolved, so `mod(5em, 3em)` does not
+    /// fold here where `abs(-5em)` folds in `simplifyAbs`.
+    private mutating func simplifyForOperation(
+        _ i: Int,
+        _ aChild: Int,
+        _ bChild: Int,
+        _ options: CalcSimplification,
+        _ operation: (Double, Double) -> Double
+    ) {
+        guard let a = nodes[aChild].numericLeaf, let b = nodes[bChild].numericLeaf else {
+            // The catch-all visitor (`:308`-`:310`): either operand not a `Numeric` leaves the node.
+            return
+        }
+        guard options.switchTogether(a, b), options.unitsMatch(a, b), options.fullyResolved(a) else {
+            return
+        }
+        setLeaf(i, a.withValue(operation(a.value, b.value)))
+    }
+
     /// `simplify(Product&)` (`+Simplification.cpp:717`-`:909`), css-values-4 steps 9.1 to 9.5.
     private mutating func simplifyProduct(_ i: Int, _ options: CalcSimplification) {
         guard nodes[i].childCount > 0 else {
@@ -6587,6 +6872,14 @@ fileprivate extension CalcFlatTree {
     ///
     /// The `declined` test is HERE and not in `emit`, so the valve costs one branch per tree rather
     /// than one per node.
+    ///
+    /// A `Bool`, and that is MEASURED rather than a style choice. Answering with a two-field struct
+    /// so a failure could name the alternative to blame cost the LEAF BAND 16.0% -- 92 retired
+    /// instructions on a single-node tree that never reaches a failure at all. The mechanism is in
+    /// the symbol table: `withCalcFlatTree` is `@inline(always)` and its closure was
+    /// closure-propagated and specialized, and the wider return type replaced that with a generic
+    /// specialization plus a `partial apply forwarder`, pushing `CalcFlatTree.simplify` (1428 bytes)
+    /// out of line. The blame is recovered from `kindMask` instead, which crosses nothing new.
     func emitRoot(
         _ original: borrowing WebCore.CSSCalc.Child,
         into builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
@@ -6651,8 +6944,8 @@ fileprivate extension CalcFlatTree {
         //
         // The origin answer for an OPERATION cannot be given here even though this switch knows it,
         // because its children have to become operands first. Rebinding it into a `let` for the test
-        // after the loop puts the hoist straight back -- measured, `leaf` +2.4% again -- so it is
-        // re-asked there as a bit test against `CalcFlatCoverage.rebuildFromOriginMask`.
+        // after the loop puts the hoist straight back -- measured, `leaf` +2.4% again -- so the
+        // alternative is switched on a second time, after the loop.
         switch node.alternative {
         case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
             // `pushLeaf` owns which alternative a unit means, via `makeNumeric`, so no unit table is
@@ -6698,22 +6991,53 @@ fileprivate extension CalcFlatTree {
         }
 
         switch node.alternative {
-        case .Random, .CalcMix, .Anchor, .AnchorSize:
-            // An operation whose payload no fixed-size flat node can carry: a `Random::Sharing`
-            // naming a dashed-ident, a per-item weight that can be a whole nested `CSSCalcValue`, an
-            // `AtomString` element name, an `AnchorSide` subtree. Its children are already operands;
-            // everything else comes off the original through `rebuildFrom`.
+        case .Sum, .Product, .Negate, .Invert:
+            break
+
+        case .Min, .Max:
+            // The one node in the file whose type is not the one it arrived with: a `clamp()` that
+            // `simplifyClamp` rewrote. `buildOperation`'s no-type overload is what
+            // `convertToMin`/`convertToMax` do, `toType` over the operands, and its `std::nullopt`
+            // is the same `std::nullopt` those two return at `:1021` and `:1043` -- so `false` here
+            // is "the C++ would not have built this node either", and it declines.
             //
-            // A FOUR-CASE SWITCH, not a bit test against a mask built from `CalcFlatCoverage.bit`.
-            // That mask does not constant-fold: `UInt64(alternative.rawValue)` over an IMPORTED C++
-            // enum leaves the optimizer eight `cond_fail`s and four shifts to run here, per operator
+            // Tested only for `Min`/`Max` rather than after the switch, so a `Sum` or a `Product` --
+            // which is what a real payload actually holds -- pays nothing for a rule only `clamp()`
+            // can reach.
+            if node.flags & CalcFlatNodeFlags.recomputeType != 0 {
+                return builder.buildOperation(node.alternative, pushed)
+            }
+
+        default:
+            // Everything `buildOperation` does not construct, which is every operation whose slots
+            // are not one `Children` or one `Child`: a `Random::Sharing` naming a dashed-ident, a
+            // per-item weight that can be a whole nested `CSSCalcValue`, an `AtomString` element
+            // name, an `AnchorSide` subtree -- and equally a `Clamp`'s two `ChildOrNone` bounds and
+            // a `round()`'s optional second argument, which the flat node CAN describe but the
+            // boundary has no entry for. Its children are already operands; everything else comes
+            // off the original through `rebuildFrom`, which fills slots generically over the tuple
+            // conformance and so serves all 41 alternatives with no C++ added per alternative.
+            //
+            // THE COMPLEMENT OF `buildOperation`'S SET, not a list of the alternatives that happen
+            // to need it today. Stated this way the routing cannot fall out of step with coverage:
+            // an alternative added to `CalcFlatCoverage.mask` lands here by default and is BUILT
+            // rather than declined, where a hand-kept list would have had to be remembered.
+            //
+            // A SWITCH, not a bit test against a mask built from `CalcFlatCoverage.bit`. That mask
+            // does not constant-fold: `UInt64(alternative.rawValue)` over an IMPORTED C++ enum
+            // leaves the optimizer eight `cond_fail`s and four shifts to run here, per operator
             // node. `CalcFlatCoverage.mask` has the same shape and gets away with it because it is
-            // read once per TREE. (The thin-LTO binary measures the two identically, so the switch is
-            // kept for saying the routing once, not for a win.)
+            // read once per TREE.
             //
-            // `CalcMix` IS ROUTED HERE AND IS NOT IN `CalcFlatCoverage.mask`, which is safe -- an
-            // alternative outside the mask never reaches this pass at all -- and the reason it is not
-            // is worth writing down, because the emit route is not what is missing:
+            // THE PRICE IS THE WALK, not the rebuild: `withCalcOriginalNode` costs 192 retired
+            // instructions per node stepped past, against `rebuildFrom`'s own 41-way dispatch at
+            // roughly 50 to 90. Accepted for these alternatives because none of them appears in any
+            // real captured payload -- `max()` twice is the whole of the math functions across
+            // `calc-real.txt`, the four `real-sp3-*.css` and `bench.css`.
+            //
+            // `CalcMix` is routed here and is NOT in `CalcFlatCoverage.mask`, which is safe -- an
+            // alternative outside the mask never reaches this pass at all -- and the reason it is
+            // not is worth writing down, because the emit route is not what is missing:
             //
             //   * the fold needs each item's WEIGHT, which is `swiftCalcMixItemWeight(node, index)`
             //     off the original. That is one `withCalcOriginalNode` descent plus one upcall per
@@ -6732,12 +7056,8 @@ fileprivate extension CalcFlatTree {
             // plan machinery shared between the fold and the emit rather than carried between them,
             // which is the piece of design this note exists to record.
             return calcEmitFromOrigin(node.origin, pushed, false, original, &builder)
-        default:
-            break
         }
 
-        // False for anything outside `buildOperation`'s set, which for now is this prototype's own
-        // coverage. Declining rather than building something plausible.
         // The node's OWN type, not a fresh `toType` of the operands, and this is the overload that
         // exists for it. `copyAndSimplify` ends at `makeChild(WTF::move(simplified), getType(root))`
         // (`+Simplification.cpp:1821`) -- the original node's type -- so recomputing here diverges
