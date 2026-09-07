@@ -1007,9 +1007,19 @@ TextStream& operator<<(TextStream&, Tree);
 
 // MARK: Construction
 
+// `makeChild`'s indirect half, split out so a caller that needs to construct the `Child` IN PLACE
+// can do so without re-spelling how an operation node is built. `Vector<Child>::constructAndAppend`
+// selects the variant alternative at compile time, where appending a finished `Child` runs the
+// 41-alternative move constructor out of line; the Swift simplification builder is the caller that
+// wants that (CSSCalcTree+Simplification.cpp's `buildOperationOnStack`).
+template<typename Op> IndirectNode<Op> makeIndirectNode(Op&& op, Type type)
+{
+    return IndirectNode<Op> { type, makeUniqueRef<Op>(WTF::move(op)) };
+}
+
 // Default implementation of ChildConstruction used for all indirect nodes.
 template<typename Op> struct ChildConstruction {
-    static Child make(Op&& op, Type type) { return Child { IndirectNode<Op> { type, makeUniqueRef<Op>(WTF::move(op)) } }; }
+    static Child make(Op&& op, Type type) { return Child { makeIndirectNode(WTF::move(op), type) }; }
 };
 
 // Specialized implementation of ChildConstruction for leaf nodes, needed to avoid `makeUniqueRef`.

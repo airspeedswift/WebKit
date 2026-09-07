@@ -5429,8 +5429,13 @@ fileprivate func calcFlatten(
     // One crossing per node: `info()` answers the discriminant, the child count and every POD
     // payload together, because they all come off the same variant tag.
     let info = WebCore.CSSCalc.swiftNodeInfo(node)
-    report.nodeCount += 1
-    report.kindMask |= UInt64(1) << UInt64(info.alternative.rawValue)
+    // `&+=` and `&<<`, for the reason `CalcFlatCoverage.bit` gives: `+=` is overflow-checked and
+    // `<<` is the SMART shift, which is defined for an over-large amount and so carries a
+    // `cmp`/`csel` pair the alternative index can never need -- there are 41 of them and the mask
+    // is 64 bits wide. Three instructions per NODE, on every band. `nodeCount` cannot wrap either:
+    // it counts nodes of a tree that is already in memory.
+    report.nodeCount &+= 1
+    report.kindMask |= UInt64(1) &<< UInt64(info.alternative.rawValue)
 
     if !isSimplifiableAlternative(info.alternative, info.childCount) {
         // The first unhandled alternative in pre-order is the one reported, so widening this file's
@@ -5456,7 +5461,11 @@ fileprivate func calcFlatten(
         return CalcFlatNode.noNode
     }
 
-    let me = UInt32(out.count)
+    // `truncatingIfNeeded` rather than the trapping `UInt32(_:)`: `out.count` is bounded by the
+    // buffer's capacity, which `withCalcFlatTree` sized from a `UInt32` node count, so the value
+    // cannot exceed `UInt32.max` and the trapping conversion's range test is two instructions per
+    // node for a condition the caller has already established.
+    let me = UInt32(truncatingIfNeeded: out.count)
 
     // Only `insideAnchorSide` propagates: it describes where the slot IS, and the whole point of it
     // is that it reaches every descendant. The other three describe the node ITSELF, so they are

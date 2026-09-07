@@ -894,6 +894,19 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
         .alternative = static_cast<CSSCalcSwiftAlternative>(node.value.index()),
     };
 
+    // `childCount` is filled INSIDE this visit rather than by a trailing `node.childCount()` call.
+    // That call is a SECOND 41-alternative `WTF::switchOn` over a node whose concrete alternative
+    // the visit below already has in hand -- a shim that only re-derives a dispatch, measured with
+    // `sample` at 22 retired instructions per node on the single-node band. The four leaf lambdas
+    // add nothing to this: `childCount` is initialised to 0 and `childNodeCountOf` is 0 for every
+    // `Leaf` by definition (CSSCalcTree+Traversal.h:154).
+    //
+    // `Anchor` and `AnchorSize` are the two exceptions and they call `childCount()` anyway, because
+    // both declare `tuple_size` 0 (FIXME webkit.org/b/280798) and `CSSCalcTree.cpp`'s
+    // `anchorChildren` answers for them by hand from a `static` this file cannot see. They are cold:
+    // neither appears in any real captured payload.
+    auto countOf = [&](const auto& operation) { out.childCount = childNodeCountOf(*operation); };
+
     WTF::switchOn(node,
         [&]<Numeric T>(const T& leaf) {
             if constexpr (std::same_as<T, Number>)
@@ -935,22 +948,24 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
             out.valueID = static_cast<uint16_t>(SiblingIndex::id);
         },
         // The four calc-operator nodes whose serialization is the grouping-parenthesis state machine.
-        [&](const IndirectNode<Sum>&) { out.kind = CSSCalcSwiftNodeKind::Sum; },
-        [&](const IndirectNode<Product>&) { out.kind = CSSCalcSwiftNodeKind::Product; },
-        [&](const IndirectNode<Negate>&) { out.kind = CSSCalcSwiftNodeKind::Negate; },
-        [&](const IndirectNode<Invert>&) { out.kind = CSSCalcSwiftNodeKind::Invert; },
+        [&](const IndirectNode<Sum>& op) { out.kind = CSSCalcSwiftNodeKind::Sum; countOf(op); },
+        [&](const IndirectNode<Product>& op) { out.kind = CSSCalcSwiftNodeKind::Product; countOf(op); },
+        [&](const IndirectNode<Negate>& op) { out.kind = CSSCalcSwiftNodeKind::Negate; countOf(op); },
+        [&](const IndirectNode<Invert>& op) { out.kind = CSSCalcSwiftNodeKind::Invert; countOf(op); },
         // No CSS-level spelling: `serializeCalculationTree` emits this node's child in its place.
-        [&](const IndirectNode<Deg2Rad>&) { out.kind = CSSCalcSwiftNodeKind::Transparent; },
+        [&](const IndirectNode<Deg2Rad>& op) { out.kind = CSSCalcSwiftNodeKind::Transparent; countOf(op); },
         // These four each get their own kind because each has a different serialization shape and
         // a different set of non-tree arguments; `valueID` is the function's own name in all four,
         // exactly as for the generic ones, so none of them costs a name table on the Swift side.
         [&](const IndirectNode<Anchor>&) {
             out.kind = CSSCalcSwiftNodeKind::AnchorFunction;
             out.valueID = static_cast<uint16_t>(Anchor::id);
+            out.childCount = static_cast<uint32_t>(node.childCount());
         },
         [&](const IndirectNode<AnchorSize>&) {
             out.kind = CSSCalcSwiftNodeKind::AnchorSizeFunction;
             out.valueID = static_cast<uint16_t>(AnchorSize::id);
+            out.childCount = static_cast<uint32_t>(node.childCount());
         },
         // `clamp()`, and only because of its `none` bounds. `min` and `max` are `ChildOrNone`, so a
         // bound holding the keyword is an argument the serializer emits but not a child node the walk
@@ -959,6 +974,7 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
         // `val` whatever `val` is), so it declines rather than resting on that.
         [&](const IndirectNode<Clamp>& clamp) {
             out.valueID = static_cast<uint16_t>(Clamp::id);
+            countOf(clamp);
             bool minIsNone = WTF::holdsAlternative<CSS::Keyword::None>(clamp->min);
             bool maxIsNone = WTF::holdsAlternative<CSS::Keyword::None>(clamp->max);
             if (minIsNone && maxIsNone)
@@ -974,13 +990,15 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
         // trees: `Random`'s `<random-cache-key>` and `CalcMix`'s per-item weights. Both keep being
         // named explicitly rather than falling into the generic lambda below, so that the allowlist
         // there stays the only other thing that can decline.
-        [&](const IndirectNode<Random>&) {
+        [&](const IndirectNode<Random>& op) {
             out.kind = CSSCalcSwiftNodeKind::RandomFunction;
             out.valueID = static_cast<uint16_t>(Random::id);
+            countOf(op);
         },
-        [&](const IndirectNode<CalcMix>&) {
+        [&](const IndirectNode<CalcMix>& op) {
             out.kind = CSSCalcSwiftNodeKind::CalcMixFunction;
             out.valueID = static_cast<uint16_t>(CalcMix::id);
+            countOf(op);
         },
         // Everything else, classified by the shape of its serialization rather than one case per
         // operation. These operations cost no name here or in Swift: `valueID` carries `Op::id` and
@@ -991,6 +1009,7 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
             static_assert(!hasChildOrNoneArgument<Op>,
                 "a second operation with a ChildOrNone argument needs its own kind the way Clamp has, "
                 "or a `none` bound will be dropped from the serialization");
+            countOf(operation);
             // One place sets `valueID`, because every kind below wants the same thing from it: the
             // operation's own `id`, which for `round()` is the rounding strategy (`nearest`, `up`,
             // `down`, `to-zero`) rather than the function name, since all four share the name and
@@ -1005,7 +1024,6 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
         }
     );
 
-    out.childCount = static_cast<uint32_t>(node.childCount());
     return out;
 }
 

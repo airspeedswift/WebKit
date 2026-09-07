@@ -2023,16 +2023,23 @@ static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, 
 
 bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
 {
+    // `constructAndAppend`, not `append(makeChild(...))`, wherever the alternative is named here.
+    // `makeChild` returns a whole `Child`, and appending one move-constructs the 41-alternative
+    // `Variant` into the stack slot -- an out-of-line `mpark` visit the C++ arm never makes, because
+    // `copyAndSimplify` ends at a `makeChild` whose result object IS its own return slot.
+    // Constructing from the alternative instead selects the variant member at COMPILE time, so
+    // there is no visit and no intermediate `Child` at all. `sample` on the single-node band put the
+    // three extra variant visits the Swift arm makes at 15.3% of its profile.
     switch (static_cast<CSSCalcSwiftNodeKind>(leaf.kind)) {
     case CSSCalcSwiftNodeKind::Percentage:
         // The one alternative `makeNumeric` cannot produce faithfully: it builds a `Percentage`
         // with `hint = { }` (CSSCalcTree.cpp:197), and a folded percentage has to keep the hint its
         // operand had, exactly as `makeChildWithValueBasedOn` does at CSSCalcTree.cpp:318. That is
         // the whole reason `kind` is on `CSSCalcSwiftLeaf` beside `unitType`.
-        m_operands->value.append(makeChild(Percentage {
+        m_operands->value.constructAndAppend(Percentage {
             .value = leaf.value,
             .hint = leaf.percentHint ? Type::PercentHintValue { static_cast<PercentHint>(leaf.percentHint) } : Type::PercentHintValue { }
-        }));
+        });
         return true;
 
     case CSSCalcSwiftNodeKind::NonCanonicalDimension:
@@ -2045,15 +2052,42 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
         //
         // `unit` is the only member `NonCanonicalDimension` has beside `value` (CSSCalcTree.h:138),
         // so nothing is re-derived here and no table crosses.
-        m_operands->value.append(makeChild(NonCanonicalDimension { .value = leaf.value, .unit = static_cast<CSSUnitType>(leaf.unitType) }));
+        m_operands->value.constructAndAppend(NonCanonicalDimension { .value = leaf.value, .unit = static_cast<CSSUnitType>(leaf.unitType) });
         return true;
 
     case CSSCalcSwiftNodeKind::Number:
+        // `makeNumeric` maps `CSSUnitType::Number` and `CSSUnitType::Integer` to `Number { value }`
+        // and nothing else maps to that alternative, so for this kind its seventy-case
+        // classification has exactly ONE outcome and naming the alternative here duplicates no
+        // table -- the two-element set below is the whole of what this arm reads from it.
+        //
+        // Worth naming rather than routing through `makeNumeric`, because it takes the arm off BOTH
+        // out-of-line calls: `makeNumeric` itself (34 retired instructions) and the variant
+        // move-construct that appending its finished `Child` costs (measured at 69 on the operator
+        // arm below).
+        //
+        // CHECKED, not assumed: `kind` and `unitType` are two independent boundary fields and this
+        // is the one arm where their agreement is load-bearing, so a `Number` kind carrying any
+        // other unit declines to the C++ arm instead of building a `Number` where `makeNumeric`
+        // would have built a dimension. `simplifycheck`'s decline count is the non-vacuous check --
+        // it is 45, and 45 of those are the constructed `Clamp` shapes, so nothing in 924951 cases
+        // reaches this.
+        if (auto unit = static_cast<CSSUnitType>(leaf.unitType); unit != CSSUnitType::Number && unit != CSSUnitType::Integer)
+            return false;
+        m_operands->value.constructAndAppend(Number { .value = leaf.value });
+        return true;
+
     case CSSCalcSwiftNodeKind::CanonicalDimension:
         // `makeNumeric` owns the classification, including which `CanonicalDimension::Dimension` a
         // canonical unit means, so `Dimension` never crosses the boundary. `unitType` is
-        // authoritative for these two; `kind` states what Swift believes it is building, and the
+        // authoritative here; `kind` states what Swift believes it is building, and the
         // differential test checks the two agree.
+        //
+        // The one arm that keeps the extra variant move, and deliberately: the alternative's
+        // PAYLOAD is not known here -- it is `makeNumeric`'s unit switch that picks the `Dimension`
+        // -- and naming it at this call site would put a second copy of the canonical-unit table on
+        // the boundary. Unlike the `Number` arm above, the set is six units wide and each maps to a
+        // different value, so there is nothing to check instead of duplicating.
         m_operands->value.append(makeNumeric(leaf.value, static_cast<CSSUnitType>(leaf.unitType)));
         return true;
 
@@ -2214,7 +2248,14 @@ static bool buildOperationOnStack(OperandVector& stack, CSSCalcSwiftAlternative 
         if (!type)
             return false;
         stack.shrink(base);
-        stack.append(makeChild(WTF::move(op), *type));
+        // `constructAndAppend`, not `append(makeChild(...))`: the same in-place construction
+        // `pushLeaf` uses. `makeChild` hands back a whole `Child`, and appending one move-constructs
+        // the 41-alternative `Variant` through an out-of-line `mpark` visit that the C++ arm never
+        // makes -- `copyAndSimplify` ends at a `makeChild` whose result object IS its own return
+        // slot. Naming the alternative instead picks the variant member at COMPILE time.
+        // `makeIndirectNode` is `ChildConstruction`'s own indirect half (CSSCalcTree.h), so this is
+        // not a second spelling of how an operation node is built.
+        stack.constructAndAppend(makeIndirectNode(WTF::move(op), *type));
         return true;
     };
 
