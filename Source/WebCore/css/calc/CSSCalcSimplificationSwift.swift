@@ -4135,6 +4135,8 @@ private enum CalcFlatCoverage {
             | bit(.Product)
             | bit(.Negate)
             | bit(.Invert)
+            | bit(.Min)
+            | bit(.Max)
     }
 }
 
@@ -4181,7 +4183,7 @@ public func cssCalcSimplifySwift(
     // qualifying corpus case, and ANY disagreement with the C++ fails the differential rather than
     // waiting for someone to flip a flag.
     //
-    // Coverage cannot regress from this. A tree holding any of the other 34 alternatives falls through
+    // Coverage cannot regress from this. A tree holding any of the other 31 alternatives falls through
     // to the two-pass `rewrite` below unchanged, and `walk` has already refused outright any tree
     // holding one that neither port handles -- so the flat path is only ever reached for a tree the
     // two-pass port would have finished too. What it can do is DIVERGE, which is the point of routing
@@ -5109,13 +5111,13 @@ fileprivate func withCalcFlatTree<R: ~Copyable>(
 
 // MARK: The flat simplifier
 //
-// COVERAGE: `Sum`, `Product`, `Negate`, `Invert` and the four numeric leaves, and nothing else.
-// Every other alternative is left exactly as it arrived, which is the honest behaviour for a bounded
-// port -- it is not a decline channel and must not be read as one. `CalcFlatCoverage.mask` is what
-// keeps a tree holding one of the other 33 away from here; widening the two together is the work this
-// representation exists to make possible.
+// COVERAGE: `Sum`, `Product`, `Negate`, `Invert`, `Min`, `Max` and the four numeric leaves, and
+// nothing else. Every other alternative is left exactly as it arrived, which is the honest behaviour
+// for a bounded port -- it is not a decline channel and must not be read as one.
+// `CalcFlatCoverage.mask` is what keeps a tree holding one of the other 31 away from here; widening
+// the two together is the work this representation exists to make possible.
 //
-// The four operations below are a full port of their `simplify` overloads, not a sketch: every arm
+// The six operations below are a full port of their `simplify` overloads, not a sketch: every arm
 // the C++ has, in the C++'s own execution order, including the two arms of `simplify(Negate&)` and
 // the `Sum`/`Invert` arms of step 9.3 that are "not stated in spec, but needed for tests", and
 // including one arm that is a defect (see `distributeNumber`). Divergence from the C++ is the failure
@@ -5130,10 +5132,11 @@ fileprivate func withCalcFlatTree<R: ~Copyable>(
 // two-pass port fits `953 + 2225d + 366d^2`.
 //
 // NOTHING HERE ALLOCATES. The tree is the one stack buffer `withCalcFlatTree` sized in advance; the
-// `Sum` merge table is two `InlineArray`s in the frame; the `Product`'s merged `<number>` reuses the
-// slot of a `<number>` it just folded away rather than needing a slot the buffer does not have. A
-// per-simplification heap buffer was measured at 617 retired instructions, which is more than the
-// whole pass, so "just one small array" was never available as an implementation choice.
+// `Sum` merge table is two `InlineArray`s in the frame and `Min`/`Max`'s is one; the `Product`'s
+// merged `<number>` reuses the slot of a `<number>` it just folded away rather than needing a slot
+// the buffer does not have. A per-simplification heap buffer was measured at 617 retired
+// instructions, which is more than the whole pass, so "just one small array" was never available as
+// an implementation choice.
 
 /// `if ((firstInstance.offset - 1) == i && !firstInstance.canRemove)` (`+Simplification.cpp:700`),
 /// plus its non-`Numeric` arm (`:707`) -- the C++'s own survivor test, asked of a flat child.
@@ -5167,6 +5170,34 @@ private func calcFlatSumSurvives(
         return false
     }
     return !canRemove[key]
+}
+
+/// `if (!offset || (offset - 1) == i)` (`+Simplification.cpp:468`), plus its non-`Numeric` arm
+/// (`:475`) -- `simplifyForMinMax`'s own survivor test, asked of a flat child.
+///
+/// Three ways to survive, all in that one condition, and the middle one is the whole reason this is
+/// not `calcFlatSumSurvives`: a non-`Numeric` child (the C++'s `[&](const auto&)` arm, which appends
+/// unconditionally), a child whose unit was never recorded -- which is how a percentage survives when
+/// `canMergePercentages` is false and the merge pass skipped it outright -- and the first instance of
+/// its unit. `simplify(Sum&)` records every numeric child, so it has no "never recorded" case and its
+/// predicate instead carries the `canRemove` bit `Min`/`Max` has no counterpart for.
+///
+/// Node indices rather than term positions, on `calcFlatSumSurvives`'s reasoning: they are unique per
+/// child, index 0 is always the root and so never a child, and 0 stays free for "not seen".
+@inline(always)
+private func calcFlatMinMaxSurvives(
+    _ leaf: NumericLeaf?,
+    _ index: Int,
+    _ offsets: borrowing CalcSimplification.MergeTable
+) -> Bool {
+    guard let leaf else {
+        return true
+    }
+    let offset = Int(offsets[mergeKey(leaf)])
+    // Both operands are plain `Int` locals, so this can be the C++'s own single expression --
+    // `calcFlatSumSurvives` had to be split into two `guard`s only because its right operand reads a
+    // `borrowing` table through the autoclosure `&&` makes of it.
+    return offset == 0 || offset - 1 == index
 }
 
 fileprivate extension CalcFlatTree {
@@ -5234,6 +5265,12 @@ fileprivate extension CalcFlatTree {
 
         case .Product:
             simplifyProduct(i, options)
+
+        case .Min:
+            simplifyMinMax(i, options, false)
+
+        case .Max:
+            simplifyMinMax(i, options, true)
 
         case .NonCanonicalDimension:
             simplifyNonCanonicalDimension(i, options, builder)
@@ -5670,6 +5707,133 @@ fileprivate extension CalcFlatTree {
             }
             cursor = next
         }
+        if previous == CalcFlatNode.noNode {
+            nodes[i].firstChild = CalcFlatNode.noNode
+        } else {
+            nodes[Int(previous)].nextSibling = CalcFlatNode.noNode
+        }
+        nodes[i].childCount = kept
+    }
+
+    /// `simplifyForMinMax` (`+Simplification.cpp:372`-`:483`), css-values-4 steps 5.1 to 5.3, reached
+    /// from `simplify(Min&)` (`:999`) and `simplify(Max&)` (`:1004`).
+    ///
+    /// `simplify(Sum&)`'s merge machinery MINUS removal, and that is the whole of it: no step 8.1
+    /// splice (the C++ never flattens a nested `min()` into its parent), no `canRemove`, no
+    /// over-removal guard, and one extra way for a child to survive -- see `calcFlatMinMaxSurvives`.
+    /// The table is the same `MergeTable` keyed by the same `mergeKey`, which is the C++'s own
+    /// `std::array<size_t, numberOfNumericIdentityTypes>` (`:415`): fixed size, in the frame, zero
+    /// allocation, and the C++ arm zero-initialises an array of the same shape per node.
+    ///
+    /// NO RESOLUTION TEST, unlike every other multi-operand fold in this file. `simplifyForOperation`
+    /// gates on `fullyResolved` (`:303`), so `mod(5em, 3em)` does not fold; this gates only on
+    /// `percentageResolveToDimension` (`:417`), so `min(1em, 2em)` DOES fold to `1em`. Both are
+    /// correct as written -- an `em` scale is positive, so magnitudes really are comparable without
+    /// knowing it -- and the asymmetry is transcribed rather than normalised.
+    private mutating func simplifyMinMax(_ i: Int, _ options: CalcSimplification, _ isMax: Bool) {
+        // `ASSERT(!root.children.isEmpty())` (`:374`). Unreachable through the parser and refused by
+        // `isSimplifiableAlternative` if it ever were, so this only keeps the code below total.
+        guard nodes[i].childCount > 0 else {
+            return
+        }
+
+        // `if (root.children.size() == 1) return { WTF::move(root.children[0]) };` (`:409`-`:410`),
+        // BEFORE the merge pass -- which is why a one-child `min()` promotes its child whatever the
+        // child is, including a percentage the merge would have refused and an operator node.
+        if nodes[i].childCount == 1, let only = child(i, 0) {
+            replace(i, with: only)
+            return
+        }
+
+        // `std::array<size_t, numberOfNumericIdentityTypes> offsetOfFirstInstance { };` (`:415`) and
+        // `bool canMergePercentages = !percentageResolveToDimension(options);` (`:417`).
+        var offsets = CalcSimplification.MergeTable(repeating: 0)
+        let canMergePercentages = !options.percentageResolveToDimension
+        // `unsigned numberOfMergeOpportunities = 0;` (`:419`).
+        var merges = 0
+
+        var cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let c = Int(cursor)
+            cursor = nodes[c].nextSibling
+
+            // `[](const auto&) { return 0; }` (`:443`-`:444`): a non-`Numeric` child is no merge
+            // opportunity, is never merged, and always survives.
+            guard let leaf = nodes[c].numericLeaf else {
+                continue
+            }
+
+            // `if (id == NumericIdentity::Percentage && !canMergePercentages) return 0;` (`:424`).
+            // The bucket is left UNSET, which is exactly how `calcFlatMinMaxSurvives` then lets the
+            // child through the rebuild.
+            if leaf.kind == .percentage, !canMergePercentages {
+                continue
+            }
+
+            let key = mergeKey(leaf)
+            if offsets[key] != 0 {
+                // `root.children[offset - 1] = evaluate(root.children[offset - 1], root.children[i]);`
+                // (`:431`). `evaluate` is `executeMathOperation<Op>(aNumeric.value, get<T>(b).value)`
+                // (`:399`) with a = the ACCUMULATED first instance and b = the later child, and the
+                // two-argument `Min`/`Max` executors are NaN-order-sensitive, so the argument order
+                // here is the C++'s position for position.
+                //
+                // `makeChildWithValueBasedOn(result, aNumeric)` keeps the FIRST INSTANCE's
+                // alternative, unit and percent hint and changes only the value -- which is what
+                // writing the merged value back into its slot does.
+                let first = Int(offsets[key]) - 1
+                nodes[first].value = isMax
+                    ? CalcExecutor.max(nodes[first].value, nodes[c].value)
+                    : CalcExecutor.min(nodes[first].value, nodes[c].value)
+                merges += 1
+                continue
+            }
+
+            // `offsetOfFirstInstance[static_cast<uint8_t>(id)] = i + 1;` (`:438`). `c + 1` is a node
+            // index, not a term position: see `calcFlatSumSurvives`.
+            offsets[key] = Int32(c + 1)
+        }
+
+        // `if (!numberOfMergeOpportunities) return { };` (`:450`-`:451`). The node keeps its kind, its
+        // cached `Type` and its child list.
+        if merges == 0 {
+            return
+        }
+
+        // `if (combinedChildrenSize == 1) return { WTF::move(root.children[0]) };` (`:453`-`:457`).
+        // Child 0 is always the sole survivor here and the C++ names it without searching for the
+        // same reason `simplify(Sum&)` does: child 0 has no earlier child to merge into, so it always
+        // survives, and any merge implies a first instance that survives -- two survivors would
+        // contradict `size - merges == 1`. Its value is the accumulated one, written back above.
+        let size = Int(nodes[i].childCount)
+        if size - merges == 1, let only = child(i, 0) {
+            replace(i, with: only)
+            return
+        }
+
+        // `:459`-`:480`: keep every non-numeric child and the first instance of each merged unit, in
+        // order. The node keeps its kind AND its original cached `Type` -- the C++ returns `{ }` at
+        // `:482` even here, so `copyAndSimplify` takes the `getType(root)` branch at `:1821`.
+        var previous = CalcFlatNode.noNode
+        var kept: UInt32 = 0
+        cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let c = Int(cursor)
+            let next = nodes[c].nextSibling
+            if calcFlatMinMaxSurvives(nodes[c].numericLeaf, c, offsets) {
+                if previous == CalcFlatNode.noNode {
+                    nodes[i].firstChild = cursor
+                } else {
+                    nodes[Int(previous)].nextSibling = cursor
+                }
+                previous = cursor
+                kept += 1
+            }
+            cursor = next
+        }
+        // At least child 0 survives, so `previous` is never the sentinel here; the branch is kept for
+        // the same reason `simplify(Sum&)`'s is, so a list this loop somehow emptied is a valid empty
+        // list rather than one linked through a dropped child.
         if previous == CalcFlatNode.noNode {
             nodes[i].firstChild = CalcFlatNode.noNode
         } else {
