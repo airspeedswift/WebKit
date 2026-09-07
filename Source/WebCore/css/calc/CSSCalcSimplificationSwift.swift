@@ -4093,14 +4093,6 @@ private enum CalcFlatCoverage {
         return UInt64(1) << UInt64(alternative.rawValue)
     }
 
-    /// The four whose surviving node leaves through `rebuildFrom` on its original, as a mask over the
-    /// same alternative index. A mask rather than `CalcFlatNode.emitRoute` at the one site `emit`
-    /// asks this on the operator path: a shift and a test, with no jump table and no second load of
-    /// the fields a `switch` on the alternative lets the optimizer hoist.
-    static var rebuildFromOriginMask: UInt64 {
-        return bit(.Random) | bit(.CalcMix) | bit(.Anchor) | bit(.AnchorSize)
-    }
-
     static var mask: UInt64 {
         return bit(.Number)
             | bit(.Percentage)
@@ -4924,23 +4916,6 @@ fileprivate enum CalcFlatNodeFlags {
     static let insideAnchorSide: UInt8 = 1 << 3
 }
 
-/// How a surviving flat node gets back out of the flat tree.
-///
-/// THIS IS A ROUTE, NOT A CAPABILITY TEST. `buildOperation` is the entry a node that states its own
-/// alternative uses, and it is the cheap one: one enum-indexed jump table and one `makeChild`,
-/// measured at about 3.4 retired instructions per node. The other two exist because a fixed-size
-/// node cannot carry every payload -- see `withCalcOriginalNode` -- and they cost an O(index) walk of
-/// the original tree, so an alternative belongs here only when it genuinely cannot be built from
-/// operands.
-fileprivate enum CalcEmitRoute {
-    /// `buildOperation(alternative, childCount, type)`: built from the operands alone.
-    case build
-    /// `rebuildFrom(original, childCount)` on the original node this one came from.
-    case rebuildFromOrigin
-    /// `pushCopyOf(original)`: a non-numeric leaf, which has no slots and no operands.
-    case copyOfOrigin
-}
-
 /// Where a pre-order descent over the ORIGINAL tree got to.
 ///
 /// A subtree that does not hold the target reports its SIZE, because that is what tells the parent
@@ -5077,35 +5052,6 @@ fileprivate extension CalcFlatNode {
         switch alternative {
         case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension: return true
         default: return false
-        }
-    }
-
-    /// How this node gets back out of the flat tree. See `CalcEmitRoute`.
-    var emitRoute: CalcEmitRoute {
-        switch alternative {
-        case .Symbol, .SiblingCount, .SiblingIndex:
-            // The three non-numeric leaves. `pushLeaf` serves the four NUMERIC ones and refuses
-            // anything else (`+Simplification.cpp:2060`-`:2063`), and `rebuildFrom` refuses a leaf
-            // outright because there are no slots to fill (`:2166`-`:2169`), so a copy of the
-            // original is the only route -- and it is exact, not merely conservative, for the reason
-            // the two-pass port's `isCopiedLeafAlternative` call site sets out.
-            return .copyOfOrigin
-
-        case .Random, .CalcMix, .Anchor, .AnchorSize:
-            // The four whose payload no fixed-size node can hold: a `Random::Sharing` naming a
-            // dashed-ident, a per-item `optional<Weight>` that can be a whole nested `CSSCalcValue`,
-            // an `AtomString` element name, an `AnchorSide` subtree. `rebuildFrom` answers all four
-            // off the original, which is why they need no new construction entry.
-            return .rebuildFromOrigin
-
-        default:
-            // Every operation `buildOperation` can construct from operands alone -- and every one it
-            // cannot, which it refuses with `false` and this file reports as a decline. That is why
-            // the default arm is safe rather than merely convenient: an alternative added to
-            // `CSSCalcSwiftAlternative` and not to `CalcFlatCoverage.mask` never reaches emit at
-            // all, and one added to both without a route here declines the tree instead of building
-            // the wrong node.
-            return .build
         }
     }
 
@@ -5669,7 +5615,7 @@ fileprivate extension CalcFlatTree {
         let resolved = builder.resolveSymbol(nodes[i].valueID, UInt16(nodes[i].unitType))
         guard resolved.resolved else {
             // `options.symbolTable.get(root.id)` answered nothing: the C++ returns `{ }` and the
-            // unresolved `Symbol` is copied through, which is `emitRoute`'s `copyOfOrigin`.
+            // unresolved `Symbol` is copied through, which is `emit`'s deep-copy arm.
             return
         }
 
@@ -5703,7 +5649,7 @@ fileprivate extension CalcFlatTree {
     /// what the upcall already returns.
     ///
     /// `resolved == false` is NOT a decline: the C++ returns `{ }` and the leaf stays in the tree,
-    /// which is `emitRoute`'s `copyOfOrigin`. Neither is a `nil` builder, which is the probe's.
+    /// which is `emit`'s deep-copy arm. Neither is a `nil` builder, which is the probe's.
     ///
     /// A `nil` from `withCalcOriginalNode` is the one real failure -- the flat tree naming an origin
     /// index the original tree does not have -- and it declines the whole tree rather than folding
@@ -5748,7 +5694,7 @@ fileprivate extension CalcFlatTree {
     ///   * no conversion data or no builder state -- the opening guard's `{ }`, and the node survives
     ///     with its simplified fallback still on it.
     ///
-    /// A surviving one leaves through `rebuildFrom` on the original (`emitRoute.rebuildFromOrigin`):
+    /// A surviving one leaves through `rebuildFrom` on the original (`rebuildFromOriginMask`):
     /// an `AtomString` element name, an `AnchorSide` subtree and an `<anchor-size>` dimension are
     /// none of them things a fixed-size flat node can hold.
     ///
@@ -6689,16 +6635,24 @@ fileprivate extension CalcFlatTree {
     ) -> Bool {
         let node = nodes[i]
 
-        // ONE dispatch on the leaf path, not two, and that is measured rather than tidy. Asking
-        // `numericLeaf` and then `emitRoute` reads the same `alternative` byte twice, and because both
-        // are pure the optimizer HOISTS the second switch -- with the four extra field loads it needs
-        // -- above the leaf return, so a single-node `calc(1px)` paid the operator routing it never
-        // uses. Merging them was worth 16 retired instructions per node on the `leaf` band.
+        // THREE ROUTES OUT OF THE FLAT TREE, and this switch picks between the two a node with no
+        // operands can take. `buildOperation` is the third and the cheap one -- one enum-indexed
+        // jump table and one `makeChild`, about 3.4 retired instructions per node -- and it is what
+        // every node that states its own alternative uses. The other two exist because a fixed-size
+        // flat node cannot carry every payload, and they cost an O(index) walk of the original tree
+        // at 192 instructions a step, so an alternative belongs on them only when it genuinely
+        // cannot be built from operands.
         //
-        // The `rebuildFromOrigin` answer cannot be given here even though the same switch knows it:
-        // its children have to become operands first. Rebinding it into a `let` for the test below
-        // puts the hoist straight back (measured: `leaf` +2.4% again), so it is re-asked after the
-        // loop, on the operator path only.
+        // ONE dispatch here, not two, and that is measured rather than tidy. Asking `numericLeaf`
+        // and then a second pure switch on the same `alternative` byte lets the optimizer HOIST the
+        // second one -- with the four extra field loads it needs -- above the leaf return, so a
+        // single-node `calc(1px)` paid operator routing it never reaches: 16 retired instructions
+        // per node on the `leaf` band.
+        //
+        // The origin answer for an OPERATION cannot be given here even though this switch knows it,
+        // because its children have to become operands first. Rebinding it into a `let` for the test
+        // after the loop puts the hoist straight back -- measured, `leaf` +2.4% again -- so it is
+        // re-asked there as a bit test against `CalcFlatCoverage.rebuildFromOriginMask`.
         switch node.alternative {
         case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
             // `pushLeaf` owns which alternative a unit means, via `makeNumeric`, so no unit table is
@@ -6709,12 +6663,19 @@ fileprivate extension CalcFlatTree {
             return builder.pushLeaf(leaf.boundaryLeaf)
 
         case .Symbol, .SiblingCount, .SiblingIndex:
-            // A non-numeric leaf that did not resolve. No children, no operands, and nothing to
-            // build: the whole node comes back off the original by deep copy, which is what
-            // `copyAndSimplify` does for it too. `CalcEmitRoute.copyOfOrigin`.
+            // The three non-numeric leaves, unresolved. `pushLeaf` serves the four NUMERIC ones and
+            // refuses anything else (`+Simplification.cpp:2060`-`:2063`), and `rebuildFrom` refuses a
+            // leaf outright because there are no slots to fill (`:2166`-`:2169`), so a deep copy of
+            // the original is the only route -- and it is exact, not merely conservative, for the
+            // reason the two-pass port's `isCopiedLeafAlternative` call site sets out.
             return calcEmitFromOrigin(node.origin, 0, true, original, &builder)
 
         default:
+            // Every operation, whether or not `buildOperation` can construct it. One it cannot is
+            // refused with `false` and reported as a decline, which is why this arm is safe rather
+            // than merely convenient: an alternative added to `CSSCalcSwiftAlternative` and not to
+            // `CalcFlatCoverage.mask` never reaches emit at all, and one added to both without a
+            // route declines the tree instead of building the wrong node.
             break
         }
 
@@ -6736,11 +6697,21 @@ fileprivate extension CalcFlatTree {
             cursor = nodes[Int(cursor)].nextSibling
         }
 
-        if CalcFlatCoverage.rebuildFromOriginMask >> UInt64(node.alternative.rawValue) & 1 != 0 {
-            // An operation whose payload no fixed-size flat node can carry. The children are already
-            // operands; everything else -- an `AtomString` element name, an `AnchorSide` subtree, a
-            // `Random::Sharing`, a nested `CSSCalcValue` item weight -- comes off the original.
+        switch node.alternative {
+        case .Random, .CalcMix, .Anchor, .AnchorSize:
+            // An operation whose payload no fixed-size flat node can carry: a `Random::Sharing`
+            // naming a dashed-ident, a per-item weight that can be a whole nested `CSSCalcValue`, an
+            // `AtomString` element name, an `AnchorSide` subtree. Its children are already operands;
+            // everything else comes off the original through `rebuildFrom`.
+            //
+            // A FOUR-CASE SWITCH, not a bit test against a mask built from `CalcFlatCoverage.bit`.
+            // That mask does not constant-fold: `UInt64(alternative.rawValue)` over an IMPORTED C++
+            // enum leaves the optimizer eight `cond_fail`s and four shifts to run here, per operator
+            // node. `CalcFlatCoverage.mask` has the same shape and gets away with it because it is
+            // read once per TREE.
             return calcEmitFromOrigin(node.origin, pushed, false, original, &builder)
+        default:
+            break
         }
 
         // False for anything outside `buildOperation`'s set, which for now is this prototype's own
