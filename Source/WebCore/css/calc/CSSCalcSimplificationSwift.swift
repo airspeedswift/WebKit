@@ -3211,6 +3211,11 @@ private extension CalcSimplification {
     /// never qualify; `.canonicalDimension` qualifies only for `Px`; `.nonCanonicalDimension` (48 of 56
     /// units) crosses to `isLengthUnit`. The flag is tested first so the upcall is skipped when it
     /// cannot be used, and the caller only reaches it for a merged value of exactly zero.
+    ///
+    /// Shared with the flat simplifier, which is why the `Px` special case is stated once: the
+    /// `isLengthUnit(uint16_t)` upcall (`+Simplification.cpp:2470`) routes through
+    /// `toNumericIdentity(NonCanonicalDimension{...})`, which answers `Number` for `CSSUnitType::Px`
+    /// and so returns FALSE for canonical px, where `isLength(PX)` in the C++ is true.
     @inline(always)
     func lengthRemovalAllowed(
         _ leaf: NumericLeaf,
@@ -4058,6 +4063,39 @@ private extension CalcSimplification {
 
 // MARK: - The entry point
 
+/// Which alternatives the FLAT simplifier covers, as a mask over the same alternative index
+/// `kindMask` is built from.
+///
+/// Built from the alternative list rather than written as a hex literal, so teaching the flat
+/// simplifier a new alternative is one name added here and the two cannot drift: the raw values come
+/// from the imported C++ enum, which is generated from `CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`.
+///
+/// A computed `static var`, not a `static let`: a stored global is lazily initialised behind a
+/// `swift_once` guard, which is an atomic load on every simplification, and every term here is a
+/// compile-time constant so the optimizer folds the whole expression to one immediate.
+///
+/// `NonCanonicalDimension` IS DELIBERATELY ABSENT even though the flat node has a `numericLeaf`
+/// mapping for it. `simplify(NonCanonicalDimension&)` (`+Simplification.cpp:506`-`:514`) calls
+/// `canonicalize`, which needs the `CSSToLengthConversionData` this pass does not carry, so letting
+/// one through would COPY the node where the C++ converts it -- a silent wrong answer rather than a
+/// decline. Adding it means porting `canonicalize`, not editing this list.
+private enum CalcFlatCoverage {
+    @inline(always)
+    static func bit(_ alternative: CalcAlternative) -> UInt64 {
+        return UInt64(1) << UInt64(alternative.rawValue)
+    }
+
+    static var mask: UInt64 {
+        return bit(.Number)
+            | bit(.Percentage)
+            | bit(.CanonicalDimension)
+            | bit(.Sum)
+            | bit(.Product)
+            | bit(.Negate)
+            | bit(.Invert)
+    }
+}
+
 /// Simplify a whole tree onto the builder's operand stack, or decline.
 ///
 /// On `.simplified` the stack holds exactly one operand, the new root. On `.declined` the stack
@@ -4091,6 +4129,41 @@ public func cssCalcSimplifySwift(
         allowZeroValueLengthRemovalFromSum: options.allowZeroValueLengthRemovalFromSum,
         category: options.category
     )
+
+    // THE FLAT PATH, taken whenever every alternative in the tree is one it implements.
+    //
+    // No gate, no new C++, and no option selecting it: the two simplifiers are two ports of the same
+    // spec, so a build flag choosing between them would mean the differential only ever exercised one
+    // of them. The tree itself decides instead -- `kindMask` already says which alternatives are
+    // present and a subset test is one `and` -- so `simplifycheck` runs the flat path on every
+    // qualifying corpus case, and ANY disagreement with the C++ fails the differential rather than
+    // waiting for someone to flip a flag.
+    //
+    // Coverage cannot regress from this. A tree holding any of the other 34 alternatives falls through
+    // to the two-pass `rewrite` below unchanged, and `walk` has already refused outright any tree
+    // holding one that neither port handles -- so the flat path is only ever reached for a tree the
+    // two-pass port would have finished too. What it can do is DIVERGE, which is the point of routing
+    // it here rather than leaving it behind a flag nothing sets.
+    if kindMask & ~CalcFlatCoverage.mask == 0 {
+        let emitted = withCalcFlatTree(root, nodeCount) { tree -> Bool in
+            tree.simplify(simplification, builder)
+            return tree.emit(0, into: &builder)
+        }
+        guard emitted else {
+            // `emit` returning false is `buildOperation` refusing, and that has no one alternative to
+            // blame: it is either a builder contract violation or `toType` answering `std::nullopt`
+            // for children whose types do not merge -- and in that second case the C++ arm returns
+            // `std::nullopt` from its own rewrite too. Reported the way the two-pass path reports its
+            // own blameless decline, `.declined(nil)`.
+            return declined(kindMask, nodeCount, nil)
+        }
+        return WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
+            kindMask: kindMask,
+            nodeCount: nodeCount,
+            outcome: CSSCalcSwiftSimplificationOutcome.simplified.rawValue,
+            declineAlternative: noDeclineAlternative
+        )
+    }
 
     if case .declined(let rewriteBlame) = simplification.rewrite(root, &builder) {
         // The rewrite's blame, not the walk's: the walk found nothing to blame or this would not be
@@ -4826,12 +4899,6 @@ fileprivate extension CalcFlatNode {
         }
         return NumericLeaf(kind: kind, value: value, unitType: UInt16(unitType), percentHint: percentHint)
     }
-
-    /// What makes two leaves addable: `1px + 2px` merges, `1px + 2em` does not, and a `Number`
-    /// never merges with a dimension. The C++ keys its fixed-size identity table on the same pair.
-    func mergesWith(_ other: CalcFlatNode) -> Bool {
-        alternative == other.alternative && unitType == other.unitType && percentHint == other.percentHint
-    }
 }
 
 // MARK: - The flat tree
@@ -5002,9 +5069,16 @@ fileprivate func withCalcFlatTree<R: ~Copyable>(
 //
 // COVERAGE: `Sum`, `Product`, `Negate`, `Invert` and the four numeric leaves, and nothing else.
 // Every other alternative is left exactly as it arrived, which is the honest behaviour for a bounded
-// prototype -- it is not a decline channel and must not be read as one. Widening it to the 41 the
-// two-pass port covers is the work this representation exists to make possible; until then nothing
-// production reaches this.
+// port -- it is not a decline channel and must not be read as one. `CalcFlatCoverage.mask` is what
+// keeps a tree holding one of the other 34 away from here; widening the two together is the work this
+// representation exists to make possible.
+//
+// The four operations below are a full port of their `simplify` overloads, not a sketch: every arm
+// the C++ has, in the C++'s own execution order, including the two arms of `simplify(Negate&)` and
+// the `Sum`/`Invert` arms of step 9.3 that are "not stated in spec, but needed for tests", and
+// including one arm that is a defect (see `distributeNumber`). Divergence from the C++ is the failure
+// mode this whole exercise is measured by, so a rule that looks wrong is reproduced and annotated
+// rather than corrected.
 //
 // WHAT MAKES IT DIFFERENT FROM THE TWO-PASS PORT, and it is the whole reason for the exercise: no
 // recursion, no per-node crossing, no 41-way variant dispatch, no operand stack, and above all no
@@ -5012,16 +5086,70 @@ fileprivate func withCalcFlatTree<R: ~Copyable>(
 // children's, and one backwards loop therefore visits every child exactly once before its parent --
 // which is `copyAndSimplify`'s own shape, and the reason the C++ is exactly linear in depth where the
 // two-pass port fits `953 + 2225d + 366d^2`.
+//
+// NOTHING HERE ALLOCATES. The tree is the one stack buffer `withCalcFlatTree` sized in advance; the
+// `Sum` merge table is two `InlineArray`s in the frame; the `Product`'s merged `<number>` reuses the
+// slot of a `<number>` it just folded away rather than needing a slot the buffer does not have. A
+// per-simplification heap buffer was measured at 617 retired instructions, which is more than the
+// whole pass, so "just one small array" was never available as an implementation choice.
+
+/// `if ((firstInstance.offset - 1) == i && !firstInstance.canRemove)` (`+Simplification.cpp:700`),
+/// plus its non-`Numeric` arm (`:707`) -- the C++'s own survivor test, asked of a flat child.
+///
+/// The same predicate as `SumMergePlan.survives`, over node indices rather than term positions: a
+/// flat child list is addressed by node index, those are unique per child, and index 0 is always the
+/// root and so never a child -- so `offset` can store `nodeIndex + 1` where the C++ stores `i + 1`.
+/// Both encodings reserve 0 for "no term of this unit has been seen", which is what lets the table be
+/// zero-initialised.
+///
+/// A free function rather than a method, so it can borrow the two tables without also borrowing the
+/// tree, which is being mutated around every call to it.
+@inline(always)
+private func calcFlatSumSurvives(
+    _ leaf: NumericLeaf?,
+    _ index: Int,
+    _ offsets: borrowing CalcSimplification.MergeTable,
+    _ canRemove: borrowing CalcSimplification.MergeFlags
+) -> Bool {
+    // `[](const auto&)` (`:707`): "Non-numeric values are not eligible for merge or removal", so one
+    // always survives.
+    guard let leaf else {
+        return true
+    }
+    let key = mergeKey(leaf)
+    // NOT `... == index && !canRemove[key]`. `&&`'s right operand is an autoclosure, and an
+    // autoclosure cannot capture a `borrowing` parameter -- the diagnostic says "cannot be captured by
+    // an escaping closure", which reads as if a closure had been written here. `sumMergePlan` hit the
+    // same wall for the same reason and records it too.
+    guard Int(offsets[key]) - 1 == index else {
+        return false
+    }
+    return !canRemove[key]
+}
 
 fileprivate extension CalcFlatTree {
     /// Simplify the whole tree, children before parents, in one reverse pass.
-    mutating func simplify() {
+    ///
+    /// `options` is the same `CalcSimplification` the two-pass port carries, so the fields the C++
+    /// reads -- `allowZeroValueLengthRemovalFromSum` at `:612` and `category` at `:886` -- have one
+    /// spelling in this file rather than two.
+    ///
+    /// `builder` is `Optional` for exactly one reason, and not as a design preference: the only thing
+    /// read through it here is `lengthRemovalAllowed`'s `isLengthUnit` upcall, and
+    /// `cssCalcFlatSimplifyProbeSwift` -- whose C++ signature is fixed by the benchmark harness that
+    /// calls it -- has no builder to hand over. `nil` cannot change an answer on any tree the
+    /// production route sends here: that route always passes the builder, and the upcall is reached
+    /// only for a `NonCanonicalDimension`, which `CalcFlatCoverage.mask` excludes.
+    mutating func simplify(
+        _ options: CalcSimplification,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) {
         var i = count - 1
         while i >= 0 {
             // Never fold inside an `anchor()`'s `<anchor-side>`: the C++ copies that subtree rather
             // than simplifying it. One bit test, because `flatten` marked the whole subtree.
             if nodes[i].flags & CalcFlatNodeFlags.insideAnchorSide == 0 {
-                simplifyNode(i)
+                simplifyNode(i, options, builder)
             }
             i -= 1
         }
@@ -5045,168 +5173,669 @@ fileprivate extension CalcFlatTree {
         nodes[i].nextSibling = sibling
     }
 
-    private mutating func simplifyNode(_ i: Int) {
+    private mutating func simplifyNode(
+        _ i: Int,
+        _ options: CalcSimplification,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) {
         switch nodes[i].alternative {
         case .Negate:
-            guard nodes[i].childCount == 1, let a = child(i, 0) else { return }
-            if nodes[a].isNumericLeaf {
-                // 6.1. The unary MINUS, not `* -1`: it flips a NaN's sign bit rather than
-                // propagating one, which is the same distinction the two-pass port's `Fold` draws.
-                let negated = -nodes[a].value
-                replace(i, with: a)
-                nodes[i].value = negated
-            } else if nodes[a].alternative == .Negate, nodes[a].childCount == 1, let inner = child(a, 0) {
-                // 6.2. `negate(negate(x))` is `x`.
-                replace(i, with: inner)
-            }
+            simplifyNegate(i)
 
         case .Invert:
-            guard nodes[i].childCount == 1, let a = child(i, 0) else { return }
-            if nodes[a].alternative == .Number {
-                // 7.1. Only a `Number` inverts to a leaf; inverting a dimension makes a type no
-                // `Child` leaf can represent, which is why this is not `isNumericLeaf`.
-                let inverted = 1 / nodes[a].value
-                replace(i, with: a)
-                nodes[i].value = inverted
-            } else if nodes[a].alternative == .Invert, nodes[a].childCount == 1, let inner = child(a, 0) {
-                // 7.2.
-                replace(i, with: inner)
-            }
+            simplifyInvert(i)
 
         case .Sum:
-            simplifySum(i)
+            simplifySum(i, options, builder)
 
         case .Product:
-            simplifyProduct(i)
+            simplifyProduct(i, options)
 
         default:
-            // Including the four leaves: `canonicalize` needs conversion data this prototype does
-            // not carry, and the other 33 alternatives are not ported yet. Left as they arrived.
+            // Including the four leaves, and for three of them that is a PORT rather than an
+            // omission: `simplify(Number&)` (`+Simplification.cpp:487`), `simplify(Percentage&)`
+            // (`:493`) and `simplify(CanonicalDimension&)` (`:500`) each `return { }` with no body,
+            // which is also why `canSimplify` answers false for exactly those three.
+            // `NonCanonicalDimension` is the one leaf that really is unported --
+            // `simplify(NonCanonicalDimension&)` (`:506`) calls `canonicalize`, which needs
+            // conversion data this pass does not carry -- and `CalcFlatCoverage.mask` is what keeps a
+            // tree containing one away from here rather than letting it be copied through silently.
             return
         }
     }
 
-    /// Steps 8.1 and 8.2: splice nested `Sum`s in, then merge every pair of like terms.
-    ///
-    /// Both are list surgery and neither allocates. 8.1 replaces a nested `Sum` in the list with that
-    /// sum's own child list, which is why the linked representation exists -- the previous
-    /// contiguous-run shape had to bump-allocate a longer run and could not be stack-sized.
-    private mutating func simplifySum(_ i: Int) {
-        guard nodes[i].childCount > 0 else { return }
+    /// `simplify(Negate&)` (`+Simplification.cpp:911`-`:961`), all four arms.
+    private mutating func simplifyNegate(_ i: Int) {
+        guard nodes[i].childCount == 1, let a = child(i, 0) else {
+            return
+        }
 
-        // 8.1. Splice. `previous == noNode` means the cursor is at the head.
+        if nodes[a].isNumericLeaf {
+            // 6.1 (`:916`-`:921`). The unary MINUS, not `0 - v` and not `* -1`: it flips the sign bit
+            // of a zero, so `-(+0)` is `-0`. That is the C++'s own stated reason for the spelling, and
+            // the same distinction the two-pass port's `Fold` draws.
+            let negated = -nodes[a].value
+            replace(i, with: a)
+            nodes[i].value = negated
+            return
+        }
+
+        if nodes[a].alternative == .Negate, nodes[a].childCount == 1, let inner = child(a, 0) {
+            // 6.2 (`:923`-`:926`). `negate(negate(x))` is `x`.
+            replace(i, with: inner)
+            return
+        }
+
+        if nodes[a].alternative == .Sum || nodes[a].alternative == .Product {
+            // `:927`-`:956`, "Not stated in spec, but needed for tests": an all-numeric `Sum` or
+            // `Product` child has EVERY child's value negated in place and is then returned in the
+            // `Negate`'s place, keeping its own cached `Type`, which `replace` carries over with it.
+            //
+            // For a `Product` that is arithmetically wrong, and it is reproduced anyway: negating
+            // every factor of `2 * 3` gives `-2 * -3`, so an even-arity all-numeric product comes back
+            // with its sign UNFLIPPED. It is observable behaviour of the shipping C++, not dead code,
+            // so the differential compares against it and a "fix" here would read as a Swift defect.
+            guard allChildrenAreNumericLeaves(a) else {
+                // `!all_of(a->children, isNumeric)` (`:930`, `:945`): `nullopt`, so the `Negate` keeps
+                // its kind and its one simplified child.
+                return
+            }
+            var cursor = nodes[a].firstChild
+            while cursor != CalcFlatNode.noNode {
+                nodes[Int(cursor)].value = -nodes[Int(cursor)].value
+                cursor = nodes[Int(cursor)].nextSibling
+            }
+            replace(i, with: a)
+        }
+    }
+
+    /// `simplify(Invert&)` (`+Simplification.cpp:963`-`:980`), both arms and no third one.
+    ///
+    /// 7.1's C++ arm is `[&](Number& a)`, NOT `[&]<Numeric T>(T&)`: a `Percentage`, a
+    /// `CanonicalDimension` and a `NonCanonicalDimension` all reach `[](auto&) { return { }; }`
+    /// (`:976`) and are left alone, because the reciprocal of a dimension is a type no `Child` leaf
+    /// can hold. Checked against the source rather than assumed -- it is the one place in this set
+    /// where `isNumericLeaf` would be the wrong predicate -- and step 9.3 depends on the distinction:
+    /// `Invert(Number)` never survives to be a `Product` factor, which is what makes
+    /// `distributeNumber`'s `Invert` arm reachable only for a percentage or a dimension.
+    private mutating func simplifyInvert(_ i: Int) {
+        guard nodes[i].childCount == 1, let a = child(i, 0) else {
+            return
+        }
+
+        if nodes[a].alternative == .Number {
+            // 7.1 (`:968`-`:971`), through the same executor the two-pass port's `foldInvert` uses.
+            let inverted = CalcExecutor.invert(nodes[a].value)
+            replace(i, with: a)
+            nodes[i].value = inverted
+            return
+        }
+
+        if nodes[a].alternative == .Invert, nodes[a].childCount == 1, let inner = child(a, 0) {
+            // 7.2 (`:972`-`:975`).
+            replace(i, with: inner)
+        }
+    }
+
+    /// `std::ranges::all_of(children, isNumeric)` (`+Simplification.cpp:769`, `:930`, `:945`) over a
+    /// flat node's final child list. True for an empty list, as `all_of` is.
+    private func allChildrenAreNumericLeaves(_ i: Int) -> Bool {
+        var cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            guard nodes[Int(cursor)].isNumericLeaf else {
+                return false
+            }
+            cursor = nodes[Int(cursor)].nextSibling
+        }
+        return true
+    }
+
+    /// Overwrite node `i` with a numeric leaf, keeping its place in its parent's list.
+    ///
+    /// The counterpart of `replace` for the three C++ sites that return a leaf the input tree does not
+    /// contain: `makeChild(CanonicalDimension { 0, Length })` at `:664`, `makeChild(*numericProduct)`
+    /// at `:755`, and step 9.4's eleven-case category table at `:882`-`:902`. `NumericLeaf` is the
+    /// two-pass port's own representation of exactly that -- "everything `makeChildWithValueBasedOn`
+    /// carries" -- so those sites are reached here through `NumericLeaf.number`,
+    /// `NumericLeaf.canonicalLength` and `numericLeafForCategory`, and no unit or percent-hint table is
+    /// written a second time.
+    ///
+    /// `nextSibling` and `flags` are the two fields NOT written: the first because overwriting it is
+    /// the cycle bug `replace` documents, the second because `insideAnchorSide` describes where the
+    /// slot is rather than what is in it.
+    ///
+    /// False means `leaf.unitType` did not fit the node's `uint8_t`, which cannot happen: every unit
+    /// here comes from a `CSSUnitType`, whose raw type IS `uint8_t`, and `CSSUnitType.h` allocates 7
+    /// bits for it. Answered rather than trapped, and answered BEFORE anything is written, so a
+    /// boundary that ever broke that leaves the node untouched instead of half-built.
+    @discardableResult
+    private mutating func setLeaf(_ i: Int, _ leaf: NumericLeaf) -> Bool {
+        guard let unit = UInt8(exactly: leaf.unitType) else {
+            return false
+        }
+        let alternative: CalcAlternative
+        switch leaf.kind {
+        case .number: alternative = .Number
+        case .percentage: alternative = .Percentage
+        case .canonicalDimension: alternative = .CanonicalDimension
+        case .nonCanonicalDimension: alternative = .NonCanonicalDimension
+        }
+        nodes[i].value = leaf.value
+        // A leaf's `Type` is DISCARDED by construction -- `ChildConstruction<T>::make(T&&, Type)` for
+        // a `Leaf` ignores its `Type` argument (CSSCalcTree.h:1016-1018) -- so this is cleared rather
+        // than computed, the same fact `flatten` rests on when it fetches no type for a leaf.
+        nodes[i].type = CalcType()
+        nodes[i].firstChild = CalcFlatNode.noNode
+        nodes[i].childCount = 0
+        nodes[i].valueID = 0
+        nodes[i].unitType = unit
+        nodes[i].alternative = alternative
+        nodes[i].percentHint = leaf.percentHint
+        return true
+    }
+
+    /// Splice every child of node `i` that is itself a `kind` node into `i`'s own child list, ONE
+    /// LEVEL, in order, and leave `childCount` correct.
+    ///
+    /// Step 8.1 for `Sum` (`+Simplification.cpp:554`-`:564`) and the outer half of step 9.1 for
+    /// `Product` (`:744`-`:750`) are the same list surgery, so they are the same function.
+    ///
+    /// ONE LEVEL IS THE WHOLE SUBTLETY, and the previous version of this got it wrong: it re-examined
+    /// from the spliced-in head, so a `Sum` nested two deep spliced twice. The C++ iterates
+    /// `root.children` exactly once and appends a grandchild without looking at it, and it does not
+    /// need to look -- the reverse loop simplified that inner `Sum` before this one, so the inner
+    /// sum's own nested sums were already spliced into it. `cursor` therefore continues from the node
+    /// AFTER the spliced child, never from the head.
+    ///
+    /// The C++ guards `Sum`'s splice with `any_of(children, holdsAlternative<IndirectNode<Sum>>)`
+    /// (`:555`) and does not guard `Product`'s. That asymmetry is not reproduced because it is not
+    /// observable: the guard exists to avoid allocating a `Vector<Child> newChildren` when nothing
+    /// would change, and relinking a list in place is already a no-op when nothing is nested. One pass
+    /// here does what the C++'s scan-then-rebuild does in two.
+    private mutating func spliceNestedChildren(_ i: Int, _ kind: CalcAlternative) {
         var previous = CalcFlatNode.noNode
         var cursor = nodes[i].firstChild
         var terms: UInt32 = 0
         while cursor != CalcFlatNode.noNode {
             let c = Int(cursor)
-            if nodes[c].alternative == .Sum, nodes[c].firstChild != CalcFlatNode.noNode {
-                // Relink the nested sum's whole list in place of the sum itself. The nested node is
-                // discarded and nothing else can reference its children, so redirecting the tail's
-                // `nextSibling` to this node's continuation is safe.
-                let head = nodes[c].firstChild
-                var tail = head
-                while nodes[Int(tail)].nextSibling != CalcFlatNode.noNode {
-                    tail = nodes[Int(tail)].nextSibling
-                }
-                nodes[Int(tail)].nextSibling = nodes[c].nextSibling
-                if previous == CalcFlatNode.noNode {
-                    nodes[i].firstChild = head
-                } else {
-                    nodes[Int(previous)].nextSibling = head
-                }
-                // Re-examine from `head`, so a sum nested two deep splices too.
-                cursor = head
+            guard nodes[c].alternative == kind else {
+                previous = cursor
+                cursor = nodes[c].nextSibling
+                terms += 1
                 continue
             }
-            previous = cursor
-            cursor = nodes[c].nextSibling
+
+            let after = nodes[c].nextSibling
+            let head = nodes[c].firstChild
+            if head == CalcFlatNode.noNode {
+                // `appendVector` of an empty vector: the nested node contributes no terms and
+                // disappears. Unreachable -- both `simplify` overloads open with
+                // `ASSERT(!root.children.isEmpty())` -- but it is one branch, and the alternative if
+                // it ever happened is a list linked through a node that is no longer in it.
+                if previous == CalcFlatNode.noNode {
+                    nodes[i].firstChild = after
+                } else {
+                    nodes[Int(previous)].nextSibling = after
+                }
+                cursor = after
+                continue
+            }
+
+            var tail = head
             terms += 1
+            while nodes[Int(tail)].nextSibling != CalcFlatNode.noNode {
+                tail = nodes[Int(tail)].nextSibling
+                terms += 1
+            }
+            // Relink the nested node's whole list in place of the node itself. The nested node is
+            // discarded and nothing else can reference its children, so redirecting the tail's
+            // `nextSibling` to this node's continuation is safe.
+            nodes[Int(tail)].nextSibling = after
+            if previous == CalcFlatNode.noNode {
+                nodes[i].firstChild = head
+            } else {
+                nodes[Int(previous)].nextSibling = head
+            }
+            previous = tail
+            cursor = after
+        }
+        nodes[i].childCount = terms
+    }
+
+    /// `simplify(Sum&)` (`+Simplification.cpp:548`-`:715`), css-values-4 steps 8.1 to 8.4, in the
+    /// C++'s execution order.
+    ///
+    /// The merge table is the C++'s own `std::array<FirstInstance, numberOfNumericIdentityTypes>`
+    /// (`:606`) rather than the O(k^2) pairwise scan this function used to do: two `InlineArray`s in
+    /// the frame, keyed by `mergeKey` -- 128 entries because the key is the 7-bit `CSSUnitType`, which
+    /// `mergeKey` explains is injective on `NumericIdentity` and so gives the same fixed-size table
+    /// without transcribing a 56-case enum into this file. Fixed size, stack, no allocation, and the
+    /// same two typealiases the two-pass port's `SumMergePlan` uses so there is one declaration of
+    /// each.
+    ///
+    /// `FirstInstance::merges` is not kept per bucket. The C++ keeps it only to sum it at `:647`, and
+    /// two running totals -- `merges`, and how many buckets are currently marked removable -- give
+    /// both of its tallies for free. `SumMergePlan` makes the same substitution and states the one
+    /// thing it depends on: `canRemove` is ASSIGNED on every merge (`:625`), not accumulated, so it can
+    /// go back to false and the count has to move both ways.
+    private mutating func simplifySum(
+        _ i: Int,
+        _ options: CalcSimplification,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) {
+        guard nodes[i].childCount > 0 else {
+            return
         }
 
-        // 8.2. Merge like terms, unlinking each one that folds into an earlier one. O(k^2) against
-        // the C++'s fixed-size identity table (`CSSCalcTree+NumericIdentity.h:106`), and deliberately
-        // so at this size: a calc sum is a handful of terms, and the table is the optimisation to
-        // make once the representation is settled, not before.
-        previous = CalcFlatNode.noNode
+        // 8.1 (`:554`-`:564`).
+        spliceNestedChildren(i, .Sum)
+
+        // `if (root.children.size() == 1) return { WTF::move(root.children[0]) };` (`:594`-`:596`), on
+        // the FLATTENED list, and it returns that child WHATEVER IT IS -- an operator node just as
+        // readily as a numeric leaf. The previous version required a leaf, which left
+        // `calc(min(1px, 2px) + 0px)` as a one-term `Sum` where the C++ returns the `min()` itself.
+        if nodes[i].childCount == 1, let only = child(i, 0) {
+            replace(i, with: only)
+            return
+        }
+
+        // 8.2's first phase (`:601`-`:640`).
+        var offsets = CalcSimplification.MergeTable(repeating: 0)
+        var canRemove = CalcSimplification.MergeFlags(repeating: false)
+        // `childrenToRemoveFromMerges` (`:643`).
+        var merges = 0
+        // The second half of `childrenToRemoveTotal` (`:648`), as a count of the buckets whose
+        // `canRemove` is currently set.
+        var removableBuckets = 0
+
+        var cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let c = Int(cursor)
+            cursor = nodes[c].nextSibling
+
+            // `[](const auto&) { }` (`:636`-`:638`): "Non-numeric values are not eligible for merge or
+            // removal."
+            guard let leaf = nodes[c].numericLeaf else {
+                continue
+            }
+            let key = mergeKey(leaf)
+
+            if offsets[key] != 0 {
+                // A repeat: `evaluate(root.children[firstInstance.offset - 1], root.children[i])` and
+                // then `root.children[firstInstance.offset - 1] = WTF::move(mergedChild)`
+                // (`:618`-`:621`). The surviving node is the FIRST INSTANCE, so its alternative, unit
+                // and percent hint are what `makeChildWithValueBasedOn` keeps and only the value
+                // changes -- which is exactly what writing the sum back into its slot does.
+                let first = Int(offsets[key]) - 1
+                let merged = CalcExecutor.sum(nodes[first].value, nodes[c].value)
+                nodes[first].value = merged
+                merges += 1
+
+                // `firstInstance.canRemove = canRemoveIfZero && !mergedValue;` (`:625`) -- an
+                // ASSIGNMENT, so a bucket made removable by an earlier merge is cleared when a later
+                // one lands non-zero. `!mergedValue` is true for both `+0` and `-0`, which `== 0` is
+                // and a sign test would not be. Spelled as `if`/`else` rather than `&&` because
+                // `&&`'s autoclosure right operand cannot capture what `lengthRemovalAllowed` needs,
+                // and written in this order so the upcall inside it is skipped for every non-zero
+                // merge.
+                //
+                // `let builder` unwraps here rather than inside `lengthRemovalAllowed`, so that
+                // function keeps its non-`Optional` `borrowing` parameter and the two-pass port's
+                // three call sites are untouched: promoting a `borrowing` argument into an `Optional`
+                // is a CONSUME, and the diagnostic for it ("'builder' is borrowed and cannot be
+                // consumed") names the call site, not the promotion. A `nil` builder answers false,
+                // which only ever mis-answers a `NonCanonicalDimension` -- an alternative
+                // `CalcFlatCoverage.mask` excludes, and one the production route, which always passes
+                // a builder, cannot reach anyway.
+                let removable: Bool
+                if merged == 0, let builder {
+                    removable = options.lengthRemovalAllowed(leaf, builder)
+                } else {
+                    removable = false
+                }
+                if removable != canRemove[key] {
+                    removableBuckets += removable ? 1 : -1
+                    canRemove[key] = removable
+                }
+                continue
+            }
+
+            // `firstInstances[id] = { .offset = i + 1, .merges = 0, .canRemove = canRemoveIfZero &&
+            // !child.value };` (`:630`-`:634`). `c + 1` is a node index, not a term position: see
+            // `calcFlatSumSurvives`.
+            offsets[key] = Int32(c + 1)
+            let removable: Bool
+            if nodes[c].value == 0, let builder {
+                removable = options.lengthRemovalAllowed(leaf, builder)
+            } else {
+                removable = false
+            }
+            if removable != canRemove[key] {
+                removableBuckets += removable ? 1 : -1
+                canRemove[key] = removable
+            }
+        }
+
+        let size = Int(nodes[i].childCount)
+        // `childrenToRemoveTotal` (`:644`-`:650`).
+        let removeTotal = merges + removableBuckets
+
+        // `if (!childrenToRemoveTotal) return { };` (`:653`). The node keeps its kind, its cached
+        // `Type` and whatever list 8.1 left it with.
+        if removeTotal == 0 {
+            return
+        }
+
+        // `if ((root.children.size() - childrenToRemoveFromMerges) == 1) return { WTF::move(
+        // root.children[0]) };` (`:657`). BEFORE zero-removal and without consulting `canRemove`, so
+        // an all-merging sum of removable zero lengths returns that zero rather than the fabricated
+        // one at `:664`. Child 0 is always the sole merge-survivor -- it has no earlier term to merge
+        // into -- which is why the C++ names it unconditionally and this needs no search, and its
+        // value is the accumulated one, written back above.
+        if size - merges == 1, let only = child(i, 0) {
+            replace(i, with: only)
+            return
+        }
+
+        let combined = size - removeTotal
+
+        // 8.4's over-removal guard (`:660`-`:664`): "If the new size is 0, we removed too much. Return
+        // a single 0 value of type `length` ... because the only kind of node that can be removed is
+        // of type `length`."
+        if combined == 0 {
+            setLeaf(i, NumericLeaf.canonicalLength(0))
+            return
+        }
+
+        // 8.3 with one survivor (`:667`-`:688`): "we know there is one child, we just don't know which
+        // one yet."
+        if combined == 1 {
+            var scan = nodes[i].firstChild
+            while scan != CalcFlatNode.noNode {
+                let s = Int(scan)
+                if calcFlatSumSurvives(nodes[s].numericLeaf, s, offsets, canRemove) {
+                    replace(i, with: s)
+                    return
+                }
+                scan = nodes[s].nextSibling
+            }
+            // Cannot happen given the arithmetic above. Falling through to the rebuild below leaves a
+            // one-child `Sum`, which is a valid tree, rather than the C++'s empty one.
+        }
+
+        // `:690`-`:712`: keep the non-numerics and the first instances that are not removable, in
+        // order. The node keeps its kind AND its original cached `Type` -- `copyAndSimplify` takes
+        // `getType(root)` at `:1821` for a node whose `simplify` returned `nullopt`, and `:712` is
+        // that path.
+        var previous = CalcFlatNode.noNode
+        var kept: UInt32 = 0
         cursor = nodes[i].firstChild
         while cursor != CalcFlatNode.noNode {
             let c = Int(cursor)
-            var merged = false
-            if nodes[c].isNumericLeaf {
-                var scan = nodes[i].firstChild
-                while scan != cursor {
-                    let s = Int(scan)
-                    if nodes[s].isNumericLeaf, nodes[s].mergesWith(nodes[c]) {
-                        nodes[s].value += nodes[c].value
-                        merged = true
-                        break
-                    }
-                    scan = nodes[s].nextSibling
-                }
-            }
             let next = nodes[c].nextSibling
-            if merged {
+            if calcFlatSumSurvives(nodes[c].numericLeaf, c, offsets, canRemove) {
+                if previous == CalcFlatNode.noNode {
+                    nodes[i].firstChild = cursor
+                } else {
+                    nodes[Int(previous)].nextSibling = cursor
+                }
+                previous = cursor
+                kept += 1
+            }
+            cursor = next
+        }
+        if previous == CalcFlatNode.noNode {
+            nodes[i].firstChild = CalcFlatNode.noNode
+        } else {
+            nodes[Int(previous)].nextSibling = CalcFlatNode.noNode
+        }
+        nodes[i].childCount = kept
+    }
+
+    /// `simplify(Product&)` (`+Simplification.cpp:717`-`:909`), css-values-4 steps 9.1 to 9.5.
+    private mutating func simplifyProduct(_ i: Int, _ options: CalcSimplification) {
+        guard nodes[i].childCount > 0 else {
+            return
+        }
+
+        // 9.1 (`:744`-`:750`), UNCONDITIONALLY unlike `Sum`'s, and one level: a grandchild that is
+        // itself a `Product` is kept as a factor, because `processChild` (`:734`) tests only for
+        // `Number`. Spliced-in grandchildren ARE examined by 9.2 below, which is why these are two
+        // passes here where the C++ writes them as one; the visitation order is identical.
+        spliceNestedChildren(i, .Product)
+
+        // 9.2 (`:729`-`:742`): fold every `<number>` factor into one value and unlink it. ONLY
+        // `Number` -- not a percentage, not a dimension -- which is what leaves those to 9.4.
+        var numericProduct: Double?
+        // The slot of the first `<number>` folded away, reused at `:801` below. Not a link, so `-1`
+        // rather than `noNode` is the "none yet" value.
+        var mergedNumberSlot = -1
+        var survivors: UInt32 = 0
+        var previous = CalcFlatNode.noNode
+        var cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let c = Int(cursor)
+            let next = nodes[c].nextSibling
+            if nodes[c].alternative == .Number {
+                // `numericProduct = Number { .value = childValue->value * numericProduct->value }`
+                // (`:737`) -- the new factor on the LEFT, which `multipliedNumericProduct` documents
+                // and which matters only for the sign of a NaN.
+                numericProduct = options.multipliedNumericProduct(nodes[c].value, numericProduct)
+                if mergedNumberSlot < 0 {
+                    mergedNumberSlot = c
+                }
                 if previous == CalcFlatNode.noNode {
                     nodes[i].firstChild = next
                 } else {
                     nodes[Int(previous)].nextSibling = next
                 }
-                terms -= 1
             } else {
                 previous = cursor
+                survivors += 1
             }
             cursor = next
         }
+        nodes[i].childCount = survivors
 
-        if terms == 1, let only = child(i, 0), nodes[only].isNumericLeaf {
-            // 8.3: a sum of one term IS that term.
-            replace(i, with: only)
+        if let numericProduct {
+            // "If `numericProduct` has a value and `newChildren` is empty, that means all the children
+            // were numbers and the product can be returned directly." (`:752`-`:755`)
+            if survivors == 0 {
+                setLeaf(i, NumericLeaf.number(numericProduct))
+                return
+            }
+
+            // 9.3 (`:757`-`:798`). The arity test is on the survivor list BEFORE the merged number is
+            // appended, which is what `:761`'s note means by "the last child is a singular `number`
+            // child".
+            if survivors == 1, let only = child(i, 0), distributeNumber(i, only, numericProduct) {
+                return
+            }
+
+            // "If there was more than one child or no replacement was found, append the product from
+            // step 9.2 into the newChildren array." (`:801`) -- at the END, so the final list is a
+            // reordering of the input rather than a copy of it.
+            //
+            // THE APPENDED NODE IS A SLOT THIS PASS JUST FREED, and that is what keeps the buffer
+            // exactly the size `walk` counted: reaching here means at least one `<number>` factor was
+            // unlinked, its slot is unreachable from any list, and it is already a `Number` carrying
+            // `Number`'s unit -- so only the value and the links need writing. There is no growable
+            // buffer here and no allocation to reach for; a heap buffer on this path was measured at
+            // 617 retired instructions, more than the whole pass.
+            if mergedNumberSlot >= 0 {
+                nodes[mergedNumberSlot].value = numericProduct
+                nodes[mergedNumberSlot].firstChild = CalcFlatNode.noNode
+                nodes[mergedNumberSlot].childCount = 0
+                nodes[mergedNumberSlot].nextSibling = CalcFlatNode.noNode
+                if previous == CalcFlatNode.noNode {
+                    nodes[i].firstChild = UInt32(mergedNumberSlot)
+                } else {
+                    nodes[Int(previous)].nextSibling = UInt32(mergedNumberSlot)
+                }
+                survivors += 1
+                nodes[i].childCount = survivors
+            }
+        }
+
+        // 9.4 (`:806`-`:905`). `success` starts FALSE and is overwritten by each iteration, so an
+        // empty list falls through to 9.5 rather than folding to `1`. Unreachable here -- a zero-
+        // survivor product either returned above or gained the merged number -- and reproduced anyway.
+        var productValue = 1.0
+        var productType = CalcType()
+        var success = false
+        var factor = nodes[i].firstChild
+        while factor != CalcFlatNode.noNode {
+            success = multiplyFactor(Int(factor), &productValue, &productType, options)
+            if !success {
+                break
+            }
+            factor = nodes[Int(factor)].nextSibling
+        }
+
+        if success, let resolvedCategory = productType.calculationCategory().value,
+           let folded = options.numericLeafForCategory(resolvedCategory, productValue) {
+            // `:879`-`:904`'s eleven-case category table, reached through the two-pass port's own
+            // `numericLeafForCategory` so each category's canonical unit and percent hint are written
+            // down once in this file.
+            setLeaf(i, folded)
             return
         }
-        nodes[i].childCount = terms
+
+        // 9.5. Return root.
     }
 
-    /// The numeric half of step 9: fold the `Number` factors together, and apply the result to a
-    /// single surviving dimension if that is all that is left.
-    private mutating func simplifyProduct(_ i: Int) {
-        guard nodes[i].childCount > 0 else { return }
+    /// Step 9.3's three arms (`+Simplification.cpp:763`-`:798`) for the single surviving factor `s`.
+    ///
+    /// True means node `i` has been replaced; false is the C++'s `return { }` out of an arm, after
+    /// which the caller appends the merged `<number>` and falls into 9.4.
+    private mutating func distributeNumber(_ i: Int, _ s: Int, _ product: Double) -> Bool {
+        if nodes[s].isNumericLeaf {
+            // `makeChildWithValueBasedOn(numeric.value * numericProduct->value, numeric)`
+            // (`:765`-`:767`): the factor's own alternative, unit and percent hint with a scaled
+            // value, which is what promoting the node and then writing the value is. It cannot be a
+            // `Number` -- 9.2 folded every one of those away -- so this is the `Percentage`,
+            // `CanonicalDimension` and `NonCanonicalDimension` overloads.
+            let scaled = nodes[s].value * product
+            replace(i, with: s)
+            nodes[i].value = scaled
+            return true
+        }
 
-        var scale = 1.0
-        var numbers = 0
-        var nonNumbers = 0
-        var lastNonNumber = -1
-        var first = -1
-        var cursor = nodes[i].firstChild
-        while cursor != CalcFlatNode.noNode {
-            let c = Int(cursor)
-            if first < 0 { first = c }
-            if nodes[c].alternative == .Number {
-                scale *= nodes[c].value
-                numbers += 1
-            } else {
-                nonNumbers += 1
-                lastNonNumber = c
+        if nodes[s].alternative == .Sum {
+            // `[&](IndirectNode<Sum>& sum)` (`:768`-`:780`): all children numeric, then EVERY child's
+            // value multiplied in place and the same `Sum` node returned -- keeping its cached `Type`,
+            // which `replace` carries over.
+            guard allChildrenAreNumericLeaves(s) else {
+                return false
             }
-            cursor = nodes[c].nextSibling
+            var cursor = nodes[s].firstChild
+            while cursor != CalcFlatNode.noNode {
+                nodes[Int(cursor)].value *= product
+                cursor = nodes[Int(cursor)].nextSibling
+            }
+            replace(i, with: s)
+            return true
         }
-        guard numbers > 0, first >= 0 else { return }
 
-        if nonNumbers == 0 {
-            // Every factor was a number.
-            replace(i, with: first)
-            nodes[i].value = scale
-            return
+        if nodes[s].alternative == .Invert {
+            // `[&](IndirectNode<Invert>& invert)` (`:781`-`:790`), AND IT IS WRONG: the C++ returns
+            // `makeChildWithValueBasedOn(child.value * numericProduct->value, child)` -- the inner
+            // operand's value MULTIPLIED by the number where dividing is what an `Invert` means, and
+            // carrying the inner operand's own unit rather than its inverse. `calc(2 / 50%)` comes
+            // back as `calc(100%)`.
+            //
+            // Reproduced exactly, not corrected. It is observable behaviour of the shipping C++ that
+            // the differential compares against, so "fixing" it here would be recorded as a Swift
+            // divergence; the two-pass port's `distributeNumber` reproduces the same arm and says so
+            // in the same words. Reachable only when the operand is a `Percentage` or a dimension,
+            // because 7.1 collapsed `Invert(Number)` before this node's turn came round.
+            guard nodes[s].childCount == 1, let inner = child(s, 0), nodes[inner].isNumericLeaf else {
+                // The inner `[](const auto&)` arm (`:786`-`:788`).
+                return false
+            }
+            let scaled = nodes[inner].value * product
+            replace(i, with: inner)
+            nodes[i].value = scaled
+            return true
         }
-        if nonNumbers == 1, nodes[lastNonNumber].isNumericLeaf {
-            // `2 * 3px` is `6px`. Only valid because the surviving factor is a LEAF: scaling an
-            // operator node would need its whole subtree rewritten, which step 9.3 does and this
-            // prototype does not.
-            replace(i, with: lastNonNumber)
-            nodes[i].value *= scale
-            return
+
+        // `[](auto&) -> std::optional<Child> { return { }; }` (`:791`-`:793`).
+        return false
+    }
+
+    /// One iteration of step 9.4's factor loop (`+Simplification.cpp:815`-`:878`): multiply this
+    /// factor's type into `productType` and its value into `productValue`.
+    ///
+    /// The same body as the two-pass port's `multiplyProductFactor`, over a flat node instead of a
+    /// `ProductFactor`, and calling the same `numericLeafType` -- so the `getType(const Percentage&)`
+    /// / `getType(const CanonicalDimension&)` split, and the reason a `NonCanonicalDimension` answers
+    /// `nil` rather than `determineType(unit)`, are stated once in this file.
+    ///
+    /// `Type::multiply` and `Type::invert` are the real C++ functions, called rather than transcribed:
+    /// pure arithmetic over `Type`'s eight bytes. The two calls are in the C++'s order.
+    private func multiplyFactor(
+        _ c: Int,
+        _ productValue: inout Double,
+        _ productType: inout CalcType,
+        _ options: CalcSimplification
+    ) -> Bool {
+        if let leaf = nodes[c].numericLeaf {
+            switch leaf.kind {
+            case .number:
+                // "`<number>` is the identity type, so multiplying by it has no effect." (`:818`)
+                productValue *= leaf.value
+                return true
+
+            case .percentage, .canonicalDimension:
+                // `Type::multiply(productResult.type, getType(x))` (`:823`, `:832`).
+                guard let factorType = options.numericLeafType(leaf),
+                      let multiplied = CalcType.multiply(productType, factorType).value else {
+                    return false
+                }
+                productType = multiplied
+                productValue *= leaf.value
+                return true
+
+            case .nonCanonicalDimension:
+                // Not an arm of the C++ switch, so it reaches `[](const auto&) -> bool { return
+                // false; }` (`:872`-`:874`). Unreachable through `CalcFlatCoverage.mask`, which
+                // excludes the alternative outright; kept because the benchmark probes are not masked.
+                return false
+            }
         }
-        // Mixed, with an operator factor: not ported yet, left alone.
+
+        // `[&](IndirectNode<Invert>& invertChild)` (`:840`-`:871`). Every other surviving node -- a
+        // `Sum`, a `Min`, a `Product` the splice could not take -- is the outer `[](const auto&)` arm
+        // (`:872`), and an `Invert` whose operand is not `Numeric` is the inner one (`:867`).
+        guard nodes[c].alternative == .Invert, nodes[c].childCount == 1, let a = child(c, 0),
+              let inner = nodes[a].numericLeaf else {
+            return false
+        }
+        switch inner.kind {
+        case .number:
+            // "`<number>` is the identity type, so multiplying / inverting by it has no effect."
+            // (`:843`) Unreachable, since 7.1 collapsed `Invert(Number)` already, and reproduced.
+            productValue /= inner.value
+            return true
+
+        case .percentage, .canonicalDimension:
+            // `Type::multiply(productResult.type, Type::invert(getType(x)))` (`:848`-`:854`,
+            // `:858`-`:864`), and the value is DIVIDED.
+            guard let factorType = options.numericLeafType(inner) else {
+                return false
+            }
+            let invertedType = CalcType.invert(factorType)
+            guard let multiplied = CalcType.multiply(productType, invertedType).value else {
+                return false
+            }
+            productType = multiplied
+            productValue /= inner.value
+            return true
+
+        case .nonCanonicalDimension:
+            // The inner `[](const auto&)` arm (`:867`-`:869`).
+            return false
+        }
     }
 
     /// Materialise the subtree rooted at `i` as a real `CSSCalc::Child`, on the builder's operand
@@ -5249,7 +5878,16 @@ fileprivate extension CalcFlatTree {
         }
         // False for anything outside `buildOperation`'s set, which for now is this prototype's own
         // coverage. Declining rather than building something plausible.
-        return builder.buildOperation(node.alternative, pushed)
+        // The node's OWN type, not a fresh `toType` of the operands, and this is the overload that
+        // exists for it. `copyAndSimplify` ends at `makeChild(WTF::move(simplified), getType(root))`
+        // (`+Simplification.cpp:1821`) -- the original node's type -- so recomputing here diverges
+        // from the C++ for any surviving operator whose children changed shape. Measured, not
+        // supposed: `calc((2 / 3px) * 4px)` survives as `Product{6px, 4px}` on both arms and
+        // SERIALIZES identically, so only simplifycheck's structural oracle catches it; the C++ keeps
+        // the parse-time type where a fresh `toType` computes px^2. That is why `flatten` pays
+        // `getType` per operator node, and why it skips it for the seven leaf alternatives, whose
+        // type `makeChild` discards.
+        return builder.buildOperation(node.alternative, pushed, node.type)
     }
 }
 
@@ -5269,15 +5907,30 @@ fileprivate func calcFlatNodeCount(_ root: borrowing WebCore.CSSCalc.Child) -> U
     return total
 }
 
+/// The `SimplificationOptions` the two flat probes run under.
+///
+/// All three fields at their C++ default, which is what a probe wants: the fixtures are timed for the
+/// shape of the pass, and an options-dependent arm would make the number depend on a value the
+/// harness does not pass. `allowZeroValueLengthRemovalFromSum` false also means the one arm that
+/// would reach `isLengthUnit` is never taken, which is why the probes can hand `simplify` no builder.
+private var calcFlatProbeOptions: CalcSimplification {
+    return CalcSimplification(
+        percentageResolveToDimension: false,
+        allowZeroValueLengthRemovalFromSum: false,
+        category: 0
+    )
+}
+
 /// Convert and then FOLD, `iterations` times, returning the bit pattern of the resulting root's
 /// value so the caller can check it against the C++ arm rather than trust the timing.
 @_expose(Cxx)
 public func cssCalcFlatSimplifyProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ iterations: UInt32) -> UInt64 {
     var bits: UInt64 = 0
     let n = calcFlatNodeCount(root)
+    let options = calcFlatProbeOptions
     for _ in 0..<iterations {
         bits = withCalcFlatTree(root, n) { tree in
-            tree.simplify()
+            tree.simplify(options, nil)
             return tree.nodes[0].value.bitPattern
         }
     }
@@ -5322,10 +5975,11 @@ public func cssCalcFlatEmitProbeSwift(
 ) -> UInt32 {
     var emitted: UInt32 = 0
     let n = calcFlatNodeCount(root)
+    let options = calcFlatProbeOptions
     for _ in 0..<iterations {
         builder.clearOperands()
         if withCalcFlatTree(root, n, { tree -> Bool in
-            tree.simplify()
+            tree.simplify(options, builder)
             return tree.emit(0, into: &builder)
         }) {
             emitted &+= 1

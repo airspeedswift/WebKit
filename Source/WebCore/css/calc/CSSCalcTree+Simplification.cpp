@@ -2178,24 +2178,30 @@ void CSSCalcSwiftBuilder::clearOperands()
     m_operands->value.shrink(0);
 }
 
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount)
+// The body both `buildOperation` overloads share. `carriedType` is the type to give the new node, or
+// `nullptr` to compute a fresh `toType` from the operands.
+//
+// A pointer, which is fine because nothing here is Swift-visible: the two public overloads are what
+// Swift calls, and a `const Type*` parameter on one of those would import as `UnsafePointer` and
+// cost an `unsafe` marker at every call site.
+static bool buildOperationOnStack(Vector<Child>& stack, CSSCalcSwiftAlternative alternative, uint32_t childCount, const Type* carriedType)
 {
-    auto& stack = m_operands->value;
     if (!childCount || childCount > stack.size())
         return false;
 
     size_t base = stack.size() - childCount;
 
-    // A fresh `toType`, because there is no original node to take one from. `toType` returning
-    // `std::nullopt` is not a boundary defect: for the `clamp()` rewrite it is the same
-    // `std::nullopt` `convertToMin` returns at :1021, i.e. the C++ would not have built this node
-    // either, so false means "decline", not "impossible".
     auto finish = [&](auto&& op) -> bool {
         // The type is computed into a LOCAL before the move, never inline beside it: argument
         // evaluation order is unspecified, so `makeChild(WTF::move(op), toType(op))` can read a
         // moved-from node whose `UniqueRef` is already null. That manifests as an OOM kill with no
         // output at all, not as anything legible.
-        auto type = toType(op);
+        //
+        // A fresh `toType` only when the caller has no type to carry. `toType` returning
+        // `std::nullopt` is not a boundary defect: for the `clamp()` rewrite it is the same
+        // `std::nullopt` `convertToMin` returns at :1021, i.e. the C++ would not have built this node
+        // either, so false means "decline", not "impossible".
+        std::optional<Type> type = carriedType ? std::optional<Type> { *carriedType } : toType(op);
         if (!type)
             return false;
         stack.shrink(base);
@@ -2237,6 +2243,16 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         // than an input it could serve, so the stack is left exactly as it was found.
         return false;
     }
+}
+
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount)
+{
+    return buildOperationOnStack(m_operands->value, alternative, childCount, nullptr);
+}
+
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type type)
+{
+    return buildOperationOnStack(m_operands->value, alternative, childCount, &type);
 }
 
 // The two shapes every `CSSCalcSwiftNumericResult` answer takes, written once instead of

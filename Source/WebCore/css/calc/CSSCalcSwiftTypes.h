@@ -47,6 +47,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <WebCore/CSSCalcType.h>
 #include <WebCore/PlatformExportMacros.h>
 #include <wtf/SwiftBridging.h>
 
@@ -852,6 +853,35 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // set is a case each, and it is why `Children` never has to reach Swift: this is the only
     // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
     WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount);
+
+    // The same, for a node that STATES its own type instead of having one derived.
+    //
+    // The C++ arm does not recompute a type when it rebuilds a node whose kind did not change:
+    // `copyAndSimplify` ends at `makeChild(WTF::move(simplified), getType(root))`
+    // (CSSCalcTree+Simplification.cpp:1821), the ORIGINAL node's type, and `rebuildFrom` above
+    // matches it with `getType(alternative)`. The overload without a type therefore does NOT
+    // reproduce the C++ for a surviving operator, and that is not a theoretical gap -- it is a
+    // measured differential failure. `calc((2 / 3px) * 4px)` simplifies to a surviving
+    // `Product{6px, 4px}` on both arms, which SERIALIZES identically on both, so only the structural
+    // oracle sees it: the C++ keeps the parse-time type while a fresh `toType` computes px^2. 57
+    // cases in simplifycheck's own corpus, all of that one shape.
+    //
+    // So a caller holding the node's real type passes it, and the overload above is for the one
+    // caller that genuinely has none: `clamp(none, VAL, MAX)` rewriting to `min(VAL, MAX)`
+    // (`:1012`-`:1038`) invents a node of a kind that was not in the input, so there is nothing to
+    // take a type from and a fresh `toType` is the right answer -- which is also why that one can
+    // fail for a reason that is not a contract violation.
+    //
+    // Two overloads rather than an optional parameter, because an absent type and a
+    // default-constructed one are different things and `Type()` is a legitimate value (a
+    // dimensionless `<number>`). This also removes a `toType` per emitted operator node.
+    //
+    // `Type` is 8 bytes of `int8_t` exponents plus a percent hint (CSSCalcType.h, `static_assert
+    // (sizeof(Type) == 8)`), so it crosses in a register. It costs this header one include, of a
+    // file whose own includes are `<array>`, `<optional>` and `<wtf/Forward.h>` -- so the
+    // self-containment the note at the top of this file protects is intact, and the Swift step
+    // already imported `CSSCalcType.h` through `CSSCalcTree.h` regardless.
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type);
 
     // Drop every operand.
     //
