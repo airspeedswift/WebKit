@@ -1087,6 +1087,42 @@ private struct CalcSimplification {
 // One function per C++ `simplify` overload, in `CSSCalcTree+Simplification.cpp`'s own order, so a
 // reader can put the two side by side.
 
+/// What `pushNumericChildren` does to each numeric child before pushing it.
+///
+/// A closed enum rather than a closure, because `pushNumericChildren` holds the builder `inout` and
+/// a closure that also mutated it would be an overlapping access -- see `hasOnlyNumericChildren`.
+/// The two cases are deliberately not one `* factor`: `-x` and `x * -1.0` are free to differ in the
+/// sign bit of a NaN, which is exactly what `Fold.scaledSumChildren` records.
+private enum NumericChildTransform {
+    /// Rules 6.3/6.4's unary minus (`+Simplification.cpp:934`, `:949`: `child.value = -child.value`).
+    case negated
+    /// Step 9.3's `*=` (`:773`), distributing the merged `<number>` over a `Sum`'s children.
+    case scaled(Double)
+
+    @inline(always)
+    func applied(to leaf: NumericLeaf) -> NumericLeaf {
+        switch self {
+        case .negated:
+            return leaf.withValue(-leaf.value)
+        case .scaled(let factor):
+            return leaf.withValue(leaf.value * factor)
+        }
+    }
+}
+
+/// What `pushNumericChildren` did.
+private enum NumericChildrenPush {
+    /// Every final child was numeric and this many operands were pushed.
+    case pushed(UInt32)
+    /// At least one final child was not numeric -- `hasOnlyNumericChildren` answering false. Both
+    /// callers reach this only if the fold pass and the rewrite pass disagree, and report it as a
+    /// decline rather than asserting.
+    case notAllNumeric
+    /// `pushLeaf` refused a leaf this function synthesised: a contract violation with no input
+    /// alternative to blame.
+    case pushRefused
+}
+
 private extension CalcSimplification {
 
     /// `simplify(Invert&)` (`+Simplification.cpp:962`-`:979`). Rule 7.2 (`Invert(Invert(x))` -> `x`)
@@ -1130,7 +1166,8 @@ private extension CalcSimplification {
     /// `simplify(Negate&)` (`+Simplification.cpp:910`-`:960`). Rule 6.1 is a unary minus, not `0 - x`
     /// or `* -1.0`: both alternatives can disagree with `-x` on the sign bit of a zero or NaN.
     /// Rules 6.3/6.4 mutate a `Sum`/`Product` child's children in place in the C++; since Swift has
-    /// no moved-from state, `numericChildren` decides every child is numeric and `rewriteNegatedChildren`
+    /// no moved-from state, `hasOnlyNumericChildren` decides every child is numeric and
+    /// `rewriteNegatedChildren`
     /// re-derives the list and pushes one negated leaf per child. The two declines below are named
     /// gaps, not catch-alls.
     @inline(always)
@@ -1152,7 +1189,7 @@ private extension CalcSimplification {
             }
             if childAlternative == .Sum || childAlternative == .Product {
                 // 6.3 / 6.4 on an arity-preserving child.
-                if numericChildren(node[0], a, builder) != nil {
+                if hasOnlyNumericChildren(node[0], a, builder) {
                     return .negatedChildren
                 }
             }
@@ -1175,7 +1212,7 @@ private extension CalcSimplification {
             }
             if childAlternative == .Sum {
                 // 6.3 over a `Sum` whose term list step 8.1 spliced or whose terms merged.
-                if numericChildren(node[0], a, builder) != nil {
+                if hasOnlyNumericChildren(node[0], a, builder) {
                     return .negatedChildren
                 }
             }
@@ -1203,71 +1240,146 @@ private extension CalcSimplification {
     }
 
     /// `std::ranges::all_of(a->children, isNumeric)` (`+Simplification.cpp:923`, `:938`), over the
-    /// child's post-simplification list (not the parser's original), as leaves. `nil` means at least
-    /// one child is not numeric; every survivor is a leaf whenever this returns non-`nil`.
-    func numericChildren(
+    /// child's post-simplification list (not the parser's original). False means at least one child is
+    /// not numeric.
+    ///
+    /// The predicate half of what used to be a single `numericChildren` returning `[NumericLeaf]?`.
+    /// Three of that function's five callers only ever compared its result against `nil`, so a heap
+    /// buffer was built and freed per node to answer a Boolean; the other two walked the list once,
+    /// pushed each leaf and dropped it, which is `pushNumericChildren` below. Neither buffer exists
+    /// now.
+    ///
+    /// The two are separate functions rather than one traversal parameterised over what to do per
+    /// leaf, because they differ in how they hold the builder and Swift cannot be generic over that:
+    /// this one runs in the fold pass, where the builder is `borrowing` at every frame, while
+    /// `pushNumericChildren` runs in the rewrite pass and needs it `inout` for `pushLeaf`. A shared
+    /// traversal taking a closure does not work either -- `sumMergePlan` records the first half of the
+    /// reason (a closure cannot capture a `borrowing` parameter of copyable type, which the builder
+    /// is), and passing the builder as a borrowed argument while a closure captures it mutably is an
+    /// overlapping access.
+    func hasOnlyNumericChildren(
         _ child: borrowing WebCore.CSSCalc.Child,
         _ folded: Fold,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
-    ) -> [NumericLeaf]? {
+    ) -> Bool {
         switch folded {
         case .unchanged(let alternative):
             guard alternative == .Sum || alternative == .Product else {
-                return nil
+                return false
             }
             // `.unchanged` is the arity-preserving case by definition -- see `Fold.mergedChildren` on
             // why the two are kept apart -- so the final list IS the node's own children in tree
             // order.
             let info = WebCore.CSSCalc.swiftNodeInfo(child)
-            var leaves: [NumericLeaf] = []
-            // `Int(clamping:)` for the capacity HINT, as `foldChildren` explains: saturating cannot be
-            // wrong here, because `append` grows regardless.
-            leaves.reserveCapacity(Int(clamping: info.childCount))
             var index: UInt32 = 0
             while index < info.childCount {
-                guard case .leaf(let leaf) = fold(child[Int(index)], builder) else {
-                    return nil
+                guard case .leaf = fold(child[Int(index)], builder) else {
+                    return false
                 }
-                leaves.append(leaf)
                 index += 1
             }
-            return leaves
+            return true
 
         case .mergedChildren(let alternative):
             guard alternative == .Sum else {
                 // `.Min`/`.Max` are neither a `Sum` nor a `Product`, and `.Product` never reaches here
                 // -- `foldNegate` declines it, because this function has no way to say "cannot
                 // derive" as distinct from "not numeric".
-                return nil
+                return false
             }
             let info = WebCore.CSSCalc.swiftNodeInfo(child)
             var origin: UInt32 = 0
             var terms = collectSumTerms(child, info.childCount, &origin, builder)
             if terms.declined != nil {
                 // Unreachable: this same walk produced `.mergedChildren(.Sum)` without declining.
-                // Checked rather than asserted, and answered with `nil` so the contract above stays
+                // Checked rather than asserted, and answered `false` so the contract above stays
                 // single-valued -- the caller then rebuilds the `Negate` and the child's own `rewrite`
                 // declines the tree, which is a fallback to the C++ arm either way.
-                return nil
+                return false
             }
             // `sumMergePlan` merges into `terms.folds`, so a first instance already carries its
             // accumulated value here; reading the term back is reading the merged result.
             let plan = sumMergePlan(&terms.folds, builder)
-            var leaves: [NumericLeaf] = []
-            leaves.reserveCapacity(terms.folds.count)
             for k in 0..<terms.folds.count where plan.survives(k, terms.folds.span) {
-                guard case .leaf(let leaf) = terms.folds[k] else {
-                    return nil
+                guard case .leaf = terms.folds[k] else {
+                    return false
                 }
-                leaves.append(leaf)
             }
-            return leaves
+            return true
 
         case .leaf, .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild, .rebuiltMinMax,
              .negatedChildren, .scaledSumChildren, .declined:
             // None of these left a `Sum`/`Product` in place, and each is refused by `foldNegate`
             // first. Enumerated rather than defaulted so a new `Fold` case is a compile error here too.
-            return nil
+            return false
+        }
+    }
+
+    /// The collecting half: every final numeric child of `child`, transformed and pushed as an
+    /// operand, in the same order `hasOnlyNumericChildren` visits them.
+    ///
+    /// Pushes as it walks rather than materialising a `[NumericLeaf]` for the caller to walk and drop
+    /// -- one heap buffer per rewritten `Negate` or distributed `Product`, and one
+    /// `swift_bridgeObjectRelease` on the hand-off. The interleaving is safe because nothing the fold
+    /// pass reads from the builder (`resolveSymbol`, `resolveRelativeLength`,
+    /// `resolveStyleCoupledValue`, `isLengthUnit`) can observe the operand stack, and because a push
+    /// that happens before a later `.notAllNumeric` is discarded whole: both callers answer that with
+    /// `.declined`, and a declined tree throws the builder away and runs the C++ arm.
+    ///
+    /// `.notAllNumeric` is `hasOnlyNumericChildren` answering false; both callers report it as
+    /// unreachable, for the reason each states.
+    func pushNumericChildren(
+        _ child: borrowing WebCore.CSSCalc.Child,
+        _ folded: Fold,
+        _ transform: NumericChildTransform,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> NumericChildrenPush {
+        switch folded {
+        case .unchanged(let alternative):
+            guard alternative == .Sum || alternative == .Product else {
+                return .notAllNumeric
+            }
+            let info = WebCore.CSSCalc.swiftNodeInfo(child)
+            var pushedLeaves: UInt32 = 0
+            var index: UInt32 = 0
+            while index < info.childCount {
+                guard case .leaf(let leaf) = fold(child[Int(index)], builder) else {
+                    return .notAllNumeric
+                }
+                guard builder.pushLeaf(transform.applied(to: leaf).boundaryLeaf) else {
+                    return .pushRefused
+                }
+                pushedLeaves += 1
+                index += 1
+            }
+            return .pushed(pushedLeaves)
+
+        case .mergedChildren(let alternative):
+            guard alternative == .Sum else {
+                return .notAllNumeric
+            }
+            let info = WebCore.CSSCalc.swiftNodeInfo(child)
+            var origin: UInt32 = 0
+            var terms = collectSumTerms(child, info.childCount, &origin, builder)
+            if terms.declined != nil {
+                return .notAllNumeric
+            }
+            let plan = sumMergePlan(&terms.folds, builder)
+            var pushedLeaves: UInt32 = 0
+            for k in 0..<terms.folds.count where plan.survives(k, terms.folds.span) {
+                guard case .leaf(let leaf) = terms.folds[k] else {
+                    return .notAllNumeric
+                }
+                guard builder.pushLeaf(transform.applied(to: leaf).boundaryLeaf) else {
+                    return .pushRefused
+                }
+                pushedLeaves += 1
+            }
+            return .pushed(pushedLeaves)
+
+        case .leaf, .replacedByTerm, .replacedBySumTerm, .replacedByGrandchild, .rebuiltMinMax,
+             .negatedChildren, .scaledSumChildren, .declined:
+            return .notAllNumeric
         }
     }
 
@@ -1323,31 +1435,36 @@ private extension CalcSimplification {
     ) -> Fold {
         // 9.1 and 9.2, merged exactly as the C++ merges them.
         var origin: UInt32 = 0
-        let factors = productFactors(node, info.childCount, &origin, builder)
+        var factors = productFactors(node, info.childCount, &origin, builder)
         if let declined = factors.declined {
             return declined
         }
 
-        var finalFactors = factors.survivors
+        // Read out before the list is appended to, because 9.5 below asks about them after: the list
+        // is now mutated in place rather than copied into a `finalFactors` of its own, which is one
+        // fewer heap buffer per `Product` node -- and with `Array` that copy was a real duplication,
+        // not a shared reference, from the moment `append` fired below.
+        let numericProduct = factors.numericProduct
+        let spliced = factors.spliced
 
-        if let numericProduct = factors.numericProduct {
+        if let numericProduct {
             // "If `numericProduct` has a value and `newChildren` is empty, that means all the
             // children were numbers and the product can be returned directly." (`:750`)
-            if finalFactors.isEmpty {
+            if factors.survivors.isEmpty {
                 return .leaf(NumericLeaf.number(numericProduct))
             }
 
             // 9.3, extended by the C++ itself to `Numeric` and `Invert` factors as well as `Sum`
             // ones. The arity test is on the list BEFORE the merged number is appended, which is
             // what `:761`'s note means by "the last child is a singular `number` child".
-            if finalFactors.count == 1, let replacement = distributeNumber(finalFactors[0], numericProduct) {
+            if factors.survivors.count == 1, let replacement = distributeNumber(factors.survivors[0], numericProduct) {
                 return replacement
             }
 
             // "If there was more than one child or no replacement was found, append the product from
             // step 9.2 into the newChildren array." (`:798`) -- at the END, which is what makes the
             // list a reordering of the input rather than a copy of it.
-            finalFactors.append(ProductFactor(
+            factors.survivors.append(ProductFactor(
                 fold: .leaf(NumericLeaf.number(numericProduct)),
                 origin: Self.mergedNumberOrigin,
                 invertedLeaf: nil,
@@ -1361,8 +1478,9 @@ private extension CalcSimplification {
         var productValue = 1.0
         var productType = CalcType()
         var success = false
-        for factor in finalFactors {
-            success = multiplyProductFactor(factor, &productValue, &productType)
+        let finalFactors = factors.survivors.span
+        for factorIndex in finalFactors.indices {
+            success = multiplyProductFactor(finalFactors[factorIndex], &productValue, &productType)
             if !success {
                 break
             }
@@ -1383,7 +1501,7 @@ private extension CalcSimplification {
         }
 
         // 9.5. Return root.
-        if factors.numericProduct == nil, !factors.spliced {
+        if numericProduct == nil, !spliced {
             return .unchanged(.Product)
         }
         return .mergedChildren(.Product)
@@ -2433,9 +2551,10 @@ private extension CalcSimplification {
     /// escapes -- which is that facility's exact shape. No `unsafe`, no refcount, and no `malloc` on
     /// any tree small enough to fit the stack, which is the nearest this gets to the C++'s zero.
     ///
-    /// The remaining heap array is `SumTermList`'s, which is genuinely growable (a spliced term list is
-    /// bounded by subtree size, not by `childCount`) and is what the C++ spends a conditional
-    /// `Vector` on too.
+    /// The remaining heap buffers are `SumTermList`'s and `ProductFactorList`'s, which are genuinely
+    /// growable (a spliced term or factor list is bounded by subtree size, not by `childCount`) and
+    /// are what the C++ spends a conditional `Vector` on too. Both are `UniqueArray`, so they are
+    /// allocations without a refcount rather than `Array`s with one.
     @inline(always)
     func withFoldedChildren<R: ~Copyable>(
         _ node: borrowing WebCore.CSSCalc.Child,
@@ -3021,11 +3140,19 @@ private extension CalcSimplification {
     /// One `Sum`'s flattened term list, as values -- no node handle, since a borrowed `Child` is
     /// `~Escapable` and no Swift container accepts one. Everything here is `Copyable`/`Escapable`, so
     /// the list can be freely returned and walked.
-    struct SumTermList {
+    struct SumTermList: ~Copyable {
         /// One entry per term of the flattened list, in order.
-        var folds: [Fold] = []
+        ///
+        /// `UniqueArray` (SE-0527), not `Array`, and the reason this type is `~Copyable`. Both buffers
+        /// are scratch owned by exactly one `collectSumTerms` frame and are never shared, so
+        /// copy-on-write buys nothing and costs a uniqueness check on every `append` plus a
+        /// retain/release pair each time the list is returned -- and this list is built three times
+        /// per `Sum` node (`foldSum`, `hasOnlyNumericChildren`/`pushNumericChildren`, and
+        /// `rewriteMergedSum`), once more per nested `Sum` spliced in. A `UniqueArray`'s buffer is not
+        /// a refcounted object at all, so none of that appears.
+        var folds = UniqueArray<Fold>()
         /// The tree-position ordinal each term came from. See `Fold.replacedBySumTerm`.
-        var origins: [UInt32] = []
+        var origins = UniqueArray<UInt32>()
         /// The first child that declined, as the `Fold` to return -- same shape as `declinedChild`.
         var declined: Fold?
     }
@@ -3142,7 +3269,7 @@ private extension CalcSimplification {
     /// Accumulation runs in term index order because `+` is not associative:
     /// `calc(1e300px + 1px + -1e300px)` depends on it.
     func sumMergePlan(
-        _ folded: inout [Fold],
+        _ folded: inout UniqueArray<Fold>,
         _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> SumMergePlan {
         var plan = SumMergePlan()
@@ -3228,10 +3355,16 @@ private extension CalcSimplification {
 
     /// The result of steps 9.1 and 9.2 over one `Product`: its factors flattened through every
     /// nested `Product`, with every `<number>` among them folded into a single value.
-    struct ProductFactorList {
+    struct ProductFactorList: ~Copyable {
         /// The non-`<number>` factors, in order. This is the C++'s `newChildren` BEFORE `:798`
         /// appends the merged number, which is the list 9.3's arity test is about.
-        var survivors: [ProductFactor] = []
+        ///
+        /// `UniqueArray`, and the reason this type is `~Copyable`: same argument as `SumTermList`'s.
+        /// It also removes a second buffer that used to be built per `Product` -- `foldProduct` took
+        /// `var finalFactors = factors.survivors` and appended to it, which is a copy-on-write buffer
+        /// duplicated in full the moment step 9.2 had a number to append. `foldProduct` now appends in
+        /// place, which a uniquely-owned buffer makes safe by construction.
+        var survivors = UniqueArray<ProductFactor>()
         /// `std::optional<Number> numericProduct` (`:730`): the product of every `<number>` factor,
         /// accumulated in walk order. `nil` when there were none.
         var numericProduct: Double?
@@ -3283,7 +3416,13 @@ private extension CalcSimplification {
                     out.declined = declined
                     return out
                 }
-                out.survivors.append(contentsOf: spliced.survivors)
+                // Appended one at a time through the child's `Span`: `UniqueArray` is noncopyable, so
+                // there is no `append(contentsOf:)` over another one of itself to reach for, and this
+                // is the same element-wise copy that spelling would have done.
+                let splicedSurvivors = spliced.survivors.span
+                for k in splicedSurvivors.indices {
+                    out.survivors.append(splicedSurvivors[k])
+                }
                 if let childProduct = spliced.numericProduct {
                     out.numericProduct = multipliedNumericProduct(childProduct, out.numericProduct)
                 }
@@ -3346,12 +3485,12 @@ private extension CalcSimplification {
             }
             if alternative == .Sum {
                 // `std::ranges::all_of(sum->children, isNumeric)` (`:769`) over the child's final,
-                // post-splice list -- see `numericChildren`.
+                // post-splice list -- see `hasOnlyNumericChildren`.
                 return ProductFactor(
                     fold: folded,
                     origin: origin,
                     invertedLeaf: nil,
-                    numericSum: numericChildren(child, folded, builder) != nil
+                    numericSum: hasOnlyNumericChildren(child, folded, builder)
                 )
             }
             // Any other surviving node: opaque to 9.3 and 9.4, which both have a catch-all arm for it.
@@ -3464,7 +3603,7 @@ private extension CalcSimplification {
     /// The `.negatedChildren` half of `rewrite`: `Negate`'s rules 6.3 and 6.4. `rebuildFrom` runs on
     /// the child, not the `Negate` (`+Simplification.cpp:939`, `:954`), so the `Negate` disappears and
     /// contributes only the sign. Every child is pushed as a leaf, never re-rewritten, since
-    /// `numericChildren` guarantees every final child is numeric.
+    /// `hasOnlyNumericChildren` guarantees every final child is numeric.
     ///
     /// The unary minus (`:934`, `:949`: `child.value = -child.value`) flips a NaN's sign bit rather
     /// than propagating it -- not the same as `* -1.0`; see `Fold.scaledSumChildren`.
@@ -3472,28 +3611,29 @@ private extension CalcSimplification {
         _ node: borrowing WebCore.CSSCalc.Child,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        guard let leaves = numericChildren(node[0], fold(node[0], builder), builder) else {
-            // Unreachable: `fold` returned `.negatedChildren`, which it does only after this same call
-            // returned a list. Checked rather than asserted, so that a boundary that came apart is a
-            // fallback to the C++ arm and not a node rebuilt from operands that were never pushed.
+        // Hoisted, so that the fold's read of `builder` finishes before `pushNumericChildren` takes it
+        // `inout`.
+        let folded = fold(node[0], builder)
+        // Counted by `pushNumericChildren` rather than narrowed from a list's `count`: `rebuildFrom`
+        // wants a `UInt32`, and this is the number actually pushed.
+        switch pushNumericChildren(node[0], folded, .negated, &builder) {
+        case .notAllNumeric:
+            // Unreachable: `fold` returned `.negatedChildren`, which it does only after
+            // `hasOnlyNumericChildren` answered true over this same walk. Checked rather than
+            // asserted, so that a boundary that came apart is a fallback to the C++ arm and not a node
+            // rebuilt from operands that were never pushed.
             return .declined(.Negate)
-        }
 
-        // Counted alongside the loop rather than narrowed from `leaves.count`: `rebuildFrom` wants a
-        // `UInt32`, and this is the number actually pushed.
-        var pushed: UInt32 = 0
-        for leaf in leaves {
-            guard builder.pushLeaf(leaf.withValue(-leaf.value).boundaryLeaf) else {
-                // A contract violation, as in `rewrite`'s `.leaf` arm: the leaf was synthesised here,
-                // so there is no input alternative to blame.
-                return .declined(nil)
-            }
-            pushed += 1
-        }
+        case .pushRefused:
+            // A contract violation, as in `rewrite`'s `.leaf` arm: the leaf was synthesised in
+            // `pushNumericChildren`, so there is no input alternative to blame.
+            return .declined(nil)
 
-        // `rebuildSlot(const Children&)` takes all remaining operands and ignores the original's
-        // count, which is what lets the arity change.
-        return builder.rebuildFrom(node[0], pushed) ? .pushed : .declined(.Negate)
+        case .pushed(let pushed):
+            // `rebuildSlot(const Children&)` takes all remaining operands and ignores the original's
+            // count, which is what lets the arity change.
+            return builder.rebuildFrom(node[0], pushed) ? .pushed : .declined(.Negate)
+        }
     }
 
     /// `rebuild` for a surviving `anchor()`/`anchor-size()`: the fallback is the only operand, and the
@@ -3720,7 +3860,9 @@ private extension CalcSimplification {
         }
 
         var pushedFactors: UInt32 = 0
-        for factor in factors.survivors {
+        let survivors = factors.survivors.span
+        for survivorIndex in survivors.indices {
+            let factor = survivors[survivorIndex]
             if case .leaf(let leaf) = factor.fold {
                 guard builder.pushLeaf(leaf.boundaryLeaf) else {
                     return .declined(nil)
@@ -3825,7 +3967,8 @@ private extension CalcSimplification {
     /// bit of a NaN, so `:773`'s `*=` is reproduced as a `*` and `:934`'s unary minus as a unary
     /// minus.
     ///
-    /// Every child is a leaf whenever this runs, by `numericChildren`'s own guard -- which is what
+    /// Every child is a leaf whenever this runs, by `hasOnlyNumericChildren`'s own guard -- which is
+    /// what
     /// lets this be a straight push loop with no `pushSumTerm` for a non-`Numeric` survivor.
     func pushScaledSum(
         _ sum: borrowing WebCore.CSSCalc.Child,
@@ -3833,23 +3976,21 @@ private extension CalcSimplification {
         _ scale: Double,
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
-        guard let leaves = numericChildren(sum, folded, builder) else {
-            // Unreachable: `fold` produced `.scaledSumChildren` only after this same call returned a
-            // list. Checked rather than asserted, for the reason `rewriteNegatedChildren` gives.
+        switch pushNumericChildren(sum, folded, .scaled(scale), &builder) {
+        case .notAllNumeric:
+            // Unreachable: `fold` produced `.scaledSumChildren` only after `hasOnlyNumericChildren`
+            // answered true over this same walk. Checked rather than asserted, for the reason
+            // `rewriteNegatedChildren` gives.
             return .declined(.Product)
-        }
 
-        var pushedChildren: UInt32 = 0
-        for leaf in leaves {
-            guard builder.pushLeaf(leaf.withValue(leaf.value * scale).boundaryLeaf) else {
-                // A contract violation: the leaf was synthesised here, so there is no input
-                // alternative to blame.
-                return .declined(nil)
-            }
-            pushedChildren += 1
-        }
+        case .pushRefused:
+            // A contract violation: the leaf was synthesised in `pushNumericChildren`, so there is no
+            // input alternative to blame.
+            return .declined(nil)
 
-        return builder.rebuildFrom(sum, pushedChildren) ? .pushed : .declined(.Product)
+        case .pushed(let pushedChildren):
+            return builder.rebuildFrom(sum, pushedChildren) ? .pushed : .declined(.Product)
+        }
     }
 
     /// The `.unchanged` half of `rewrite`: the node keeps its own alternative and is rebuilt from
@@ -4042,7 +4183,14 @@ public func cssCalcCanSimplifySwift(_ root: borrowing WebCore.CSSCalc.Child) -> 
 /// A `struct` of arrays rather than a `Fold` payload, for the reason `Fold.negatedChildren` gives: a
 /// dynamically-sized plan on a `Fold` value constructed for every node at every level would be a heap
 /// allocation. `rewrite` re-derives this plan instead.
-private struct CalcMixPlan {
+///
+/// `~Copyable`, because `survivors` is a `UniqueArray`: the plan is scratch owned by exactly one
+/// `calc-mix()` fold, is never shared, and every copy of it would be a copy of that buffer. Making
+/// the struct noncopyable is what lets the buffer be `UniqueArray` rather than `Array`, and that in
+/// turn is what takes the retain/release pair off every hand-off of the plan -- a `[Survivor]`
+/// crossing a function boundary is a `swift_bridgeObjectRetain`/`Release` pair per `calc-mix()` node
+/// even when nothing mutates it.
+private struct CalcMixPlan: ~Copyable {
     /// One surviving item, in item order.
     struct Survivor {
         /// The item's index in the original item list -- which is also its child index, because
@@ -4070,7 +4218,11 @@ private struct CalcMixPlan {
     }
 
     /// In item order, which is the order `Vector<CalcMix::Item>` is rebuilt in.
-    var survivors: [Survivor] = []
+    ///
+    /// `UniqueArray` (SE-0527), not `Array`: a uniquely-owned, non-copy-on-write buffer, so there is
+    /// no uniqueness check on `append`, no defensive copy, and no refcount on the buffer object at
+    /// all. Nothing here is ever shared -- see the type's own note.
+    var survivors = UniqueArray<Survivor>()
 
     /// A `Fold` to return instead of running the accumulator.
     ///
@@ -4079,6 +4231,30 @@ private struct CalcMixPlan {
     /// `zeroValueMatchingChild` (`:1516`, `:1589`), which is a fold to a leaf. A decline can also land
     /// here, from `zeroValueMatchingChild` on a child this cannot type.
     var early: Fold?
+
+    /// The first child that declined, as the `Fold` to return -- same shape as `declinedChild`.
+    ///
+    /// Carried beside `early` rather than in it, because `calcMixPlan` can also set `early` to a
+    /// decline of its own and the two are answered with different blame. It is a field rather than
+    /// the second half of a returned tuple because the plan is now `~Copyable`, and a tuple is the
+    /// one place that would have to be too.
+    var decliningChild: Fold?
+}
+
+/// What `calcMixPlan`'s counting loop learned about the weight list, as values.
+///
+/// Four scalars in one struct so that the loop can live inside a `withTemporaryAllocation` closure
+/// and still hand its results to `calcMixPlanFromWeights` without a seven-parameter call.
+private struct CalcMixWeightSurvey {
+    /// False as soon as any weight is a `Calc` (`:1499`-`:1501`): normalisation is off for the whole
+    /// node.
+    var canNormalize = true
+    /// The sum of every `Raw` weight in item order, zeros included -- the C++'s addition sequence.
+    var total = 0.0
+    /// `numberOfOmittedWeights` (`:1503`).
+    var numberOfOmittedWeights: UInt32 = 0
+    /// `numberOfKnownZeroWeights` (`:1495`).
+    var numberOfKnownZeroWeights: UInt32 = 0
 }
 
 private extension CalcSimplification {
@@ -4125,54 +4301,74 @@ private extension CalcSimplification {
     /// `== 0` is the same on both counts; and `isKnownZero()` is `isRaw() && value == 0`
     /// (CSSPrimitiveNumeric.h:142), so a `Calc` weight is never counted however it would evaluate. The
     /// boundary reports the three states this needs and nothing is re-derived.
+    ///
+    /// The weight list is read once per item and carried, rather than re-crossing the boundary in
+    /// each of the six branches of `calcMixPlanFromWeights`: `calcMixItemWeight` walks to the item,
+    /// and the branches ask about the same three fields up to twice each. It is carried in ONE
+    /// `withTemporaryAllocation` buffer of the boundary's own record (SE-0524), not in the three
+    /// parallel `[Bool]`/`[Bool]`/`[Double]` heap arrays this used to build: the list is sized
+    /// exactly by `itemCount`, dead when the plan is returned, and never escapes, which is that
+    /// facility's exact shape. Three heap allocations and three `swift_bridgeObjectRelease`s per
+    /// `calc-mix()` node become none.
     func calcMixPlan(
         _ node: borrowing WebCore.CSSCalc.Child,
         _ itemCount: UInt32,
         _ folded: Span<Fold>
     ) -> CalcMixPlan {
-        var canNormalize = true
-        var total = 0.0
-        var numberOfOmittedWeights: UInt32 = 0
-        var numberOfKnownZeroWeights: UInt32 = 0
+        // `Int(clamping:)`, not `Int(_:)`, which traps if `Int` is narrower than `UInt32`; the
+        // capacity is a bound here and not a hint, and the loop appends exactly `itemCount` times.
+        return withTemporaryAllocation(
+            of: WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight.self,
+            capacity: Int(clamping: itemCount)
+        ) { weights in
+            var survey = CalcMixWeightSurvey()
 
-        // Read once per item and carried, rather than re-crossing the boundary in each of the six
-        // branches below: `calcMixItemWeight` walks to the item, and the branches ask about the same
-        // three fields up to twice each.
-        var isPresent: [Bool] = []
-        var isRaw: [Bool] = []
-        var rawValue: [Double] = []
-        isPresent.reserveCapacity(Int(clamping: itemCount))
-        isRaw.reserveCapacity(Int(clamping: itemCount))
-        rawValue.reserveCapacity(Int(clamping: itemCount))
+            var index: UInt32 = 0
+            while index < itemCount {
+                let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
+                weights.append(weight)
+
+                if weight.present {
+                    if weight.isRaw {
+                        // `[&](const Weight::Raw& raw)` (`:1492`-`:1498`).
+                        if weight.value == 0 {
+                            survey.numberOfKnownZeroWeights += 1
+                        }
+                        survey.total += weight.value
+                    } else {
+                        // `[&](const Weight::Calc&)` (`:1499`-`:1501`).
+                        survey.canNormalize = false
+                    }
+                } else {
+                    survey.numberOfOmittedWeights += 1
+                }
+                index += 1
+            }
+
+            return calcMixPlanFromWeights(itemCount, folded, weights.span, survey)
+        }
+    }
+
+    /// Steps 1 to 5's decision half, over the weights `calcMixPlan` already read.
+    ///
+    /// Split from the counting loop only so that the loop's scratch buffer is a
+    /// `withTemporaryAllocation` and this body does not have to live inside its closure. `node` is
+    /// deliberately not a parameter: every question left is about the weights and the folded values.
+    func calcMixPlanFromWeights(
+        _ itemCount: UInt32,
+        _ folded: Span<Fold>,
+        _ weights: Span<WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight>,
+        _ survey: CalcMixWeightSurvey
+    ) -> CalcMixPlan {
+        let canNormalize = survey.canNormalize
+        let total = survey.total
+        let numberOfOmittedWeights = survey.numberOfOmittedWeights
+        let numberOfKnownZeroWeights = survey.numberOfKnownZeroWeights
 
         var index: UInt32 = 0
-        while index < itemCount {
-            let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
-            isPresent.append(weight.present)
-            isRaw.append(weight.isRaw)
-            rawValue.append(weight.value)
-
-            if weight.present {
-                if weight.isRaw {
-                    // `[&](const Weight::Raw& raw)` (`:1492`-`:1498`).
-                    if weight.value == 0 {
-                        numberOfKnownZeroWeights += 1
-                    }
-                    total += weight.value
-                } else {
-                    // `[&](const Weight::Calc&)` (`:1499`-`:1501`).
-                    canNormalize = false
-                }
-            } else {
-                numberOfOmittedWeights += 1
-            }
-            index += 1
-        }
-
         // `item.weight && item.weight->isKnownZero()` is spelled inline at each of the four sites below
-        // as `isPresent[i] && isRaw[i] && rawValue[i] == 0`, rather than hoisted into a helper: every loop
-        // here is a `while` over a `UInt32` with no closure, since `calcMixPlan` takes a `borrowing`
-        // parameter and a closure capturing one is not the shape wanted here.
+        // as `weights[i].present && weights[i].isRaw && weights[i].value == 0`, rather than hoisted
+        // into a helper: every loop here is a `while` over a `UInt32` with no closure.
         var plan = CalcMixPlan()
 
         if !canNormalize {
@@ -4198,11 +4394,11 @@ private extension CalcSimplification {
             index = 0
             while index < itemCount {
                 let i = Int(index)
-                if !(isPresent[i] && isRaw[i] && rawValue[i] == 0) {
+                if !(weights[i].present && weights[i].isRaw && weights[i].value == 0) {
                     plan.survivors.append(CalcMixPlan.Survivor(
                         index: index,
                         fold: folded[i],
-                        weight: rawValue[i],
+                        weight: weights[i].value,
                         replaceWeight: false
                     ))
                 }
@@ -4222,7 +4418,7 @@ private extension CalcSimplification {
             index = 0
             while index < itemCount {
                 let i = Int(index)
-                if !isPresent[i] || (isRaw[i] && rawValue[i] == 0) {
+                if !weights[i].present || (weights[i].isRaw && weights[i].value == 0) {
                     index += 1
                     continue
                 }
@@ -4232,7 +4428,7 @@ private extension CalcSimplification {
                     // `item.weight->raw()->value * normalizationFactor` (`:1552`, `:1560`). The
                     // multiply is the C++'s, not a divide by `total / 100`: the two differ in the last
                     // bit.
-                    weight: rawValue[i] * normalizationFactor,
+                    weight: weights[i].value * normalizationFactor,
                     replaceWeight: true
                 ))
                 index += 1
@@ -4242,7 +4438,7 @@ private extension CalcSimplification {
 
         // `:1563`-`:1611`, `total < 100`. `weightForOmitted` is step 2, and it is computed in both of
         // the two sub-branches that have omitted weights and in neither of the two that do not -- so it
-        // is computed here and used only where `isPresent` is false, which cannot happen when the count
+        // is computed here and used only where the weight is absent, which cannot happen when the count
         // is zero.
         //
         // `Double(numberOfOmittedWeights)` is `static_cast<double>(numberOfOmittedWeights)`, and the
@@ -4262,19 +4458,19 @@ private extension CalcSimplification {
         index = 0
         while index < itemCount {
             let i = Int(index)
-            if isPresent[i] {
+            if weights[i].present {
                 // `:1576`-`:1577`, `:1596`-`:1597`: a known-zero weight is dropped wherever there is
                 // one to drop, and where `numberOfKnownZeroWeights` is 0 this is never true. A present,
                 // non-zero weight is left exactly as it is in all four sub-branches -- `total < 100` has
                 // no normalisation factor.
-                if isRaw[i], rawValue[i] == 0, numberOfKnownZeroWeights > 0 {
+                if weights[i].isRaw, weights[i].value == 0, numberOfKnownZeroWeights > 0 {
                     index += 1
                     continue
                 }
                 plan.survivors.append(CalcMixPlan.Survivor(
                     index: index,
                     fold: folded[i],
-                    weight: rawValue[i],
+                    weight: weights[i].value,
                     replaceWeight: false
                 ))
             } else {
@@ -4294,16 +4490,17 @@ private extension CalcSimplification {
 
     /// Every item surviving with its own weight: the `!canNormalize`, nothing-to-remove rebuild.
     ///
-    /// Fills the plan's list through `inout` rather than returning one. A returned `[Survivor]` is a
-    /// second heap buffer per `calc-mix()` node plus ARC on the handoff, which is what
-    /// `#ReturnTypeImplicitCopy` names; appending into the caller's list writes the only buffer there
-    /// ever is. `reserveCapacity` is a total, not an increment, so it counts what the list already
-    /// holds -- zero on the one path that calls this, and correct if that ever stops being true.
+    /// Fills the plan's list through `inout` rather than returning one. A returned list is a second
+    /// heap buffer per `calc-mix()` node -- plus, back when it was an `Array`, ARC on the handoff,
+    /// which is what `#ReturnTypeImplicitCopy` names; appending into the caller's list writes the only
+    /// buffer there ever is. `reserveCapacity` is a total, not an increment, so it counts what the
+    /// list already holds -- zero on the one path that calls this, and correct if that ever stops
+    /// being true.
     @inline(always)
     func calcMixKeepAll(
         _ itemCount: UInt32,
         _ folded: Span<Fold>,
-        into survivors: inout [CalcMixPlan.Survivor]
+        into survivors: inout UniqueArray<CalcMixPlan.Survivor>
     ) {
         survivors.reserveCapacity(survivors.count + Int(clamping: itemCount))
         var index: UInt32 = 0
@@ -4344,10 +4541,18 @@ private extension CalcSimplification {
     /// which would pass two percentages with different hints). `std::nullopt` on disagreement is a
     /// rebuild, not a decline. Weight is `/ 100.0`, not `* 0.01` -- they differ in the last bit, which
     /// matters for signed zero and NaN.
-    func calcMixSum(_ plan: CalcMixPlan) -> Fold {
+    ///
+    /// `borrowing`, and the survivor list is walked through its `Span` rather than by `for ... in`:
+    /// `UniqueArray` is noncopyable and so is no `Sequence`, and a borrowed plan is read without the
+    /// buffer changing hands. Taking the plan by value cost a retain/release of the survivor buffer
+    /// per `calc-mix()` node back when it was an `Array`; it is now unrepresentable rather than
+    /// merely avoided.
+    func calcMixSum(_ plan: borrowing CalcMixPlan) -> Fold {
         var accumulated: NumericLeaf?
 
-        for survivor in plan.survivors {
+        let survivors = plan.survivors.span
+        for survivorIndex in survivors.indices {
+            let survivor = survivors[survivorIndex]
             // `auto weight = item.weight->raw()->value / 100.0;` (`:1622`). The dereference is
             // unconditional in the C++ and safe there for the reason it is safe here: every path that
             // reaches this loop left every survivor with a present `Raw` weight, and the one path that
@@ -4428,16 +4633,17 @@ private extension CalcSimplification {
         _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
     ) -> Rewrite {
         let info = WebCore.CSSCalc.swiftNodeInfo(node)
-        // The declining child is reported beside the plan rather than through `plan.early`, which
-        // `calcMixPlan` can also set to a decline of its own -- and the two are answered with
-        // different blame below.
-        let (plan, decliningChild) = withFoldedChildren(node, info.childCount, builder) { folded -> (CalcMixPlan, Fold?) in
+        // The declining child is reported in the plan's own `decliningChild`, not through
+        // `plan.early`, which `calcMixPlan` can also set to a decline of its own -- and the two are
+        // answered with different blame below. A tuple would be the other spelling and cannot be one:
+        // `CalcMixPlan` is `~Copyable`.
+        let plan = withFoldedChildren(node, info.childCount, builder) { folded -> CalcMixPlan in
             if let declined = declinedChild(folded.span) {
-                return (CalcMixPlan(), declined)
+                return CalcMixPlan(decliningChild: declined)
             }
-            return (calcMixPlan(node, info.childCount, folded.span), nil)
+            return calcMixPlan(node, info.childCount, folded.span)
         }
-        if case .declined(let blame)? = decliningChild {
+        if case .declined(let blame)? = plan.decliningChild {
             // Unreachable: `fold` returned `.mergedChildren(.CalcMix)`, which it does only after this
             // same walk found no declining child. Checked rather than asserted, so that a boundary that
             // came apart is a fallback to the C++ arm and not a node rebuilt from a short list.
@@ -4459,13 +4665,14 @@ private extension CalcSimplification {
         // for. `foldProduct`'s `pushedFactors`/`pushedChildren` and `rebuildAnchor`'s `pushedFallback`
         // follow the same rule.
         var pushedItems: UInt32 = 0
-        for survivor in plan.survivors {
-            if case .declined(let blame) = rewrite(node[Int(survivor.index)], &builder) {
+        for survivorIndex in plan.survivors.indices {
+            if case .declined(let blame) = rewrite(node[Int(plan.survivors[survivorIndex].index)], &builder) {
                 return .declined(blame)
             }
             pushedItems += 1
         }
-        for survivor in plan.survivors {
+        for survivorIndex in plan.survivors.indices {
+            let survivor = plan.survivors[survivorIndex]
             builder.pushCalcMixItemWeight(survivor.index, survivor.weight, survivor.replaceWeight)
         }
 
