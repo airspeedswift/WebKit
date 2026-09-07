@@ -4163,6 +4163,7 @@ private enum CalcFlatCoverage {
             | bit(.Exp)
             | bit(.Progress)
             | bit(.ProgressNoClamp)
+            | bit(.CalcMix)
             | bit(.Symbol)
             | bit(.SiblingCount)
             | bit(.SiblingIndex)
@@ -4443,6 +4444,92 @@ private struct CalcMixWeightSurvey {
     var numberOfOmittedWeights: UInt32 = 0
     /// `numberOfKnownZeroWeights` (`:1495`).
     var numberOfKnownZeroWeights: UInt32 = 0
+}
+
+/// One item's disposition under spec steps 1 to 5, as values.
+private struct CalcMixItemPlan {
+    /// Whether the item is in the rebuilt list at all.
+    let survives: Bool
+    /// The item's effective weight as a `<percentage>`, which the accumulator divides by 100
+    /// (`+Simplification.cpp:1622`). Meaningful only where `canNormalize` held, which is exactly
+    /// where the accumulator runs.
+    let weight: Double
+    /// Whether the rebuild carries `weight` -- step 2's `(100% - specified sum) / n` or step 4's
+    /// `weight * 100% / total` -- or the original item's own weight, unchanged.
+    ///
+    /// `false` is not an optimisation: it is the only spelling that can carry a `Calc` weight, a
+    /// whole nested `CSSCalcValue`, through the rebuild, and two of the C++'s paths need exactly
+    /// that (`:1573`-`:1582`, `:1594`-`:1600`).
+    let replaceWeight: Bool
+
+    static let dropped = CalcMixItemPlan(survives: false, weight: 0, replaceWeight: false)
+}
+
+/// What spec steps 1 to 5 (`+Simplification.cpp:1509`-`:1611`) do to ONE item, given the census of
+/// the whole weight list.
+///
+/// PURE, and that is load-bearing rather than tidy: no tree, no folded children, no position. It is
+/// what lets `emit` run the plan a SECOND time over the original weights and reproduce the fold's
+/// survivor list exactly, which is how the flat port carries a per-item weight plan across a
+/// boundary that has nowhere to put one. See `CalcFlatTree.simplifyCalcMix`.
+@inline(always)
+private func calcMixItemPlan(
+    _ weight: WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight,
+    _ survey: CalcMixWeightSurvey
+) -> CalcMixItemPlan {
+    // `item.weight && item.weight->isKnownZero()`, which the C++ spells inline at each of its four
+    // sites. `isKnownZero()` is `isRaw() && value == 0` (CSSPrimitiveNumeric.h:142), so a `Calc`
+    // weight is never one however it would evaluate.
+    let isKnownZero = weight.present && weight.isRaw && weight.value == 0
+
+    if !survey.canNormalize {
+        // `:1509`-`:1529`. Normalisation is off for the whole node and the C++ returns `{ }` on
+        // every path out of this branch, so the accumulator never runs and every survivor keeps its
+        // own weight. Its two sub-branches -- nothing to remove (`:1511`-`:1513`) and drop the
+        // known-zeros (`:1518`-`:1526`) -- are ONE line here, because with
+        // `numberOfKnownZeroWeights == 0` no item is `isKnownZero` and the condition never fires.
+        return isKnownZero
+            ? .dropped
+            : CalcMixItemPlan(survives: true, weight: weight.value, replaceWeight: false)
+    }
+
+    if survey.total >= 100 {
+        // `:1531`-`:1562`. Omitted weights become 0 and are removed, specified zeros are removed,
+        // and every remaining weight is scaled -- in BOTH of the C++'s sub-branches, which differ
+        // only in whether anything is dropped.
+        guard weight.present, !isKnownZero else {
+            return .dropped
+        }
+        // `item.weight->raw()->value * normalizationFactor` (`:1552`, `:1560`). The MULTIPLY is the
+        // C++'s, not a divide by `total / 100`; the two differ in the last bit.
+        return CalcMixItemPlan(
+            survives: true,
+            weight: weight.value * (100.0 / survey.total),
+            replaceWeight: true
+        )
+    }
+
+    // `:1563`-`:1611`, `total < 100`. There is no normalisation factor here: a present, non-zero
+    // weight is left exactly as it is in all four of the C++'s sub-branches.
+    if weight.present {
+        // `:1576`-`:1577`, `:1596`-`:1597`: a known-zero weight is dropped wherever there is one to
+        // drop. The `numberOfKnownZeroWeights > 0` half is implied by `isKnownZero` and is kept
+        // because the C++ spells it.
+        if isKnownZero, survey.numberOfKnownZeroWeights > 0 {
+            return .dropped
+        }
+        return CalcMixItemPlan(survives: true, weight: weight.value, replaceWeight: false)
+    }
+
+    // `item.weight = CalcMix::Item::Weight { weightForOmitted }` (`:1579`, `:1608`), spec step 2.
+    // `static_cast<double>(numberOfOmittedWeights)`, and the division is by the count of OMITTED
+    // weights rather than by the item count. It cannot divide by zero: this arm is reached only for
+    // an absent weight, so there is at least one.
+    return CalcMixItemPlan(
+        survives: true,
+        weight: (100.0 - survey.total) / Double(survey.numberOfOmittedWeights),
+        replaceWeight: true
+    )
 }
 
 private extension CalcSimplification {
@@ -5130,6 +5217,73 @@ fileprivate func calcEmitFromOrigin(
     return withCalcOriginalNode(original, target) { builder.rebuildFrom($0, operands) } ?? false
 }
 
+/// `calc-mix()`'s emit route: the plan recomputed, its weights pushed, and then the same generic
+/// `rebuildFrom` every other origin-routed alternative uses.
+///
+/// THE PLAN IS RECOMPUTED HERE RATHER THAN CARRIED FROM THE FOLD, and `CalcFlatTree.simplifyCalcMix`
+/// sets out why: there is nowhere on a fixed-size flat node to keep an item index, a `Double` and a
+/// flag per child, and pushing them during the fold takes them in the wrong order -- the reverse
+/// scan folds an inner `calc-mix()` before an outer one while `emit` reaches the inner one first,
+/// and `rebuildSlot` consumes the weight stack from the top. `calcMixItemPlan` is a pure function of
+/// the original weights, which have not changed, so the second run produces the same survivors in
+/// the same order as the first.
+///
+/// ONE descent, because the census, the plans and the rebuild all read the same original node.
+/// `itemCount` comes from `childCount()` on that node and NOT from the flat node, whose `childCount`
+/// is the survivor count by the time emit runs: `swiftCalcMixItemWeight` answers an out-of-range
+/// index with `present == false`, which is indistinguishable from an omitted weight, so reading past
+/// the end would silently invent items.
+///
+/// The survivor/operand cross-check is `rebuildSlot`'s too (`+Simplification.cpp:1988`-`:1994`) and
+/// is made here as well, because failing it early declines the tree rather than pairing a prefix.
+@inline(never)
+fileprivate func calcEmitCalcMix(
+    _ target: UInt32,
+    _ operands: UInt32,
+    _ original: borrowing WebCore.CSSCalc.Child,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> Bool {
+    return withCalcOriginalNode(original, target) { node -> Bool in
+        let itemCount = UInt32(clamping: node.childCount())
+
+        var survey = CalcMixWeightSurvey()
+        var index: UInt32 = 0
+        while index < itemCount {
+            let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
+            if !weight.present {
+                survey.numberOfOmittedWeights += 1
+            } else if weight.isRaw {
+                if weight.value == 0 {
+                    survey.numberOfKnownZeroWeights += 1
+                }
+                survey.total += weight.value
+            } else {
+                survey.canNormalize = false
+            }
+            index += 1
+        }
+
+        // In ITEM ORDER, which is the order `rebuildSlot(const Vector<CalcMix::Item>&)` pairs them
+        // with the operands. The operands are already on the stack: `emit` pushed the surviving flat
+        // children before the switch that reached here, and a nested `calc-mix()` consumed its own
+        // weights inside that recursion, so the stack is back where it started.
+        var pushed: UInt32 = 0
+        index = 0
+        while index < itemCount {
+            let plan = calcMixItemPlan(WebCore.CSSCalc.swiftCalcMixItemWeight(node, index), survey)
+            if plan.survives {
+                builder.pushCalcMixItemWeight(index, plan.weight, plan.replaceWeight)
+                pushed += 1
+            }
+            index += 1
+        }
+        guard pushed == operands else {
+            return false
+        }
+        return builder.rebuildFrom(node, operands)
+    } ?? false
+}
+
 fileprivate extension CalcFlatNode {
     /// The four numeric leaves -- the only alternatives that carry a foldable value.
     var isNumericLeaf: Bool {
@@ -5621,35 +5775,49 @@ fileprivate extension CalcFlatTree {
         case .NonCanonicalDimension:
             simplifyNonCanonicalDimension(i, options, builder)
 
-        case .Clamp, .RoundNearest, .RoundUp, .RoundDown, .RoundToZero,
-             .Mod, .Rem, .Abs, .Sign, .Pow, .Sqrt,
-             .Deg2Rad, .Sin, .Cos, .Tan, .Asin, .Acos, .Atan, .Atan2,
-             .Hypot, .Log, .Exp, .Progress, .ProgressNoClamp,
-             .Symbol, .SiblingCount, .SiblingIndex, .Anchor, .AnchorSize, .Random:
-            simplifyColdNode(i, original, options, builder)
+        case .Number, .Percentage, .CanonicalDimension:
+            // The other three leaves, and for each of them that is a PORT rather than an omission:
+            // `simplify(Number&)` (`+Simplification.cpp:487`), `simplify(Percentage&)` (`:493`) and
+            // `simplify(CanonicalDimension&)` (`:500`) each `return { }` with no body, which is
+            // also why `canSimplify` answers false for exactly those three -- and true for the
+            // fourth, which is the case just above.
+            return
 
         default:
-            // Including the other three leaves, and for each of them that is a PORT rather than an
-            // omission: `simplify(Number&)` (`+Simplification.cpp:487`), `simplify(Percentage&)`
-            // (`:493`) and `simplify(CanonicalDimension&)` (`:500`) each `return { }` with no body,
-            // which is also why `canSimplify` answers false for exactly those three -- and true for
-            // the fourth, which is the case just above.
-            return
+            // EVERY REMAINING ALTERNATIVE, spelled as `default` rather than as the thirty-one
+            // labels it stands for, and that is measured. The list WAS written out, and the
+            // thirty-first label -- `CalcMix`, the last of the forty-one -- cost 6.7 retired
+            // instructions per simplification on the single-node `leaf` band plus about 2.2 per
+            // node, `leaf` +1.17% and `ladder12` +0.44%, on trees that execute none of it. Thirty
+            // labels were free and thirty-one were not, so it is a lowering threshold rather than a
+            // slope; naming the ten alternatives this switch actually dispatches and defaulting the
+            // rest took every band back to the baseline exactly (`leaf` 581.2 -> 574.5, `ladder12`
+            // 7665.2 -> 7630.4).
+            //
+            // SAFE BECAUSE THE MASK IS NOW COMPLETE. `simplify` runs only for a tree whose whole
+            // `kindMask` is inside `CalcFlatCoverage.mask`, and that mask holds all forty-one, so
+            // `default` here is exactly the thirty-one cold alternatives. An alternative C++ grows
+            // later cannot reach this line -- it would not be in the mask -- and if it somehow did,
+            // `simplifyColdNode`'s own `default` leaves the node alone, which is the same answer
+            // this arm used to give.
+            simplifyColdNode(i, original, options, builder)
         }
     }
 
     /// The alternatives a REAL PAGE'S CSS does not hold, behind ONE call site.
     ///
-    /// THIRTY CASE LABELS SHARING ONE CALL, and that shape is measured rather than tidy. The hot
-    /// switch above names exactly the operations the captured payloads contain -- `calc-real.txt`,
-    /// the four `real-sp3-*.css` and `bench.css` hold `max()` twice and no other math function at
-    /// all -- and everything else is one entry. Five separate `@inline(never)` arms instead of one
-    /// pushed `CalcFlatTree.simplify` (1544 bytes) out of line and out of `withCalcFlatTree`'s
-    /// specialized body, which cost the SINGLE-NODE band 12.7% -- 73 retired instructions on a tree
-    /// that executes none of the new code, measured with the folds present and the mask bits
-    /// withheld so they were dead. The budget is what matters, not the individual markers: a batch
-    /// that adds an alternative adds an arm HERE, where the enclosing function is already cold and
-    /// already out of line, and the hot switch does not grow.
+    /// THIRTY-ONE ALTERNATIVES BEHIND ONE CALL, and that shape is measured rather than tidy. The
+    /// hot switch above names exactly the operations the captured payloads contain --
+    /// `calc-real.txt`, the four `real-sp3-*.css` and `bench.css` hold `max()` twice and no other
+    /// math function at all -- plus the four leaves, and everything else is its `default`. Five
+    /// separate `@inline(never)` arms instead of one pushed `CalcFlatTree.simplify` (1544 bytes)
+    /// out of line and out of `withCalcFlatTree`'s specialized body, which cost the SINGLE-NODE
+    /// band 12.7% -- 73 retired instructions on a tree that executes none of the new code, measured
+    /// with the folds present and the mask bits withheld so they were dead. The budget is what
+    /// matters, not the individual markers: a batch that adds an alternative adds an arm HERE,
+    /// where the enclosing function is already cold and already out of line, and the hot switch
+    /// does not grow at all -- it names ten alternatives and defaults the rest, which is a second
+    /// measured constraint in its own right and is written up at that `default`.
     ///
     /// `@inline(never)` for the same reason each of these already carried it: `simplify` pays this
     /// function's frame per node, and none of these is reached by a tree a page actually contains.
@@ -5733,6 +5901,9 @@ fileprivate extension CalcFlatTree {
         case .ProgressNoClamp:
             simplifyProgress(i, options, CalcExecutor.progressNoClamp)
 
+        case .CalcMix:
+            simplifyCalcMix(i, original, options)
+
         case .Symbol:
             simplifySymbol(i, options, builder)
 
@@ -5746,7 +5917,7 @@ fileprivate extension CalcFlatTree {
             simplifyRandom(i, original, options, builder)
 
         default:
-            // Unreachable: the caller's switch selects exactly the thirty above. Spelled as a
+            // Unreachable: the caller's `default` selects exactly the thirty-one above. Spelled as a
             // return rather than a trap for the reason every other unreachable arm in this file is
             // -- an untaught alternative leaves the node alone, which the mask has already made
             // impossible, rather than killing the process.
@@ -6920,6 +7091,248 @@ fileprivate extension CalcFlatTree {
         setLeaf(i, NumericLeaf.number(CalcExecutor.log(nodes[aChild].value, nodes[bChild].value)))
     }
 
+    /// `simplify(CalcMix&)` (`+Simplification.cpp:1446`-`:1691`), the second-largest body in the
+    /// file, and the forty-first of forty-one.
+    ///
+    /// FOUR PHASES, all four kept. The weight census (`:1487`-`:1507`); the `!canNormalize` early
+    /// return that only drops known-zero items (`:1509`-`:1529`); the `total >= 100` and
+    /// `total < 100` normalisation branches (`:1531`-`:1611`); and the accumulator, which requires
+    /// every surviving item to be the same numeric kind and to agree on that kind's own identity
+    /// (`:1613`-`:1689`). `zeroValueMatchingChild`'s eleven-case category table (`:1454`-`:1482`)
+    /// is reached through `numericLeafForCategory`, which the two-pass port already shares with
+    /// step 9.4, so no category table is written a third time.
+    ///
+    /// THE PLAN IS RECOMPUTED AT EMIT, NOT CARRIED, and that is the one real design choice here.
+    /// `rebuildSlot(const Vector<CalcMix::Item>&)` (`:1976`) wants one `pushCalcMixItemWeight` plan
+    /// per SURVIVING item at emit time, and a flat node has two spare BYTES -- nowhere to keep an
+    /// item index, a `Double` and a flag per child. Pushing them during the fold does not work
+    /// either: the weight stack is consumed from the top by item count, and the reverse scan folds
+    /// an INNER `calc-mix()` before an outer one while `emit` reaches the inner one FIRST, so the
+    /// inner rebuild would take the outer's plans. `calcMixItemPlan` is a pure function of one
+    /// original weight and the census of all of them, so `emit` runs it a second time and gets the
+    /// same survivor list in the same order, onto which the surviving flat children zip.
+    ///
+    /// THE SUM FAILING IS A REBUILD, NOT A DECLINE. `:1681` returns `nullopt` from a `simplify`
+    /// that has ALREADY rewritten `root.children`, so `calc-mix(10% 25%, 10px 75%)` keeps its
+    /// `calc-mix()` with the normalised weights rather than declining. The relink below therefore
+    /// happens whether or not the accumulator agrees, and it happens before the accumulator reads
+    /// anything.
+    ///
+    /// TWO DESCENTS OF THE ORIGINAL TREE, not two per item: `swiftCalcMixItemWeight` indexes the
+    /// item vector, so one `withCalcOriginalNode` walk serves the whole list and the reads are O(1)
+    /// each. Two rather than one because the census has to be complete before any item can be
+    /// judged. At 192 retired instructions per node stepped past that is the dominant cost of this
+    /// fold, and it is accepted for the reason the other origin routes are: `calc-mix()` does not
+    /// appear in any real captured payload.
+    @inline(never)
+    private mutating func simplifyCalcMix(
+        _ i: Int,
+        _ original: borrowing WebCore.CSSCalc.Child,
+        _ options: CalcSimplification
+    ) {
+        let itemCount = nodes[i].childCount
+        // `isSimplifiableAlternative` already refuses an empty one, which is where the C++
+        // dereferences an empty `std::optional` at `:1685`.
+        guard itemCount > 0 else {
+            return
+        }
+        let origin = nodes[i].origin
+
+        guard let survey = calcMixSurvey(origin, itemCount, original) else {
+            declined = true
+            return
+        }
+
+        // The all-zero answers (`:1514`-`:1516` and `:1587`-`:1590`), written as the C++'s two
+        // separate branches rather than merged: they sit in different normalisation arms and only
+        // one of them tests `numberOfOmittedWeights`. The first is dead -- `!canNormalize` needs a
+        // `Calc` weight, which is never `isKnownZero`, so `itemCount` cannot equal the known-zero
+        // count there -- and is reproduced anyway, because a dead branch transcribed is cheaper to
+        // audit than a dead branch reasoned away.
+        if !survey.canNormalize {
+            if survey.numberOfKnownZeroWeights != 0, itemCount == survey.numberOfKnownZeroWeights {
+                calcMixFoldToZero(i, options)
+                return
+            }
+        } else if survey.total < 100 {
+            if survey.numberOfKnownZeroWeights > 0, survey.numberOfOmittedWeights == 0,
+                itemCount == survey.numberOfKnownZeroWeights {
+                calcMixFoldToZero(i, options)
+                return
+            }
+        }
+
+        guard calcMixKeepSurvivors(i, origin, itemCount, survey, original) else {
+            declined = true
+            return
+        }
+
+        // `!canNormalize` RETURNS `{ }` ON EVERY PATH (`:1511`, `:1521`, `:1528`), so the
+        // accumulator never runs for it and the node is rebuilt from whatever the relink left. It
+        // must: a `Calc` weight is a whole nested `CSSCalcValue`, `swiftCalcMixItemWeight` reports
+        // its value as 0 rather than as anything usable, and weighting an item by it would be an
+        // invented answer rather than a fold.
+        guard survey.canNormalize else {
+            return
+        }
+
+        // Phase 4, the weighted sum (`:1613`-`:1689`). Over the SURVIVORS, which is what the relink
+        // just left in the child list, and over their normalised weights, which
+        // `calcMixItemPlan` gives again -- the same recomputation `emit` makes, for the same
+        // reason. `/ 100.0`, not `* 0.01`: they differ in the last bit.
+        var accumulated: NumericLeaf? = nil
+        var cursor = nodes[i].firstChild
+        var index: UInt32 = 0
+        while cursor != CalcFlatNode.noNode, index < itemCount {
+            guard let weight = calcMixWeight(origin, index, original) else {
+                declined = true
+                return
+            }
+            index += 1
+            let plan = calcMixItemPlan(weight, survey)
+            guard plan.survives else {
+                continue
+            }
+
+            let c = Int(cursor)
+            cursor = nodes[c].nextSibling
+            guard let leaf = nodes[c].numericLeaf else {
+                // `[](const auto&)`: an item that is not a `Numeric` ends the fold and the node is
+                // rebuilt from the children the relink left.
+                return
+            }
+            let scaled = plan.weight / 100.0
+            guard let current = accumulated else {
+                accumulated = leaf.withValue(leaf.value * scaled)
+                continue
+            }
+            guard options.calcMixAccumulatorAgrees(current, leaf) else {
+                return
+            }
+            accumulated = current.withValue(current.value + leaf.value * scaled)
+        }
+
+        guard let result = accumulated else {
+            // No survivors at all. Unreachable -- every path that can empty the list either folded
+            // through `calcMixFoldToZero` above or kept the item whose weight took `total` to 100 --
+            // and rebuilt rather than asserted, which cannot be wrong.
+            return
+        }
+        setLeaf(i, result)
+    }
+
+    /// Phase 1 (`+Simplification.cpp:1487`-`:1507`), in one descent of the original tree.
+    ///
+    /// `total` accumulates every `Raw` weight in item order INCLUDING the zeros, so its rounding is
+    /// the C++'s addition sequence; `isKnownZero()` is `isRaw() && value == 0`
+    /// (CSSPrimitiveNumeric.h:142), so a `Calc` weight is never counted however it would evaluate.
+    /// `nil` means the flat tree and the tree it was built from disagree about their own shape.
+    private func calcMixSurvey(
+        _ origin: UInt32,
+        _ itemCount: UInt32,
+        _ original: borrowing WebCore.CSSCalc.Child
+    ) -> CalcMixWeightSurvey? {
+        return withCalcOriginalNode(original, origin) { node -> CalcMixWeightSurvey in
+            var survey = CalcMixWeightSurvey()
+            var index: UInt32 = 0
+            while index < itemCount {
+                let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
+                if !weight.present {
+                    survey.numberOfOmittedWeights += 1
+                } else if weight.isRaw {
+                    if weight.value == 0 {
+                        survey.numberOfKnownZeroWeights += 1
+                    }
+                    survey.total += weight.value
+                } else {
+                    survey.canNormalize = false
+                }
+                index += 1
+            }
+            return survey
+        }
+    }
+
+    /// One item's weight off the original, for the two passes that need it after the census.
+    ///
+    /// A named function rather than the call spelled at each site, so the `withCalcOriginalNode`
+    /// closure captures the index and nothing else -- in particular not `self`, which is a
+    /// `~Escapable` struct over a `MutableSpan` and cannot be handed to one.
+    private func calcMixWeight(
+        _ origin: UInt32,
+        _ index: UInt32,
+        _ original: borrowing WebCore.CSSCalc.Child
+    ) -> WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight? {
+        return withCalcOriginalNode(original, origin) { WebCore.CSSCalc.swiftCalcMixItemWeight($0, index) }
+    }
+
+    /// Phases 2 and 3 applied to the child list: keep the surviving items, in item order, and
+    /// relink. The C++ builds a `Vector<Child> newChildren` and moves it over `root.children`
+    /// (`:1524`, `:1554`, `:1581`, `:1599`); a linked list relinks in place and allocates nothing.
+    ///
+    /// `false` means an item's weight could not be read, which is the flat tree and the original
+    /// disagreeing about their shape -- a decline, not a rebuild, because the two lists would then
+    /// pair up wrongly.
+    private mutating func calcMixKeepSurvivors(
+        _ i: Int,
+        _ origin: UInt32,
+        _ itemCount: UInt32,
+        _ survey: CalcMixWeightSurvey,
+        _ original: borrowing WebCore.CSSCalc.Child
+    ) -> Bool {
+        var previous = CalcFlatNode.noNode
+        var kept: UInt32 = 0
+        var cursor = nodes[i].firstChild
+        var index: UInt32 = 0
+        while cursor != CalcFlatNode.noNode, index < itemCount {
+            guard let weight = calcMixWeight(origin, index, original) else {
+                return false
+            }
+            index += 1
+            let c = Int(cursor)
+            let next = nodes[c].nextSibling
+            if calcMixItemPlan(weight, survey).survives {
+                if previous == CalcFlatNode.noNode {
+                    nodes[i].firstChild = cursor
+                } else {
+                    nodes[Int(previous)].nextSibling = cursor
+                }
+                previous = cursor
+                kept += 1
+            }
+            cursor = next
+        }
+        if previous == CalcFlatNode.noNode {
+            nodes[i].firstChild = CalcFlatNode.noNode
+        } else {
+            nodes[Int(previous)].nextSibling = CalcFlatNode.noNode
+        }
+        nodes[i].childCount = kept
+        return true
+    }
+
+    /// `zeroValueMatchingChild(children[0])` (`+Simplification.cpp:1454`-`:1482`, called at `:1516`
+    /// and `:1589`): when every weight is known zero the whole `calc-mix()` becomes a zero of the
+    /// FIRST item's category.
+    ///
+    /// The category comes from `getType(child.value)`, which this file can answer for a folded leaf
+    /// and cannot for an operation -- a recursive type computation with no boundary accessor behind
+    /// it. That is a narrow, named gap and it declines rather than guessing:
+    /// `calc-mix(sibling-index() 0%, 2 0%)` with no builder state hits it,
+    /// `calc-mix(1em 0%, 2em 0%)` does not. Same gap the two-pass port's `zeroValueMatchingChild`
+    /// has, and the same blame.
+    private mutating func calcMixFoldToZero(_ i: Int, _ options: CalcSimplification) {
+        guard let first = child(i, 0), let leaf = nodes[first].numericLeaf,
+            let childType = options.leafType(leaf),
+            let category = childType.calculationCategory().value,
+            // `.value = 0`, a literal in all eleven of the C++'s arms -- positive zero.
+            let zero = options.numericLeafForCategory(category, 0) else {
+            declined = true
+            return
+        }
+        setLeaf(i, zero)
+    }
+
     /// `simplify(Progress&)` and `simplify(ProgressNoClamp&)`
     /// (`+Simplification.cpp:1404`-`:1444`), which are identical but for the executor.
     ///
@@ -7435,6 +7848,22 @@ fileprivate extension CalcFlatTree {
                 return builder.buildOperation(node.alternative, pushed)
             }
 
+        case .CalcMix:
+            // The one alternative whose origin route needs something pushed BEFORE `rebuildFrom`:
+            // one weight plan per surviving item. See `calcEmitCalcMix` and
+            // `CalcFlatTree.simplifyCalcMix` for why the plan is recomputed here rather than
+            // carried from the fold.
+            //
+            // A `case` OF THIS SWITCH, and that placement was checked rather than assumed. A fourth
+            // arm on a switch `emit` runs at every node is exactly the shape that cost
+            // `simplifyNode` 6.7 instructions per simplification for its thirty-first label, so the
+            // alternative -- an `==` inside the `default` arm below, paid only by a node already
+            // taking the O(index) origin walk -- was built and measured: `leaf` 581.2 against
+            // 581.3, every other band identical to a tenth of an instruction. Neutral, so the
+            // clearer spelling stays. The two are NOT the same shape as `simplifyNode`'s, which is
+            // why the result there does not transfer and this was measured separately.
+            return calcEmitCalcMix(node.origin, pushed, original, &builder)
+
         default:
             // Everything `buildOperation` does not construct, which is every operation whose slots
             // are not one `Children` or one `Child`: a `Random::Sharing` naming a dashed-ident, a
@@ -7464,26 +7893,12 @@ fileprivate extension CalcFlatTree {
             // real captured payload -- `max()` twice is the whole of the math functions across
             // `calc-real.txt`, the four `real-sp3-*.css` and `bench.css`.
             //
-            // `CalcMix` is routed here and is NOT in `CalcFlatCoverage.mask`, which is safe -- an
-            // alternative outside the mask never reaches this pass at all -- and the reason it is
-            // not is worth writing down, because the emit route is not what is missing:
-            //
-            //   * the fold needs each item's WEIGHT, which is `swiftCalcMixItemWeight(node, index)`
-            //     off the original. That is one `withCalcOriginalNode` descent plus one upcall per
-            //     item, exactly as `simplifyAnchorFunction` does it, so the fold is reachable;
-            //   * but `rebuildSlot(const Vector<CalcMix::Item>&)` needs one `pushCalcMixItemWeight`
-            //     plan per SURVIVING item, at EMIT time, and there is nowhere to stash one. A plan is
-            //     an original item index, a `Double` and a flag, per child, and `CalcFlatNode` has two
-            //     spare BYTES. Pushing them during the fold instead does not work either: the weight
-            //     stack is consumed from the top by `childCount`, and the reverse scan folds an inner
-            //     `calc-mix()` BEFORE an outer one while `emit` reaches the inner one FIRST, so the
-            //     inner rebuild would take the outer's plans.
-            //
-            // So the shape it needs is RECOMPUTE AT EMIT: `calcMixPlan` is a pure function of the
-            // original weights, so running it a second time in `emit` reproduces the same survivor
-            // list in the same order, and the surviving flat children zip onto it. That makes the
-            // plan machinery shared between the fold and the emit rather than carried between them,
-            // which is the piece of design this note exists to record.
+            // `CalcMix` used to be routed here and held out of `CalcFlatCoverage.mask`, with a note
+            // saying the blocker was that `rebuildSlot(const Vector<CalcMix::Item>&)` needs one
+            // `pushCalcMixItemWeight` plan per SURVIVING item at emit time and a flat node has two
+            // spare bytes. That was the right diagnosis and the wrong conclusion: the plan is a pure
+            // function of the original weights, so it is RECOMPUTED at emit rather than carried.
+            // It has its own arm above; see `calcEmitCalcMix`.
             return calcEmitFromOrigin(node.origin, pushed, false, original, &builder)
         }
 
