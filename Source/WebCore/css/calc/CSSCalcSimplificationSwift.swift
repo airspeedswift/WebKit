@@ -4109,6 +4109,7 @@ private enum CalcFlatCoverage {
             | bit(.SiblingIndex)
             | bit(.Anchor)
             | bit(.AnchorSize)
+            | bit(.Random)
     }
 }
 
@@ -4144,7 +4145,7 @@ public func cssCalcSimplifySwift(
     // qualifying corpus case, and ANY disagreement with the C++ fails the differential rather than
     // waiting for someone to flip a flag.
     //
-    // Coverage cannot regress from this. A tree holding any of the other 26 alternatives falls through
+    // Coverage cannot regress from this. A tree holding any of the other 25 alternatives falls through
     // to the two-pass `rewrite` below unchanged, and the flattening pass has already refused outright
     // any tree holding one that neither port handles -- so the flat path is only ever reached for a
     // tree the two-pass port would have finished too. What it can do is DIVERGE, which is the point of
@@ -5348,9 +5349,9 @@ fileprivate func withCalcFlatTree<R>(
 // MARK: The flat simplifier
 //
 // COVERAGE: `Sum`, `Product`, `Negate`, `Invert`, `Min`, `Max`, `Symbol`, `SiblingCount`,
-// `SiblingIndex`, `Anchor`, `AnchorSize` and the four numeric leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
+// `SiblingIndex`, `Anchor`, `AnchorSize`, `Random` and the four numeric leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
 // honest behaviour for a bounded port -- it is not a decline channel and must not be read as one.
-// `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining 26 away from here;
+// `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining 25 away from here;
 // widening the two together is the work this representation exists to make possible.
 //
 // The six operations below are a full port of their `simplify` overloads, not a sketch: every arm
@@ -5530,6 +5531,9 @@ fileprivate extension CalcFlatTree {
 
         case .Anchor, .AnchorSize:
             simplifyAnchorFunction(i, original, builder)
+
+        case .Random:
+            simplifyRandom(i, original, options, builder)
 
         default:
             // Including the other three leaves, and for each of them that is a PORT rather than an
@@ -5744,6 +5748,73 @@ fileprivate extension CalcFlatTree {
 
         // Both remaining dispositions leave the node as it is. They differ only in whether the C++
         // marked the property invalid at computed-value time, which the upcall already did.
+    }
+
+    /// `simplify(Random&)` (`+Simplification.cpp:1350`-`:1402`): fold `random()` once its bounds are
+    /// resolved numerics of one alternative and its `<random-key>` names a base value.
+    ///
+    /// The `<random-key>` is not a child; only `min`, `max` and the optional `step` are, so
+    /// `childCount` is 2 or 3 whether or not a key is present. All present operands must be the same
+    /// numeric alternative and unit, checked against `max` and `step` SEPARATELY and both anchored on
+    /// `min`, as the C++ does; only `min` is checked for `fullyResolved`, so a non-canonical dimension
+    /// never folds here. The result is shaped like `min`, so a `random()` over percentages keeps
+    /// `min`'s percent hint.
+    ///
+    /// THE BOUNDS ARE CHECKED BEFORE THE UPCALL, and that is not just cheaper. `resolveRandomBaseValue`
+    /// goes through `BuilderState::lookupCSSRandomBaseValue`, which is a lookup-or-INSERT keyed on the
+    /// sharing, and the C++ reaches it only after the bounds pass (`:1388`). Asking earlier would
+    /// register a key for a `random()` the C++ never resolved.
+    ///
+    /// A surviving one leaves through `rebuildFrom` on the original: `Random::Sharing` is a variant
+    /// holding a dashed-ident and has no operand-stack representation at all.
+    private mutating func simplifyRandom(
+        _ i: Int,
+        _ original: borrowing WebCore.CSSCalc.Child,
+        _ options: CalcSimplification,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) {
+        guard let builder else {
+            return
+        }
+        let childCount = nodes[i].childCount
+        guard let minimumChild = child(i, 0), let maximumChild = child(i, 1),
+            let minimum = nodes[minimumChild].numericLeaf,
+            let maximum = nodes[maximumChild].numericLeaf else {
+            // Either bound not a numeric leaf is the C++'s `[](const auto&)` arm, and a missing one
+            // cannot happen for a parser-built node -- `isSimplifiableAlternative` already bounds the
+            // arity to 2 or 3. Both leave the node alone.
+            return
+        }
+        guard options.switchTogether(minimum, maximum), options.unitsMatch(minimum, maximum),
+            options.fullyResolved(minimum) else {
+            return
+        }
+
+        // `root.step` is present exactly when there is a third child, as with `round()`'s second
+        // argument and `log()`'s base.
+        var step: Double? = nil
+        if childCount > 2 {
+            guard let stepChild = child(i, 2), let stepLeaf = nodes[stepChild].numericLeaf else {
+                return
+            }
+            guard options.switchTogether(minimum, stepLeaf), options.unitsMatch(minimum, stepLeaf) else {
+                return
+            }
+            step = stepLeaf.value
+        }
+
+        guard let baseValue = withCalcOriginalNode(original, nodes[i].origin, { builder.resolveStyleCoupledValue($0) }) else {
+            declined = true
+            return
+        }
+        // `resolved == false` covers all three of the C++'s causes -- no conversion data or builder
+        // state, an unresolved element-scoped key, a `Calc` fixed value -- and none of them is a
+        // decline: the C++ leaves the node in the tree and so does this.
+        guard baseValue.resolved else {
+            return
+        }
+
+        setLeaf(i, minimum.withValue(CalcExecutor.random(baseValue.value, minimum.value, maximum.value, step)))
     }
 
     /// `simplify(Negate&)` (`+Simplification.cpp:911`-`:961`), all four arms.
