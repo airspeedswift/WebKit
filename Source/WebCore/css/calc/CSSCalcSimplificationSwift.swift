@@ -4107,6 +4107,8 @@ private enum CalcFlatCoverage {
             | bit(.Symbol)
             | bit(.SiblingCount)
             | bit(.SiblingIndex)
+            | bit(.Anchor)
+            | bit(.AnchorSize)
     }
 }
 
@@ -4142,7 +4144,7 @@ public func cssCalcSimplifySwift(
     // qualifying corpus case, and ANY disagreement with the C++ fails the differential rather than
     // waiting for someone to flip a flag.
     //
-    // Coverage cannot regress from this. A tree holding any of the other 28 alternatives falls through
+    // Coverage cannot regress from this. A tree holding any of the other 26 alternatives falls through
     // to the two-pass `rewrite` below unchanged, and the flattening pass has already refused outright
     // any tree holding one that neither port handles -- so the flat path is only ever reached for a
     // tree the two-pass port would have finished too. What it can do is DIVERGE, which is the point of
@@ -5346,9 +5348,9 @@ fileprivate func withCalcFlatTree<R>(
 // MARK: The flat simplifier
 //
 // COVERAGE: `Sum`, `Product`, `Negate`, `Invert`, `Min`, `Max`, `Symbol`, `SiblingCount`,
-// `SiblingIndex` and the four numeric leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
+// `SiblingIndex`, `Anchor`, `AnchorSize` and the four numeric leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
 // honest behaviour for a bounded port -- it is not a decline channel and must not be read as one.
-// `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining 28 away from here;
+// `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining 26 away from here;
 // widening the two together is the work this representation exists to make possible.
 //
 // The six operations below are a full port of their `simplify` overloads, not a sketch: every arm
@@ -5526,6 +5528,9 @@ fileprivate extension CalcFlatTree {
         case .SiblingCount, .SiblingIndex:
             simplifySiblingFunction(i, original, builder)
 
+        case .Anchor, .AnchorSize:
+            simplifyAnchorFunction(i, original, builder)
+
         default:
             // Including the other three leaves, and for each of them that is a PORT rather than an
             // omission: `simplify(Number&)` (`+Simplification.cpp:487`), `simplify(Percentage&)`
@@ -5660,6 +5665,85 @@ fileprivate extension CalcFlatTree {
             return
         }
         setLeaf(i, NumericLeaf.number(resolved.value))
+    }
+
+    /// `simplify(Anchor&)` and `simplify(AnchorSize&)` (`+Simplification.cpp:1692`-`:1744`): resolve
+    /// against the anchor position evaluator, substituting the fallback when it answers nothing.
+    ///
+    /// One function for both, since `resolveStyleCoupledValue` reads which off the node's own variant
+    /// tag and implements the whole of both bodies, including the `EvaluationOptions` with
+    /// `.range = CSS::All` and the `setCurrentPropertyInvalidAtComputedValueTime()` tail.
+    ///
+    /// THREE dispositions, and the third is why `CSSCalcSwiftNumericResult` carries
+    /// `substituteFallback` at all:
+    ///
+    ///   * resolved -- a canonical `<length>`, and the fallback is discarded. It was still simplified,
+    ///     because the reverse scan reached it first, which is exactly what the C++ does: children are
+    ///     simplified before `simplify` runs on the node, and that simplification can have observable
+    ///     upcalls.
+    ///   * the evaluation answered nothing -- `:1714`'s `std::exchange(anchor.fallback, { })`, so the
+    ///     node BECOMES its fallback. With no fallback the exchange yields `std::nullopt`, which is
+    ///     `simplify` returning `{ }`, so the node survives; the property was already marked invalid
+    ///     at computed-value time inside the upcall.
+    ///   * no conversion data or no builder state -- the opening guard's `{ }`, and the node survives
+    ///     with its simplified fallback still on it.
+    ///
+    /// A surviving one leaves through `rebuildFrom` on the original (`emitRoute.rebuildFromOrigin`):
+    /// an `AtomString` element name, an `AnchorSide` subtree and an `<anchor-size>` dimension are
+    /// none of them things a fixed-size flat node can hold.
+    ///
+    /// The `<anchor-side>` subtree is NOT simplified and NOT pushed as an operand -- `:1797` copies
+    /// it -- which `insideAnchorSide` and `emit`'s first-child skip handle between them.
+    private mutating func simplifyAnchorFunction(
+        _ i: Int,
+        _ original: borrowing WebCore.CSSCalc.Child,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) {
+        guard let builder else {
+            return
+        }
+
+        // Where the fallback sits among the children: `anchorChildren` (CSSCalcTree.cpp:95-:111) fills
+        // the `<anchor-side>` subtree first, when it is a `<percentage>` rather than a keyword, then
+        // the fallback -- and it is the SAME function `childCount` and `operator[]` answer from, so
+        // deriving presence from the count here cannot disagree with the boundary. The two-pass port
+        // cross-checks against `operationInfo().hasFallback` instead, which is a second crossing for
+        // an answer the count already gives.
+        let sideSlots: UInt32 = nodes[i].flags & CalcFlatNodeFlags.anchorSideIsSubtree != 0 ? 1 : 0
+        let childCount = nodes[i].childCount
+        guard childCount == sideSlots || childCount == sideSlots &+ 1 else {
+            // The count and the side flag disagree, which no tree the boundary produced can do.
+            declined = true
+            return
+        }
+
+        guard let resolved = withCalcOriginalNode(original, nodes[i].origin, { builder.resolveStyleCoupledValue($0) }) else {
+            declined = true
+            return
+        }
+
+        if resolved.resolved {
+            // `simplify` always ends at a `CanonicalDimension` here, so the check is on the
+            // alternative and not the unit: a boundary that came apart declines rather than building
+            // the wrong leaf.
+            guard resolved.alternative == .CanonicalDimension else {
+                declined = true
+                return
+            }
+            setLeaf(i, NumericLeaf(kind: .canonicalDimension, value: resolved.value, unitType: resolved.unitType, percentHint: 0))
+            return
+        }
+
+        if resolved.substituteFallback, childCount == sideSlots &+ 1, let fallback = child(i, Int(sideSlots)) {
+            // The node becomes the fallback child itself, `replace` rather than a leaf write, so a
+            // `Numeric` fallback reaches the parent as a numeric and a subtree reaches it as a
+            // subtree: `calc(anchor(top, 1px) + 1em)` has to become `17px`, not `calc(1px + 16px)`.
+            replace(i, with: fallback)
+            return
+        }
+
+        // Both remaining dispositions leave the node as it is. They differ only in whether the C++
+        // marked the property invalid at computed-value time, which the upcall already did.
     }
 
     /// `simplify(Negate&)` (`+Simplification.cpp:911`-`:961`), all four arms.
