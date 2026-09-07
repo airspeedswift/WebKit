@@ -768,11 +768,35 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     {
     }
 
+    // `isRoot`, ON EVERY CONSTRUCTION ENTRY BELOW, and it is the whole of the boundary's knowledge
+    // of where the finished tree goes.
+    //
+    // Set, the node being built is the tree's ROOT, and it is constructed straight into the `Tree`
+    // the caller of `copyAndSimplify` asked for rather than onto the operand stack. Clear, it goes
+    // on the stack as every other node does. Swift answers it with `i == 0`: node 0 of the flat
+    // tree is the root and no child index is 0, so it costs one comparison and no extra crossing.
+    //
+    // WHY IT EXISTS. The last operand on the stack is the new root, and handing it over used to be
+    // `Tree { .root = WTF::move(operands.value[0]) }` -- an out-of-line 41-alternative `mpark`
+    // visit for the move plus another for the destroy of the moved-from slot, about 52 retired
+    // instructions once per simplification, against a C++ arm that pays nothing because
+    // `copyAndSimplify(const Child&)`'s return slot IS the `Tree`'s root. See `swiftSimplifiedRoot`
+    // (CSSCalcTree+Simplification.cpp) for the elision chain that makes the destination reachable
+    // and `constructOperand` for what happens at the slot.
+    //
+    // A trailing parameter rather than a `beginRoot()` entry, because arming would be a second
+    // crossing per tree for a fact the caller already has, and rather than five `*Root` overloads,
+    // because the destination is not a different way to build a node.
+    //
+    // Defaulted, so the `ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)` primitive benchmarks, which build
+    // operands on a stack with no root slot at all, are unchanged. A `true` with no root slot
+    // provided still pushes; nothing depends on the flag being honoured.
+
     // Build one of the four numeric leaves and push it. See `CSSCalcSwiftLeaf`.
     //
     // Returns false for a `kind` outside the four numeric leaves, which is a contract violation
     // rather than an input that can be met, declining rather than building something plausible.
-    WEBCORE_EXPORT bool pushLeaf(CSSCalcSwiftLeaf);
+    WEBCORE_EXPORT bool pushLeaf(CSSCalcSwiftLeaf, bool isRoot = false);
 
     // Deep-copy an input subtree and push it. Used for every node walked past without changing,
     // and for every child of a node that is declined for rewriting.
@@ -783,7 +807,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // `AnchorSide`, while `Child` was one of ten `static` overloads inside CSSCalcTree+Copy.cpp --
     // which is one line of header and the removal of one `static`, and is the smallest thing that
     // works. Nothing new was written.
-    WEBCORE_EXPORT void pushCopyOf(const Child&);
+    WEBCORE_EXPORT void pushCopyOf(const Child&, bool isRoot = false);
 
     // Pop `childCount` operands and push back one node of `original`'s own kind, built from them.
     //
@@ -802,7 +826,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // Returns false, reported as a decline, for a contract violation: too few operands, a mismatched
     // arity, a leaf, or an `Anchor`/`AnchorSize` -- both declare `tuple_size` 0 (CSSCalcTree.h:1317,
     // "FIXME webkit.org/b/280798"), so generic reconstruction would build them empty.
-    WEBCORE_EXPORT bool rebuildFrom(const Child& original, uint32_t childCount);
+    WEBCORE_EXPORT bool rebuildFrom(const Child& original, uint32_t childCount, bool isRoot = false);
 
     // Push the weight the next `CalcMix` item pushed as an operand is to carry.
     //
@@ -867,7 +891,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // operands is a contract violation and returns false without touching the stack. Widening the
     // set is a case each, and it is why `Children` never has to reach Swift: this is the only
     // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount);
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, bool isRoot = false);
 
     // The same, for a node that STATES its own type instead of having one derived.
     //
@@ -896,7 +920,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // file whose own includes are `<array>`, `<optional>` and `<wtf/Forward.h>` -- so the
     // self-containment the note at the top of this file protects is intact, and the Swift step
     // already imported `CSSCalcType.h` through `CSSCalcTree.h` regardless.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type);
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false);
 
     // Drop every operand.
     //

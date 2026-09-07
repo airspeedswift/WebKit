@@ -1895,7 +1895,44 @@ struct CSSCalcSwiftOperandStack {
     // stack because a weight is not a subtree; kept as a stack rather than per-node so a nested
     // CalcMix follows the same consume-the-top discipline as every other slot shape.
     Vector<CalcMixWeightPlan> calcMixWeights;
+    // Where the finished ROOT is constructed, instead of on the stack: `Tree::root` inside the
+    // caller's own return object. `swiftSimplifiedRoot` below is what makes that address reachable;
+    // `CSSCalcSwiftBuilder::pushLeaf`'s `isRoot` comment is why it exists.
+    //
+    // Null for the `ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)` primitive benchmarks, which drive the
+    // builder directly and have no tree to put a root in; the root then goes on the stack like
+    // anything else and their `value.size() == 1` assertions are unchanged.
+    Child* rootSlot { nullptr };
+    // Whether a construction has consumed `rootSlot`. The completion contract, checked in
+    // `trySimplifyWithSwiftIsland`: exactly this, and an empty operand stack.
+    bool rootConstructed { false };
 };
+
+// Where a finished node goes.
+//
+// The root slot when this is the root and one was provided, the top of the operand stack
+// otherwise. Both are IN-PLACE constructions from a named alternative -- `Vector::constructAndAppend`
+// and placement new select the variant member at compile time -- so neither route builds an
+// intermediate `Child`.
+//
+// THE PLACEHOLDER'S DESTRUCTOR IS DELIBERATELY NOT RUN. `Tree` has no default constructor, so the
+// root slot handed over is not raw storage but a live `Child` holding a `Number` (see
+// `swiftSimplifiedRoot`). [basic.life]/5 permits reusing an object's storage without calling its
+// non-trivial destructor as long as nothing depends on that destructor's side effects, and a
+// `Number` has none -- it is two words of POD inside the variant. Calling `~Child()` here would
+// cost exactly the out-of-line 41-alternative `mpark` visit this whole route exists to remove,
+// which would be half the saving spent to no effect.
+template<typename... Args>
+static ALWAYS_INLINE void constructOperand(CSSCalcSwiftOperandStack& operands, bool isRoot, Args&&... args)
+{
+    if (isRoot && operands.rootSlot) {
+        static_assert(std::is_trivially_destructible_v<Number>, "the root placeholder's storage is reused without a destructor call, which [basic.life]/5 allows only because nothing depends on the destructor");
+        new (NotNull, operands.rootSlot) Child(std::forward<Args>(args)...);
+        operands.rootConstructed = true;
+        return;
+    }
+    operands.value.constructAndAppend(std::forward<Args>(args)...);
+}
 
 // The operands `rebuildFrom` fills a node's slots from: a forward cursor over the top of the stack.
 //
@@ -2021,7 +2058,7 @@ static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, 
     return items;
 }
 
-bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
+bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot)
 {
     // `constructAndAppend`, not `append(makeChild(...))`, wherever the alternative is named here.
     // `makeChild` returns a whole `Child`, and appending one move-constructs the 41-alternative
@@ -2036,7 +2073,7 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
         // with `hint = { }` (CSSCalcTree.cpp:197), and a folded percentage has to keep the hint its
         // operand had, exactly as `makeChildWithValueBasedOn` does at CSSCalcTree.cpp:318. That is
         // the whole reason `kind` is on `CSSCalcSwiftLeaf` beside `unitType`.
-        m_operands->value.constructAndAppend(Percentage {
+        constructOperand(*m_operands, isRoot, Percentage {
             .value = leaf.value,
             .hint = leaf.percentHint ? Type::PercentHintValue { static_cast<PercentHint>(leaf.percentHint) } : Type::PercentHintValue { }
         });
@@ -2052,7 +2089,7 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
         //
         // `unit` is the only member `NonCanonicalDimension` has beside `value` (CSSCalcTree.h:138),
         // so nothing is re-derived here and no table crosses.
-        m_operands->value.constructAndAppend(NonCanonicalDimension { .value = leaf.value, .unit = static_cast<CSSUnitType>(leaf.unitType) });
+        constructOperand(*m_operands, isRoot, NonCanonicalDimension { .value = leaf.value, .unit = static_cast<CSSUnitType>(leaf.unitType) });
         return true;
 
     case CSSCalcSwiftNodeKind::Number:
@@ -2074,7 +2111,7 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
         // reaches this.
         if (auto unit = static_cast<CSSUnitType>(leaf.unitType); unit != CSSUnitType::Number && unit != CSSUnitType::Integer)
             return false;
-        m_operands->value.constructAndAppend(Number { .value = leaf.value });
+        constructOperand(*m_operands, isRoot, Number { .value = leaf.value });
         return true;
 
     case CSSCalcSwiftNodeKind::CanonicalDimension:
@@ -2088,7 +2125,7 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
         // -- and naming it at this call site would put a second copy of the canonical-unit table on
         // the boundary. Unlike the `Number` arm above, the set is six units wide and each maps to a
         // different value, so there is nothing to check instead of duplicating.
-        m_operands->value.append(makeNumeric(leaf.value, static_cast<CSSUnitType>(leaf.unitType)));
+        constructOperand(*m_operands, isRoot, makeNumeric(leaf.value, static_cast<CSSUnitType>(leaf.unitType)));
         return true;
 
     default:
@@ -2098,11 +2135,11 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf)
     }
 }
 
-void CSSCalcSwiftBuilder::pushCopyOf(const Child& node)
+void CSSCalcSwiftBuilder::pushCopyOf(const Child& node, bool isRoot)
 {
     // `CSSCalc::copy(const Child&)`, which is what `copyAndSimplifyChildren` bottoms out in too, so
     // the two cannot disagree about what a copy is.
-    m_operands->value.append(copy(node));
+    constructOperand(*m_operands, isRoot, copy(node));
 }
 
 void CSSCalcSwiftBuilder::pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight)
@@ -2138,7 +2175,7 @@ CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child& node, uint32_t ind
     return { .value = 0, .present = true, .isRaw = false };
 }
 
-bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount)
+bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount, bool isRoot)
 {
     auto& stack = m_operands->value;
     auto& weights = m_operands->calcMixWeights;
@@ -2212,7 +2249,7 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount
     }
 
     stack.shrink(base);
-    stack.append(WTF::move(*rebuilt));
+    constructOperand(*m_operands, isRoot, WTF::move(*rebuilt));
     return true;
 }
 
@@ -2227,8 +2264,9 @@ void CSSCalcSwiftBuilder::clearOperands()
 // A pointer, which is fine because nothing here is Swift-visible: the two public overloads are what
 // Swift calls, and a `const Type*` parameter on one of those would import as `UnsafePointer` and
 // cost an `unsafe` marker at every call site.
-static bool buildOperationOnStack(OperandVector& stack, CSSCalcSwiftAlternative alternative, uint32_t childCount, const Type* carriedType)
+static bool buildOperationOnStack(CSSCalcSwiftOperandStack& operands, CSSCalcSwiftAlternative alternative, uint32_t childCount, const Type* carriedType, bool isRoot)
 {
+    auto& stack = operands.value;
     if (!childCount || childCount > stack.size())
         return false;
 
@@ -2255,7 +2293,7 @@ static bool buildOperationOnStack(OperandVector& stack, CSSCalcSwiftAlternative 
         // slot. Naming the alternative instead picks the variant member at COMPILE time.
         // `makeIndirectNode` is `ChildConstruction`'s own indirect half (CSSCalcTree.h), so this is
         // not a second spelling of how an operation node is built.
-        stack.constructAndAppend(makeIndirectNode(WTF::move(op), *type));
+        constructOperand(operands, isRoot, makeIndirectNode(WTF::move(op), *type));
         return true;
     };
 
@@ -2295,14 +2333,14 @@ static bool buildOperationOnStack(OperandVector& stack, CSSCalcSwiftAlternative 
     }
 }
 
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount)
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, bool isRoot)
 {
-    return buildOperationOnStack(m_operands->value, alternative, childCount, nullptr);
+    return buildOperationOnStack(*m_operands, alternative, childCount, nullptr, isRoot);
 }
 
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type type)
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type type, bool isRoot)
 {
-    return buildOperationOnStack(m_operands->value, alternative, childCount, &type);
+    return buildOperationOnStack(*m_operands, alternative, childCount, &type, isRoot);
 }
 
 // The two shapes every `CSSCalcSwiftNumericResult` answer takes, written once instead of
@@ -2856,10 +2894,11 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
 }
 #endif
 
-// Whether the island simplified: true leaves the new root as `operands.value[0]`, false means "run
-// your own simplifier". Nothing done here is observable in that case: the operand stack is the
-// caller's local and is destroyed with it, which is what makes a whole-tree decline free of the
-// truncation problem `serializationForCSS` has with a `StringBuilder`.
+// Whether the island simplified: true leaves the new root already constructed in
+// `operands.rootSlot`, false means "run your own simplifier". Nothing done here is observable in
+// that case: the operand stack is the caller's local and is destroyed with it, which is what makes
+// a whole-tree decline free of the truncation problem `serializationForCSS` has with a
+// `StringBuilder`.
 //
 // The stack is the CALLER's, and the answer is a `bool` rather than a `std::optional<Tree>`,
 // because every `Child` handover is a 41-way generic `mpark` visit that neither inlines nor
@@ -2867,8 +2906,9 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
 // caller's return slot cost THREE such move-constructions and three matching destructions per
 // simplification -- measured at 1072 of the 5651 profile samples of a single-node tree, 19% -- and
 // the C++ arm's `Tree { .root = copyAndSimplify(tree.root, options), ... }` pays none of them,
-// because the inner call's return slot IS the outer node's. Handing the root back in place brings
-// the Swift path to the same one move plus the one destruction of the moved-from stack slot.
+// because the inner call's return slot IS the outer node's. The root slot takes the LAST of those
+// away too: the finished root is constructed where the caller's `Tree` needs it, so the Swift path
+// now moves nothing at all, matching the C++ arm exactly.
 static bool trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOptions& options, CSSCalcSwiftOperandStack& operands)
 {
     CSSCalcSwiftBuilder builder { operands, options };
@@ -2907,10 +2947,13 @@ static bool trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOpt
         return false;
     }
 
-    // Swift's other contract: a completed walk leaves exactly one operand, the new root.
-    // Checked rather than asserted, so that a boundary that came apart is a fallback to the C++
-    // arm and not a crash or -- much worse -- a tree built from whatever else was on the stack.
-    if (operands.value.size() != 1) {
+    // Swift's other contract: a completed walk constructs the root in the root slot and leaves
+    // nothing behind on the operand stack. Checked rather than asserted, so that a boundary that
+    // came apart is a fallback to the C++ arm and not a crash or -- much worse -- a tree built from
+    // whatever else was on the stack. A declined tree cannot reach here, so `rootConstructed` false
+    // means the walk finished while leaving the caller's placeholder in place, which would return
+    // `calc(0)` for every input.
+    if (!operands.rootConstructed || !operands.value.isEmpty()) {
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
         s_simplificationDeclines.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -2922,20 +2965,45 @@ static bool trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOpt
 
 // MARK: Exposed interface
 
+// The island's whole-tree call, with the finished root constructed straight into the `Tree` the
+// caller asked for.
+//
+// THE ELISION CHAIN, which is the only reason a destination exists to hand over. `root` is this
+// function's return object -- one `return` of one named local, so NRVO; the call is the prvalue
+// initialiser of `Tree::root` below, which C++17 elides by guarantee; and `copyAndSimplify` returns
+// that `Tree` by NRVO in turn. So `&root` here IS `Tree::root` in the storage the original caller
+// provided, and the last construction the walk makes writes the root where it has to end up.
+//
+// The placeholder is here because `Tree` has no default constructor and so cannot hand out an
+// uninitialised root slot; `constructOperand` says why its destructor is not run. Its cost is two
+// stores, against the ~52 retired instructions the move it replaces cost -- an out-of-line 41-way
+// `mpark` visit to move the root off the operand stack and another to destroy the moved-from slot.
+//
+// On a DECLINE the placeholder (or, for the forced-decline benchmark hook, a perfectly good root
+// nobody wants) is returned and destroyed by the caller. That path is 45 cases in 924951 and pays
+// one ordinary `Child` destruction for the privilege.
+static Child swiftSimplifiedRoot(const Tree& tree, const SimplificationOptions& options, bool& simplified)
+{
+    Child root = Number { .value = 0 };
+
+    CSSCalcSwiftOperandStack operands;
+    operands.rootSlot = &root;
+    simplified = trySimplifyWithSwiftIsland(tree, options, operands);
+    return root;
+}
+
 Tree copyAndSimplify(const Tree& tree, const SimplificationOptions& options, Simplifier simplifier)
 {
     if (simplifier == Simplifier::Swift) {
-        // Declared here rather than inside the island helper so the root can be moved straight into
-        // this function's own return slot; see the note on `trySimplifyWithSwiftIsland`.
-        CSSCalcSwiftOperandStack operands;
-        if (trySimplifyWithSwiftIsland(tree, options, operands)) {
-            return Tree {
-                .root = WTF::move(operands.value[0]),
-                .type = tree.type,
-                .stage = tree.stage,
-                .requiresConversionData = tree.requiresConversionData,
-            };
-        }
+        bool simplified = false;
+        Tree result {
+            .root = swiftSimplifiedRoot(tree, options, simplified),
+            .type = tree.type,
+            .stage = tree.stage,
+            .requiresConversionData = tree.requiresConversionData,
+        };
+        if (simplified)
+            return result;
     }
 
 #if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN

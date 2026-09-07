@@ -2008,13 +2008,14 @@ fileprivate func calcEmitFromOrigin(
     _ target: UInt32,
     _ operands: UInt32,
     _ copyWhole: Bool,
+    _ isRoot: Bool,
     _ original: borrowing WebCore.CSSCalc.Child,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
 ) -> Bool {
     if copyWhole {
-        return withCalcOriginalNode(original, target) { builder.pushCopyOf($0) } != nil
+        return withCalcOriginalNode(original, target) { builder.pushCopyOf($0, isRoot) } != nil
     }
-    return withCalcOriginalNode(original, target) { builder.rebuildFrom($0, operands) } ?? false
+    return withCalcOriginalNode(original, target) { builder.rebuildFrom($0, operands, isRoot) } ?? false
 }
 
 /// `calc-mix()`'s emit route: the plan recomputed, its weights pushed, and then the same generic
@@ -2040,6 +2041,7 @@ fileprivate func calcEmitFromOrigin(
 fileprivate func calcEmitCalcMix(
     _ target: UInt32,
     _ operands: UInt32,
+    _ isRoot: Bool,
     _ original: borrowing WebCore.CSSCalc.Child,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
 ) -> Bool {
@@ -2080,7 +2082,7 @@ fileprivate func calcEmitCalcMix(
         guard pushed == operands else {
             return false
         }
-        return builder.rebuildFrom(node, operands)
+        return builder.rebuildFrom(node, operands, isRoot)
     } ?? false
 }
 
@@ -4581,6 +4583,13 @@ fileprivate extension CalcFlatTree {
     /// makes the origin route expensive is the WALK, at 192 instructions per node stepped past
     /// (`withCalcOriginalNode`).
     ///
+    /// `i == 0` IS "this node is the root", and it is passed to every construction entry as
+    /// `isRoot`. Node 0 is where `calcFlatten` writes the root and `emitRoot` is the only caller
+    /// that names an index, so no child can be 0. The boundary uses it to construct the finished
+    /// root straight into the caller's `Tree` instead of onto the operand stack; see
+    /// `CSSCalcSwiftBuilder::pushLeaf`'s `isRoot` note for what that is worth. It costs one
+    /// comparison at each of the six construction calls and no extra crossing.
+    ///
     /// Recursive on tree DEPTH, not on node count, and the deepest calc expression in the whole WPT
     /// css-values corpus is single digits.
     func emit(
@@ -4615,7 +4624,7 @@ fileprivate extension CalcFlatTree {
             guard let leaf = node.numericLeaf else {
                 return false
             }
-            return builder.pushLeaf(leaf.boundaryLeaf)
+            return builder.pushLeaf(leaf.boundaryLeaf, i == 0)
 
         case .Symbol, .SiblingCount, .SiblingIndex:
             // The three non-numeric leaves, unresolved. `pushLeaf` serves the four NUMERIC ones and
@@ -4623,7 +4632,7 @@ fileprivate extension CalcFlatTree {
             // leaf outright because there are no slots to fill (`:2166`-`:2169`), so a deep copy of
             // the original is the only route -- and it is exact, not merely conservative, for the
             // reason `+Simplification.cpp:2166`-`:2169` gives: there is nothing to fill.
-            return calcEmitFromOrigin(node.origin, 0, true, original, &builder)
+            return calcEmitFromOrigin(node.origin, 0, true, i == 0, original, &builder)
 
         default:
             // Every operation, whether or not `buildOperation` can construct it. One it cannot is
@@ -4667,7 +4676,7 @@ fileprivate extension CalcFlatTree {
             // which is what a real payload actually holds -- pays nothing for a rule only `clamp()`
             // can reach.
             if node.flags & CalcFlatNodeFlags.recomputeType != 0 {
-                return builder.buildOperation(node.alternative, pushed)
+                return builder.buildOperation(node.alternative, pushed, i == 0)
             }
 
         case .CalcMix:
@@ -4684,7 +4693,7 @@ fileprivate extension CalcFlatTree {
             // 581.3, every other band identical to a tenth of an instruction. Neutral, so the
             // clearer spelling stays. The two are NOT the same shape as `simplifyNode`'s, which is
             // why the result there does not transfer and this was measured separately.
-            return calcEmitCalcMix(node.origin, pushed, original, &builder)
+            return calcEmitCalcMix(node.origin, pushed, i == 0, original, &builder)
 
         default:
             // Everything `buildOperation` does not construct, which is every operation whose slots
@@ -4721,7 +4730,7 @@ fileprivate extension CalcFlatTree {
             // spare bytes. That was the right diagnosis and the wrong conclusion: the plan is a pure
             // function of the original weights, so it is RECOMPUTED at emit rather than carried.
             // It has its own arm above; see `calcEmitCalcMix`.
-            return calcEmitFromOrigin(node.origin, pushed, false, original, &builder)
+            return calcEmitFromOrigin(node.origin, pushed, false, i == 0, original, &builder)
         }
 
         // The node's OWN type, not a fresh `toType` of the operands, and this is the overload that
@@ -4733,7 +4742,7 @@ fileprivate extension CalcFlatTree {
         // the parse-time type where a fresh `toType` computes px^2. That is why `flatten` pays
         // `getType` per operator node, and why it skips it for the seven leaf alternatives, whose
         // type `makeChild` discards.
-        return builder.buildOperation(node.alternative, pushed, node.type)
+        return builder.buildOperation(node.alternative, pushed, node.type, i == 0)
     }
 }
 
