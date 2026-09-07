@@ -4115,6 +4115,14 @@ private enum CalcFlatCoverage {
             | bit(.Sign)
             | bit(.Pow)
             | bit(.Sqrt)
+            | bit(.Deg2Rad)
+            | bit(.Sin)
+            | bit(.Cos)
+            | bit(.Tan)
+            | bit(.Asin)
+            | bit(.Acos)
+            | bit(.Atan)
+            | bit(.Atan2)
             | bit(.Symbol)
             | bit(.SiblingCount)
             | bit(.SiblingIndex)
@@ -5563,6 +5571,7 @@ fileprivate extension CalcFlatTree {
 
         case .Clamp, .RoundNearest, .RoundUp, .RoundDown, .RoundToZero,
              .Mod, .Rem, .Abs, .Sign, .Pow, .Sqrt,
+             .Deg2Rad, .Sin, .Cos, .Tan, .Asin, .Acos, .Atan, .Atan2,
              .Symbol, .SiblingCount, .SiblingIndex, .Anchor, .AnchorSize, .Random:
             simplifyColdNode(i, original, options, builder)
 
@@ -5578,7 +5587,7 @@ fileprivate extension CalcFlatTree {
 
     /// The alternatives a REAL PAGE'S CSS does not hold, behind ONE call site.
     ///
-    /// SEVENTEEN CASE LABELS SHARING ONE CALL, and that shape is measured rather than tidy. The hot
+    /// TWENTY-FIVE CASE LABELS SHARING ONE CALL, and that shape is measured rather than tidy. The hot
     /// switch above names exactly the operations the captured payloads contain -- `calc-real.txt`,
     /// the four `real-sp3-*.css` and `bench.css` hold `max()` twice and no other math function at
     /// all -- and everything else is one entry. Five separate `@inline(never)` arms instead of one
@@ -5632,6 +5641,30 @@ fileprivate extension CalcFlatTree {
         case .Sqrt:
             simplifySqrt(i)
 
+        case .Deg2Rad:
+            simplifyDeg2Rad(i)
+
+        case .Sin:
+            simplifyNumberToNumber(i, CalcExecutor.sin)
+
+        case .Cos:
+            simplifyNumberToNumber(i, CalcExecutor.cos)
+
+        case .Tan:
+            simplifyNumberToNumber(i, CalcExecutor.tan)
+
+        case .Asin:
+            simplifyArcTrig(i, CalcExecutor.asin)
+
+        case .Acos:
+            simplifyArcTrig(i, CalcExecutor.acos)
+
+        case .Atan:
+            simplifyArcTrig(i, CalcExecutor.atan)
+
+        case .Atan2:
+            simplifyAtan2(i, options)
+
         case .Symbol:
             simplifySymbol(i, options, builder)
 
@@ -5645,7 +5678,7 @@ fileprivate extension CalcFlatTree {
             simplifyRandom(i, original, options, builder)
 
         default:
-            // Unreachable: the caller's switch selects exactly the seventeen above. Spelled as a
+            // Unreachable: the caller's switch selects exactly the twenty-five above. Spelled as a
             // return rather than a trap for the reason every other unreachable arm in this file is
             // -- an untaught alternative leaves the node alone, which the mask has already made
             // impossible, rather than killing the process.
@@ -6722,6 +6755,77 @@ fileprivate extension CalcFlatTree {
             return
         }
         setLeaf(i, NumericLeaf.number(CalcExecutor.sqrt(nodes[aChild].value)))
+    }
+
+    /// `simplify(Deg2Rad&)` (`+Simplification.cpp:982`-`:997`): the parse-time wrapper that turns an
+    /// `<angle>` argument to `sin()`/`cos()`/`tan()` into the `<number>` of radians those three fold
+    /// over. It has no syntax of its own, so it is only ever reached inside a trig function -- which
+    /// is also why teaching the flat pass `Sin` without it would buy almost nothing: `sin(30deg)`
+    /// has `Deg2Rad` in its `kindMask` and the whole tree would fall to the two-pass port.
+    ///
+    /// SAFER THAN THE C++, deliberately, and the same choice `foldDeg2Rad` (`.swift:1771`) made: the
+    /// C++ `ASSERT`s the dimension is `Angle` and then converts whatever it got, so a `Deg2Rad`
+    /// wrapping a `<length>` misconverts silently in a shipping build. This checks the unit and
+    /// leaves the node alone.
+    @inline(never)
+    private mutating func simplifyDeg2Rad(_ i: Int) {
+        guard let angleChild = child(i, 0), let angle = nodes[angleChild].numericLeaf,
+            angle.kind == .canonicalDimension,
+            angle.unitType == UInt16(WebCore.CSSUnitType.Deg.rawValue) else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(CalcExecutor.degreesToRadians(angle.value)))
+    }
+
+    /// `simplifyForTrig<Op>` (`+Simplification.cpp:340`-`:355`), which `simplify(Sin&)`, `(Cos&)` and
+    /// `(Tan&)` (`:1138`-`:1151`) are one line each onto -- and, character for character, the bodies
+    /// of `simplify(Exp&)` (`:1308`-`:1321`) and `simplify(Log&)`'s one-argument shape
+    /// (`:1300`-`:1305`) as well, which is why those two route here rather than to a copy of it.
+    ///
+    /// `Number` SPECIFICALLY, not the `Numeric` concept: the C++ gives `WTF::switchOn` a single
+    /// `(const Number&)` arm, so `sin(50%)` and `exp(1em)` fall to the catch-all and are left alone.
+    /// For the trig three the argument was type-checked to `<number>` at parse or wrapped in a
+    /// `Deg2Rad` that produces one, so this fires exactly when the operand has resolved to radians.
+    ///
+    /// `CalcExecutor.tan` reproduces the two named poles bit for bit (`.swift:519`); it is not
+    /// `Darwin.tan`, and the closure passed here is the reason that distinction survives.
+    @inline(never)
+    private mutating func simplifyNumberToNumber(_ i: Int, _ operation: (Double) -> Double) {
+        guard let aChild = child(i, 0), nodes[aChild].alternative == .Number else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(operation(nodes[aChild].value)))
+    }
+
+    /// `simplifyForArcTrig<Op>` (`+Simplification.cpp:357`-`:370`), for `simplify(Asin&)`, `(Acos&)`
+    /// and `(Atan&)` (`:1153`-`:1166`): the same one-arm `Number` predicate, and a canonical
+    /// `<angle>` out rather than a `<number>` -- `CalcExecutor.asin`/`.acos`/`.atan` all end in
+    /// `radiansToDegrees`, so the value is already in the `Deg` `NumericLeaf.canonicalAngle` names.
+    @inline(never)
+    private mutating func simplifyArcTrig(_ i: Int, _ operation: (Double) -> Double) {
+        guard let aChild = child(i, 0), nodes[aChild].alternative == .Number else {
+            return
+        }
+        setLeaf(i, NumericLeaf.canonicalAngle(operation(nodes[aChild].value)))
+    }
+
+    /// `simplify(Atan2&)` (`+Simplification.cpp:1168`-`:1173`), which is
+    /// `simplifyForOperationWithCompletion<Atan2>` (`:314`-`:326`): `simplifyForOperation`'s three
+    /// predicates, with the caller choosing the result's shape instead of inheriting the first
+    /// operand's. For `atan2()` that shape is always a canonical `<angle>`.
+    ///
+    /// `fullyResolved`, so `atan2(1em, 2em)` does not fold -- the same side of the `:155`-`:173`
+    /// split `mod()` sits on, and the opposite side from `abs()`.
+    @inline(never)
+    private mutating func simplifyAtan2(_ i: Int, _ options: CalcSimplification) {
+        guard let aChild = child(i, 0), let bChild = child(i, 1),
+            let a = nodes[aChild].numericLeaf, let b = nodes[bChild].numericLeaf else {
+            return
+        }
+        guard options.switchTogether(a, b), options.unitsMatch(a, b), options.fullyResolved(a) else {
+            return
+        }
+        setLeaf(i, NumericLeaf.canonicalAngle(CalcExecutor.atan2(a.value, b.value)))
     }
 
     /// `simplify(Product&)` (`+Simplification.cpp:717`-`:909`), css-values-4 steps 9.1 to 9.5.
