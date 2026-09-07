@@ -4093,6 +4093,14 @@ private enum CalcFlatCoverage {
         return UInt64(1) << UInt64(alternative.rawValue)
     }
 
+    /// The four whose surviving node leaves through `rebuildFrom` on its original, as a mask over the
+    /// same alternative index. A mask rather than `CalcFlatNode.emitRoute` at the one site `emit`
+    /// asks this on the operator path: a shift and a test, with no jump table and no second load of
+    /// the fields a `switch` on the alternative lets the optimizer hoist.
+    static var rebuildFromOriginMask: UInt64 {
+        return bit(.Random) | bit(.CalcMix) | bit(.Anchor) | bit(.AnchorSize)
+    }
+
     static var mask: UInt64 {
         return bit(.Number)
             | bit(.Percentage)
@@ -5017,6 +5025,31 @@ fileprivate func calcDescendToOrigin<R>(
     return .passed(next &- index)
 }
 
+/// The two origin routes, OUT OF LINE, and that is measured rather than stylistic.
+///
+/// A closure body is a `partial_apply` and a stack slot even when it is `[on_stack]` and
+/// specialised, and two of them inside `emit` grew that function's frame -- which `emit` pays PER
+/// NODE, because it recurses. Inline, they cost the whole pass a fixed ~70 retired instructions per
+/// simplification, measured on `calc-shapes`' `leaf` band, which is a single numeric leaf and
+/// reaches neither route.
+///
+/// `@inline(never)` rather than trusting the optimizer: both arms are cold by construction -- none
+/// of the alternatives that take them appears in any real captured payload -- and the whole point of
+/// the split is that `emit`'s frame does not grow.
+@inline(never)
+fileprivate func calcEmitFromOrigin(
+    _ target: UInt32,
+    _ operands: UInt32,
+    _ copyWhole: Bool,
+    _ original: borrowing WebCore.CSSCalc.Child,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> Bool {
+    if copyWhole {
+        return withCalcOriginalNode(original, target) { builder.pushCopyOf($0) } != nil
+    }
+    return withCalcOriginalNode(original, target) { builder.rebuildFrom($0, operands) } ?? false
+}
+
 fileprivate extension CalcFlatNode {
     /// The four numeric leaves -- the only alternatives that carry a foldable value.
     var isNumericLeaf: Bool {
@@ -5603,6 +5636,7 @@ fileprivate extension CalcFlatTree {
     /// `nil` builder is the probe's, as in `simplifyNonCanonicalDimension`: with no symbol table to
     /// consult there is nothing to resolve against, which is the C++'s own `return { }` for a symbol
     /// the table does not hold.
+    @inline(never)
     private mutating func simplifySymbol(
         _ i: Int,
         _ options: CalcSimplification,
@@ -5653,6 +5687,7 @@ fileprivate extension CalcFlatTree {
     /// A `nil` from `withCalcOriginalNode` is the one real failure -- the flat tree naming an origin
     /// index the original tree does not have -- and it declines the whole tree rather than folding
     /// something else.
+    @inline(never)
     private mutating func simplifySiblingFunction(
         _ i: Int,
         _ original: borrowing WebCore.CSSCalc.Child,
@@ -5698,6 +5733,7 @@ fileprivate extension CalcFlatTree {
     ///
     /// The `<anchor-side>` subtree is NOT simplified and NOT pushed as an operand -- `:1797` copies
     /// it -- which `insideAnchorSide` and `emit`'s first-child skip handle between them.
+    @inline(never)
     private mutating func simplifyAnchorFunction(
         _ i: Int,
         _ original: borrowing WebCore.CSSCalc.Child,
@@ -5767,6 +5803,7 @@ fileprivate extension CalcFlatTree {
     ///
     /// A surviving one leaves through `rebuildFrom` on the original: `Random::Sharing` is a variant
     /// holding a dashed-ident and has no operand-stack representation at all.
+    @inline(never)
     private mutating func simplifyRandom(
         _ i: Int,
         _ original: borrowing WebCore.CSSCalc.Child,
@@ -6626,18 +6663,33 @@ fileprivate extension CalcFlatTree {
     ) -> Bool {
         let node = nodes[i]
 
-        if let leaf = node.numericLeaf {
+        // ONE dispatch on the leaf path, not two, and that is measured rather than tidy. Asking
+        // `numericLeaf` and then `emitRoute` reads the same `alternative` byte twice, and because both
+        // are pure the optimizer HOISTS the second switch -- with the four extra field loads it needs
+        // -- above the leaf return, so a single-node `calc(1px)` paid the operator routing it never
+        // uses. Merging them was worth 16 retired instructions per node on the `leaf` band.
+        //
+        // The `rebuildFromOrigin` answer cannot be given here even though the same switch knows it:
+        // its children have to become operands first. Rebinding it into a `let` for the test below
+        // puts the hoist straight back (measured: `leaf` +2.4% again), so it is re-asked after the
+        // loop, on the operator path only.
+        switch node.alternative {
+        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
             // `pushLeaf` owns which alternative a unit means, via `makeNumeric`, so no unit table is
             // re-derived here -- the same routing the two-pass port's leaves take.
+            guard let leaf = node.numericLeaf else {
+                return false
+            }
             return builder.pushLeaf(leaf.boundaryLeaf)
-        }
 
-        let route = node.emitRoute
-        if route == .copyOfOrigin {
+        case .Symbol, .SiblingCount, .SiblingIndex:
             // A non-numeric leaf that did not resolve. No children, no operands, and nothing to
             // build: the whole node comes back off the original by deep copy, which is what
-            // `copyAndSimplify` does for it too.
-            return withCalcOriginalNode(original, node.origin) { builder.pushCopyOf($0) } != nil
+            // `copyAndSimplify` does for it too. `CalcEmitRoute.copyOfOrigin`.
+            return calcEmitFromOrigin(node.origin, 0, true, original, &builder)
+
+        default:
+            break
         }
 
         var pushed: UInt32 = 0
@@ -6658,15 +6710,11 @@ fileprivate extension CalcFlatTree {
             cursor = nodes[Int(cursor)].nextSibling
         }
 
-        if route == .rebuildFromOrigin {
+        if CalcFlatCoverage.rebuildFromOriginMask >> UInt64(node.alternative.rawValue) & 1 != 0 {
             // An operation whose payload no fixed-size flat node can carry. The children are already
             // operands; everything else -- an `AtomString` element name, an `AnchorSide` subtree, a
             // `Random::Sharing`, a nested `CSSCalcValue` item weight -- comes off the original.
-            // `operands` rather than `pushed` itself: a `var` read inside the body is captured by
-            // ADDRESS, which pins it to a stack slot and blocks the closure specialization the copy
-            // arm above gets. A `let` copy crosses in a register.
-            let operands = pushed
-            return withCalcOriginalNode(original, node.origin) { builder.rebuildFrom($0, operands) } ?? false
+            return calcEmitFromOrigin(node.origin, pushed, false, original, &builder)
         }
 
         // False for anything outside `buildOperation`'s set, which for now is this prototype's own
