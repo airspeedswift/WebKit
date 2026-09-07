@@ -2791,13 +2791,21 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
 }
 #endif
 
-// The simplified tree, or `std::nullopt` to mean "run your own simplifier". Nothing done here is
-// observable in that case: the operand stack is local and destroyed with it, which is what makes a
-// whole-tree decline free of the truncation problem `serializationForCSS` has with a
-// `StringBuilder`.
-static std::optional<Tree> trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOptions& options)
+// Whether the island simplified: true leaves the new root as `operands.value[0]`, false means "run
+// your own simplifier". Nothing done here is observable in that case: the operand stack is the
+// caller's local and is destroyed with it, which is what makes a whole-tree decline free of the
+// truncation problem `serializationForCSS` has with a `StringBuilder`.
+//
+// The stack is the CALLER's, and the answer is a `bool` rather than a `std::optional<Tree>`,
+// because every `Child` handover is a 41-way generic `mpark` visit that neither inlines nor
+// specialises. Building a `Tree` here, moving it into the optional and moving that into the
+// caller's return slot cost THREE such move-constructions and three matching destructions per
+// simplification -- measured at 1072 of the 5651 profile samples of a single-node tree, 19% -- and
+// the C++ arm's `Tree { .root = copyAndSimplify(tree.root, options), ... }` pays none of them,
+// because the inner call's return slot IS the outer node's. Handing the root back in place brings
+// the Swift path to the same one move plus the one destruction of the moved-from stack slot.
+static bool trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOptions& options, CSSCalcSwiftOperandStack& operands)
 {
-    CSSCalcSwiftOperandStack operands;
     CSSCalcSwiftBuilder builder { operands, options };
 
     auto swiftOptions = CSSCalcSwiftSimplificationOptions {
@@ -2823,7 +2831,7 @@ static std::optional<Tree> trySimplifyWithSwiftIsland(const Tree& tree, const Si
     s_simplificationLastDeclineAlternative.store(result.declineAlternative, std::memory_order_relaxed);
     if (s_simplificationForceDecline.load(std::memory_order_relaxed)) {
         s_simplificationDeclines.fetch_add(1, std::memory_order_relaxed);
-        return std::nullopt;
+        return false;
     }
 #endif
 
@@ -2831,7 +2839,7 @@ static std::optional<Tree> trySimplifyWithSwiftIsland(const Tree& tree, const Si
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
         s_simplificationDeclines.fetch_add(1, std::memory_order_relaxed);
 #endif
-        return std::nullopt;
+        return false;
     }
 
     // Swift's other contract: a completed walk leaves exactly one operand, the new root.
@@ -2841,15 +2849,10 @@ static std::optional<Tree> trySimplifyWithSwiftIsland(const Tree& tree, const Si
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
         s_simplificationDeclines.fetch_add(1, std::memory_order_relaxed);
 #endif
-        return std::nullopt;
+        return false;
     }
 
-    return Tree {
-        .root = WTF::move(operands.value[0]),
-        .type = tree.type,
-        .stage = tree.stage,
-        .requiresConversionData = tree.requiresConversionData,
-    };
+    return true;
 }
 
 // MARK: Exposed interface
@@ -2857,8 +2860,17 @@ static std::optional<Tree> trySimplifyWithSwiftIsland(const Tree& tree, const Si
 Tree copyAndSimplify(const Tree& tree, const SimplificationOptions& options, Simplifier simplifier)
 {
     if (simplifier == Simplifier::Swift) {
-        if (auto simplified = trySimplifyWithSwiftIsland(tree, options))
-            return WTF::move(*simplified);
+        // Declared here rather than inside the island helper so the root can be moved straight into
+        // this function's own return slot; see the note on `trySimplifyWithSwiftIsland`.
+        CSSCalcSwiftOperandStack operands;
+        if (trySimplifyWithSwiftIsland(tree, options, operands)) {
+            return Tree {
+                .root = WTF::move(operands.value[0]),
+                .type = tree.type,
+                .stage = tree.stage,
+                .requiresConversionData = tree.requiresConversionData,
+            };
+        }
     }
 
 #if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
