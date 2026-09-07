@@ -4105,6 +4105,8 @@ private enum CalcFlatCoverage {
             | bit(.Min)
             | bit(.Max)
             | bit(.Symbol)
+            | bit(.SiblingCount)
+            | bit(.SiblingIndex)
     }
 }
 
@@ -4140,13 +4142,13 @@ public func cssCalcSimplifySwift(
     // qualifying corpus case, and ANY disagreement with the C++ fails the differential rather than
     // waiting for someone to flip a flag.
     //
-    // Coverage cannot regress from this. A tree holding any of the other 30 alternatives falls through
+    // Coverage cannot regress from this. A tree holding any of the other 28 alternatives falls through
     // to the two-pass `rewrite` below unchanged, and the flattening pass has already refused outright
     // any tree holding one that neither port handles -- so the flat path is only ever reached for a
     // tree the two-pass port would have finished too. What it can do is DIVERGE, which is the point of
     // routing it here rather than leaving it behind a flag nothing sets.
     var (report, emitted) = withCalcFlatTree(root, calcFlatStackCapacity) { tree in
-        tree.simplify(simplification, builder)
+        tree.simplify(root, simplification, builder)
         return tree.emitRoot(root, into: &builder)
     }
 
@@ -4214,7 +4216,7 @@ private func calcFlatSimplifyOversized(
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
 ) -> (report: CalcFlattenReport, result: Bool?) {
     return withCalcFlatTree(root, Int(clamping: nodeCount)) { tree in
-        tree.simplify(simplification, builder)
+        tree.simplify(root, simplification, builder)
         return tree.emitRoot(root, into: &builder)
     }
 }
@@ -4916,7 +4918,7 @@ fileprivate enum CalcFlatNodeFlags {
 /// THIS IS A ROUTE, NOT A CAPABILITY TEST. `buildOperation` is the entry a node that states its own
 /// alternative uses, and it is the cheap one: one enum-indexed jump table and one `makeChild`,
 /// measured at about 3.4 retired instructions per node. The other two exist because a fixed-size
-/// node cannot carry every payload -- see `calcEmitFromOrigin` -- and they cost an O(index) walk of
+/// node cannot carry every payload -- see `withCalcOriginalNode` -- and they cost an O(index) walk of
 /// the original tree, so an alternative belongs here only when it genuinely cannot be built from
 /// operands.
 fileprivate enum CalcEmitRoute {
@@ -4933,63 +4935,65 @@ fileprivate enum CalcEmitRoute {
 /// A subtree that does not hold the target reports its SIZE, because that is what tells the parent
 /// which pre-order index its next child has. Nothing else can: a pre-order index is a running count,
 /// and the original tree stores no count.
-fileprivate enum CalcOriginDescent {
+fileprivate enum CalcOriginDescent<R> {
     /// The target was not in this subtree, which spans this many pre-order indices.
     case passed(UInt32)
-    /// The target was reached, and this is what the emit answered.
-    case reached(Bool)
-
-    /// Whether the emit happened and succeeded. A `passed` at the top level means the target index
-    /// named no node -- a flat tree and the original tree that produced it disagreeing about their
-    /// own shape -- and declines rather than emitting something else.
-    var emitted: Bool {
-        switch self {
-        case .reached(let ok): return ok
-        case .passed: return false
-        }
-    }
+    /// The target was reached, and this is what `body` answered about it.
+    case reached(R)
 }
 
-/// Find the ORIGINAL node whose pre-order index is `target` and emit it onto the builder's operand
-/// stack, taking `operands` operands for its slots.
+/// Run `body` on the ORIGINAL node whose pre-order index is `target`, or answer nil if no node has
+/// that index.
 ///
 /// THE POINT OF THIS FUNCTION IS THAT IT ADDS NO C++. `CalcFlatNode.origin` already names the
-/// original node, `rebuildFrom` and `pushCopyOf` already exist and are already called from the
-/// two-pass port, and between them they serve every one of the 41 alternatives -- `rebuildFrom`
-/// recovers the operation from the original's own variant tag, fills its slots generically over the
-/// tuple conformance, and takes `getType(alternative)`, which is the same type the flat node carries
-/// because `calcFlatten` read it off the same node. So an alternative whose payload a fixed-size
-/// flat node cannot hold needs a fold and a mask bit, and no boundary change at all.
+/// original node, and every upcall that needs one -- `rebuildFrom`, `pushCopyOf`,
+/// `resolveStyleCoupledValue`, `swiftCalcMixItemWeight` -- already exists and is already called from
+/// the two-pass port. `rebuildFrom` in particular recovers the operation from the original's own
+/// variant tag, fills its slots generically over the tuple conformance, and takes
+/// `getType(alternative)`, which is the same type the flat node carries because `calcFlatten` read it
+/// off the same node. So an alternative whose payload a fixed-size flat node cannot hold needs a fold
+/// and a mask bit, and no boundary change at all.
 ///
 /// A RECURSIVE DESCENT RATHER THAN A LOOKUP TABLE, and that is forced rather than chosen: a
 /// `CSSCalc::Child` is move-only and `~Copyable`, so no Swift container may hold one and there is no
 /// array of them to index. Keeping the borrow on the call stack is the whole technique --
 /// `withFoldedChildren` does the same thing for the two-pass port's children.
 ///
+/// A BODY RATHER THAN A SELECTOR, so that the four upcalls that need an original share one walk
+/// instead of one walk each. A selector byte read back at the bottom of the descent would be exactly
+/// the re-derived dispatch this file exists to remove; the closure is non-escaping and specializes
+/// away.
+///
 /// COST: exactly the nodes at pre-order indices below `target`, plus the target. Pre-order means one
 /// child's subtree contains the target and the ones before it are walked to be counted, so there is
 /// nothing to prune -- an early exit on `index > target` can never fire for a target that exists.
-/// That makes the route O(target) per emitted node and O(N^2) for a tree that is all such nodes;
-/// see the throughput note in the commit that landed this. `Child::childCount()` rather than
+/// That makes it O(target) per node served this way, and O(N^2) for a tree that is all such nodes;
+/// see the throughput note in the commit that landed it. `Child::childCount()` rather than
 /// `swiftNodeInfo`, because the walk needs the arity and nothing else.
 ///
-/// `copyWhole` selects `pushCopyOf` over `rebuildFrom`. Carried rather than re-derived from the
-/// node: the caller already switched on the flat node's alternative to get here, and asking the
-/// original again would be exactly the re-derivation this file exists to remove.
-fileprivate func calcEmitFromOrigin(
+/// A `nil` answer means the flat tree and the tree it was built from disagree about their own shape.
+/// Every caller declines on it rather than reaching for another node.
+fileprivate func withCalcOriginalNode<R>(
+    _ root: borrowing WebCore.CSSCalc.Child,
+    _ target: UInt32,
+    _ body: (borrowing WebCore.CSSCalc.Child) -> R
+) -> R? {
+    switch calcDescendToOrigin(root, 0, target, body) {
+    case .reached(let answer):
+        return answer
+    case .passed:
+        return nil
+    }
+}
+
+fileprivate func calcDescendToOrigin<R>(
     _ node: borrowing WebCore.CSSCalc.Child,
     _ index: UInt32,
     _ target: UInt32,
-    _ operands: UInt32,
-    _ copyWhole: Bool,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
-) -> CalcOriginDescent {
+    _ body: (borrowing WebCore.CSSCalc.Child) -> R
+) -> CalcOriginDescent<R> {
     if index == target {
-        if copyWhole {
-            builder.pushCopyOf(node)
-            return .reached(true)
-        }
-        return .reached(builder.rebuildFrom(node, operands))
+        return .reached(body(node))
     }
 
     // Pre-order: the first child is always the next index, and each later child starts after its
@@ -4999,9 +5003,9 @@ fileprivate func calcEmitFromOrigin(
     var childIndex = 0
     let childCount = node.childCount()
     while childIndex < childCount {
-        switch calcEmitFromOrigin(node[childIndex], next, target, operands, copyWhole, &builder) {
-        case .reached(let ok):
-            return .reached(ok)
+        switch calcDescendToOrigin(node[childIndex], next, target, body) {
+        case .reached(let answer):
+            return .reached(answer)
         case .passed(let size):
             next &+= size
         }
@@ -5341,10 +5345,10 @@ fileprivate func withCalcFlatTree<R>(
 
 // MARK: The flat simplifier
 //
-// COVERAGE: `Sum`, `Product`, `Negate`, `Invert`, `Min`, `Max`, `Symbol` and the four numeric
-// leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
+// COVERAGE: `Sum`, `Product`, `Negate`, `Invert`, `Min`, `Max`, `Symbol`, `SiblingCount`,
+// `SiblingIndex` and the four numeric leaves, and nothing else. Every other alternative is left exactly as it arrived, which is the
 // honest behaviour for a bounded port -- it is not a decline channel and must not be read as one.
-// `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining 30 away from here;
+// `CalcFlatCoverage.mask` is what keeps a tree holding one of the remaining 28 away from here;
 // widening the two together is the work this representation exists to make possible.
 //
 // The six operations below are a full port of their `simplify` overloads, not a sketch: every arm
@@ -5445,7 +5449,17 @@ fileprivate extension CalcFlatTree {
     /// sends here, because that route always passes the builder. It CAN change one on the probe's own
     /// trees, which is why the `nil` behaviour is pinned at each site rather than assumed unreachable:
     /// a relative length with no conversion data to resolve against is the C++'s `nullopt`.
+    ///
+    /// `original` is the tree `calcFlatten` walked, threaded down for the folds whose upcall takes a
+    /// `CSSCalc::Child` -- `resolveStyleCoupledValue` and `swiftCalcMixItemWeight`. They reach it
+    /// through `withCalcOriginalNode`, at the node's own place in the reverse scan, which is the
+    /// position `copyAndSimplify` resolves at too. Taking them during `calcFlatten` instead would
+    /// have been O(1) rather than O(index), and was rejected: it resolves an `anchor()` BEFORE its
+    /// fallback is simplified and resolves a `random()` whose bounds the fold has not yet checked,
+    /// so it can make an upcall -- and, for `anchor()`, a
+    /// `setCurrentPropertyInvalidAtComputedValueTime` side effect -- that the C++ arm never makes.
     mutating func simplify(
+        _ original: borrowing WebCore.CSSCalc.Child,
         _ options: CalcSimplification,
         _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
     ) {
@@ -5454,7 +5468,7 @@ fileprivate extension CalcFlatTree {
             // Never fold inside an `anchor()`'s `<anchor-side>`: the C++ copies that subtree rather
             // than simplifying it. One bit test, because `flatten` marked the whole subtree.
             if nodes[i].flags & CalcFlatNodeFlags.insideAnchorSide == 0 {
-                simplifyNode(i, options, builder)
+                simplifyNode(i, original, options, builder)
             }
             i -= 1
         }
@@ -5480,6 +5494,7 @@ fileprivate extension CalcFlatTree {
 
     private mutating func simplifyNode(
         _ i: Int,
+        _ original: borrowing WebCore.CSSCalc.Child,
         _ options: CalcSimplification,
         _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
     ) {
@@ -5507,6 +5522,9 @@ fileprivate extension CalcFlatTree {
 
         case .Symbol:
             simplifySymbol(i, options, builder)
+
+        case .SiblingCount, .SiblingIndex:
+            simplifySiblingFunction(i, original, builder)
 
         default:
             // Including the other three leaves, and for each of them that is a PORT rather than an
@@ -5609,6 +5627,39 @@ fileprivate extension CalcFlatTree {
             // something.
             declined = true
         }
+    }
+
+    /// `simplify(SiblingCount&)` and `simplify(SiblingIndex&)` (`+Simplification.cpp:527`-`:544`):
+    /// resolve the tree-counting functions against the styled element.
+    ///
+    /// One function for both, because `resolveStyleCoupledValue` reads which off the node's own
+    /// variant tag -- so the two can never be swapped across the boundary -- and it implements both
+    /// guards in the C++'s own order (`:2400`-`:2409`): no conversion data or no builder state, then
+    /// no element. `sibling-count()` widens its integer result with `static_cast<double>`, which is
+    /// what the upcall already returns.
+    ///
+    /// `resolved == false` is NOT a decline: the C++ returns `{ }` and the leaf stays in the tree,
+    /// which is `emitRoute`'s `copyOfOrigin`. Neither is a `nil` builder, which is the probe's.
+    ///
+    /// A `nil` from `withCalcOriginalNode` is the one real failure -- the flat tree naming an origin
+    /// index the original tree does not have -- and it declines the whole tree rather than folding
+    /// something else.
+    private mutating func simplifySiblingFunction(
+        _ i: Int,
+        _ original: borrowing WebCore.CSSCalc.Child,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) {
+        guard let builder else {
+            return
+        }
+        guard let resolved = withCalcOriginalNode(original, nodes[i].origin, { builder.resolveStyleCoupledValue($0) }) else {
+            declined = true
+            return
+        }
+        guard resolved.resolved else {
+            return
+        }
+        setLeaf(i, NumericLeaf.number(resolved.value))
     }
 
     /// `simplify(Negate&)` (`+Simplification.cpp:911`-`:961`), all four arms.
@@ -6392,7 +6443,7 @@ fileprivate extension CalcFlatTree {
     ///
     /// `original` is the tree `calcFlatten` walked, and it is threaded down rather than reached
     /// through the flat node because a `CSSCalc::Child` is move-only: no Swift container may hold
-    /// one, so the only place a borrow of one can live is the call stack. See `calcEmitFromOrigin`.
+    /// one, so the only place a borrow of one can live is the call stack. See `withCalcOriginalNode`.
     ///
     /// SWIFT WALKS ITS OWN TREE. That is the whole shape of this function and the reason the flat
     /// node does not exist in C++: nothing about the representation crosses, only finished operands
@@ -6431,7 +6482,7 @@ fileprivate extension CalcFlatTree {
             // A non-numeric leaf that did not resolve. No children, no operands, and nothing to
             // build: the whole node comes back off the original by deep copy, which is what
             // `copyAndSimplify` does for it too.
-            return calcEmitFromOrigin(original, 0, node.origin, 0, true, &builder).emitted
+            return withCalcOriginalNode(original, node.origin) { builder.pushCopyOf($0) } != nil
         }
 
         var pushed: UInt32 = 0
@@ -6456,7 +6507,11 @@ fileprivate extension CalcFlatTree {
             // An operation whose payload no fixed-size flat node can carry. The children are already
             // operands; everything else -- an `AtomString` element name, an `AnchorSide` subtree, a
             // `Random::Sharing`, a nested `CSSCalcValue` item weight -- comes off the original.
-            return calcEmitFromOrigin(original, 0, node.origin, pushed, false, &builder).emitted
+            // `operands` rather than `pushed` itself: a `var` read inside the body is captured by
+            // ADDRESS, which pins it to a stack slot and blocks the closure specialization the copy
+            // arm above gets. A `let` copy crosses in a register.
+            let operands = pushed
+            return withCalcOriginalNode(original, node.origin) { builder.rebuildFrom($0, operands) } ?? false
         }
 
         // False for anything outside `buildOperation`'s set, which for now is this prototype's own
@@ -6499,7 +6554,7 @@ public func cssCalcFlatSimplifyProbeSwift(_ root: borrowing WebCore.CSSCalc.Chil
         // any fixture here produces, so the caller's value check catches a probe that measured
         // nothing.
         bits = withCalcFlatTree(root, calcFlatStackCapacity) { tree in
-            tree.simplify(options, nil)
+            tree.simplify(root, options, nil)
             return tree.nodes[0].value.bitPattern
         }.result ?? 0
     }
@@ -6546,7 +6601,7 @@ public func cssCalcFlatEmitProbeSwift(
     for _ in 0..<iterations {
         builder.clearOperands()
         if withCalcFlatTree(root, calcFlatStackCapacity, { tree -> Bool in
-            tree.simplify(options, builder)
+            tree.simplify(root, options, builder)
             return tree.emitRoot(root, into: &builder)
         }).result == true {
             emitted &+= 1
