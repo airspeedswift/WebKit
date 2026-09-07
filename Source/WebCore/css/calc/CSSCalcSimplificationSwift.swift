@@ -4697,32 +4697,107 @@ private extension CalcSimplification {
 // that plus the stores, and it REPLACES the pre-pass rather than adding to it, because the same
 // pass can compute `nodeCount`, `kindMask` and the decline predicate on the way through.
 
-/// One node of the flat tree: a plain value, 24 bytes, the same size as the `Child` it mirrors but
-/// with no indirection and nothing refcounted.
+/// One node of the flat tree.
 ///
 /// Children are named by INDEX, not by pointer, which is what makes the whole structure `Copyable`,
-/// storable in an ordinary Swift array, and free of the `~Escapable` problem that forced the handle
+/// storable in an ordinary Swift buffer, and free of the `~Escapable` problem that forced the handle
 /// design in the first place. Same move as the tokenizer island's offset-in-the-pointer-slot design.
 ///
 /// DEFINED IN SWIFT, and that is the point of the exercise rather than an aesthetic preference: the
-/// declaration briefly lived in CSSCalcSwiftTypes.h so that `emitFlatTree` could take a `Span` of
-/// these, and every consequence of that ran the wrong way -- C++ owning the shape of a structure
-/// only Swift builds, a size `static_assert` to keep the two in step, and a boundary type that grows
-/// a field every time the simplifier learns an alternative. Emit no longer takes a span, so nothing
-/// on the C++ side names this type and nothing has to.
+/// declaration briefly lived in CSSCalcSwiftTypes.h so that an `emitFlatTree` upcall could take a
+/// `Span` of these, and every consequence of that ran the wrong way -- C++ owning the shape of a
+/// structure only Swift builds, a size `static_assert` to keep the two in step, and a boundary type
+/// that grows a field every time the simplifier learns an alternative. Emit takes no span, so
+/// nothing on the C++ side names this type and nothing has to.
 ///
 /// `alternative` is the imported C++ enum rather than a Swift mirror of it, so a `switch` here is
 /// checked against the one list (`CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`) and adding a 42nd
 /// alternative is a compile error here rather than a silent passthrough.
+///
+/// THE CHILD LIST IS A LINKED LIST, `firstChild` plus `nextSibling`, and that is load-bearing rather
+/// than a style choice. The previous shape was a side table of child indices with each node owning a
+/// contiguous run, and css-values-4 step 8.1 -- splice a nested `Sum`'s terms into its parent -- makes
+/// a run LONGER than it started, so the table had to be bump-allocated and could reach O(N^2) slots
+/// on a left-nested chain of sums. A linked list splices by relinking: O(1), and **no storage beyond
+/// the N nodes**. That is what lets the whole flat tree be one fixed-size buffer sized from a node
+/// count known in advance, which is what lets it live on the stack. A per-simplification heap buffer
+/// was measured at 617 retired instructions on this path -- 4.9x the C++ arm's ENTIRE single-node
+/// simplification -- so "just one allocation" was never an acceptable answer.
+///
+/// Random access to child `k` is O(k) rather than O(1) as a result. That is the right trade: calc
+/// arities are a handful, every hot walk is sequential, and the alternative cost a buffer that could
+/// not be stack-allocated.
 fileprivate struct CalcFlatNode {
+    /// The numeric payload of a leaf. Meaningless for an operation.
     var value: Double
-    /// Offset into the child-index side table, not into the node array.
-    var childStart: UInt32
+
+    /// The node's own `Type`, carried rather than recomputed.
+    ///
+    /// `rebuildFrom` takes the ORIGINAL node's type (`CSSCalcTree+Simplification.cpp:2147`), which is
+    /// what `copyAndSimplify` does at `:1821`: a node whose children simplified but whose kind did
+    /// not change keeps its type. A flat node has no original to reach at emit time, so it carries
+    /// the type from flattening instead. The alternative -- recomputing `toType` during emit -- is
+    /// what the R151 emit probe did, and it is both extra work per node and a different answer for
+    /// any node whose children changed shape.
+    var type: CalcType
+
+    /// The first child's index, or `CalcFlatNode.noNode` when there are none.
+    var firstChild: UInt32
+    /// The next sibling in the parent's list, or `CalcFlatNode.noNode`.
+    var nextSibling: UInt32
+    /// How many children the list holds. Derivable by walking it, and kept because arity is tested
+    /// far more often than the list is walked.
     var childCount: UInt32
+
+    /// The pre-order index this node had when the tree was flattened.
+    ///
+    /// Not the same as the node's current slot once simplification starts moving nodes about --
+    /// promoting a grandchild copies a node into an ancestor's slot, and the copy has to keep naming
+    /// the ORIGINAL `CSSCalc::Child` it came from, because that is the only route back to a payload
+    /// no fixed-size node can hold: an `AtomString` element name, a nested `CSSCalcValue` weight, an
+    /// `AnchorSide` subtree, a `Random::Sharing`.
+    var origin: UInt32
+
     var valueID: UInt16
     var unitType: UInt8
     var alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
     var percentHint: UInt8
+    /// See `CalcFlatNodeFlags`.
+    var flags: UInt8
+
+    /// The end-of-list sentinel, and the "no such node" answer.
+    ///
+    /// `UInt32.max` cannot collide with a real index: the index space is bounded by the node count,
+    /// and a tree of 2^32 nodes cannot be built -- a `Child` is 24 bytes, so it would need 96 GB.
+    static let noNode: UInt32 = .max
+}
+
+/// The bits on `CalcFlatNode.flags`.
+///
+/// A bitfield rather than four `Bool`s, so the node stays inside the 8-byte tail slot it shares with
+/// `valueID`, `unitType`, `alternative` and `percentHint`, and the fifth predicate costs nothing.
+fileprivate enum CalcFlatNodeFlags {
+    /// `clamp()` whose MINIMUM bound is the keyword `none` rather than a subtree.
+    ///
+    /// Neither the child count nor the alternative can answer this: `clamp(none, VAL, MAX)` and
+    /// `clamp(MIN, VAL, none)` both report two children, because `Child::operator[]` skips a
+    /// `ChildOrNone` holding the keyword entirely. The reading boundary answers it with two
+    /// dedicated `CSSCalcSwiftNodeKind`s (`CSSCalcSwiftTypes.h:154-155`); here it is a bit, captured
+    /// once during flattening.
+    static let clampNoneMinimum: UInt8 = 1 << 0
+    /// `clamp()` whose MAXIMUM bound is the keyword `none`.
+    static let clampNoneMaximum: UInt8 = 1 << 1
+    /// `anchor()`'s `<anchor-side>` is a subtree rather than a keyword, so it occupies child slot 0
+    /// and the fallback, if there is one, is slot 1.
+    static let anchorSideIsSubtree: UInt8 = 1 << 2
+    /// This node is inside an `anchor()`'s `<anchor-side>` subtree.
+    ///
+    /// **Never simplify one.** `simplify(Anchor&)` COPIES the side (`+Simplification.cpp:1797`)
+    /// rather than simplifying it, so folding it would turn `anchor(--a calc(25% + 25%))` into
+    /// `anchor(--a 50%)`, which the C++ does not do. The flattening pass still has to VISIT the
+    /// subtree -- an alternative this file has not been taught, sitting inside a side, still has to
+    /// decline the whole tree -- so the distinction has to be a mark rather than an omission.
+    static let insideAnchorSide: UInt8 = 1 << 3
 }
 
 fileprivate extension CalcFlatNode {
@@ -4759,133 +4834,243 @@ fileprivate extension CalcFlatNode {
     }
 }
 
-/// `append(contentsOf: repeatElement(value, count: n))`, which `UniqueArray` does not provide --
-/// SE-0527 gives it `append(_:)` and the buffer-copying overloads, but no repeating append.
+// MARK: - The flat tree
+
+/// The whole flat tree: ONE buffer of `CalcFlatNode`, and nothing else.
 ///
-/// A helper rather than an open-coded loop at the call site, so the pre-allocation happens once and
-/// cannot be forgotten the next time someone needs this: `reserveCapacity` takes a TOTAL, not an
-/// increment (SE-0527: "on return, the array's capacity becomes `n`"), so it is `count + n` and a
-/// plain `reserveCapacity(n)` would be a silent no-op on any non-empty array.
-extension UniqueArray where Element: Copyable {
-    mutating func append(repeating value: Element, count n: Int) {
-        reserveCapacity(count + n)
-        for _ in 0..<n {
-            append(value)
-        }
+/// `~Escapable`, because the storage is a `MutableSpan` over a buffer the caller owns rather than
+/// anything this type allocates. That is the point -- see `withCalcFlatTree`, which sizes the buffer
+/// from a node count the coverage walk has already computed and puts it on the stack. Nothing here
+/// allocates, and there is no second buffer to keep in step.
+///
+/// Pre-order, so a parent's index is always LESS than any of its descendants'. That one property is
+/// what makes simplification a plain reverse loop with no recursion and no work list: counting down
+/// from `count - 1` reaches every child before its parent, which is exactly the order
+/// `copyAndSimplify` recurses in (`+Simplification.cpp:1810` -- simplify the children, then look at
+/// the node). The C++ visits each node once and so does this; the two-pass `fold`/`rewrite` port
+/// beside it cannot, because it holds a read-only handle and a write-only builder and has nowhere to
+/// put a simplified child.
+///
+/// The verified spelling, since three of the four obvious ones do not compile: the storage is taken
+/// `consuming` with `@_lifetime(copy storage)`, not `inout`, which otherwise fails "missing
+/// reinitialization of inout parameter after consume"; the attribute is `@_lifetime`, not
+/// `@lifetime`; and it needs `-enable-experimental-feature Lifetimes`, which WebCore's Swift step
+/// already passes. Reproducer: `~/src/webkit-swift-ports/cssprobe/flatstack/probe3.swift`.
+fileprivate struct CalcFlatTree: ~Escapable, ~Copyable {
+    var nodes: MutableSpan<CalcFlatNode>
+    /// How many of `nodes` are live. The span is sized to the whole tree up front, so this only
+    /// counts up during flattening and never moves afterwards.
+    var count: Int
+
+    @_lifetime(copy storage)
+    init(storage: consuming MutableSpan<CalcFlatNode>) {
+        self.nodes = storage
+        self.count = 0
     }
 }
 
-/// The flat tree, as two reusable buffers.
-///
-/// `UniqueArray` (SE-0527), not `Array`. An `Array` is a copy-on-write refcounted buffer, so it
-/// carries a retain/release and a uniqueness check on mutation that this never needs -- the tree is
-/// scratch owned by exactly one simplification and is never shared. `UniqueArray` is uniquely
-/// owned and non-copyable, which is the honest shape and costs neither. Prefer it over `Array`
-/// wherever copyability is not actually wanted.
-///
-/// That makes this type `~Copyable` by containment, which is also correct: copying a half-built
-/// flat tree is not a thing any caller should be able to ask for.
-fileprivate struct CalcFlatTree: ~Copyable {
-    var nodes = UniqueArray<CalcFlatNode>()
-    var childIndices = UniqueArray<UInt32>()
-
-    /// `removeAll()`, not `removeAll(keepingCapacity: true)`. SE-0527 specifies the latter on
-    /// `UniqueArray`, but the shipping toolchain has only the no-argument form -- the one the
-    /// proposal puts on `RigidArray`, documented as "preserving its allocated capacity", which is
-    /// the behaviour wanted here. A proposal promising an overload that is not there is worth a
-    /// filing; the benchmark is the check that capacity really is preserved, since if it were not,
-    /// the per-conversion malloc this hoisting exists to remove would come straight back.
-    mutating func reset() {
-        nodes.removeAll()
-        childIndices.removeAll()
-    }
-
-    /// Appends `node`'s subtree and returns its index.
+fileprivate extension CalcFlatTree {
+    /// Flatten `node`'s subtree in pre-order and return its index.
     ///
-    /// The child-index slots are RESERVED before recursing, so a child's own appends cannot move
-    /// this node's slots and the indices stay valid without a second pass.
-    mutating func append(_ node: borrowing WebCore.CSSCalc.Child) -> UInt32 {
+    /// One `swiftNodeInfo` crossing per node, and it is the last per-node read crossing anything
+    /// makes: every pass downstream reads the flat array. The recursion is over the original
+    /// `CSSCalc::Child` tree and is the only place that tree is walked.
+    ///
+    /// Tree order, not serialization order: `childAt` sorts a `Sum`'s and a `Product`'s children by
+    /// unit for the serializer, which would silently permute a multi-unit sum here.
+    mutating func flatten(_ node: borrowing WebCore.CSSCalc.Child, _ inheritedFlags: UInt8) -> UInt32 {
         let info = WebCore.CSSCalc.swiftNodeInfo(node)
-        let me = nodes.count
-        nodes.append(CalcFlatNode(
+        let me = count
+        count += 1
+
+        var flags = inheritedFlags
+        switch info.kind {
+        case .ClampWithNoneMinimum: flags |= CalcFlatNodeFlags.clampNoneMinimum
+        case .ClampWithNoneMaximum: flags |= CalcFlatNodeFlags.clampNoneMaximum
+        default: break
+        }
+
+        // A second crossing, taken only for the one alternative that needs it, on the same rule
+        // `CSSCalcSwiftNode::operationInfo` states: `info()` runs for every node of every tree, and
+        // this answers a question only `anchor()` asks.
+        if info.alternative == .Anchor, !WebCore.CSSCalc.swiftOperationInfo(node).anchorSideIsKeyword {
+            flags |= CalcFlatNodeFlags.anchorSideIsSubtree
+        }
+
+        // `getType(const Child&)` (CSSCalcTree.h:1053), the same accessor `copyAndSimplify` reads the
+        // original's type through at `+Simplification.cpp:1821`. Nothing new was declared for this.
+        //
+        // NOT taken for the seven leaf alternatives, and that is not a micro-optimisation: a leaf's
+        // `Type` is DISCARDED by construction. `ChildConstruction<T>::make(T&&, Type)` for a `Leaf`
+        // ignores its `Type` argument entirely (CSSCalcTree.h:1016-1018), which is the same fact the
+        // two-pass port's `pushCopyOf` comment rests on. Paying a crossing per leaf for a value
+        // nothing can read is the shape this whole exercise exists to remove, and leaves are most of
+        // a real calc tree's nodes.
+        let carriesType: Bool
+        switch info.alternative {
+        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension,
+             .Symbol, .SiblingCount, .SiblingIndex:
+            carriesType = false
+        default:
+            carriesType = true
+        }
+
+        nodes[me] = CalcFlatNode(
             value: info.numericValue,
-            childStart: 0,
+            type: carriesType ? WebCore.CSSCalc.getType(node) : CalcType(),
+            firstChild: CalcFlatNode.noNode,
+            nextSibling: CalcFlatNode.noNode,
             childCount: info.childCount,
+            origin: UInt32(me),
             valueID: info.valueID,
             unitType: info.unitType,
             alternative: info.alternative,
-            percentHint: info.percentHint))
+            percentHint: info.percentHint,
+            flags: flags)
 
-        let start = childIndices.count
-        let count = Int(info.childCount)
-        // Reserved BEFORE recursing, so a child's own appends cannot move this node's slots.
-        childIndices.append(repeating: 0, count: count)
-        for i in 0..<count {
-            childIndices[start + i] = append(node[i])
+        var previous = CalcFlatNode.noNode
+        var index: UInt32 = 0
+        while index < info.childCount {
+            // Slot 0 of an `anchor()` with a subtree side IS that side. Everything under it is
+            // marked, so the simplification pass skips the whole subtree on one bit test per node
+            // rather than having to know where the boundary is.
+            let sideRoot = (flags & CalcFlatNodeFlags.anchorSideIsSubtree) != 0 && index == 0
+            let child = flatten(node[Int(index)], sideRoot ? flags | CalcFlatNodeFlags.insideAnchorSide : flags)
+            if previous == CalcFlatNode.noNode {
+                nodes[me].firstChild = child
+            } else {
+                nodes[Int(previous)].nextSibling = child
+            }
+            previous = child
+            index += 1
         }
-        nodes[me].childStart = UInt32(start)
         return UInt32(me)
+    }
+
+    /// The `k`th child of node `i`, or nil if it has fewer than `k + 1`.
+    ///
+    /// O(k). Every hot caller walks the list instead; this is for the fixed operand slots, where `k`
+    /// is 0, 1 or 2 and is a literal at the call site.
+    func child(_ i: Int, _ k: Int) -> Int? {
+        var cursor = nodes[i].firstChild
+        var remaining = k
+        while cursor != CalcFlatNode.noNode {
+            if remaining == 0 { return Int(cursor) }
+            remaining -= 1
+            cursor = nodes[Int(cursor)].nextSibling
+        }
+        return nil
     }
 }
 
-/// Build the flat tree and return its node count.
+/// Flatten `root` into a stack buffer and hand the tree to `body`.
 ///
-/// The count is returned so the benchmark cannot optimise the traversal away, and because it is the
-/// same number the coverage pre-pass reports -- which is the point: this pass subsumes that one.
+/// `nodeCount` comes from the coverage walk, which has already visited exactly this node set and
+/// allocated nothing to do it, so the buffer is sized exactly and no growth is possible.
+///
+/// `withTemporaryAllocation` (SE-0524) rather than any owned container, and that is the whole reason
+/// the count is threaded in: a `UniqueArray` here was MEASURED at 617 retired instructions per
+/// simplification, against the C++ arm's 127 for an entire single-node tree, so a per-call heap
+/// buffer costs more than the pass it feeds. The stdlib falls back to the heap for a buffer too large
+/// for the stack, so an adversarially wide tree degrades rather than overflowing.
+///
+/// `OutputSpan` is append-only, so the buffer is filled with a placeholder and then read back as a
+/// `MutableSpan`. `flatten` writes every slot it will use exactly once before anything reads it, and
+/// `count` bounds every read to the written prefix.
+@inline(always)
+fileprivate func withCalcFlatTree<R: ~Copyable>(
+    _ root: borrowing WebCore.CSSCalc.Child,
+    _ nodeCount: UInt32,
+    _ body: (inout CalcFlatTree) -> R
+) -> R {
+    let capacity = Int(clamping: nodeCount)
+    return withTemporaryAllocation(of: CalcFlatNode.self, capacity: capacity) { buffer in
+        let blank = CalcFlatNode(
+            value: 0, type: CalcType(), firstChild: CalcFlatNode.noNode,
+            nextSibling: CalcFlatNode.noNode, childCount: 0, origin: 0, valueID: 0,
+            unitType: 0, alternative: .Number, percentHint: 0, flags: 0)
+        for _ in 0..<capacity {
+            buffer.append(blank)
+        }
+        var tree = CalcFlatTree(storage: buffer.mutableSpan)
+        _ = tree.flatten(root, 0)
+        return body(&tree)
+    }
+}
+
 // MARK: The flat simplifier
 //
 // COVERAGE: `Sum`, `Product`, `Negate`, `Invert` and the four numeric leaves, and nothing else.
-// Every other alternative is left exactly as it arrived, which is the honest behaviour for a
-// bounded probe -- it is not a decline channel and must not be read as one. The point is to bound
-// what the flat design costs on the shapes that dominate real calc(), not to be the shipping
-// simplifier.
+// Every other alternative is left exactly as it arrived, which is the honest behaviour for a bounded
+// prototype -- it is not a decline channel and must not be read as one. Widening it to the 41 the
+// two-pass port covers is the work this representation exists to make possible; until then nothing
+// production reaches this.
 //
-// WHAT MAKES IT DIFFERENT FROM THE PORT, and it is the whole reason for the exercise: no recursion,
-// no per-node crossing, no 41-way variant dispatch, no operand stack. `append` builds the array in
-// pre-order DFS, so a parent's index is always LESS than its children's, and one backwards loop
-// therefore visits every child before its parent.
+// WHAT MAKES IT DIFFERENT FROM THE TWO-PASS PORT, and it is the whole reason for the exercise: no
+// recursion, no per-node crossing, no 41-way variant dispatch, no operand stack, and above all no
+// re-folding. `flatten` builds the array in pre-order, so a parent's index is always LESS than its
+// children's, and one backwards loop therefore visits every child exactly once before its parent --
+// which is `copyAndSimplify`'s own shape, and the reason the C++ is exactly linear in depth where the
+// two-pass port fits `953 + 2225d + 366d^2`.
 
 fileprivate extension CalcFlatTree {
-    /// Fold the whole tree, children before parents, in one reverse pass.
+    /// Simplify the whole tree, children before parents, in one reverse pass.
     mutating func simplify() {
-        var i = nodes.count - 1
+        var i = count - 1
         while i >= 0 {
-            simplifyNode(i)
+            // Never fold inside an `anchor()`'s `<anchor-side>`: the C++ copies that subtree rather
+            // than simplifying it. One bit test, because `flatten` marked the whole subtree.
+            if nodes[i].flags & CalcFlatNodeFlags.insideAnchorSide == 0 {
+                simplifyNode(i)
+            }
             i -= 1
         }
     }
 
-    /// The `index`th child of node `i`, as an index into `nodes`.
-    private func child(_ i: Int, _ index: Int) -> Int {
-        Int(childIndices[Int(nodes[i].childStart) + index])
+    /// Replace node `i` with node `j`, keeping `i`'s place in its parent's list.
+    ///
+    /// EVERY promotion goes through this, and the reason is a bug this cost a crash to find: a plain
+    /// `nodes[i] = nodes[j]` copies `nextSibling` too, so the promoted node inherits the sibling link
+    /// of wherever it came from. In a `Sum` whose term is promoted out of a nested `Sum`, that link
+    /// points back into the list being walked, and the splice loop runs forever building a cycle --
+    /// which reads as an OOM kill with no output rather than as anything legible. The contiguous-run
+    /// representation could not have this defect because it had no sibling link to copy; the linked
+    /// list buys O(1) splicing and this is the invariant that comes with it.
+    ///
+    /// `firstChild` and `childCount` ARE taken from `j`: the node genuinely adopts `j`'s children.
+    /// So is `origin`, so the promoted node keeps naming the original `CSSCalc::Child` it came from.
+    private mutating func replace(_ i: Int, with j: Int) {
+        let sibling = nodes[i].nextSibling
+        nodes[i] = nodes[j]
+        nodes[i].nextSibling = sibling
     }
 
     private mutating func simplifyNode(_ i: Int) {
         switch nodes[i].alternative {
         case .Negate:
-            guard nodes[i].childCount == 1 else { return }
-            let a = child(i, 0)
+            guard nodes[i].childCount == 1, let a = child(i, 0) else { return }
             if nodes[a].isNumericLeaf {
                 // 6.1. The unary MINUS, not `* -1`: it flips a NaN's sign bit rather than
-                // propagating one, which is the same distinction the port's `Fold` draws.
-                nodes[i] = nodes[a]
-                nodes[i].value = -nodes[a].value
-            } else if nodes[a].alternative == .Negate, nodes[a].childCount == 1 {
+                // propagating one, which is the same distinction the two-pass port's `Fold` draws.
+                let negated = -nodes[a].value
+                replace(i, with: a)
+                nodes[i].value = negated
+            } else if nodes[a].alternative == .Negate, nodes[a].childCount == 1, let inner = child(a, 0) {
                 // 6.2. `negate(negate(x))` is `x`.
-                nodes[i] = nodes[child(a, 0)]
+                replace(i, with: inner)
             }
 
         case .Invert:
-            guard nodes[i].childCount == 1 else { return }
-            let a = child(i, 0)
+            guard nodes[i].childCount == 1, let a = child(i, 0) else { return }
             if nodes[a].alternative == .Number {
                 // 7.1. Only a `Number` inverts to a leaf; inverting a dimension makes a type no
                 // `Child` leaf can represent, which is why this is not `isNumericLeaf`.
-                nodes[i] = nodes[a]
-                nodes[i].value = 1 / nodes[a].value
-            } else if nodes[a].alternative == .Invert, nodes[a].childCount == 1 {
+                let inverted = 1 / nodes[a].value
+                replace(i, with: a)
+                nodes[i].value = inverted
+            } else if nodes[a].alternative == .Invert, nodes[a].childCount == 1, let inner = child(a, 0) {
                 // 7.2.
-                nodes[i] = nodes[child(a, 0)]
+                replace(i, with: inner)
             }
 
         case .Sum:
@@ -4895,86 +5080,107 @@ fileprivate extension CalcFlatTree {
             simplifyProduct(i)
 
         default:
-            // Including the four leaves: `canonicalize` needs conversion data this probe does not
-            // carry, and the other 33 alternatives are out of scope. Left as they arrived.
+            // Including the four leaves: `canonicalize` needs conversion data this prototype does
+            // not carry, and the other 33 alternatives are not ported yet. Left as they arrived.
             return
         }
     }
 
     /// Steps 8.1 and 8.2: splice nested `Sum`s in, then merge every pair of like terms.
+    ///
+    /// Both are list surgery and neither allocates. 8.1 replaces a nested `Sum` in the list with that
+    /// sum's own child list, which is why the linked representation exists -- the previous
+    /// contiguous-run shape had to bump-allocate a longer run and could not be stack-sized.
     private mutating func simplifySum(_ i: Int) {
-        let n = Int(nodes[i].childCount)
-        guard n > 0 else { return }
+        guard nodes[i].childCount > 0 else { return }
 
-        // Terms are accumulated at the END of `childIndices` rather than written over this node's
-        // own run, because 8.1 can make the list LONGER than it started -- a nested sum contributes
-        // all of its terms. Repointing `childStart` is O(1) and leaves the old run stranded, which
-        // is the same trade a bump allocator makes.
-        let start = childIndices.count
-        for k in 0..<n {
-            let c = child(i, k)
-            if nodes[c].alternative == .Sum {
-                let inner = Int(nodes[c].childStart)
-                for j in 0..<Int(nodes[c].childCount) {
-                    childIndices.append(childIndices[inner + j])
+        // 8.1. Splice. `previous == noNode` means the cursor is at the head.
+        var previous = CalcFlatNode.noNode
+        var cursor = nodes[i].firstChild
+        var terms: UInt32 = 0
+        while cursor != CalcFlatNode.noNode {
+            let c = Int(cursor)
+            if nodes[c].alternative == .Sum, nodes[c].firstChild != CalcFlatNode.noNode {
+                // Relink the nested sum's whole list in place of the sum itself. The nested node is
+                // discarded and nothing else can reference its children, so redirecting the tail's
+                // `nextSibling` to this node's continuation is safe.
+                let head = nodes[c].firstChild
+                var tail = head
+                while nodes[Int(tail)].nextSibling != CalcFlatNode.noNode {
+                    tail = nodes[Int(tail)].nextSibling
                 }
-            } else {
-                childIndices.append(UInt32(c))
+                nodes[Int(tail)].nextSibling = nodes[c].nextSibling
+                if previous == CalcFlatNode.noNode {
+                    nodes[i].firstChild = head
+                } else {
+                    nodes[Int(previous)].nextSibling = head
+                }
+                // Re-examine from `head`, so a sum nested two deep splices too.
+                cursor = head
+                continue
             }
+            previous = cursor
+            cursor = nodes[c].nextSibling
+            terms += 1
         }
 
-        // 8.2, merged in place over the run just appended. O(k^2) against the C++'s fixed-size
-        // identity table, and deliberately so at this size: a calc sum is a handful of terms, and
-        // the table is the optimisation to make once the design is chosen, not before.
-        var write = start
-        var read = start
-        while read < childIndices.count {
-            let term = Int(childIndices[read])
-            if nodes[term].isNumericLeaf {
-                var merged = false
-                var scan = start
-                while scan < write {
-                    let into = Int(childIndices[scan])
-                    if nodes[into].isNumericLeaf, nodes[into].mergesWith(nodes[term]) {
-                        nodes[into].value += nodes[term].value
+        // 8.2. Merge like terms, unlinking each one that folds into an earlier one. O(k^2) against
+        // the C++'s fixed-size identity table (`CSSCalcTree+NumericIdentity.h:106`), and deliberately
+        // so at this size: a calc sum is a handful of terms, and the table is the optimisation to
+        // make once the representation is settled, not before.
+        previous = CalcFlatNode.noNode
+        cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let c = Int(cursor)
+            var merged = false
+            if nodes[c].isNumericLeaf {
+                var scan = nodes[i].firstChild
+                while scan != cursor {
+                    let s = Int(scan)
+                    if nodes[s].isNumericLeaf, nodes[s].mergesWith(nodes[c]) {
+                        nodes[s].value += nodes[c].value
                         merged = true
                         break
                     }
-                    scan += 1
-                }
-                if merged {
-                    read += 1
-                    continue
+                    scan = nodes[s].nextSibling
                 }
             }
-            childIndices[write] = childIndices[read]
-            write += 1
-            read += 1
+            let next = nodes[c].nextSibling
+            if merged {
+                if previous == CalcFlatNode.noNode {
+                    nodes[i].firstChild = next
+                } else {
+                    nodes[Int(previous)].nextSibling = next
+                }
+                terms -= 1
+            } else {
+                previous = cursor
+            }
+            cursor = next
         }
-        childIndices.removeLast(childIndices.count - write)
 
-        let count = write - start
-        if count == 1, nodes[Int(childIndices[start])].isNumericLeaf {
+        if terms == 1, let only = child(i, 0), nodes[only].isNumericLeaf {
             // 8.3: a sum of one term IS that term.
-            nodes[i] = nodes[Int(childIndices[start])]
+            replace(i, with: only)
             return
         }
-        nodes[i].childStart = UInt32(start)
-        nodes[i].childCount = UInt32(count)
+        nodes[i].childCount = terms
     }
 
     /// The numeric half of step 9: fold the `Number` factors together, and apply the result to a
     /// single surviving dimension if that is all that is left.
     private mutating func simplifyProduct(_ i: Int) {
-        let n = Int(nodes[i].childCount)
-        guard n > 0 else { return }
+        guard nodes[i].childCount > 0 else { return }
 
         var scale = 1.0
         var numbers = 0
-        var lastNonNumber = -1
         var nonNumbers = 0
-        for k in 0..<n {
-            let c = child(i, k)
+        var lastNonNumber = -1
+        var first = -1
+        var cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let c = Int(cursor)
+            if first < 0 { first = c }
             if nodes[c].alternative == .Number {
                 scale *= nodes[c].value
                 numbers += 1
@@ -4982,111 +5188,115 @@ fileprivate extension CalcFlatTree {
                 nonNumbers += 1
                 lastNonNumber = c
             }
+            cursor = nodes[c].nextSibling
         }
-        guard numbers > 0 else { return }
+        guard numbers > 0, first >= 0 else { return }
 
         if nonNumbers == 0 {
             // Every factor was a number.
-            nodes[i] = nodes[child(i, 0)]
+            replace(i, with: first)
             nodes[i].value = scale
             return
         }
         if nonNumbers == 1, nodes[lastNonNumber].isNumericLeaf {
             // `2 * 3px` is `6px`. Only valid because the surviving factor is a LEAF: scaling an
             // operator node would need its whole subtree rewritten, which step 9.3 does and this
-            // probe does not.
-            nodes[i] = nodes[lastNonNumber]
+            // prototype does not.
+            replace(i, with: lastNonNumber)
             nodes[i].value *= scale
             return
         }
-        // Mixed, with an operator factor: out of scope, left alone.
+        // Mixed, with an operator factor: not ported yet, left alone.
     }
 
     /// Materialise the subtree rooted at `i` as a real `CSSCalc::Child`, on the builder's operand
     /// stack, and report whether it got there.
     ///
     /// SWIFT WALKS ITS OWN TREE. That is the whole shape of this function and the reason the flat
-    /// node no longer exists in C++: nothing about the tree crosses, only finished operands and, for
-    /// an operator, the alternative and the arity. Post-order, so every child is an operand on the
-    /// stack before its parent asks for it -- the same discipline the rest of the builder already
-    /// uses, and the reason no Swift container ever holds a `Child`.
+    /// node does not exist in C++: nothing about the representation crosses, only finished operands
+    /// and, for an operator, the alternative and the arity. Post-order, so every child is an operand
+    /// on the stack before its parent asks for it -- the same discipline the rest of the builder
+    /// already uses, and the reason no Swift container ever holds a `Child`.
     ///
-    /// What crosses per node, and what does not: `pushLeaf` takes a 16-byte POD and `buildOperation`
-    /// takes an enum and a count. Neither re-derives anything. The predecessor of this function was
-    /// one crossing for the whole tree -- Swift handing over two `Span`s and C++ walking them -- and
-    /// the reason that is gone is not that it was slow but that it required C++ to name the node
-    /// type, which is the inversion running backwards. The cost of the swap is measured, not
-    /// assumed: see the emit gate in `calcbench --primitives`.
+    /// What crosses per node: `pushLeaf` takes a 16-byte POD, `buildOperation` an enum and a count.
+    /// Neither re-derives anything. The predecessor was one crossing for the whole tree -- Swift
+    /// handing over two `Span`s and C++ walking them -- and the reason that is gone is not that it
+    /// was slow but that it required C++ to name the node type, which is the inversion running
+    /// backwards. The price of the swap was measured rather than assumed: 0.9580 to 0.9636 of the
+    /// C++ arm, about 3.4 retired instructions per node.
     ///
-    /// Distinct from `rebuildFrom`, which is what the tree-walking port calls: that takes the
-    /// ORIGINAL node and recovers its operation through a 41-way `switchOn` plus `WTF::apply`, at
-    /// 1396 retired instructions. A flat node states its own alternative, so there is nothing to
-    /// recover.
+    /// Distinct from `rebuildFrom`, which is what the two-pass port calls: that takes the ORIGINAL
+    /// node and recovers its operation through a 41-way `switchOn` plus `WTF::apply`, at 1396 retired
+    /// instructions. A flat node states its own alternative, so there is nothing to recover.
     ///
     /// Recursive on tree DEPTH, not on node count, and the deepest calc expression in the whole WPT
-    /// css-values corpus is single digits. An explicit stack would need a Swift buffer to hold it
-    /// and would buy nothing here.
+    /// css-values corpus is single digits.
     func emit(_ i: Int, into builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder) -> Bool {
         let node = nodes[i]
 
         if let leaf = node.numericLeaf {
             // `pushLeaf` owns which alternative a unit means, via `makeNumeric`, so no unit table is
-            // re-derived here -- the same routing the tree-walking port's leaves take.
+            // re-derived here -- the same routing the two-pass port's leaves take.
             return builder.pushLeaf(leaf.boundaryLeaf)
         }
 
-        let n = Int(node.childCount)
-        for k in 0..<n {
-            guard emit(child(i, k), into: &builder) else { return false }
+        var pushed: UInt32 = 0
+        var cursor = node.firstChild
+        while cursor != CalcFlatNode.noNode {
+            guard emit(Int(cursor), into: &builder) else { return false }
+            pushed += 1
+            cursor = nodes[Int(cursor)].nextSibling
         }
-        // False for anything outside `buildOperation`'s set, which for now is the flat simplifier's
-        // own coverage. Declining rather than building something plausible.
-        return builder.buildOperation(node.alternative, UInt32(n))
+        // False for anything outside `buildOperation`'s set, which for now is this prototype's own
+        // coverage. Declining rather than building something plausible.
+        return builder.buildOperation(node.alternative, pushed)
     }
+}
+
+/// Count the nodes of `root`, so a flat tree can be stack-allocated for it.
+///
+/// A separate traversal only in the probes below. On any real path the number comes from `walk`,
+/// which computes it already and allocates nothing to do it -- which is the point: the counting pass
+/// the flat tree needs is a pass that has to run anyway.
+fileprivate func calcFlatNodeCount(_ root: borrowing WebCore.CSSCalc.Child) -> UInt32 {
+    var total: UInt32 = 1
+    let info = WebCore.CSSCalc.swiftNodeInfo(root)
+    var index: UInt32 = 0
+    while index < info.childCount {
+        total += calcFlatNodeCount(root[Int(index)])
+        index += 1
+    }
+    return total
 }
 
 /// Convert and then FOLD, `iterations` times, returning the bit pattern of the resulting root's
 /// value so the caller can check it against the C++ arm rather than trust the timing.
-///
-/// Same hoisting as the conversion probe: the buffers live outside the loop.
 @_expose(Cxx)
 public func cssCalcFlatSimplifyProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ iterations: UInt32) -> UInt64 {
-    var tree = CalcFlatTree()
-    tree.nodes.reserveCapacity(64)
-    tree.childIndices.reserveCapacity(64)
     var bits: UInt64 = 0
+    let n = calcFlatNodeCount(root)
     for _ in 0..<iterations {
-        tree.reset()
-        let rootIndex = tree.append(root)
-        tree.simplify()
-        bits = tree.nodes[Int(rootIndex)].value.bitPattern
+        bits = withCalcFlatTree(root, n) { tree in
+            tree.simplify()
+            return tree.nodes[0].value.bitPattern
+        }
     }
     return bits
 }
 
 /// Converts `root` `iterations` times and returns the summed node count.
 ///
-/// THE LOOP IS IN SWIFT, and that is the correction rather than a convenience -- it is the same one
-/// the operand-stack primitive already carries. Two fresh `Array`s per conversion charge every
-/// iteration with two mallocs and two frees that a real implementation pays once for the process,
-/// not once per tree; measured that way the conversion came out at 2338 instructions, against 1457
-/// for the C++ arm's entire simplification, and essentially all of the difference was allocation.
-/// Hoisting them out of the loop measures a STEADY-STATE conversion.
-///
-/// A mutable global would have been the obvious hoist and is not available: `nonisolated(unsafe)`
-/// makes every access an `unsafe` expression under -strict-memory-safety, and this island is at
-/// zero markers. A function-local reused across an in-Swift loop costs nothing and needs no marker.
+/// THE LOOP IS IN SWIFT, and that is a correction rather than a convenience: two fresh `Array`s per
+/// conversion charged every iteration with two mallocs and two frees that a real implementation pays
+/// once per process, not once per tree, and measured that way conversion came out at 2338
+/// instructions against 1457 for the C++ arm's entire simplification. There is now no allocation at
+/// all -- the tree is a stack buffer -- so what this measures is the traversal and the stores.
 @_expose(Cxx)
 public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ iterations: UInt32) -> UInt32 {
-    var tree = CalcFlatTree()
-    tree.nodes.reserveCapacity(64)
-    tree.childIndices.reserveCapacity(64)
-    // `tree` is `~Copyable`, so the loop below borrows it rather than copying per iteration.
     var total: UInt32 = 0
+    let n = calcFlatNodeCount(root)
     for _ in 0..<iterations {
-        tree.reset()
-        _ = tree.append(root)
-        total &+= UInt32(tree.nodes.count)
+        total &+= withCalcFlatTree(root, n) { tree in UInt32(tree.count) }
     }
     return total
 }
@@ -5102,34 +5312,22 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
 /// with real children, and that is the cost that decides whether the flat design wins on the trees
 /// real CSS actually carries.
 ///
-/// SWIFT WALKS ITS OWN TREE and pushes finished operands; see `CalcFlatTree.emit`. Nothing about the
-/// flat representation crosses, which is what lets the node be a Swift type. The predecessor took a
-/// `Span` of a C++-declared POD in one crossing per tree; this takes one crossing per node with
-/// nothing dispatched in either, and the difference between the two is what this gate now measures.
-///
-/// Same hoisting as the other two probes, and for the same measured reason: the two flat buffers
-/// live outside the loop, because allocating them per call read 2338 instructions against 458
-/// hoisted -- 1.6x the C++ arm's whole simplification, which would have refuted the design outright.
-/// The C++ side hoists the operand stack to match, and the stack is cleared rather than freed here,
-/// so a benchmark loop is steady-state rather than growing a vector `iterations` long.
-///
-/// Guarded, because the fixture the benchmark drives it with is defined only in a bridge build.
+/// The operand stack is cleared rather than freed between iterations, so what is timed is a
+/// steady-state emit rather than a vector growing `iterations` long.
 @_expose(Cxx)
 public func cssCalcFlatEmitProbeSwift(
     _ root: borrowing WebCore.CSSCalc.Child,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
     _ iterations: UInt32
 ) -> UInt32 {
-    var tree = CalcFlatTree()
-    tree.nodes.reserveCapacity(64)
-    tree.childIndices.reserveCapacity(64)
     var emitted: UInt32 = 0
+    let n = calcFlatNodeCount(root)
     for _ in 0..<iterations {
-        tree.reset()
-        let rootIndex = tree.append(root)
-        tree.simplify()
         builder.clearOperands()
-        if tree.emit(Int(rootIndex), into: &builder) {
+        if withCalcFlatTree(root, n, { tree -> Bool in
+            tree.simplify()
+            return tree.emit(0, into: &builder)
+        }) {
             emitted &+= 1
         }
     }
