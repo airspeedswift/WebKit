@@ -1880,8 +1880,17 @@ struct CalcMixWeightPlan {
 // Swift's operand stack, forward-declared in CSSCalcSwiftTypes.h so that boundary header can
 // stay free of wtf/Vector.h. One line, and it is the entire reason no Swift type ever has to hold a
 // `Child`.
+// Inline capacity, so a simplification whose peak operand run fits leaves the allocator untouched.
+// Worth a FLAT ~240 retired instructions per simplification on every band of calc-shapes.tsv and
+// calc-depth.tsv, which is 23% of the `leaf` band -- single-node trees, where there is no walk to
+// amortise the per-call cost over. 16 rather than 8: the peak is the widest operand run the walk
+// holds at once, one per leaf for the widest operation in the tree, and at 8 a 12-term sum
+// (`ladder12`) pays the inline-to-heap move on top of the malloc it still makes -- measured +388
+// there against -246 at 16, with the -240 on every other band unchanged either way.
+using OperandVector = Vector<Child, 16>;
+
 struct CSSCalcSwiftOperandStack {
-    Vector<Child> value;
+    OperandVector value;
     // The weights the next CalcMix reconstruction pairs with its items, in item order. A separate
     // stack because a weight is not a subtree; kept as a stack rather than per-node so a nested
     // CalcMix follows the same consume-the-top discipline as every other slot shape.
@@ -1895,7 +1904,7 @@ struct CSSCalcSwiftOperandStack {
 // operation. The contract check is exact both ways: too few operands trips `ok`; too many leaves
 // the cursor short of `end`.
 struct RebuildCursor {
-    Vector<Child>& stack;
+    OperandVector& stack;
     size_t next;
     size_t end;
     // The weight stack and the position this node's CalcMix weights start at. Carried on the
@@ -2184,7 +2193,7 @@ void CSSCalcSwiftBuilder::clearOperands()
 // A pointer, which is fine because nothing here is Swift-visible: the two public overloads are what
 // Swift calls, and a `const Type*` parameter on one of those would import as `UnsafePointer` and
 // cost an `unsafe` marker at every call site.
-static bool buildOperationOnStack(Vector<Child>& stack, CSSCalcSwiftAlternative alternative, uint32_t childCount, const Type* carriedType)
+static bool buildOperationOnStack(OperandVector& stack, CSSCalcSwiftAlternative alternative, uint32_t childCount, const Type* carriedType)
 {
     if (!childCount || childCount > stack.size())
         return false;
