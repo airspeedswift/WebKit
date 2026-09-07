@@ -6708,7 +6708,29 @@ fileprivate extension CalcFlatTree {
             // That mask does not constant-fold: `UInt64(alternative.rawValue)` over an IMPORTED C++
             // enum leaves the optimizer eight `cond_fail`s and four shifts to run here, per operator
             // node. `CalcFlatCoverage.mask` has the same shape and gets away with it because it is
-            // read once per TREE.
+            // read once per TREE. (The thin-LTO binary measures the two identically, so the switch is
+            // kept for saying the routing once, not for a win.)
+            //
+            // `CalcMix` IS ROUTED HERE AND IS NOT IN `CalcFlatCoverage.mask`, which is safe -- an
+            // alternative outside the mask never reaches this pass at all -- and the reason it is not
+            // is worth writing down, because the emit route is not what is missing:
+            //
+            //   * the fold needs each item's WEIGHT, which is `swiftCalcMixItemWeight(node, index)`
+            //     off the original. That is one `withCalcOriginalNode` descent plus one upcall per
+            //     item, exactly as `simplifyAnchorFunction` does it, so the fold is reachable;
+            //   * but `rebuildSlot(const Vector<CalcMix::Item>&)` needs one `pushCalcMixItemWeight`
+            //     plan per SURVIVING item, at EMIT time, and there is nowhere to stash one. A plan is
+            //     an original item index, a `Double` and a flag, per child, and `CalcFlatNode` has two
+            //     spare BYTES. Pushing them during the fold instead does not work either: the weight
+            //     stack is consumed from the top by `childCount`, and the reverse scan folds an inner
+            //     `calc-mix()` BEFORE an outer one while `emit` reaches the inner one FIRST, so the
+            //     inner rebuild would take the outer's plans.
+            //
+            // So the shape it needs is RECOMPUTE AT EMIT: `calcMixPlan` is a pure function of the
+            // original weights, so running it a second time in `emit` reproduces the same survivor
+            // list in the same order, and the surviving flat children zip onto it. That makes the
+            // plan machinery shared between the fold and the emit rather than carried between them,
+            // which is the piece of design this note exists to record.
             return calcEmitFromOrigin(node.origin, pushed, false, original, &builder)
         default:
             break
