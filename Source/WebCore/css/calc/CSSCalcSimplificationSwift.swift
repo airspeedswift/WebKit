@@ -1407,10 +1407,10 @@ private enum CalcFlatCoverage {
     }
 
     /// A computed `static var`, not a `static let`: a stored global is lazily initialised behind a
-    /// `swift_once` guard, which is an atomic load on every read -- and `CalcFlattenReport.writing`
-    /// reads this once per node, not once per tree. Measured at 10 retired instructions per
-    /// simplification when it was tried, against 0 for the computed form once `bit` stopped
-    /// branching.
+    /// `swift_once` guard, which is an atomic load on every read -- and this is read once per node,
+    /// by `CalcFlattenReport.sawAlternative`. Measured at 10 retired instructions per simplification
+    /// when it was tried, against 0 for the computed form once `bit` stopped branching, which is
+    /// what lets it fold into the immediate of `sawAlternative`'s single `tst`.
     static var mask: UInt64 {
         return bit(.Number)
             | bit(.Percentage)
@@ -2187,28 +2187,58 @@ fileprivate struct CalcFlattenReport {
     /// `nodeCount` still sizes an exact retry.
     var overflowed = false
 
-    /// `CalcFlatCoverage.mask`, evaluated ONCE PER TREE rather than once per node.
+    /// Whether the nodes written so far can still become a flat tree. Two ways to lose it, and both
+    /// are monotone, so once this is false it stays false and the pass degrades to a plain walk: it
+    /// keeps crossing and counting, because the count and the mask have to describe every tree the
+    /// gate saw, but it writes nothing more, and it stops paying `getType` and `operationInfo` for
+    /// nodes no flat tree will hold.
     ///
-    /// `writing` is read at every node of the flattening walk, and the mask is a forty-term
-    /// expression the optimizer folds only sometimes (see `CalcFlatCoverage.bit`). A stored
-    /// property initialised here is one evaluation per `CalcFlattenReport()`, which is one per
-    /// `calcFlatten`, and it is the spelling that makes the cost independent of both the term count
-    /// and the node count. Measured on the 13-node `ladder12` band: 7648.9 retired instructions per
-    /// simplification reading the computed property per node, 7631.2 reading this -- and on the
-    /// single-node `leaf` band, 578.7 against 574.6, so it is not purely a per-node saving either:
-    /// the computed form was evaluated more than once per tree even where there is only one node.
-    let coverageMask = CalcFlatCoverage.mask
+    /// MAINTAINED, NOT RECOMPUTED, and that is what the monotonicity buys. As a computed property
+    /// this was three loads, two compares and a `bics` against a stored copy of
+    /// `CalcFlatCoverage.mask` -- eight instructions -- at each of its four read sites, one of which
+    /// is per node and one per CHILD. Maintained it is `ldrb`/`cmp`/`b.ne`.
+    ///
+    /// THE COVERAGE SUBSET TEST IS NO LONGER ONE OF THE WAYS, and that is a deliberate move of the
+    /// same test from per node to per tree: `withCalcFlatTree` asks it once, beside this. A tree
+    /// holding an alternative outside `CalcFlatCoverage.mask` is now flattened in full and then
+    /// declined, rather than degrading to a walk at the offending node. Same answer, same blame,
+    /// same decline; the difference is wasted writes into a scratch buffer nothing reads on a path
+    /// that the mask being complete at 41 of 41 makes unreachable anyway. Kept per node it cost
+    /// three or four instructions on EVERY node, because the mask has to be materialised and
+    /// compared where it used to ride along in a `bics` against a field already loaded.
+    var writing = true
 
-    /// Whether the nodes written so far can still become a flat tree. Three ways to lose it, and all
-    /// three are monotone -- `kindMask` only gains bits -- so once this is false it stays false and
-    /// the pass degrades to a plain walk: it keeps crossing and counting, because the count and the
-    /// mask have to describe every tree the gate saw, but it writes nothing more, and it stops paying
-    /// `getType` and `operationInfo` for nodes no flat tree will hold.
+    /// Record `alternative` in `kindMask`.
+    @inline(always)
+    mutating func sawAlternative(_ alternative: CalcAlternative) {
+        kindMask |= UInt64(1) &<< UInt64(alternative.rawValue)
+    }
+
+    /// Whether every alternative seen so far is one the FLAT port covers. Asked once per tree.
     ///
-    /// The coverage test is in here rather than only at the end so that a tree bound to decline pays
-    /// the walk and not a flattening it will throw away.
-    var writing: Bool {
-        return everyNodeSimplifiable && !overflowed && kindMask & ~coverageMask == 0
+    /// Against the mask rather than against `rawValue < 41`, which is the same answer today and
+    /// would not stay the same: a bit dropped from `CalcFlatCoverage.mask` to narrow coverage has to
+    /// take the trees holding it off the flat path, and only the mask formulation does that.
+    var everyAlternativeCovered: Bool {
+        return kindMask & ~CalcFlatCoverage.mask == 0
+    }
+
+    /// A node no port handles at all. The first one in pre-order is the one blamed, so widening this
+    /// file's coverage can only move the blame outward.
+    @inline(always)
+    mutating func sawUnsimplifiableNode(_ alternative: CalcAlternative) {
+        if blame == nil {
+            blame = alternative
+        }
+        everyNodeSimplifiable = false
+        writing = false
+    }
+
+    /// The buffer filled up. The walk continues, so `nodeCount` still sizes an exact retry.
+    @inline(always)
+    mutating func sawOverflow() {
+        overflowed = true
+        writing = false
     }
 }
 
@@ -2265,18 +2295,20 @@ fileprivate func calcFlattenNode(
     // is 64 bits wide. Three instructions per NODE, on every band. `nodeCount` cannot wrap either:
     // it counts nodes of a tree that is already in memory.
     report.nodeCount &+= 1
-    report.kindMask |= UInt64(1) &<< UInt64(info.alternative.rawValue)
+    report.sawAlternative(info.alternative)
 
     if !isSimplifiableAlternative(info.alternative, info.childCount) {
-        // The first unhandled alternative in pre-order is the one reported, so widening this file's
-        // coverage can only move the blame outward.
-        if report.blame == nil {
-            report.blame = info.alternative
-        }
-        report.everyNodeSimplifiable = false
+        report.sawUnsimplifiableNode(info.alternative)
     }
-    if out.freeCapacity == 0 {
-        report.overflowed = true
+    // A `guard` rather than a plain `if`, and spelled as `count < capacity` rather than as
+    // `freeCapacity == 0`, so that the append below is reached only on a path where
+    // `OutputSpan.append`'s own precondition is an established fact in the FORM the precondition is
+    // written in. `freeCapacity == 0` establishes only that the two DIFFER, which does not
+    // discharge `count < capacity`, and the append then repeated the bounds test and carried its
+    // own trap.
+    guard out.count < out.capacity else {
+        report.sawOverflow()
+        return calcFlattenSubtree(node, info, inheritedFlags, &out, &report)
     }
 
     // THE LEAF FAST PATH. The same seven alternatives `carriesType` names below, and the node it
@@ -2474,7 +2506,12 @@ fileprivate func withCalcFlatTree<R>(
     return withTemporaryAllocation(of: CalcFlatNode.self, capacity: capacity) { out in
         var report = CalcFlattenReport()
         _ = calcFlatten(root, 0, &out, &report)
-        guard report.writing else {
+        // `everyAlternativeCovered` beside `writing`, and this is the ONLY place the coverage subset
+        // test is asked -- see `CalcFlattenReport.writing` for why it moved here from the per-node
+        // path. A tree holding an alternative the flat port does not cover was flattened in full and
+        // is discarded unread here, which is the same decline it used to reach at the offending
+        // node.
+        guard report.writing, report.everyAlternativeCovered else {
             return (report, nil)
         }
         // `out.count` into a local first: `mutableSpan` is a MUTATING accessor, so reading the count
@@ -4795,8 +4832,8 @@ fileprivate extension CalcFlatTree {
             // leaves the optimizer eight `cond_fail`s and four shifts to run here, per operator
             // node. `CalcFlatCoverage.mask` gets away with the same shape because LLVM folds the
             // whole chain -- but only below a size threshold, which is what `bit`'s `&<<` is for,
-            // and NOT because the mask is "read once per tree": `CalcFlattenReport.writing` reads
-            // it once per node. That claim used to stand here and is corrected at `bit`.
+            // and NOT because the mask is "read once per tree": `CalcFlattenReport.sawAlternative`
+            // reads it once per node. That claim used to stand here and is corrected at `bit`.
             //
             // THE PRICE IS THE WALK, not the rebuild: `withCalcOriginalNode` costs 192 retired
             // instructions per node stepped past, against `rebuildFrom`'s own 41-way dispatch at
