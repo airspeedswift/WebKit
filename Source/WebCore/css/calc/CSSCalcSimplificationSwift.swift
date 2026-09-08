@@ -1514,12 +1514,11 @@ public func cssCalcSimplifySwift(
 
 /// The whole of `cssCalcSimplifySwift` for a root that is a numeric leaf with no children.
 ///
-/// `@inline(always)` into the entry point, whose frame this therefore shares -- and that is the point
-/// of the split rather than a side effect. `withTemporaryAllocation`'s 1000-byte buffer is an `alloca`
-/// in the entry block, so it and the stack protector it forces are paid on EVERY path through the
-/// function that holds it; moving the flat pass into its own `@inline(never)` function is what takes
-/// frame (17 instructions) plus protector (10) off this path. Same mechanism as the
-/// `calcFlattenNode`/`calcFlattenSubtree` split.
+/// `@inline(always)`, so this is an early return out of the entry point and not a call. It therefore
+/// shares that function's frame, INCLUDING `withTemporaryAllocation`'s 1000-byte `alloca` and the stack
+/// protector the `alloca` forces -- an `alloca` lives in the entry block, so those are paid on every
+/// path through the function that holds one, ~18 retired instructions this path does not use. Splitting
+/// the flat pass out to escape them was measured and LOSES; see `calcSimplifyFlatTree`.
 ///
 /// Nothing here allocates, nothing recurses, and no `CalcFlatNode` is ever written: the leaf lives in
 /// registers from `swiftNodeInfo` to `pushLeaf`.
@@ -1589,10 +1588,23 @@ private func calcSimplifyNumericLeafRoot(
 
 /// Everything a tree that is not a single numeric leaf needs: the flat pass, unchanged.
 ///
-/// `@inline(never)`, so that the 1000-byte `withTemporaryAllocation` buffer and the stack protector it
-/// forces stay out of the entry point's frame. It costs the trees that come here one `bl` and one
-/// frame, and no extra boundary crossing -- `rootInfo` is threaded in.
-@inline(never)
+/// `@inline(always)`, and that is a MEASURED 2x2 rather than the obvious choice. The obvious choice is
+/// `@inline(never)`, which takes `withTemporaryAllocation`'s 1000-byte `alloca` -- and the stack
+/// protector it forces -- out of the leaf path's frame, and it does: the leaf band reads 254.3 retired
+/// instructions against 272.1 here. But an `alloca` lives in the entry block, so the split has to be a
+/// real call, and the trees that DO need the flat pass then pay a second frame, the `bl` and the repack
+/// of the 24-byte node info into the callee's registers -- a flat +28 per call, measured identically on
+/// `mixed`, every rung of the unit ladder and every rung of the depth ladder. Four of `real`'s seven
+/// captured expressions take the leaf path and three do not, so the split loses on the band that
+/// ships: `real` 913.2 split against 907.6 inlined, `mixed` 1993.9 against 1956.8, `ladder12` 6045.9
+/// against 6010.3.
+///
+/// The fourth cell says why the split cannot be rescued by shrinking the entry frame. Moving the
+/// `NonCanonicalDimension` canonicalization out of line is worth −3.4 on `real` WITH the split and
+/// −1.3 against this arrangement, i.e. it was buying back the split's own cost; both together are
+/// WORSE than this alone (`real` 908.9, `leaf` 278.7). Parked as
+/// `cssprobe/patches/calc-leafroot-coldcanon-0908.patch`.
+@inline(always)
 private func calcSimplifyFlatTree(
     _ root: borrowing WebCore.CSSCalc.Child,
     _ rootInfo: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
