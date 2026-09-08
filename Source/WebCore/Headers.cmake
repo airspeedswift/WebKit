@@ -1149,7 +1149,9 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS
     css/calc/CSSCalcOperator.h
     css/calc/CSSCalcRandomCachingKey.h
     css/calc/CSSCalcRandomSharing.h
+    css/calc/CSSCalcSwiftTypes.h
     css/calc/CSSCalcSymbolTable.h
+    css/calc/CSSCalcTree+NumericIdentity.h
     css/calc/CSSCalcTree.h
     css/calc/CSSCalcType.h
     css/calc/CSSCalcValue.h
@@ -1169,6 +1171,7 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS
     css/parser/CSSParserIdioms.h
     css/parser/CSSParserMode.h
     css/parser/CSSParserToken.h
+    css/parser/CSSParserTokenBits.h
     css/parser/CSSParserTokenRange.h
     css/parser/CSSPropertyParser.h
     css/parser/CSSPropertyParserConsumer+Color.h

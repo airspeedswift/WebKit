@@ -860,11 +860,17 @@ template<typename Op> static constexpr bool hasChildOrNoneArgument = []<size_t..
 // Pins `CSSCalcSwiftAlternative` to `Node`'s alternative order. This lives here because this is
 // the nearest translation unit that can see both the enum and the variant.
 //
+// `Node` and the enum both expand from `CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`, so a divergence is
+// not expressible in the source, but a change to that generation is, and this is the only place
+// where such a change fails loudly. `init?(rawValue:)` on an imported C++ enum never fails, so a
+// renumbered alternative would reach Swift as a valid case, be switched on, and produce a wrong
+// node, with no runtime check able to catch it.
+//
 // One assert per alternative, expanded from the same list that declares the enumerators, so an
-// enumerator that gained no assert is not expressible. `WTF::alternativeIndexV` (StdLibExtras.h:620)
-// carries its own `static_assert(count == 1)`, so a type that appears twice in `Node` is rejected
-// here too, and a type that appears zero times fails to instantiate rather than silently answering
-// the past-the-end index.
+// enumerator that gained no assert is not expressible. `WTF::alternativeIndexV` carries its own
+// `static_assert(count == 1)`, so a type that appears twice in `Node` is rejected here too, and a
+// type that appears zero times fails to instantiate rather than silently answering the past-the-end
+// index.
 #define CSS_CALC_SWIFT_PIN_ALTERNATIVE(name, type) \
     static_assert(WTF::alternativeIndexV<type, Node> == static_cast<size_t>(CSSCalcSwiftAlternative::name), \
         "CSSCalcSwiftAlternative::" #name " is not Node's index for " #type);
@@ -883,7 +889,7 @@ static_assert(numberOfCSSCalcSwiftAlternatives == WTF::VariantSizeV<Node>);
 // and has to justify moving the AArch64 return value out of registers.
 static_assert(sizeof(CSSCalcSwiftNodeInfo) == 24);
 
-CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node)
+CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node) noexcept
 {
     // One `switchOn` over the 41-alternative Variant, answering every question about the node at
     // once, so a leaf costs one discriminant dispatch rather than one per field.
@@ -1049,7 +1055,7 @@ static CSSValueID anchorSizeDimensionValueID(Style::AnchorSizeDimension dimensio
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node)
+CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node) noexcept
 {
     CSSCalcSwiftOperationInfo out {
         .valueID = static_cast<uint16_t>(CSSValueInvalid),
@@ -1155,22 +1161,22 @@ static const Child* childInSerializationOrder(const Child& node, uint32_t index)
 // The three POD reads, forwarded. `CSSCalcSwiftNode` is now a handle over a `Child` and nothing
 // more: the Swift simplifier reads the tree directly and only the serialization boundary still
 // takes one. Both these and the handle go when serialization follows (revisit log R149 step 1b).
-CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const
+CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const noexcept
 {
     return swiftNodeInfo(*m_node);
 }
 
-CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const
+CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const noexcept
 {
     return swiftOperationInfo(*m_node);
 }
 
-CSSCalcSwiftCalcMixWeight CSSCalcSwiftNode::calcMixItemWeight(uint32_t index) const
+CSSCalcSwiftCalcMixWeight CSSCalcSwiftNode::calcMixItemWeight(uint32_t index) const noexcept
 {
     return swiftCalcMixItemWeight(*m_node, index);
 }
 
-CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
+CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const noexcept
 {
     auto* found = childInSerializationOrder(*m_node, index);
     // Not a clamp and not a null return: this only ever indexes below the `childCount` it was just
@@ -1187,12 +1193,12 @@ CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const
 // `info().childCount` is `Child::childCount()`, the same walker this indexes, so the count and the
 // indices cannot disagree -- which is what the two-walker arrangement this replaced had to argue
 // for in prose.
-CSSCalcSwiftNode CSSCalcSwiftNode::childInTreeOrder(uint32_t index) const
+CSSCalcSwiftNode CSSCalcSwiftNode::childInTreeOrder(uint32_t index) const noexcept
 {
     return CSSCalcSwiftNode { &(*m_node)[index] };
 }
 
-void CSSCalcSwiftSink::appendLiteral(uint8_t literal)
+void CSSCalcSwiftSink::appendLiteral(uint8_t literal) noexcept
 {
     // Selected by name rather than by index, so the numbering `CSSCalcSwiftLiteral` declares in
     // Swift is never transcribed here: reordering those cases cannot change which spelling is
@@ -1228,19 +1234,19 @@ void CSSCalcSwiftSink::appendLiteral(uint8_t literal)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-void CSSCalcSwiftSink::appendNumber(double value, uint8_t unitType)
+void CSSCalcSwiftSink::appendNumber(double value, uint8_t unitType) noexcept
 {
     // The same call `serializeCalculationTree`'s Numeric overload makes, so both serializers share
     // one number-formatting implementation by construction rather than by comparison.
     CSS::serializationForCSS(*m_builder, *m_context, CSS::SerializableNumber { value, unitTypeString(static_cast<CSSUnitType>(unitType)) });
 }
 
-void CSSCalcSwiftSink::appendValueIDName(uint16_t valueID)
+void CSSCalcSwiftSink::appendValueIDName(uint16_t valueID) noexcept
 {
     m_builder->append(nameLiteralForSerialization(static_cast<CSSValueID>(valueID)));
 }
 
-void CSSCalcSwiftSink::appendOperationArgument(const CSSCalcSwiftNode& node, uint8_t part, uint32_t index)
+void CSSCalcSwiftSink::appendOperationArgument(const CSSCalcSwiftNode& node, uint8_t part, uint32_t index) noexcept
 {
     // Selected by name, like `appendLiteral`, so the numbering `CSSCalcSwiftOperationPart` declares
     // in Swift is never transcribed here.

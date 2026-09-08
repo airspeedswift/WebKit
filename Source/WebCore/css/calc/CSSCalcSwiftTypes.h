@@ -42,6 +42,41 @@
 // 0 warnings. The self-containment reason above is the one that still holds.
 //
 // The recursive walk and the sink below import with 0 errors, 0 warnings and 0 `unsafe` markers.
+//
+// EVERY FUNCTION SWIFT CALLS HERE IS `noexcept`, AND THAT IS NOT DECORATION. Swift emits a
+// termination landing pad around each call to a C++ function whose declaration permits an exception:
+// measured on a two-function probe under this project's real interop flags
+// (`cssprobe/trapcensus/noexceptprobe/`), a throwing and a `noexcept` callee compile to
+// instruction-for-instruction identical code except for the throwing arm's trailing `brk #0x1`. At
+// the census taken before these keywords were added, that cost the simplification island 62 `brk`s,
+// two of which were reachable *conditionally* -- the `bl; cbz; brk` around `isLengthUnit` -- and so
+// were live trap conditions rather than pure size.
+//
+// Why the annotation is correct rather than a hazard, which is the direction that matters, since
+// `noexcept` over something that can throw converts an exception into `std::terminate`:
+//
+//   1. Every definition below lives in a WebCore translation unit, and WebCore is compiled
+//      `-fno-exceptions` (`Source/WebCore/Configurations/Base.xcconfig:63`,
+//      `GCC_ENABLE_CPP_EXCEPTIONS = NO`; the flag is on the real compile line, reached through the
+//      per-target `*-common-args.resp` response file). A `throw` expression is therefore ill-formed
+//      in these translation units, and libc++'s `_LIBCPP_THROW` aborts rather than throwing.
+//   2. The one thing that would otherwise throw is allocation, and WebKit's allocators do not:
+//      `Vector`'s growth, `makeUniqueRef` and TZone all `CRASH()` on failure rather than raising
+//      `std::bad_alloc`.
+//   3. The residual hazard `-fno-exceptions` does not cover is an Objective-C `@throw` unwinding
+//      *through* one of these frames, so it is checked per function rather than assumed. The
+//      deepest call graphs here are `resolveRelativeLength` (`CSS::toLengthUnit`, then
+//      `Style::resolveLength`, whose relative units read a realised font cascade) and
+//      `resolveStyleCoupledValue` (`Style::AnchorPositionEvaluator::evaluateSize`, `Style::toStyle`,
+//      the sibling-count/index resolvers and `simplify(Random&)`); every frame in them is C++, and
+//      the rest of this header's functions do nothing but read POD fields off a `Child` or push onto
+//      a `Vector`. And in the direction that matters for safety, an Objective-C exception crossing a
+//      `-fno-exceptions` frame already has no cleanup and is undefined today: `noexcept` turns that
+//      into a deterministic `std::terminate`, which is not a regression.
+//
+// So the keyword records a fact the build already guarantees, and its only effect is to let Swift
+// stop generating a pad for a path that cannot exist. Note that `noexcept` is not part of the
+// Itanium mangling of these symbols, so no exported name changes.
 
 #pragma once
 
@@ -124,31 +159,19 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
     AnchorSizeFunction,
 };
 
-// WHICH of `CSSCalc::Node`'s 41 variant alternatives the walk is standing on, exactly.
+// Which of `CSSCalc::Node`'s variant alternatives a node is, exactly, for a rewriter that must
+// dispatch on the operation rather than on the serialization shape. The numbering is the variant's
+// own alternative index, read with `Node::index()`, and this list is the only copy: `Node`'s
+// `Variant<...>` is generated from it in CSSCalcTree.h, and each pairing is pinned with
+// `WTF::alternativeIndexV<T, Node>` in CSSCalcTree+Serialization.cpp because `init?(rawValue:)` on
+// an imported C++ enum never fails.
 //
-// A second discriminant beside `CSSCalcSwiftNodeKind`: the kind names the serialization shape
-// (several operations share one, e.g. `min()` and `mod()` are both `Function`), but a rewriter
-// must dispatch on the operation itself, which no amount of `valueID` inspection can do over a
-// kind that lumps operations together.
-//
-// No existing WebCore enum serves this role: `CSSCalc::Operator` omits the seven leaves,
-// `Deg2Rad`, `Anchor` and `AnchorSize`, and nothing in the tree maps an operation onto it;
-// `ToCalculationTreeOp<Op>` is a type alias with the same gaps; `Style::Calculation`'s parallel
-// tree declares no enum at all.
-//
-// So the numbering is the variant's own alternative index, read with `Node::index()` -- no switch,
-// no table, nothing per-operation on either side of the boundary. Kept from drifting: the
-// enumerator list and the pinning list are the same macro expansion
-// (`CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`); `numberOfCSSCalcSwiftAlternatives` counts that list
-// rather than the last enumerator and is held equal to `std::variant_size_v<Node>`; and each
-// pairing is pinned with `WTF::alternativeIndexV<T, Node>`, which rejects a duplicated alternative
-// type.
-//
-// The second macro argument is the alternative's C++ type, inert in this header -- a macro body is
-// not parsed until expanded -- which lets this self-contained header still name
-// `IndirectNode<Sum>` for the translation unit that can.
-#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(macro) \
-    macro(Number, Number) \
+// Split into FIRST and REST because a `Variant<...>` template argument list cannot carry a trailing
+// comma.
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_FIRST(macro) \
+    macro(Number, Number)
+
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_REST(macro) \
     macro(Percentage, Percentage) \
     macro(CanonicalDimension, CanonicalDimension) \
     macro(NonCanonicalDimension, NonCanonicalDimension) \
@@ -189,6 +212,10 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
     macro(CalcMix, IndirectNode<CalcMix>) \
     macro(Anchor, IndirectNode<Anchor>) \
     macro(AnchorSize, IndirectNode<AnchorSize>)
+
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(macro) \
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_FIRST(macro) \
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_REST(macro)
 
 enum class CSSCalcSwiftAlternative : uint8_t {
 #define CSS_CALC_SWIFT_DECLARE_ALTERNATIVE(name, type) name,
@@ -306,13 +333,13 @@ struct CSSCalcSwiftNodeInfo {
 // #ClangDeclarationImport warning.
 struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     __attribute__((swift_attr("@lifetime(immortal)")))
-    CSSCalcSwiftNode()
+    CSSCalcSwiftNode() noexcept
         : m_node(nullptr)
     {
     }
 
     __attribute__((swift_attr("@lifetime(copy node)")))
-    CSSCalcSwiftNode(const Child* node [[clang::lifetimebound]])
+    CSSCalcSwiftNode(const Child* node [[clang::lifetimebound]]) noexcept
         : m_node(node)
     {
     }
@@ -325,14 +352,14 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // `unitType`, `valueID`): each of those was a separate `WTF::switchOn` over the same
     // 41-alternative `Variant`, so splitting them would re-derive the same discriminant up to five
     // times per node to answer questions this answers together.
-    CSSCalcSwiftNodeInfo info() const;
+    CSSCalcSwiftNodeInfo info() const noexcept;
 
     // Everything the four operation kinds below need beyond `info()`, from one more crossing.
     //
     // Separate from `info()` rather than folded into it because `info()` runs for every node of
     // every tree, and this answers questions only four rare kinds ask. Called only when the kind
     // says to.
-    CSSCalcSwiftOperationInfo operationInfo() const;
+    CSSCalcSwiftOperationInfo operationInfo() const noexcept;
 
     // The `index`th child, IN SERIALIZATION ORDER.
     //
@@ -351,7 +378,7 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // and the alternative -- handing Swift a child *list* -- is either a buffer the boundary would
     // have to own or a second representation of the tree. If a measurement finds this costly, the
     // fix is an iterator handle, not a flattened array.
-    WEBCORE_EXPORT CSSCalcSwiftNode childAt(uint32_t index) const [[clang::lifetimebound]];
+    WEBCORE_EXPORT CSSCalcSwiftNode childAt(uint32_t index) const noexcept [[clang::lifetimebound]];
 
     // The `index`th child, in tree order -- what `forAllChildNodes` yields, unsorted.
     //
@@ -365,7 +392,7 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     //
     // `[[clang::lifetimebound]]`, prefix and nothing else, is the one spelling of six that imports
     // without a #ClangDeclarationImport warning.
-    WEBCORE_EXPORT CSSCalcSwiftNode childInTreeOrder(uint32_t index) const [[clang::lifetimebound]];
+    WEBCORE_EXPORT CSSCalcSwiftNode childInTreeOrder(uint32_t index) const noexcept [[clang::lifetimebound]];
 
     // The weight of `CalcMix` item `index` -- the one payload of any alternative that is neither a
     // child subtree nor a scalar on `info()`.
@@ -380,7 +407,7 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // `CalcMix` overload (CSSCalcTree+Traversal.h:127) yields each item's `value` once, in item
     // order, and nothing for a weight. So `info().childCount` is the item count and this shares its
     // bound.
-    CSSCalcSwiftCalcMixWeight calcMixItemWeight(uint32_t index) const;
+    CSSCalcSwiftCalcMixWeight calcMixItemWeight(uint32_t index) const noexcept;
 
 private:
     // So that `appendOperationArgument` can reach the node it is being asked to write a piece of,
@@ -410,9 +437,9 @@ private:
 // `Child` is incomplete in this header, deliberately -- it stays self-contained and does not
 // include CSSCalcTree.h. That is fine for a parameter; it is only an incomplete RETURN type that
 // makes the importer drop a declaration.
-WEBCORE_EXPORT CSSCalcSwiftNodeInfo swiftNodeInfo(const Child&);
-WEBCORE_EXPORT CSSCalcSwiftOperationInfo swiftOperationInfo(const Child&);
-WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child&, uint32_t index);
+WEBCORE_EXPORT CSSCalcSwiftNodeInfo swiftNodeInfo(const Child&) noexcept;
+WEBCORE_EXPORT CSSCalcSwiftOperationInfo swiftOperationInfo(const Child&) noexcept;
+WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child&, uint32_t index) noexcept;
 
 // Where the serialization output goes.
 //
@@ -428,7 +455,7 @@ WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child&, ui
 // refcounted sink would cost a heap allocation per call on a path `cssText` and getComputedStyle
 // reach, and "immortal" would be a claim that is not true.
 struct SWIFT_SAFE CSSCalcSwiftSink {
-    CSSCalcSwiftSink(WTF::StringBuilder& builder [[clang::lifetimebound]], const CSS::SerializationContext& context [[clang::lifetimebound]])
+    CSSCalcSwiftSink(WTF::StringBuilder& builder [[clang::lifetimebound]], const CSS::SerializationContext& context [[clang::lifetimebound]]) noexcept
         : m_builder(&builder)
         , m_context(&context)
     {
@@ -450,16 +477,16 @@ struct SWIFT_SAFE CSSCalcSwiftSink {
     //
     // `uint8_t` rather than the imported enum type because this header is what the generated header
     // is generated *from*; it cannot see the Swift enum's C name.
-    WEBCORE_EXPORT void appendLiteral(uint8_t literal);
+    WEBCORE_EXPORT void appendLiteral(uint8_t literal) noexcept;
 
     // Routes to CSS::serializationForCSS over a CSS::SerializableNumber, which is what the C++
     // serializer at CSSCalcTree+Serialization.cpp:589 does, so the two arms share one
     // number-formatting implementation by construction rather than by comparison.
-    WEBCORE_EXPORT void appendNumber(double value, uint8_t unitType);
+    WEBCORE_EXPORT void appendNumber(double value, uint8_t unitType) noexcept;
 
     // `nameLiteralForSerialization(CSSValueID)`, for Symbol, SiblingCount and SiblingIndex. The
     // id is named here; C++ owns the table, which is generated and must not be transcribed.
-    WEBCORE_EXPORT void appendValueIDName(uint16_t valueID);
+    WEBCORE_EXPORT void appendValueIDName(uint16_t valueID) noexcept;
 
     // A second upcall for arguments that are CSS values rather than calculation trees, and every
     // one of them must be spelled by C++.
@@ -476,7 +503,7 @@ struct SWIFT_SAFE CSSCalcSwiftSink {
     // Taken by `const&`, which is load-bearing: by value this method imports as `unsafe`, because
     // the sink's struct-level `SWIFT_SAFE` does not reach a parameter that is itself
     // `~Escapable`. By const reference: zero `unsafe`.
-    WEBCORE_EXPORT void appendOperationArgument(const CSSCalcSwiftNode&, uint8_t part, uint32_t index);
+    WEBCORE_EXPORT void appendOperationArgument(const CSSCalcSwiftNode&, uint8_t part, uint32_t index) noexcept;
 
 private:
     WTF::StringBuilder* m_builder;
@@ -592,17 +619,41 @@ struct CSSCalcSwiftSimplificationOptions {
 // what lets `rebuildFrom` be generic and keeps `~Escapable` out of the picture -- no Swift
 // container ever holds a `Child`, because the container is the C++ stack.
 struct SWIFT_SAFE CSSCalcSwiftBuilder {
-    CSSCalcSwiftBuilder(CSSCalcSwiftOperandStack& operands [[clang::lifetimebound]], const SimplificationOptions& options [[clang::lifetimebound]])
+    CSSCalcSwiftBuilder(CSSCalcSwiftOperandStack& operands [[clang::lifetimebound]], const SimplificationOptions& options [[clang::lifetimebound]]) noexcept
         : m_operands(&operands)
         , m_options(&options)
     {
     }
 
+    // `isRoot`, ON EVERY CONSTRUCTION ENTRY BELOW, and it is the whole of the boundary's knowledge
+    // of where the finished tree goes.
+    //
+    // Set, the node being built is the tree's ROOT, and it is constructed straight into the `Tree`
+    // the caller of `copyAndSimplify` asked for rather than onto the operand stack. Clear, it goes
+    // on the stack as every other node does. Swift answers it with `i == 0`: node 0 of the flat
+    // tree is the root and no child index is 0, so it costs one comparison and no extra crossing.
+    //
+    // WHY IT EXISTS. The last operand on the stack is the new root, and handing it over used to be
+    // `Tree { .root = WTF::move(operands.value[0]) }` -- an out-of-line 41-alternative `mpark`
+    // visit for the move plus another for the destroy of the moved-from slot, about 52 retired
+    // instructions once per simplification, against a C++ arm that pays nothing because
+    // `copyAndSimplify(const Child&)`'s return slot IS the `Tree`'s root. See `swiftSimplifiedRoot`
+    // (CSSCalcTree+Simplification.cpp) for the elision chain that makes the destination reachable
+    // and `constructOperand` for what happens at the slot.
+    //
+    // A trailing parameter rather than a `beginRoot()` entry, because arming would be a second
+    // crossing per tree for a fact the caller already has, and rather than five `*Root` overloads,
+    // because the destination is not a different way to build a node.
+    //
+    // Defaulted, so the `ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)` primitive benchmarks, which build
+    // operands on a stack with no root slot at all, are unchanged. A `true` with no root slot
+    // provided still pushes; nothing depends on the flag being honoured.
+
     // Build one of the four numeric leaves and push it. See `CSSCalcSwiftLeaf`.
     //
     // Returns false for a `kind` outside the four numeric leaves, which is a contract violation
     // rather than an input that can be met, declining rather than building something plausible.
-    WEBCORE_EXPORT bool pushLeaf(CSSCalcSwiftLeaf);
+    WEBCORE_EXPORT bool pushLeaf(CSSCalcSwiftLeaf, bool isRoot = false) noexcept;
 
     // Deep-copy an input subtree and push it. Used for every node walked past without changing,
     // and for every child of a node that is declined for rewriting.
@@ -613,7 +664,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // `AnchorSide`, while `Child` was one of ten `static` overloads inside CSSCalcTree+Copy.cpp --
     // which is one line of header and the removal of one `static`, and is the smallest thing that
     // works. Nothing new was written.
-    WEBCORE_EXPORT void pushCopyOf(const Child&);
+    WEBCORE_EXPORT void pushCopyOf(const Child&, bool isRoot = false) noexcept;
 
     // Pop `childCount` operands and push back one node of `original`'s own kind, built from them.
     //
@@ -632,7 +683,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // Returns false, reported as a decline, for a contract violation: too few operands, a mismatched
     // arity, a leaf, or an `Anchor`/`AnchorSize` -- both declare `tuple_size` 0 (CSSCalcTree.h:1317,
     // "FIXME webkit.org/b/280798"), so generic reconstruction would build them empty.
-    WEBCORE_EXPORT bool rebuildFrom(const Child& original, uint32_t childCount);
+    WEBCORE_EXPORT bool rebuildFrom(const Child& original, uint32_t childCount, bool isRoot = false) noexcept;
 
     // Push the weight the next `CalcMix` item pushed as an operand is to carry.
     //
@@ -648,15 +699,15 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     //
     // Addressed by index rather than by position, because pairing by original position is wrong
     // once items can be dropped -- only the caller knows which original item each survivor is.
-    WEBCORE_EXPORT void pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight);
+    WEBCORE_EXPORT void pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight) noexcept;
 
     // Pop `childCount` operands and push a FRESH node of the named `alternative` built from them.
     //
-    // The construction entry that does NOT take an original node, and the one the flat tree uses
-    // for every operator it can build from operands alone. `rebuildFrom` above recovers the
-    // operation from the original node's variant tag through a 41-way `switchOn` plus `WTF::apply`,
-    // and a flat node has no original to recover from and does not need one: it already states its
-    // own alternative.
+    // The construction entry that does NOT take an original node, and the one the flat tree uses for
+    // every operator it can build from operands alone. `rebuildFrom` above recovers the operation
+    // from the original node's variant tag through a 41-way `switchOn` plus `WTF::apply`, and a flat
+    // node has no original to recover from and does not need one: it already states its own
+    // alternative.
     //
     // WHAT THAT DISPATCH COSTS, measured rather than asserted, and CORRECTED: this comment used to
     // read "1396 retired instructions, measured as primitive 7 against primitive 8", which was
@@ -671,7 +722,9 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // for primitive 8, the C++ arm building the same node directly INCLUDING its two leaves.
     // Netting the leaves out (2 x primitive 4, 68) puts the dispatch premium at ROUGHLY 50 TO 90
     // INSTRUCTIONS, about a tenth of the reconstruction. The allocation dominates it, not the
-    // 41-way visit.
+    // 41-way visit. Routing every operator through `rebuildFrom` to retire this entry was BUILT AND
+    // MEASURED (`cssprobe/validate/arms/calc-p3only.patch`) and costs +16.9% on the real payload,
+    // so the premium is not a rounding error at this granularity; see the note there.
     //
     // Naming the alternative here is a deliberate reversal of the rule the reading direction keeps
     // ("no operation kind ever crosses in the construction direction", above). That rule is right
@@ -685,48 +738,43 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // (CSSCalcTree+Simplification.cpp:1012-1038) is `Min`/`Max` through this same entry, so the
     // selector is one enum rather than one enum and one `bool`.
     //
-    // Unlike `rebuildFrom` this computes a FRESH `toType(...)`, because there is no original node
-    // to take one from -- which is also why it can fail for a reason that is not a contract
-    // violation: `toType` returns `std::nullopt` when the children's types do not merge, and the
-    // C++ arm returns `std::nullopt` from the rewrite in exactly that case. So false there means
-    // "the C++ would not have made this node either", and it must decline rather than treat it as
-    // impossible.
+    // `recomputeType` SELECTS BETWEEN THE TWO TYPE RULES, and it is one parameter where it used to be
+    // a second overload plus a `const Type*` threaded through a shared static body. Swift already
+    // holds the answer as `CalcFlatNodeFlags.recomputeType`, so passing it costs nothing and removes
+    // a boundary entry, a wrapper pair and the pointer parameter -- the entry count is what the goop
+    // metric counts, and two entries for one operation was the duplication.
     //
-    // Serves the `Children`-slotted operations (`Sum`, `Product`, `Min`, `Max`) and the two unary
-    // ones (`Negate`, `Invert`); an alternative outside that set, a mismatched arity, or too few
-    // operands is a contract violation and returns false without touching the stack. Widening the
-    // set is a case each, and it is why `Children` never has to reach Swift: this is the only
-    // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount);
-
-    // The same, for a node that STATES its own type instead of having one derived.
+    //  * false -- USE `carriedType`. The C++ arm does not recompute a type when it rebuilds a node
+    //    whose kind did not change: `copyAndSimplify` ends at `makeChild(WTF::move(simplified),
+    //    getType(root))` (`:1821`), the ORIGINAL node's type, and `rebuildFrom` above matches it with
+    //    `getType(alternative)`. Recomputing instead is a measured differential failure, not a
+    //    theoretical gap: `calc((2 / 3px) * 4px)` simplifies to a surviving `Product{6px, 4px}` on
+    //    both arms, which SERIALIZES identically on both, so only the structural oracle sees it --
+    //    the C++ keeps the parse-time type while a fresh `toType` computes px^2. 57 cases in
+    //    simplifycheck's own corpus, all of that one shape.
+    //  * true -- IGNORE `carriedType` and compute a fresh `toType`. For the one caller that has no
+    //    type to carry: the `clamp()` rewrite invents a node of a kind that was not in the input, so
+    //    there is nothing to take a type from. It is also why this can fail for a reason that is not
+    //    a contract violation -- `toType` returns `std::nullopt` when the children's types do not
+    //    merge, and `convertToMin` returns `std::nullopt` in exactly that case (`:1021`), so false
+    //    means "the C++ would not have made this node either" and the caller declines.
     //
-    // The C++ arm does not recompute a type when it rebuilds a node whose kind did not change:
-    // `copyAndSimplify` ends at `makeChild(WTF::move(simplified), getType(root))`
-    // (CSSCalcTree+Simplification.cpp:1821), the ORIGINAL node's type, and `rebuildFrom` above
-    // matches it with `getType(alternative)`. The overload without a type therefore does NOT
-    // reproduce the C++ for a surviving operator, and that is not a theoretical gap -- it is a
-    // measured differential failure. `calc((2 / 3px) * 4px)` simplifies to a surviving
-    // `Product{6px, 4px}` on both arms, which SERIALIZES identically on both, so only the structural
-    // oracle sees it: the C++ keeps the parse-time type while a fresh `toType` computes px^2. 57
-    // cases in simplifycheck's own corpus, all of that one shape.
-    //
-    // So a caller holding the node's real type passes it, and the overload above is for the one
-    // caller that genuinely has none: `clamp(none, VAL, MAX)` rewriting to `min(VAL, MAX)`
-    // (`:1012`-`:1038`) invents a node of a kind that was not in the input, so there is nothing to
-    // take a type from and a fresh `toType` is the right answer -- which is also why that one can
-    // fail for a reason that is not a contract violation.
-    //
-    // Two overloads rather than an optional parameter, because an absent type and a
-    // default-constructed one are different things and `Type()` is a legitimate value (a
-    // dimensionless `<number>`). This also removes a `toType` per emitted operator node.
+    // A flag rather than `std::optional<Type>`, because `Type()` is a legitimate value (a
+    // dimensionless `<number>`) and an optional would put the two states one careless
+    // `value_or` apart.
     //
     // `Type` is 8 bytes of `int8_t` exponents plus a percent hint (CSSCalcType.h, `static_assert
     // (sizeof(Type) == 8)`), so it crosses in a register. It costs this header one include, of a
     // file whose own includes are `<array>`, `<optional>` and `<wtf/Forward.h>` -- so the
     // self-containment the note at the top of this file protects is intact, and the Swift step
     // already imported `CSSCalcType.h` through `CSSCalcTree.h` regardless.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type);
+    //
+    // Serves the `Children`-slotted operations (`Sum`, `Product`, `Min`, `Max`) and the two unary
+    // ones (`Negate`, `Invert`); an alternative outside that set, a mismatched arity, or too few
+    // operands is a contract violation and returns false without touching the stack. Widening the
+    // set is a case each, and it is why `Children` never has to reach Swift: this is the only
+    // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool recomputeType, bool isRoot = false) noexcept;
 
     // Drop every operand.
     //
@@ -739,7 +787,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     //
     // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
     // that this header stays self-contained and does not pull in wtf/Vector.h.
-    WEBCORE_EXPORT void clearOperands();
+    WEBCORE_EXPORT void clearOperands() noexcept;
 
     // `simplify(Symbol&)` (CSSCalcTree+Simplification.cpp:516-524) in full --
     // `makeNumeric(options.symbolTable.get(id)->value, unit)`.
@@ -753,7 +801,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     //
     // The `unit` parameter is what lets the answer carry `alternative`: classifying a unit in
     // Swift would mean transcribing `makeNumeric`'s seventy cases.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveSymbol(uint16_t valueID, uint16_t unit) const;
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveSymbol(uint16_t valueID, uint16_t unit) const noexcept;
 
     // `Style::resolveLength(value, *CSS::toLengthUnit(unit), *conversionData)`, which is
     // `canonicalize`'s `tryMakeCanonical` (CSSCalcTree+Simplification.cpp:181-:187).
@@ -772,7 +820,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // The answer is `nullopt` -- `resolved == false` -- exactly when the C++ returns `nullopt`,
     // which for these units means "no conversion data", and the dimension is left alone.
     // `alternative` is still reported for the reason `CSSCalcSwiftNumericResult::alternative` gives.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const;
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const noexcept;
 
     // `isLength(toNumericIdentity(...))` (CSSCalcTree+NumericIdentity.h:215), which
     // `simplify(Sum&)` reads at CSSCalcTree+Simplification.cpp:611 to decide whether a zero-valued
@@ -790,7 +838,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // alone, so this is reached only for a `NonCanonicalDimension` term whose value is exactly
     // zero with `allowZeroValueLengthRemovalFromSum` set. `calc(0em + 1px)` reaches it; nothing
     // else does.
-    WEBCORE_EXPORT bool isLengthUnit(uint16_t unitType) const;
+    WEBCORE_EXPORT bool isLengthUnit(uint16_t unitType) const noexcept;
 
     // The fourth upcall, and the only place `Style::BuilderState` reaches this boundary.
     //
@@ -882,7 +930,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // `sret`, for more new C++ than the four-line branch below -- the two dispositions are
     // indistinguishable to Swift either way, since a `Calc` fixed value comes back
     // `resolved == false` and the node is copied through, matching `std::nullopt` from the C++ arm.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const Child&) const;
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const Child&) const noexcept;
 
 private:
     CSSCalcSwiftOperandStack* m_operands;
