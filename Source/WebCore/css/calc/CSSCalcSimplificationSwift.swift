@@ -1313,7 +1313,11 @@ private extension CalcSimplification {
     /// the merge is keyed by unit identity in a compile-time fixed-size table, not by a per-term heap
     /// array. `MergeTable` holds `index + 1`, so 0 means no term of that unit has been seen -- the
     /// C++'s own encoding, which is what lets the whole table be zero-initialised.
-    typealias MergeTable = InlineArray<128, Int32>
+    ///
+    /// `UInt32` rather than `Int32`, which is what a node index is: the store side then spells the
+    /// narrowing `UInt32(truncatingIfNeeded:)` instead of the trapping `Int32(_:)`, and the read side
+    /// widens for free. See the store sites for the range argument.
+    typealias MergeTable = InlineArray<128, UInt32>
     /// `FirstInstance::canRemove` (`:603`), one bit per unit identity. A separate table rather than a
     /// field beside the offset so the common (`Min`/`Max`) case pays for the offsets alone.
     typealias MergeFlags = InlineArray<128, Bool>
@@ -2196,12 +2200,14 @@ fileprivate func calcEmitCalcMix(
         var survey = CalcMixWeightSurvey()
         var index: UInt32 = 0
         while index < itemCount {
+            // `&+=` throughout: every counter here is bounded by `itemCount`, which is
+            // `node.childCount()` of a `calc-mix()` already in memory, clamped into `UInt32`.
             let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
             if !weight.present {
-                survey.numberOfOmittedWeights += 1
+                survey.numberOfOmittedWeights &+= 1
             } else if weight.isRaw {
                 if weight.value == 0 {
-                    survey.numberOfKnownZeroWeights += 1
+                    survey.numberOfKnownZeroWeights &+= 1
                 }
                 survey.total += weight.value
             } else {
@@ -2220,7 +2226,8 @@ fileprivate func calcEmitCalcMix(
             let plan = calcMixItemPlan(WebCore.CSSCalc.swiftCalcMixItemWeight(node, index), survey)
             if plan.survives {
                 builder.pushCalcMixItemWeight(index, plan.weight, plan.replaceWeight)
-                pushed += 1
+                // `&+=`: at most one push per item, so `pushed <= itemCount`.
+                pushed &+= 1
             }
             index += 1
         }
@@ -2519,7 +2526,26 @@ fileprivate func calcFlattenSubtree(
     _ out: inout OutputSpan<CalcFlatNode>,
     _ report: inout CalcFlattenReport
 ) -> UInt32 {
-    guard report.writing else {
+    // `out.count < out.capacity` IS RE-ESTABLISHED HERE, and it is not redundant with the identical
+    // guard `calcFlattenNodeWithInfo` makes before every call that reaches the append below. This
+    // function is `@inline(never)` -- deliberately, so the operation path's fourteen callee-saved
+    // registers stay off the leaf path -- and a fact established in a caller does not cross that
+    // boundary. There is no safe spelling that publishes it across, so the append at the end of this
+    // function carried `OutputSpan.append`'s own `_precondition(_count < capacity)`
+    // (`OutputSpan.swift:300`) as a trap. Spelled `count < capacity`, the form the precondition is
+    // written in, for the reason the caller's guard gives: `freeCapacity == 0` establishes only that
+    // the two DIFFER.
+    //
+    // The else arm is neither unreachable nor a new behaviour. The only way into this function with
+    // the buffer already full is the caller's own overflow branch, which has already called
+    // `sawOverflow()` and so already cleared `writing` -- which is why the arm re-tests before
+    // calling it rather than calling it unconditionally: reaching here with capacity to spare and
+    // `writing` false is the ordinary unsimplifiable-node degradation, and must not be recorded as
+    // an overflow, because `overflowed` is what selects the exact-size retry.
+    guard report.writing, out.count < out.capacity else {
+        if out.count >= out.capacity {
+            report.sawOverflow()
+        }
         // Walk only. No `getType`, no `operationInfo`, no stores: nothing downstream will read a
         // tree this pass has already given up on, and the remaining crossings exist solely so that
         // `nodeCount` and `kindMask` describe the full tree rather than a truncated prefix.
@@ -2621,7 +2647,12 @@ fileprivate extension CalcFlatTree {
         var remaining = k
         while cursor != CalcFlatNode.noNode {
             if remaining == 0 { return Int(cursor) }
-            remaining -= 1
+            // `&-`: `remaining` is only decremented on the branch where it is not 0, and it starts
+            // at `k`, which is non-negative at every one of this file's 43 call sites -- the literals
+            // 0, 1 and 2, plus one `Int(sideSlots)` whose source is a `UInt32` that is 0 or 1. The
+            // function is `fileprivate`, so that is the whole call set and no other can be added
+            // from outside. So `remaining >= 1` here and the subtraction cannot underflow.
+            remaining &-= 1
             cursor = nodes[Int(cursor)].nextSibling
         }
         return nil
@@ -2711,6 +2742,19 @@ fileprivate func withCalcFlatTree<R>(
 // the buffer does not have. A per-simplification heap buffer was measured at 617 retired
 // instructions, which is more than the whole pass, so "just one small array" was never available as
 // an implementation choice.
+//
+// EVERY COUNTER BELOW IS WRAPPING (`&+=`, `&-`), and the equivalence argument is the one
+// `calcFlattenNodeWithInfo` already makes for `report.nodeCount &+= 1`: these count the nodes or the
+// children of a tree THAT IS ALREADY IN MEMORY. Concretely, every one of them is bounded by the
+// length of one node's sibling list, which is a sublist of `nodes` -- itself a `MutableSpan` over a
+// buffer of at most `UInt32.max` slots, since `withCalcFlatTree` sizes it from a `UInt32` node count
+// -- so no counter can reach `UInt32.max`, let alone `Int.max`. The differences (`size - merges`,
+// `size - removeTotal`) subtract two values both in `0 ... UInt32.max`, so they land in
+// `-(2^32-1) ... 2^32-1`, inside `Int` by 31 bits at each end. The check is therefore not merely
+// unlikely to fire, it is unreachable, and it was 21 trap conditions on the hot path (R167 Q1).
+//
+// The bound is stated again at each site, because `&+=` is not a free rewrite: it turns a detected
+// overflow into a silent wrap, so a site whose bound cannot be named must keep the trap.
 
 /// `if ((firstInstance.offset - 1) == i && !firstInstance.canRemove)` (`+Simplification.cpp:700`),
 /// plus its non-`Numeric` arm (`:707`) -- the C++'s own survivor test, asked of a flat child.
@@ -3460,7 +3504,10 @@ fileprivate extension CalcFlatTree {
             guard nodes[c].alternative == kind else {
                 previous = cursor
                 cursor = nodes[c].nextSibling
-                terms += 1
+                // `&+=` at all three `terms` sites: `terms` is the length of the rebuilt sibling
+                // list, every element of which is a distinct slot of `nodes`, so it is bounded by
+                // `nodes.count`.
+                terms &+= 1
                 continue
             }
 
@@ -3481,10 +3528,10 @@ fileprivate extension CalcFlatTree {
             }
 
             var tail = head
-            terms += 1
+            terms &+= 1
             while nodes[Int(tail)].nextSibling != CalcFlatNode.noNode {
                 tail = nodes[Int(tail)].nextSibling
-                terms += 1
+                terms &+= 1
             }
             // Relink the nested node's whole list in place of the node itself. The nested node is
             // discarded and nothing else can reference its children, so redirecting the tail's
@@ -3568,7 +3615,8 @@ fileprivate extension CalcFlatTree {
                 let first = Int(offsets[key]) - 1
                 let merged = CalcExecutor.sum(nodes[first].value, nodes[c].value)
                 nodes[first].value = merged
-                merges += 1
+                // `&+=`: at most one merge per child of the sibling list, so `merges <= nodes.count`.
+                merges &+= 1
 
                 // `firstInstance.canRemove = canRemoveIfZero && !mergedValue;` (`:625`) -- an
                 // ASSIGNMENT, so a bucket made removable by an earlier merge is cleared when a later
@@ -3593,7 +3641,10 @@ fileprivate extension CalcFlatTree {
                     removable = false
                 }
                 if removable != canRemove[key] {
-                    removableBuckets += removable ? 1 : -1
+                    // `&+=`: guarded on `removable != canRemove[key]` and paired with the assignment
+                    // below, so this counter is exactly "how many of the 128 buckets have
+                    // `canRemove` set" and never leaves `0 ... 128`.
+                    removableBuckets &+= removable ? 1 : -1
                     canRemove[key] = removable
                 }
                 continue
@@ -3602,7 +3653,11 @@ fileprivate extension CalcFlatTree {
             // `firstInstances[id] = { .offset = i + 1, .merges = 0, .canRemove = canRemoveIfZero &&
             // !child.value };` (`:630`-`:634`). `c + 1` is a node index, not a term position: see
             // `calcFlatSumSurvives`.
-            offsets[key] = Int32(c + 1)
+            // `UInt32(truncatingIfNeeded: c &+ 1)` rather than the trapping `Int32(c + 1)`: `c` is a
+            // node index that has already indexed `nodes`, whose length `withCalcFlatTree` sized from
+            // a `UInt32` node count, so `c <= UInt32.max - 1` and `c &+ 1` fits `UInt32` exactly.
+            // Same argument `calcFlattenSubtree` gives for `UInt32(truncatingIfNeeded: out.count)`.
+            offsets[key] = UInt32(truncatingIfNeeded: c &+ 1)
             let removable: Bool
             if nodes[c].value == 0, let builder {
                 removable = options.lengthRemovalAllowed(leaf, builder)
@@ -3610,14 +3665,15 @@ fileprivate extension CalcFlatTree {
                 removable = false
             }
             if removable != canRemove[key] {
-                removableBuckets += removable ? 1 : -1
+                removableBuckets &+= removable ? 1 : -1
                 canRemove[key] = removable
             }
         }
 
         let size = Int(nodes[i].childCount)
         // `childrenToRemoveTotal` (`:644`-`:650`).
-        let removeTotal = merges + removableBuckets
+        // `&+`: `merges` is in `0 ... nodes.count` and `removableBuckets` in `0 ... 128`.
+        let removeTotal = merges &+ removableBuckets
 
         // `if (!childrenToRemoveTotal) return { };` (`:653`). The node keeps its kind, its cached
         // `Type` and whatever list 8.1 left it with.
@@ -3631,12 +3687,15 @@ fileprivate extension CalcFlatTree {
         // one at `:664`. Child 0 is always the sole merge-survivor -- it has no earlier term to merge
         // into -- which is why the C++ names it unconditionally and this needs no search, and its
         // value is the accumulated one, written back above.
-        if size - merges == 1, let only = child(i, 0) {
+        // `&-` twice: `size` is a `UInt32` `childCount` widened to `Int`, and `merges` and
+        // `removeTotal` are both in `0 ... nodes.count + 128`, so either difference lies inside
+        // `-(2^32-1) ... 2^32-1`.
+        if size &- merges == 1, let only = child(i, 0) {
             replace(i, with: only)
             return
         }
 
-        let combined = size - removeTotal
+        let combined = size &- removeTotal
 
         // 8.4's over-removal guard (`:660`-`:664`): "If the new size is 0, we removed too much. Return
         // a single 0 value of type `length` ... because the only kind of node that can be removed is
@@ -3667,6 +3726,8 @@ fileprivate extension CalcFlatTree {
         // `getType(root)` at `:1821` for a node whose `simplify` returned `nullopt`, and `:712` is
         // that path.
         var previous = CalcFlatNode.noNode
+        // `kept` counts survivors of one sibling list, each a distinct slot of `nodes`, so it is
+        // bounded by `nodes.count` and its `&+=` below cannot wrap.
         var kept: UInt32 = 0
         cursor = nodes[i].firstChild
         while cursor != CalcFlatNode.noNode {
@@ -3679,7 +3740,7 @@ fileprivate extension CalcFlatTree {
                     nodes[Int(previous)].nextSibling = cursor
                 }
                 previous = cursor
-                kept += 1
+                kept &+= 1
             }
             cursor = next
         }
@@ -3761,13 +3822,15 @@ fileprivate extension CalcFlatTree {
                 nodes[first].value = isMax
                     ? CalcExecutor.max(nodes[first].value, nodes[c].value)
                     : CalcExecutor.min(nodes[first].value, nodes[c].value)
-                merges += 1
+                // `&+=`: at most one merge per child of the sibling list, so `merges <= nodes.count`.
+                merges &+= 1
                 continue
             }
 
             // `offsetOfFirstInstance[static_cast<uint8_t>(id)] = i + 1;` (`:438`). `c + 1` is a node
             // index, not a term position: see `calcFlatSumSurvives`.
-            offsets[key] = Int32(c + 1)
+            // `truncatingIfNeeded` on the same range argument `simplifySum`'s store gives.
+            offsets[key] = UInt32(truncatingIfNeeded: c &+ 1)
         }
 
         // `if (!numberOfMergeOpportunities) return { };` (`:450`-`:451`). The node keeps its kind, its
@@ -3782,7 +3845,9 @@ fileprivate extension CalcFlatTree {
         // survives, and any merge implies a first instance that survives -- two survivors would
         // contradict `size - merges == 1`. Its value is the accumulated one, written back above.
         let size = Int(nodes[i].childCount)
-        if size - merges == 1, let only = child(i, 0) {
+        // `&-`: `size` is a `UInt32` `childCount` widened to `Int` and `merges <= nodes.count`, so
+        // the difference lies inside `-(2^32-1) ... 2^32-1`.
+        if size &- merges == 1, let only = child(i, 0) {
             replace(i, with: only)
             return
         }
@@ -3791,6 +3856,8 @@ fileprivate extension CalcFlatTree {
         // order. The node keeps its kind AND its original cached `Type` -- the C++ returns `{ }` at
         // `:482` even here, so `copyAndSimplify` takes the `getType(root)` branch at `:1821`.
         var previous = CalcFlatNode.noNode
+        // `kept` counts survivors of one sibling list, each a distinct slot of `nodes`, so it is
+        // bounded by `nodes.count` and its `&+=` below cannot wrap.
         var kept: UInt32 = 0
         cursor = nodes[i].firstChild
         while cursor != CalcFlatNode.noNode {
@@ -3803,7 +3870,7 @@ fileprivate extension CalcFlatTree {
                     nodes[Int(previous)].nextSibling = cursor
                 }
                 previous = cursor
-                kept += 1
+                kept &+= 1
             }
             cursor = next
         }
@@ -4338,12 +4405,14 @@ fileprivate extension CalcFlatTree {
             var survey = CalcMixWeightSurvey()
             var index: UInt32 = 0
             while index < itemCount {
+                // `&+=`: both counters are bounded by `itemCount`, the `childCount()` of a
+                // `calc-mix()` already in memory.
                 let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
                 if !weight.present {
-                    survey.numberOfOmittedWeights += 1
+                    survey.numberOfOmittedWeights &+= 1
                 } else if weight.isRaw {
                     if weight.value == 0 {
-                        survey.numberOfKnownZeroWeights += 1
+                        survey.numberOfKnownZeroWeights &+= 1
                     }
                     survey.total += weight.value
                 } else {
@@ -4383,6 +4452,8 @@ fileprivate extension CalcFlatTree {
         _ original: borrowing WebCore.CSSCalc.Child
     ) -> Bool {
         var previous = CalcFlatNode.noNode
+        // `kept` counts survivors of one sibling list, each a distinct slot of `nodes`, so it is
+        // bounded by `nodes.count` and its `&+=` below cannot wrap.
         var kept: UInt32 = 0
         var cursor = nodes[i].firstChild
         var index: UInt32 = 0
@@ -4400,7 +4471,7 @@ fileprivate extension CalcFlatTree {
                     nodes[Int(previous)].nextSibling = cursor
                 }
                 previous = cursor
-                kept += 1
+                kept &+= 1
             }
             cursor = next
         }
@@ -4602,7 +4673,10 @@ fileprivate extension CalcFlatTree {
                 }
             } else {
                 previous = cursor
-                survivors += 1
+                // `&+=` at both `survivors` sites: survivors are distinct slots of one sibling list,
+                // so the count is bounded by `nodes.count`. The second site adds the one folded
+                // `<number>` slot back, which is a slot this same list just released.
+                survivors &+= 1
             }
             cursor = next
         }
@@ -4643,7 +4717,7 @@ fileprivate extension CalcFlatTree {
                 } else {
                     nodes[Int(previous)].nextSibling = UInt32(mergedNumberSlot)
                 }
-                survivors += 1
+                survivors &+= 1
                 nodes[i].childCount = survivors
             }
         }
@@ -4932,7 +5006,8 @@ fileprivate extension CalcFlatTree {
         }
         while cursor != CalcFlatNode.noNode {
             guard emit(Int(cursor), original, into: &builder) else { return false }
-            pushed += 1
+            // `&+=`: one push per child of this node's sibling list, so `pushed <= nodes.count`.
+            pushed &+= 1
             cursor = nodes[Int(cursor)].nextSibling
         }
 
