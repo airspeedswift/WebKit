@@ -1890,11 +1890,11 @@ struct CalcMixWeightPlan {
 using OperandVector = Vector<Child, 16>;
 
 struct CSSCalcSwiftOperandStack {
-    OperandVector value;
+    OperandVector value { };
     // The weights the next CalcMix reconstruction pairs with its items, in item order. A separate
     // stack because a weight is not a subtree; kept as a stack rather than per-node so a nested
     // CalcMix follows the same consume-the-top discipline as every other slot shape.
-    Vector<CalcMixWeightPlan> calcMixWeights;
+    Vector<CalcMixWeightPlan> calcMixWeights { };
     // Where the finished ROOT is constructed, instead of on the stack: `Tree::root` inside the
     // caller's own return object. `swiftSimplifiedRoot` below is what makes that address reachable;
     // `CSSCalcSwiftBuilder::pushLeaf`'s `isRoot` comment is why it exists.
@@ -1902,10 +1902,14 @@ struct CSSCalcSwiftOperandStack {
     // Null for the `ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)` primitive benchmarks, which drive the
     // builder directly and have no tree to put a root in; the root then goes on the stack like
     // anything else and their `value.size() == 1` assertions are unchanged.
+    //
+    // ALSO THE COMPLETION FLAG. `constructOperand` nulls it as it consumes it, so "a construction
+    // has taken the root slot" needs no second field: `trySimplifyWithSwiftIsland` reads a
+    // still-non-null slot as "the walk finished leaving the caller's placeholder in place". The
+    // safety property is the one a separate `bool` gave, not a weaker one -- a second root
+    // construction finds a null slot, appends to the operand stack instead of overwriting a live
+    // `Child`, and the non-empty-stack half of that same check declines the tree.
     Child* rootSlot { nullptr };
-    // Whether a construction has consumed `rootSlot`. The completion contract, checked in
-    // `trySimplifyWithSwiftIsland`: exactly this, and an empty operand stack.
-    bool rootConstructed { false };
 };
 
 // Where a finished node goes.
@@ -1925,13 +1929,11 @@ struct CSSCalcSwiftOperandStack {
 template<typename... Args>
 static ALWAYS_INLINE void constructOperand(CSSCalcSwiftOperandStack& operands, bool isRoot, Args&&... args)
 {
-    if (isRoot && operands.rootSlot) {
-        static_assert(std::is_trivially_destructible_v<Number>, "the root placeholder's storage is reused without a destructor call, which [basic.life]/5 allows only because nothing depends on the destructor");
-        new (NotNull, operands.rootSlot) Child(std::forward<Args>(args)...);
-        operands.rootConstructed = true;
-        return;
-    }
-    operands.value.constructAndAppend(std::forward<Args>(args)...);
+    static_assert(std::is_trivially_destructible_v<Number>, "the root placeholder's storage is reused without a destructor call, which [basic.life]/5 allows only because nothing depends on the destructor");
+    if (Child* slot = isRoot ? std::exchange(operands.rootSlot, nullptr) : nullptr)
+        new (NotNull, slot) Child(std::forward<Args>(args)...);
+    else
+        operands.value.constructAndAppend(std::forward<Args>(args)...);
 }
 
 // The operands `rebuildFrom` fills a node's slots from: a forward cursor over the top of the stack.
@@ -2950,10 +2952,10 @@ static bool trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOpt
     // Swift's other contract: a completed walk constructs the root in the root slot and leaves
     // nothing behind on the operand stack. Checked rather than asserted, so that a boundary that
     // came apart is a fallback to the C++ arm and not a crash or -- much worse -- a tree built from
-    // whatever else was on the stack. A declined tree cannot reach here, so `rootConstructed` false
-    // means the walk finished while leaving the caller's placeholder in place, which would return
-    // `calc(0)` for every input.
-    if (!operands.rootConstructed || !operands.value.isEmpty()) {
+    // whatever else was on the stack. A declined tree cannot reach here, so a still-non-null
+    // `rootSlot` means the walk finished while leaving the caller's placeholder in place, which
+    // would return `calc(0)` for every input.
+    if (operands.rootSlot || !operands.value.isEmpty()) {
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
         s_simplificationDeclines.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -2975,8 +2977,8 @@ static bool trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOpt
 // provided, and the last construction the walk makes writes the root where it has to end up.
 //
 // The placeholder is here because `Tree` has no default constructor and so cannot hand out an
-// uninitialised root slot; `constructOperand` says why its destructor is not run. Its cost is two
-// stores, against the ~52 retired instructions the move it replaces cost -- an out-of-line 41-way
+// uninitialised root slot; `constructOperand` says why its destructor is not run. Its cost is one
+// store, against the ~52 retired instructions the move it replaces cost -- an out-of-line 41-way
 // `mpark` visit to move the root off the operand stack and another to destroy the moved-from slot.
 //
 // On a DECLINE the placeholder (or, for the forced-decline benchmark hook, a perfectly good root
@@ -2986,8 +2988,7 @@ static Child swiftSimplifiedRoot(const Tree& tree, const SimplificationOptions& 
 {
     Child root = Number { .value = 0 };
 
-    CSSCalcSwiftOperandStack operands;
-    operands.rootSlot = &root;
+    CSSCalcSwiftOperandStack operands { .rootSlot = &root };
     simplified = trySimplifyWithSwiftIsland(tree, options, operands);
     return root;
 }
