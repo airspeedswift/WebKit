@@ -721,6 +721,12 @@ private enum CalcExecutor {
 /// `calcFlatten` is the traversal that asks it: there is no separate coverage walk, because a second
 /// pass over the same nodes meant a second `swiftNodeInfo` crossing for an answer the first one
 /// already had.
+/// `@inline(always)` because it has two call sites since `calcFlattenNode` was split out, and the
+/// optimizer's answer to two was to OUTLINE it: the leaf fast path grew a `bl` and, worse, kept all
+/// seven `stp`/`ldp` pairs in `calcFlatten`'s frame because every field of `info` then had to
+/// survive a call. Inlined it is a range test and a jump table, and the leaf path makes no call at
+/// all after `swiftNodeInfo`.
+@inline(always)
 private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCount: UInt32) -> Bool {
     switch alternative {
     case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
@@ -2227,6 +2233,29 @@ fileprivate func calcFlatten(
     _ out: inout OutputSpan<CalcFlatNode>,
     _ report: inout CalcFlattenReport
 ) -> UInt32 {
+    return calcFlattenNode(node, inheritedFlags, &out, &report)
+}
+
+/// The per-node body, and the reason it is separated from `calcFlattenSubtree`.
+///
+/// A leaf child used to pay `calcFlatten`'s WHOLE frame -- seven `stp`/`ldp` pairs, fourteen
+/// callee-saved registers -- and that frame exists for the operation path: `getType`,
+/// `swiftOperationInfo`, the child loop and `Child::operator[]` are what force it, and a leaf
+/// reaches none of them. The C++ arm's `copyAndSimplifyChildren` reaches each child through
+/// `WTF::apply` over the tuple slots and, for a leaf, does a `switchOn` and a 16-byte copy.
+///
+/// So the seven leaf alternatives finish HERE, with no call of any kind, and this is
+/// `@inline(always)` into its two call sites: the out-of-line entry above and
+/// `calcFlattenSubtree`'s child loop. The recursion therefore runs through `calcFlattenSubtree`
+/// alone -- a leaf child costs neither a call nor a frame -- and there is still only one copy of
+/// the leaf body in the source.
+@inline(always)
+fileprivate func calcFlattenNode(
+    _ node: borrowing WebCore.CSSCalc.Child,
+    _ inheritedFlags: UInt8,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ report: inout CalcFlattenReport
+) -> UInt32 {
     // One crossing per node: `info()` answers the discriminant, the child count and every POD
     // payload together, because they all come off the same variant tag.
     let info = WebCore.CSSCalc.swiftNodeInfo(node)
@@ -2250,13 +2279,64 @@ fileprivate func calcFlatten(
         report.overflowed = true
     }
 
+    // THE LEAF FAST PATH. The same seven alternatives `carriesType` names below, and the node it
+    // writes is the same one `calcFlattenSubtree` would write for them, by case analysis rather
+    // than by assumption:
+    //
+    //  * `type` -- `carriesType` is false for exactly these seven, so `getType` is not called and
+    //    the slot is a default `CalcType()`.
+    //  * `flags` -- `info.kind` for a leaf is one of the numeric or symbol kinds, never
+    //    `ClampWithNoneMinimum`/`Maximum`, and `.Anchor` is not in this set, so the two arms that
+    //    can add a bit are both unreachable and `flags` reduces to the inherited
+    //    `insideAnchorSide`.
+    //  * `firstChild` -- guarded on `childCount == 0`, which is what makes the child loop empty;
+    //    a leaf alternative reporting children (which the parser cannot build) falls through to
+    //    `calcFlattenSubtree` and is handled by the general path rather than mishandled here.
+    switch info.alternative {
+    case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension,
+         .Symbol, .SiblingCount, .SiblingIndex:
+        if info.childCount == 0, report.writing {
+            let me = UInt32(truncatingIfNeeded: out.count)
+            out.append(CalcFlatNode(
+                value: info.numericValue,
+                type: CalcType(),
+                firstChild: CalcFlatNode.noNode,
+                nextSibling: CalcFlatNode.noNode,
+                childCount: 0,
+                origin: me,
+                valueID: info.valueID,
+                unitType: info.unitType,
+                alternative: info.alternative,
+                percentHint: info.percentHint,
+                flags: inheritedFlags & CalcFlatNodeFlags.insideAnchorSide))
+            return me
+        }
+    default:
+        break
+    }
+
+    return calcFlattenSubtree(node, info, inheritedFlags, &out, &report)
+}
+
+/// Everything a node with children needs, and the only recursive function in the pass.
+///
+/// `@inline(never)`: inlining it into the entry wrapper would put the operation path's fourteen
+/// callee-saved registers back on the leaf path, which is the whole cost this split removes.
+@inline(never)
+fileprivate func calcFlattenSubtree(
+    _ node: borrowing WebCore.CSSCalc.Child,
+    _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+    _ inheritedFlags: UInt8,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ report: inout CalcFlattenReport
+) -> UInt32 {
     guard report.writing else {
         // Walk only. No `getType`, no `operationInfo`, no stores: nothing downstream will read a
         // tree this pass has already given up on, and the remaining crossings exist solely so that
         // `nodeCount` and `kindMask` describe the full tree rather than a truncated prefix.
         var index: UInt32 = 0
         while index < info.childCount {
-            _ = calcFlatten(node[Int(index)], inheritedFlags, &out, &report)
+            _ = calcFlattenNode(node[Int(index)], inheritedFlags, &out, &report)
             index += 1
         }
         return CalcFlatNode.noNode
@@ -2328,7 +2408,7 @@ fileprivate func calcFlatten(
         // marked, so the simplification pass skips the whole subtree on one bit test per node
         // rather than having to know where the boundary is.
         let sideRoot = (flags & CalcFlatNodeFlags.anchorSideIsSubtree) != 0 && index == 0
-        let child = calcFlatten(node[Int(index)], sideRoot ? flags | CalcFlatNodeFlags.insideAnchorSide : flags, &out, &report)
+        let child = calcFlattenNode(node[Int(index)], sideRoot ? flags | CalcFlatNodeFlags.insideAnchorSide : flags, &out, &report)
         // `report.writing` is re-read rather than remembered: a descendant can be the node that
         // fills the buffer or the node that is not simplifiable, and after either one `child` is
         // `noNode` and `previous` may name a slot that no longer means what it did.
