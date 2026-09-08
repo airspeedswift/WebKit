@@ -186,18 +186,28 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
 // tree declares no enum at all.
 //
 // So the numbering is the variant's own alternative index, read with `Node::index()` -- no switch,
-// no table, nothing per-operation on either side of the boundary. Kept from drifting: the
-// enumerator list and the pinning list are the same macro expansion
-// (`CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`); `numberOfCSSCalcSwiftAlternatives` counts that list
-// rather than the last enumerator and is held equal to `std::variant_size_v<Node>`; and each
-// pairing is pinned with `WTF::alternativeIndexV<T, Node>`, which rejects a duplicated alternative
-// type.
+// no table, nothing per-operation on either side of the boundary.
+//
+// This list is the ONLY copy. `CSSCalc::Node`'s `Variant<...>` is generated from it in
+// `CSSCalcTree.h`, so the enumerator order and the alternative order cannot diverge: divergence is
+// not expressible rather than merely asserted against. `numberOfCSSCalcSwiftAlternatives` counts
+// the list rather than reading the last enumerator, and is held equal to `WTF::VariantSizeV<Node>`;
+// each pairing is still pinned with `WTF::alternativeIndexV<T, Node>` in
+// `CSSCalcTree+Serialization.cpp`, kept deliberately now that it is redundant, because
+// `init?(rawValue:)` on an imported C++ enum never fails -- a wrong raw value would reach Swift as
+// a valid case rather than as nil, so the only place it can be caught is at compile time.
 //
 // The second macro argument is the alternative's C++ type, inert in this header -- a macro body is
-// not parsed until expanded -- which lets this self-contained header still name
-// `IndirectNode<Sum>` for the translation unit that can.
-#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(macro) \
-    macro(Number, Number) \
+// not parsed until expanded -- which is what lets this self-contained boundary header own a list
+// naming `IndirectNode<Sum>` for the translation unit that can see it.
+//
+// Split into FIRST and REST because a `Variant<...>` template argument list cannot carry a trailing
+// comma: `CSSCalcTree.h` emits the first alternative bare and each of the rest comma-prefixed.
+// Every other consumer expands the whole list and does not care.
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_FIRST(macro) \
+    macro(Number, Number)
+
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_REST(macro) \
     macro(Percentage, Percentage) \
     macro(CanonicalDimension, CanonicalDimension) \
     macro(NonCanonicalDimension, NonCanonicalDimension) \
@@ -238,6 +248,10 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
     macro(CalcMix, IndirectNode<CalcMix>) \
     macro(Anchor, IndirectNode<Anchor>) \
     macro(AnchorSize, IndirectNode<AnchorSize>)
+
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(macro) \
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_FIRST(macro) \
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_REST(macro)
 
 enum class CSSCalcSwiftAlternative : uint8_t {
 #define CSS_CALC_SWIFT_DECLARE_ALTERNATIVE(name, type) name,

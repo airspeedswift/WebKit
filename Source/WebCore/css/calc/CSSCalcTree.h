@@ -26,6 +26,7 @@
 #pragma once
 
 #include <WebCore/CSSCalcRandomSharing.h>
+#include <WebCore/CSSCalcSwiftTypes.h>
 #include <WebCore/CSSCalcType.h>
 #include <WebCore/CSSCustomIdent.h>
 #include <WebCore/CSSPrimitiveNumeric.h>
@@ -194,49 +195,23 @@ template<typename Op> struct IndirectNode {
     bool operator==(const IndirectNode<Op>& other) const { return type == other.type && arePointingToEqualData(op, other.op); }
 };
 
+// The 41 alternatives, expanded from the one list that declares them
+// (`CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE` in CSSCalcSwiftTypes.h, whose second macro argument is the
+// type named here). Generated rather than written out because the same 41 names are also the
+// enumerators of `CSSCalcSwiftAlternative`, whose numbering *is* this variant's alternative index:
+// two hand-kept copies of one ordered list is the duplicated table the pinning `static_assert`s in
+// CSSCalcTree+Serialization.cpp existed to police, and generating one from the other makes the
+// divergence inexpressible instead. Those asserts are kept anyway -- see the note at the list.
+//
+// FIRST/REST rather than one expansion: a template argument list cannot carry a trailing comma.
+#define CSS_CALC_NODE_ALTERNATIVE_FIRST(name, type) type
+#define CSS_CALC_NODE_ALTERNATIVE_REST(name, type) , type
 using Node = Variant<
-    Number,
-    Percentage,
-    CanonicalDimension,
-    NonCanonicalDimension,
-    Symbol,
-    SiblingCount,
-    SiblingIndex,
-    IndirectNode<Sum>,
-    IndirectNode<Product>,
-    IndirectNode<Negate>,
-    IndirectNode<Invert>,
-    IndirectNode<Deg2Rad>,
-    IndirectNode<Min>,
-    IndirectNode<Max>,
-    IndirectNode<Clamp>,
-    IndirectNode<RoundNearest>,
-    IndirectNode<RoundUp>,
-    IndirectNode<RoundDown>,
-    IndirectNode<RoundToZero>,
-    IndirectNode<Mod>,
-    IndirectNode<Rem>,
-    IndirectNode<Sin>,
-    IndirectNode<Cos>,
-    IndirectNode<Tan>,
-    IndirectNode<Asin>,
-    IndirectNode<Acos>,
-    IndirectNode<Atan>,
-    IndirectNode<Atan2>,
-    IndirectNode<Pow>,
-    IndirectNode<Sqrt>,
-    IndirectNode<Hypot>,
-    IndirectNode<Log>,
-    IndirectNode<Exp>,
-    IndirectNode<Abs>,
-    IndirectNode<Sign>,
-    IndirectNode<Random>,
-    IndirectNode<Progress>,
-    IndirectNode<ProgressNoClamp>,
-    IndirectNode<CalcMix>,
-    IndirectNode<Anchor>,
-    IndirectNode<AnchorSize>
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_FIRST(CSS_CALC_NODE_ALTERNATIVE_FIRST)
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_REST(CSS_CALC_NODE_ALTERNATIVE_REST)
 >;
+#undef CSS_CALC_NODE_ALTERNATIVE_REST
+#undef CSS_CALC_NODE_ALTERNATIVE_FIRST
 
 // Size and alignment of `Node`, so that the Swift-facing stand-in for `Child::value` below can be
 // declared without naming `Node` at all. Asserted against the real type in the branch that can see

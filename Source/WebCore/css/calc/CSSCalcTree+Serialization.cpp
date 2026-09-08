@@ -848,6 +848,14 @@ template<typename Op> static constexpr bool hasChildOrNoneArgument = []<size_t..
 // Pins `CSSCalcSwiftAlternative` to `Node`'s alternative order. This lives here because this is
 // the nearest translation unit that can see both the enum and the variant.
 //
+// REDUNDANT BY CONSTRUCTION SINCE `Node` IS GENERATED FROM THE ENUM'S OWN LIST, AND KEPT ANYWAY.
+// Both now expand from `CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`, so a divergence is not expressible in
+// the source; what is still expressible is a *change to the generation*, and this is the only place
+// where such a change fails loudly. `init?(rawValue:)` on an imported C++ enum never fails
+// (interop notes 92), so a renumbered alternative would reach Swift as a valid case rather than as
+// nil, be switched on, and produce a wrong node -- there is no runtime check that could catch it,
+// which is why the compile-time one stays even at zero information under today's spelling.
+//
 // One assert per alternative, expanded from the same list that declares the enumerators, so an
 // enumerator that gained no assert is not expressible. `WTF::alternativeIndexV` (StdLibExtras.h:620)
 // carries its own `static_assert(count == 1)`, so a type that appears twice in `Node` is rejected
