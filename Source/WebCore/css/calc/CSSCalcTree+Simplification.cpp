@@ -1690,19 +1690,50 @@ std::optional<Child> simplify(CalcMix& root, const SimplificationOptions& option
     );
 }
 
+// What an `anchor()` evaluates to, or nothing.
+//
+// Extracted because it has TWO callers that need the same answer in two different shapes:
+// `simplify(Anchor&)` below turns it into a `Child`, and the Swift island's
+// `resolveStyleCoupledValue` needs it as a `double` on a POD, because the island keeps folding the
+// enclosing expression -- `calc(anchor(top) + 1em)` has to become one length, which it can only do
+// if the value comes back to it. The island used to restate this, and a restatement of an
+// evaluation is exactly the sort of second definition that drifts.
+//
+// `.range` is `CSS::All`, not `options.range`: an anchor is evaluated unclamped even inside a
+// property with a range.
+static std::optional<double> evaluateAnchorFunction(const Anchor& anchor, const SimplificationOptions& options)
+{
+    return evaluateWithoutFallback(anchor, EvaluationOptions {
+        .category = options.category,
+        .range = CSS::All,
+        .conversionData = options.conversionData,
+        .symbolTable = options.symbolTable
+    });
+}
+
+// What an `anchor-size()` evaluates to, or nothing. Same two callers, same reason.
+//
+// `dimension` is passed through as the `optional` it is: `evaluateSize` substitutes
+// `defaultDimensionForPropertyID(propertyID)` for an absent one
+// (AnchorPositionEvaluator.cpp:1023), so a presence bit would not be enough to reconstruct it.
+static std::optional<double> evaluateAnchorSizeFunction(const AnchorSize& anchorSize, Style::BuilderState& builderState)
+{
+    std::optional<Style::ScopedName> anchorSizeScopedName;
+    if (anchorSize.elementName) {
+        anchorSizeScopedName = Style::ScopedName {
+            .name = Style::toStyle(*anchorSize.elementName, builderState).value,
+            .scopeOrdinal = builderState.styleScopeOrdinal()
+        };
+    }
+    return Style::AnchorPositionEvaluator::evaluateSize(builderState, anchorSizeScopedName, anchorSize.dimension);
+}
+
 std::optional<Child> simplify(Anchor& anchor, const SimplificationOptions& options)
 {
     if (!options.conversionData || !options.conversionData->styleBuilderState())
         return { };
 
-    auto evaluationOptions = EvaluationOptions {
-        .category = options.category,
-        .range = CSS::All,
-        .conversionData = options.conversionData,
-        .symbolTable = options.symbolTable
-    };
-
-    auto result = evaluateWithoutFallback(anchor, evaluationOptions);
+    auto result = evaluateAnchorFunction(anchor, options);
     if (!result) {
         // https://drafts.csswg.org/css-anchor-position-1/#anchor-valid
         // "If any of these conditions are false, the anchor() function resolves to its specified fallback value.
@@ -1724,15 +1755,7 @@ std::optional<Child> simplify(AnchorSize& anchorSize, const SimplificationOption
 
     CheckedPtr builderState = options.conversionData->styleBuilderState();
 
-    std::optional<Style::ScopedName> anchorSizeScopedName;
-    if (anchorSize.elementName) {
-        anchorSizeScopedName = Style::ScopedName {
-            .name = Style::toStyle(*anchorSize.elementName, *builderState).value,
-            .scopeOrdinal = builderState->styleScopeOrdinal()
-        };
-    }
-
-    auto result = Style::AnchorPositionEvaluator::evaluateSize(*builderState, anchorSizeScopedName, anchorSize.dimension);
+    auto result = evaluateAnchorSizeFunction(anchorSize, *builderState);
 
     if (!result) {
         if (!anchorSize.fallback)
@@ -2404,44 +2427,22 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const Ch
         return substituteAnchorFallback;
     };
 
-    // `simplify(Anchor&)` (`:1692`-`:1717`), whole, placed above the element guard because it does
-    // not require an element -- `AnchorPositionEvaluator::evaluate` finds its own
-    // (`AnchorPositionEvaluator.cpp:897`) and answers nothing when there is none.
+    // `simplify(Anchor&)` and `simplify(AnchorSize&)`, through the SAME evaluation each of them
+    // calls rather than through a restatement of it. What is left here is only the part that
+    // differs: those two answer with a `Child` and mutate the node, and this answers with a POD and
+    // does not, because the island is still folding the enclosing expression and needs the value.
     //
-    // `EvaluationOptions` is built here because it cannot cross the boundary. Note `.range` is
-    // `CSS::All`, not `m_options->range`: an anchor is evaluated unclamped even inside a property
-    // with a range. The four members are copied one for one from `:1697`-`:1702`.
+    // Placed above the element guard because neither requires an element --
+    // `AnchorPositionEvaluator::evaluate` finds its own (`AnchorPositionEvaluator.cpp:897`) and
+    // answers nothing when there is none.
     if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
-        auto result = evaluateWithoutFallback(**anchor, EvaluationOptions {
-            .category = m_options->category,
-            .range = CSS::All,
-            .conversionData = m_options->conversionData,
-            .symbolTable = m_options->symbolTable
-        });
-        if (result)
+        if (auto result = evaluateAnchorFunction(**anchor, *m_options))
             return resolvedCanonicalLength(*result);
         return anchorEvaluationFailed(static_cast<bool>((*anchor)->fallback));
     }
 
-    // `simplify(AnchorSize&)` (`:1719`-`:1744`), whole. `Style::toStyle(CSS::CustomIdent,
-    // BuilderState&)` and `builderState->styleScopeOrdinal()` are the two things a
-    // `Style::ScopedName` needs, and neither is expressible across the boundary -- the same reason
-    // the `<random-key>` handling above stays here: it would require transcribing an `AtomString`
-    // and a scope ordinal to build a value only C++ consumes.
     if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
-        std::optional<Style::ScopedName> anchorSizeScopedName;
-        if ((*anchorSize)->elementName) {
-            anchorSizeScopedName = Style::ScopedName {
-                .name = Style::toStyle(*(*anchorSize)->elementName, *builderState).value,
-                .scopeOrdinal = builderState->styleScopeOrdinal()
-            };
-        }
-
-        // `anchorSize.dimension` is a `std::optional<AnchorSizeDimension>`, passed through as one:
-        // `evaluateSize` substitutes `defaultDimensionForPropertyID(propertyID)` for an absent
-        // dimension (`AnchorPositionEvaluator.cpp:1023`), so reporting just `hasDimension` would not
-        // be enough to reconstruct it.
-        if (auto result = Style::AnchorPositionEvaluator::evaluateSize(*builderState, anchorSizeScopedName, (*anchorSize)->dimension))
+        if (auto result = evaluateAnchorSizeFunction(**anchorSize, *builderState))
             return resolvedCanonicalLength(*result);
         return anchorEvaluationFailed(static_cast<bool>((*anchorSize)->fallback));
     }
