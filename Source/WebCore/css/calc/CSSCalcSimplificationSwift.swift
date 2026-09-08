@@ -2756,6 +2756,43 @@ fileprivate func withCalcFlatTree<R>(
 // The bound is stated again at each site, because `&+=` is not a free rewrite: it turns a detected
 // overflow into a silent wrap, so a site whose bound cannot be named must keep the trap.
 
+// THE 139 `nodes[...]` BOUNDS CHECKS BELOW ARE JUSTIFIED BY MEASUREMENT, NOT LEFT UNADDRESSED, and
+// this is the measurement. R167's census ranked "one validating accessor for every node index" as the
+// island's largest remaining trap item and pre-registered "retired instructions flat to -1% on `leaf`,
+// flat on `real` and `ladder12`". That prediction is REFUTED. Four arms were built at thin LTO against
+// this file as it stands, seven interleaved rounds, medians, the C++ arm as a null control (flat to
+// +-0.02%) and a duplicate-of-one-arm floor of +-0.02%:
+//
+//   arm                                          conditions   real    mixed  ladder12 depth12  leaf
+//   this file                                       180 (139 index)    --      --      --       --
+//   A  every link/sentinel site through `slot()`     95 ( 57)  +0.49%  +0.82%  +0.63%  +0.50%  +0.04%
+//   B  A + one `indices.contains` guard per head     42 (  2)  +2.06%  +2.84%  +4.65%  +1.90%   0.00%
+//   C  B + `@inline(always)` on `simplify`           42 (  2)  +0.38%  +1.01%  +3.88%  +1.69%   0.00%
+//
+// `slot(_ raw: UInt32) -> Int?` returning `nodes.indices.contains(k) ? k : nil` -- spelled the way the
+// subscript's own `_precondition(indices.contains(position))` is spelled, never
+// `UInt(bitPattern:) <`, which is the trap filings §43 exists about. Arms A-C are parked as
+// `cssprobe/validate/arms/trapq6{link,,inl}.patch`.
+//
+// THE COMPARES ARE NOT THE COST, which is why this is priced rather than abandoned. `sample` profiles
+// of arm B on a single-band `ladder12` corpus attribute it to INLINER THRESHOLDS, twice over:
+// `CalcFlatTree.simplify` went from 0.00% self time -- only ever executed inlined into
+// `cssCalcSimplifySwift` -- to 7.02%, with the entry dropping 6.00% -> 1.52%; `@inline(always)` puts
+// it back (arm C, `real` +2.06% -> +0.38%), and the profile then shows the SAME shape one level down,
+// `resolveRelativeLength` appearing at 1.58% from 0.00% and `toLengthUnit` at +1.49pp under a
+// `simplifyNonCanonicalDimension` that the guard grew. Static instruction counts are worthless here
+// and were checked: all three arms are SMALLER than this file (7578, 7117, 7568 against 7739) and all
+// three are slower.
+//
+// So the next step is selective placement rather than a spelling: the guard is affordable wherever it
+// does not push its function over a threshold, and the two thresholds are now named. Until that is
+// done these checks stay, and they are PARITY WITH THE C++ rather than a Swift deficit --
+// `WTF::Vector::operator[]` forwards to `at()`, which calls `OverflowHandler::overflowed()`
+// unconditionally in Release (`Vector.h:803`-`:817`), and `CSSCalc::Children` wraps a `Vector<Child>`
+// (`CSSCalcTree.h:356`-`:364`), so the C++ arm aborts on an out-of-range child index exactly as this
+// does. Removing them buys no coverage and no memory safety; it is a throughput question, and on this
+// evidence it currently loses.
+
 /// `if ((firstInstance.offset - 1) == i && !firstInstance.canRemove)` (`+Simplification.cpp:700`),
 /// plus its non-`Numeric` arm (`:707`) -- the C++'s own survivor test, asked of a flat child.
 ///
