@@ -1788,23 +1788,32 @@ template<Leaf Op> static auto copyAndSimplifyChildren(const Op& op, const Simpli
     return op;
 }
 
+// ONE walk over an operation's tuple slots, parameterised by what each slot becomes.
+//
+// Two callers want the same walk and differ only in the per-slot answer: `copyAndSimplifyChildren`
+// below maps each slot through `copyAndSimplify`, and `CSSCalcSwiftBuilder::rebuildFrom` takes each
+// slot off the Swift island's operand cursor through `rebuildSlot`. Written once, so the one thing
+// that is genuinely per-operation -- `Anchor` and `AnchorSize` declaring `tuple_size` 0 while
+// holding three slots each (CSSCalcTree.h:1317, "FIXME (webkit.org/b/280798): make Anchor and
+// AnchorSize tuple-like") -- is stated once instead of in both walks. When that FIXME is fixed the
+// two branches delete themselves and nothing else moves.
+//
+// `side` is COPIED, not mapped: `simplify` is not applied to the `<anchor-side>` subtree, because
+// doing so would fold `anchor(--a calc(25% + 25%))` to `anchor(--a 50%)`, which this file does not
+// do. `elementName` and `dimension` are not subtrees at all.
+template<typename Op, typename MapSlot> static Op rebuildChildren(const IndirectNode<Op>& root, NOESCAPE MapSlot&& mapSlot)
+{
+    if constexpr (std::same_as<Op, Anchor>)
+        return Anchor { .elementName = root->elementName, .side = copy(root->side), .fallback = mapSlot(root->fallback) };
+    else if constexpr (std::same_as<Op, AnchorSize>)
+        return AnchorSize { .elementName = root->elementName, .dimension = root->dimension, .fallback = mapSlot(root->fallback) };
+    else
+        return WTF::apply([&](const auto& ...x) { return Op { mapSlot(x)... }; }, *root);
+}
+
 template<typename Op> static auto copyAndSimplifyChildren(const IndirectNode<Op>& root, const SimplificationOptions& options) -> Op
 {
-    return WTF::apply([&](const auto& ...x) { return Op { copyAndSimplify(x, options)... }; } , *root);
-}
-
-static auto copyAndSimplifyChildren(const IndirectNode<Anchor>& anchor, const SimplificationOptions& options) -> Anchor
-{
-    return Anchor { .elementName = anchor->elementName, .side = copy(anchor->side), .fallback = copyAndSimplify(anchor->fallback, options) };
-}
-
-static auto copyAndSimplifyChildren(const IndirectNode<AnchorSize>& anchorSize, const SimplificationOptions& options) -> AnchorSize
-{
-    return AnchorSize {
-        .elementName = anchorSize->elementName,
-        .dimension = anchorSize->dimension,
-        .fallback = copyAndSimplify(anchorSize->fallback, options)
-    };
+    return rebuildChildren(root, [&](const auto& slot) { return copyAndSimplify(slot, options); });
 }
 
 Child copyAndSimplify(const Child& root, const SimplificationOptions& options)
@@ -2200,42 +2209,18 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount
     auto rebuilt = WTF::switchOn(original,
         [&](const auto& alternative) -> std::optional<Child> {
             if constexpr (requires { *alternative; }) {
-                using Op = std::remove_cvref_t<decltype(*alternative)>;
-                if constexpr (std::same_as<Op, Anchor> || std::same_as<Op, AnchorSize>) {
-                    // Both declare `tuple_size` 0 (CSSCalcTree.h:1317, "FIXME (webkit.org/b/280798):
-                    // make Anchor and AnchorSize tuple-like") while holding an `AnchorSide`, an
-                    // optional `<anchor-size>` dimension and an optional fallback, so `WTF::apply`
-                    // yields no slots and would build them empty. Handled with explicit slot lists
-                    // instead of the generic path.
-                    //
-                    // These mirror `copyAndSimplifyChildren`'s own two overloads, with the fallback
-                    // taken from the cursor. `elementName` and `dimension` are copied; `side` is
-                    // copied via `CSSCalc::copy` rather than simplified, matching the C++ overload,
-                    // which writes `.side = copy(anchor->side)` and does not simplify the
-                    // `<anchor-side>` subtree -- simplifying it would fold
-                    // `anchor(--a calc(25% + 25%))` to `anchor(--a 50%)`, which the C++ does not do.
-                    //
-                    // `rebuildSlot(const std::optional<Child>&, ...)` is reused for the fallback, so
-                    // presence still follows the original and the cursor contract matches every
-                    // other slot shape.
-                    auto op = [&] {
-                        if constexpr (std::same_as<Op, Anchor>)
-                            return Anchor { .elementName = alternative->elementName, .side = copy(alternative->side), .fallback = rebuildSlot(alternative->fallback, cursor) };
-                        else
-                            return AnchorSize { .elementName = alternative->elementName, .dimension = alternative->dimension, .fallback = rebuildSlot(alternative->fallback, cursor) };
-                    }();
-                    if (!cursor.ok || !cursor.exhausted())
-                        return std::nullopt;
-                    return makeChild(WTF::move(op), getType(alternative));
-                } else {
-                    auto op = WTF::apply([&](const auto& ...x) { return Op { rebuildSlot(x, cursor)... }; }, *alternative);
-                    if (!cursor.ok || !cursor.exhausted())
-                        return std::nullopt;
-                    // The ORIGINAL's type, which is what `copyAndSimplify` uses at :1814. A node
-                    // whose children simplified but whose kind did not change keeps its type; the
-                    // one rewrite that does change kind asks `buildOperation` for a fresh one.
-                    return makeChild(WTF::move(op), getType(alternative));
-                }
+                // The SAME walk `copyAndSimplifyChildren` uses, with `rebuildSlot` in place of
+                // `copyAndSimplify`: every slot shape is served by an overload rather than by an
+                // arm here, so adding an operation adds no code unless it adds a slot shape, in
+                // which case it fails to compile. `Anchor`'s and `AnchorSize`'s non-tuple-like
+                // layout is handled inside `rebuildChildren` for both callers at once.
+                auto op = rebuildChildren(alternative, [&](const auto& slot) { return rebuildSlot(slot, cursor); });
+                if (!cursor.ok || !cursor.exhausted())
+                    return std::nullopt;
+                // The ORIGINAL's type, which is what `copyAndSimplify` uses at :1814. A node
+                // whose children simplified but whose kind did not change keeps its type; the
+                // one rewrite that does change kind asks `buildOperation` for a fresh one.
+                return makeChild(WTF::move(op), getType(alternative));
             } else {
                 // A leaf has no slots to rebuild from, so asking is a contract violation.
                 return std::nullopt;
