@@ -2233,7 +2233,7 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount
                         return std::nullopt;
                     // The ORIGINAL's type, which is what `copyAndSimplify` uses at :1814. A node
                     // whose children simplified but whose kind did not change keeps its type; the
-                    // one rewrite that does change kind computes a fresh one, in `buildOperation`.
+                    // one rewrite that does change kind asks `buildOperation` for a fresh one.
                     return makeChild(WTF::move(op), getType(alternative));
                 }
             } else {
@@ -2260,15 +2260,9 @@ void CSSCalcSwiftBuilder::clearOperands() noexcept
     m_operands->value.shrink(0);
 }
 
-// The body both `buildOperation` overloads share. `carriedType` is the type to give the new node, or
-// `nullptr` to compute a fresh `toType` from the operands.
-//
-// A pointer, which is fine because nothing here is Swift-visible: the two public overloads are what
-// Swift calls, and a `const Type*` parameter on one of those would import as `UnsafePointer` and
-// cost an `unsafe` marker at every call site.
-static bool buildOperationOnStack(CSSCalcSwiftOperandStack& operands, CSSCalcSwiftAlternative alternative, uint32_t childCount, const Type* carriedType, bool isRoot)
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool recomputeType, bool isRoot) noexcept
 {
-    auto& stack = operands.value;
+    auto& stack = m_operands->value;
     if (!childCount || childCount > stack.size())
         return false;
 
@@ -2280,11 +2274,12 @@ static bool buildOperationOnStack(CSSCalcSwiftOperandStack& operands, CSSCalcSwi
         // moved-from node whose `UniqueRef` is already null. That manifests as an OOM kill with no
         // output at all, not as anything legible.
         //
-        // A fresh `toType` only when the caller has no type to carry. `toType` returning
-        // `std::nullopt` is not a boundary defect: for the `clamp()` rewrite it is the same
-        // `std::nullopt` `convertToMin` returns at :1021, i.e. the C++ would not have built this node
-        // either, so false means "decline", not "impossible".
-        std::optional<Type> type = carriedType ? std::optional<Type> { *carriedType } : toType(op);
+        // A fresh `toType` only when the caller has no type to carry -- the `clamp()` rewrite, which
+        // is the one rule that changes an operation's kind. `toType` returning `std::nullopt` is not
+        // a boundary defect: for that rewrite it is the same `std::nullopt` `convertToMin` returns at
+        // :1021, i.e. the C++ would not have built this node either, so false means "decline", not
+        // "impossible".
+        std::optional<Type> type = recomputeType ? toType(op) : std::optional<Type> { carriedType };
         if (!type)
             return false;
         stack.shrink(base);
@@ -2295,7 +2290,7 @@ static bool buildOperationOnStack(CSSCalcSwiftOperandStack& operands, CSSCalcSwi
         // slot. Naming the alternative instead picks the variant member at COMPILE time.
         // `makeIndirectNode` is `ChildConstruction`'s own indirect half (CSSCalcTree.h), so this is
         // not a second spelling of how an operation node is built.
-        constructOperand(operands, isRoot, makeIndirectNode(WTF::move(op), *type));
+        constructOperand(*m_operands, isRoot, makeIndirectNode(WTF::move(op), *type));
         return true;
     };
 
@@ -2333,16 +2328,6 @@ static bool buildOperationOnStack(CSSCalcSwiftOperandStack& operands, CSSCalcSwi
         // than an input it could serve, so the stack is left exactly as it was found.
         return false;
     }
-}
-
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, bool isRoot) noexcept
-{
-    return buildOperationOnStack(*m_operands, alternative, childCount, nullptr, isRoot);
-}
-
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type type, bool isRoot) noexcept
-{
-    return buildOperationOnStack(*m_operands, alternative, childCount, &type, isRoot);
 }
 
 // The two shapes every `CSSCalcSwiftNumericResult` answer takes, written once instead of

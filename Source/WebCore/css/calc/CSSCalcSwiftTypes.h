@@ -895,11 +895,11 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
 
     // Pop `childCount` operands and push a FRESH node of the named `alternative` built from them.
     //
-    // The construction entry that does NOT take an original node, and the one the flat tree uses
-    // for every operator it can build from operands alone. `rebuildFrom` above recovers the
-    // operation from the original node's variant tag through a 41-way `switchOn` plus `WTF::apply`,
-    // and a flat node has no original to recover from and does not need one: it already states its
-    // own alternative.
+    // The construction entry that does NOT take an original node, and the one the flat tree uses for
+    // every operator it can build from operands alone. `rebuildFrom` above recovers the operation
+    // from the original node's variant tag through a 41-way `switchOn` plus `WTF::apply`, and a flat
+    // node has no original to recover from and does not need one: it already states its own
+    // alternative.
     //
     // WHAT THAT DISPATCH COSTS, measured rather than asserted, and CORRECTED: this comment used to
     // read "1396 retired instructions, measured as primitive 7 against primitive 8", which was
@@ -914,7 +914,9 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // for primitive 8, the C++ arm building the same node directly INCLUDING its two leaves.
     // Netting the leaves out (2 x primitive 4, 68) puts the dispatch premium at ROUGHLY 50 TO 90
     // INSTRUCTIONS, about a tenth of the reconstruction. The allocation dominates it, not the
-    // 41-way visit.
+    // 41-way visit. Routing every operator through `rebuildFrom` to retire this entry was BUILT AND
+    // MEASURED (`cssprobe/validate/arms/calc-p3only.patch`) and costs +16.9% on the real payload,
+    // so the premium is not a rounding error at this granularity; see the note there.
     //
     // Naming the alternative here is a deliberate reversal of the rule the reading direction keeps
     // ("no operation kind ever crosses in the construction direction", above). That rule is right
@@ -928,48 +930,43 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // (CSSCalcTree+Simplification.cpp:1012-1038) is `Min`/`Max` through this same entry, so the
     // selector is one enum rather than one enum and one `bool`.
     //
-    // Unlike `rebuildFrom` this computes a FRESH `toType(...)`, because there is no original node
-    // to take one from -- which is also why it can fail for a reason that is not a contract
-    // violation: `toType` returns `std::nullopt` when the children's types do not merge, and the
-    // C++ arm returns `std::nullopt` from the rewrite in exactly that case. So false there means
-    // "the C++ would not have made this node either", and it must decline rather than treat it as
-    // impossible.
+    // `recomputeType` SELECTS BETWEEN THE TWO TYPE RULES, and it is one parameter where it used to be
+    // a second overload plus a `const Type*` threaded through a shared static body. Swift already
+    // holds the answer as `CalcFlatNodeFlags.recomputeType`, so passing it costs nothing and removes
+    // a boundary entry, a wrapper pair and the pointer parameter -- the entry count is what the goop
+    // metric counts, and two entries for one operation was the duplication.
     //
-    // Serves the `Children`-slotted operations (`Sum`, `Product`, `Min`, `Max`) and the two unary
-    // ones (`Negate`, `Invert`); an alternative outside that set, a mismatched arity, or too few
-    // operands is a contract violation and returns false without touching the stack. Widening the
-    // set is a case each, and it is why `Children` never has to reach Swift: this is the only
-    // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, bool isRoot = false) noexcept;
-
-    // The same, for a node that STATES its own type instead of having one derived.
+    //  * false -- USE `carriedType`. The C++ arm does not recompute a type when it rebuilds a node
+    //    whose kind did not change: `copyAndSimplify` ends at `makeChild(WTF::move(simplified),
+    //    getType(root))` (`:1821`), the ORIGINAL node's type, and `rebuildFrom` above matches it with
+    //    `getType(alternative)`. Recomputing instead is a measured differential failure, not a
+    //    theoretical gap: `calc((2 / 3px) * 4px)` simplifies to a surviving `Product{6px, 4px}` on
+    //    both arms, which SERIALIZES identically on both, so only the structural oracle sees it --
+    //    the C++ keeps the parse-time type while a fresh `toType` computes px^2. 57 cases in
+    //    simplifycheck's own corpus, all of that one shape.
+    //  * true -- IGNORE `carriedType` and compute a fresh `toType`. For the one caller that has no
+    //    type to carry: the `clamp()` rewrite invents a node of a kind that was not in the input, so
+    //    there is nothing to take a type from. It is also why this can fail for a reason that is not
+    //    a contract violation -- `toType` returns `std::nullopt` when the children's types do not
+    //    merge, and `convertToMin` returns `std::nullopt` in exactly that case (`:1021`), so false
+    //    means "the C++ would not have made this node either" and the caller declines.
     //
-    // The C++ arm does not recompute a type when it rebuilds a node whose kind did not change:
-    // `copyAndSimplify` ends at `makeChild(WTF::move(simplified), getType(root))`
-    // (CSSCalcTree+Simplification.cpp:1821), the ORIGINAL node's type, and `rebuildFrom` above
-    // matches it with `getType(alternative)`. The overload without a type therefore does NOT
-    // reproduce the C++ for a surviving operator, and that is not a theoretical gap -- it is a
-    // measured differential failure. `calc((2 / 3px) * 4px)` simplifies to a surviving
-    // `Product{6px, 4px}` on both arms, which SERIALIZES identically on both, so only the structural
-    // oracle sees it: the C++ keeps the parse-time type while a fresh `toType` computes px^2. 57
-    // cases in simplifycheck's own corpus, all of that one shape.
-    //
-    // So a caller holding the node's real type passes it, and the overload above is for the one
-    // caller that genuinely has none: `clamp(none, VAL, MAX)` rewriting to `min(VAL, MAX)`
-    // (`:1012`-`:1038`) invents a node of a kind that was not in the input, so there is nothing to
-    // take a type from and a fresh `toType` is the right answer -- which is also why that one can
-    // fail for a reason that is not a contract violation.
-    //
-    // Two overloads rather than an optional parameter, because an absent type and a
-    // default-constructed one are different things and `Type()` is a legitimate value (a
-    // dimensionless `<number>`). This also removes a `toType` per emitted operator node.
+    // A flag rather than `std::optional<Type>`, because `Type()` is a legitimate value (a
+    // dimensionless `<number>`) and an optional would put the two states one careless
+    // `value_or` apart.
     //
     // `Type` is 8 bytes of `int8_t` exponents plus a percent hint (CSSCalcType.h, `static_assert
     // (sizeof(Type) == 8)`), so it crosses in a register. It costs this header one include, of a
     // file whose own includes are `<array>`, `<optional>` and `<wtf/Forward.h>` -- so the
     // self-containment the note at the top of this file protects is intact, and the Swift step
     // already imported `CSSCalcType.h` through `CSSCalcTree.h` regardless.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false) noexcept;
+    //
+    // Serves the `Children`-slotted operations (`Sum`, `Product`, `Min`, `Max`) and the two unary
+    // ones (`Negate`, `Invert`); an alternative outside that set, a mismatched arity, or too few
+    // operands is a contract violation and returns false without touching the stack. Widening the
+    // set is a case each, and it is why `Children` never has to reach Swift: this is the only
+    // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool recomputeType, bool isRoot = false) noexcept;
 
     // Drop every operand.
     //

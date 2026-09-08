@@ -1648,7 +1648,7 @@ private func calcSimplifyFlatTree(
     if let emitted {
         guard emitted else {
             // `emit` returning false is a construction refusing. Two shapes, and only one of them
-            // has an alternative to name: `buildOperation`'s no-type overload answering
+            // has an alternative to name: `buildOperation` answering
             // `std::nullopt` from `toType` for a `clamp()` this pass rewrote to a `min()`/`max()`
             // whose children's types do not merge -- which is the same `std::nullopt`
             // `convertToMin` returns at `+Simplification.cpp:1021`, so the C++ arm does not build
@@ -4937,22 +4937,8 @@ fileprivate extension CalcFlatTree {
         }
 
         switch node.alternative {
-        case .Sum, .Product, .Negate, .Invert:
+        case .Sum, .Product, .Negate, .Invert, .Min, .Max:
             break
-
-        case .Min, .Max:
-            // The one node in the file whose type is not the one it arrived with: a `clamp()` that
-            // `simplifyClamp` rewrote. `buildOperation`'s no-type overload is what
-            // `convertToMin`/`convertToMax` do, `toType` over the operands, and its `std::nullopt`
-            // is the same `std::nullopt` those two return at `:1021` and `:1043` -- so `false` here
-            // is "the C++ would not have built this node either", and it declines.
-            //
-            // Tested only for `Min`/`Max` rather than after the switch, so a `Sum` or a `Product` --
-            // which is what a real payload actually holds -- pays nothing for a rule only `clamp()`
-            // can reach.
-            if node.flags & CalcFlatNodeFlags.recomputeType != 0 {
-                return builder.buildOperation(node.alternative, pushed, i == 0)
-            }
 
         case .CalcMix:
             // The one alternative whose origin route needs something pushed BEFORE `rebuildFrom`:
@@ -5008,16 +4994,28 @@ fileprivate extension CalcFlatTree {
             return calcEmitFromOrigin(node.origin, pushed, false, i == 0, original, &builder)
         }
 
-        // The node's OWN type, not a fresh `toType` of the operands, and this is the overload that
-        // exists for it. `copyAndSimplify` ends at `makeChild(WTF::move(simplified), getType(root))`
-        // (`+Simplification.cpp:1821`) -- the original node's type -- so recomputing here diverges
-        // from the C++ for any surviving operator whose children changed shape. Measured, not
-        // supposed: `calc((2 / 3px) * 4px)` survives as `Product{6px, 4px}` on both arms and
-        // SERIALIZES identically, so only simplifycheck's structural oracle catches it; the C++ keeps
-        // the parse-time type where a fresh `toType` computes px^2. That is why `flatten` pays
-        // `getType` per operator node, and why it skips it for the seven leaf alternatives, whose
-        // type `makeChild` discards.
-        return builder.buildOperation(node.alternative, pushed, node.type, i == 0)
+        // The node's OWN type, not a fresh `toType` of the operands, EXCEPT for the one rule that
+        // changes an operation's kind. `copyAndSimplify` ends at `makeChild(WTF::move(simplified),
+        // getType(root))` (`+Simplification.cpp:1821`) -- the original node's type -- so recomputing
+        // here diverges from the C++ for any surviving operator whose children changed shape.
+        // Measured, not supposed: `calc((2 / 3px) * 4px)` survives as `Product{6px, 4px}` on both
+        // arms and SERIALIZES identically, so only simplifycheck's structural oracle catches it; the
+        // C++ keeps the parse-time type where a fresh `toType` computes px^2. That is why `flatten`
+        // pays `getType` per operator node, and why it skips it for the seven leaf alternatives,
+        // whose type `makeChild` discards.
+        //
+        // ONE CALL RATHER THAN TWO, AND ONE BOUNDARY ENTRY RATHER THAN TWO, and the flag that used to
+        // be an overload selector is a bit this node already carries: a `clamp()` that `simplifyClamp`
+        // rewrote to a `min()`/`max()` has `recomputeType` set, and that is exactly the case where the
+        // node's carried type is the `Clamp`'s and must not be used --
+        // `convertToMin`/`convertToMax` compute `toType` over the operands (`:1019`-`:1045`). Passing
+        // the bit costs nothing that reading it for a separate call did not, and it retires a second
+        // `buildOperation` overload, the pair of wrappers over a shared static body, and the
+        // `const Type*` parameter that body threaded. It also takes an arm off a switch `emit` runs at
+        // every node, which is the shape that cost `simplifyNode` 6.7 instructions per simplification
+        // for its thirty-first label.
+        return builder.buildOperation(node.alternative, pushed, node.type,
+            node.flags & CalcFlatNodeFlags.recomputeType != 0, i == 0)
     }
 }
 

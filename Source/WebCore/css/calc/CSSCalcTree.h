@@ -986,7 +986,7 @@ TextStream& operator<<(TextStream&, Tree);
 // can do so without re-spelling how an operation node is built. `Vector<Child>::constructAndAppend`
 // selects the variant alternative at compile time, where appending a finished `Child` runs the
 // 41-alternative move constructor out of line; the Swift simplification builder is the caller that
-// wants that (CSSCalcTree+Simplification.cpp's `buildOperationOnStack`).
+// wants that (CSSCalcTree+Simplification.cpp's `CSSCalcSwiftBuilder::buildOperation`).
 template<typename Op> IndirectNode<Op> makeIndirectNode(Op&& op, Type type)
 {
     return IndirectNode<Op> { type, makeUniqueRef<Op>(WTF::move(op)) };
