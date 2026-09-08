@@ -2058,7 +2058,7 @@ static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, 
     return items;
 }
 
-bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot)
+bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot) noexcept
 {
     // `constructAndAppend`, not `append(makeChild(...))`, wherever the alternative is named here.
     // `makeChild` returns a whole `Child`, and appending one move-constructs the 41-alternative
@@ -2135,14 +2135,14 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot)
     }
 }
 
-void CSSCalcSwiftBuilder::pushCopyOf(const Child& node, bool isRoot)
+void CSSCalcSwiftBuilder::pushCopyOf(const Child& node, bool isRoot) noexcept
 {
     // `CSSCalc::copy(const Child&)`, which is what `copyAndSimplifyChildren` bottoms out in too, so
     // the two cannot disagree about what a copy is.
     constructOperand(*m_operands, isRoot, copy(node));
 }
 
-void CSSCalcSwiftBuilder::pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight)
+void CSSCalcSwiftBuilder::pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight) noexcept
 {
     m_operands->calcMixWeights.append(CalcMixWeightPlan { .weight = weight, .origin = origin, .replace = replaceWeight });
 }
@@ -2151,7 +2151,7 @@ void CSSCalcSwiftBuilder::pushCalcMixItemWeight(uint32_t origin, double weight, 
 // those two sit next to the child walker so the count and the indices stay in step, while this
 // reads a payload no walker yields -- `forAllChildNodes` visits nothing for a weight -- so there is
 // nothing here to stay in step with.
-CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child& node, uint32_t index)
+CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child& node, uint32_t index) noexcept
 {
     // `get_if` rather than `switchOn`, for the reason CSSCalcTree+Serialization.cpp:1322 gives at the
     // one other place a specific alternative is reached for: a generic visitor instantiates its
@@ -2175,7 +2175,7 @@ CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child& node, uint32_t ind
     return { .value = 0, .present = true, .isRaw = false };
 }
 
-bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount, bool isRoot)
+bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount, bool isRoot) noexcept
 {
     auto& stack = m_operands->value;
     auto& weights = m_operands->calcMixWeights;
@@ -2253,7 +2253,7 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount
     return true;
 }
 
-void CSSCalcSwiftBuilder::clearOperands()
+void CSSCalcSwiftBuilder::clearOperands() noexcept
 {
     m_operands->value.shrink(0);
 }
@@ -2333,12 +2333,12 @@ static bool buildOperationOnStack(CSSCalcSwiftOperandStack& operands, CSSCalcSwi
     }
 }
 
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, bool isRoot)
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, bool isRoot) noexcept
 {
     return buildOperationOnStack(*m_operands, alternative, childCount, nullptr, isRoot);
 }
 
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type type, bool isRoot)
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type type, bool isRoot) noexcept
 {
     return buildOperationOnStack(*m_operands, alternative, childCount, &type, isRoot);
 }
@@ -2378,7 +2378,7 @@ static constexpr CSSCalcSwiftNumericResult resolvedCanonicalLength(double value)
 // `unresolvedNumber`.
 static constexpr CSSCalcSwiftNumericResult substituteAnchorFallback { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = true };
 
-CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const Child& node) const
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const Child& node) const noexcept
 {
     // The guard `simplify(SiblingCount&)`, `(SiblingIndex&)` and `(Random&)` all open with (`:528`,
     // `:538`, `:1352`). For `random()` it runs deliberately before the sharing is looked at, so a
@@ -2498,7 +2498,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const Ch
     return unresolvedNumber;
 }
 
-CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, uint16_t unit) const
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, uint16_t unit) const noexcept
 {
     // The same call `simplify(Symbol&)` makes at :521. An id and the node's unit are passed in; C++
     // owns the table, a `HashMap` on the options that is not reducible to anything that crosses.
@@ -2543,7 +2543,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, u
     return out;
 }
 
-CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double value, uint16_t unitType) const
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double value, uint16_t unitType) const noexcept
 {
     // `canonicalize`'s `tryMakeCanonical` (`:181`-`:187`), and only that. The other twenty-eight of
     // its seventy cases are decided in Swift -- see `canonicalizedDimension` in
@@ -2571,7 +2571,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double valu
     return unresolvedNumber;
 }
 
-bool CSSCalcSwiftBuilder::isLengthUnit(uint16_t unitType) const
+bool CSSCalcSwiftBuilder::isLengthUnit(uint16_t unitType) const noexcept
 {
     // `isLength(id)` from :611, with `id` recovered the same way the caller there gets it. The real
     // predicate is called rather than restated: the 48-of-64 membership set exists exactly once, in
