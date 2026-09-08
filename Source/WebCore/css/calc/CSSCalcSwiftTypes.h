@@ -930,30 +930,23 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // (CSSCalcTree+Simplification.cpp:1012-1038) is `Min`/`Max` through this same entry, so the
     // selector is one enum rather than one enum and one `bool`.
     //
-    // `recomputeType` SELECTS BETWEEN THE TWO TYPE RULES, and it is one parameter where it used to be
-    // a second overload plus a `const Type*` threaded through a shared static body. Swift already
-    // holds the answer as `CalcFlatNodeFlags.recomputeType`, so passing it costs nothing and removes
-    // a boundary entry, a wrapper pair and the pointer parameter -- the entry count is what the goop
-    // metric counts, and two entries for one operation was the duplication.
+    // ONE TYPE RULE, AND IT IS `carriedType`. The C++ arm does not recompute a type when it rebuilds
+    // a node whose kind did not change: `copyAndSimplify` ends at `makeChild(WTF::move(simplified),
+    // getType(root))` (`:1821`), the ORIGINAL node's type, and `rebuildFrom` above matches it with
+    // `getType(alternative)`. Recomputing instead is a measured differential failure, not a
+    // theoretical gap: `calc((2 / 3px) * 4px)` simplifies to a surviving `Product{6px, 4px}` on both
+    // arms, which SERIALIZES identically on both, so only the structural oracle sees it -- the C++
+    // keeps the parse-time type while a fresh `toType` computes px^2. 57 cases in simplifycheck's
+    // own corpus, all of that one shape.
     //
-    //  * false -- USE `carriedType`. The C++ arm does not recompute a type when it rebuilds a node
-    //    whose kind did not change: `copyAndSimplify` ends at `makeChild(WTF::move(simplified),
-    //    getType(root))` (`:1821`), the ORIGINAL node's type, and `rebuildFrom` above matches it with
-    //    `getType(alternative)`. Recomputing instead is a measured differential failure, not a
-    //    theoretical gap: `calc((2 / 3px) * 4px)` simplifies to a surviving `Product{6px, 4px}` on
-    //    both arms, which SERIALIZES identically on both, so only the structural oracle sees it --
-    //    the C++ keeps the parse-time type while a fresh `toType` computes px^2. 57 cases in
-    //    simplifycheck's own corpus, all of that one shape.
-    //  * true -- IGNORE `carriedType` and compute a fresh `toType`. For the one caller that has no
-    //    type to carry: the `clamp()` rewrite invents a node of a kind that was not in the input, so
-    //    there is nothing to take a type from. It is also why this can fail for a reason that is not
-    //    a contract violation -- `toType` returns `std::nullopt` when the children's types do not
-    //    merge, and `convertToMin` returns `std::nullopt` in exactly that case (`:1021`), so false
-    //    means "the C++ would not have made this node either" and the caller declines.
-    //
-    // A flag rather than `std::optional<Type>`, because `Type()` is a legitimate value (a
-    // dimensionless `<number>`) and an optional would put the two states one careless
-    // `value_or` apart.
+    // The one rewrite that invents a kind not present in the input carries a type too, and that is
+    // why the `bool recomputeType` selector this entry used to take is gone. `toType(Min)` is
+    // `Type::consistentType` over the two operands -- `AllowedTypes::Any` in, `OutputTransform::None`
+    // out -- so the island computes it in `convertToMinMax` and stores it on the flat node BEFORE
+    // committing to the conversion. A merge that fails leaves the node a `Clamp`, which is what
+    // `convertToMin` returning `std::nullopt` (`:1021`) makes `copyAndSimplify` do with it. So this
+    // entry can no longer fail for a reason that is not a contract violation, and the whole-tree
+    // decline that a `std::nullopt` here used to force -- the island's last one -- has no cause left.
     //
     // `Type` is 8 bytes of `int8_t` exponents plus a percent hint (CSSCalcType.h, `static_assert
     // (sizeof(Type) == 8)`), so it crosses in a register. It costs this header one include, of a
@@ -966,7 +959,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // operands is a contract violation and returns false without touching the stack. Widening the
     // set is a case each, and it is why `Children` never has to reach Swift: this is the only
     // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool recomputeType, bool isRoot = false) noexcept;
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false) noexcept;
 
     // Drop every operand.
     //

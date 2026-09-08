@@ -1651,24 +1651,25 @@ private func calcSimplifyFlatTree(
 
     if let emitted {
         guard emitted else {
-            // `emit` returning false is a construction refusing. Two shapes, and only one of them
-            // has an alternative to name: `buildOperation` answering
-            // `std::nullopt` from `toType` for a `clamp()` this pass rewrote to a `min()`/`max()`
-            // whose children's types do not merge -- which is the same `std::nullopt`
-            // `convertToMin` returns at `+Simplification.cpp:1021`, so the C++ arm does not build
-            // it either -- and a builder contract violation, which has no one alternative behind
-            // it. The first blames `.Clamp`, the second has no single alternative to name. An
-            // UNATTRIBUTED decline is one nobody can close, and `simplifycheck`'s guard 3b fails
-            // outright on one.
+            // `emit` returning false is a construction refusing, and there is now exactly ONE shape of
+            // that: a builder contract violation -- either the mid-pass `declined` valve, or
+            // `pushLeaf`/`rebuildFrom`/`buildOperation` handed something outside its own contract.
+            // None of them has one alternative behind it, so none is named.
             //
-            // ASKED OF `kindMask`, which the flattening pass already computed, rather than of a bit
-            // the fold sets and `emitRoot` reports. That is deliberately coarser -- a tree whose
-            // `clamp()` folded away entirely and that then failed to emit for some other reason
-            // blames `.Clamp` too -- and it is what the cheap answer costs: carrying the precise
-            // one back out widens the closure's return type, which measured 92 retired instructions
-            // per simplification on the single-node band (see `emitRoot`).
-            return declined(report.kindMask, report.nodeCount,
-                report.kindMask & CalcFlatCoverage.bit(.Clamp) != 0 ? .Clamp : nil)
+            // IT USED TO HAVE A SECOND SHAPE AND THAT IS WHY IT USED TO BLAME `.Clamp`:
+            // `buildOperation` answered `std::nullopt` from `toType` for a `clamp()` this pass had
+            // rewritten to a `min()`/`max()` whose children's types do not merge, and by then the
+            // operands were already consumed. `convertToMinMax` asks `Type::consistentType` before it
+            // commits instead, so a merge that fails leaves the node a `Clamp` and this cannot be
+            // reached that way any more -- which took the island's last 45 declines to zero.
+            //
+            // The blame went with it. Keeping "any tree containing a `clamp()` blames `Clamp`" once
+            // the `clamp()` reason is gone would point every future contract violation at whichever
+            // alternative happened to be in the tree, and a confident wrong attribution is worse than
+            // none: an UNATTRIBUTED decline fails `simplifycheck`'s guard 3b outright, which is the
+            // right treatment for a contract violation and the wrong one for a coverage refusal. A
+            // decline that IS a coverage refusal must name what it refused.
+            return declined(report.kindMask, report.nodeCount, nil)
         }
         return WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
             kindMask: report.kindMask,
@@ -1999,8 +2000,9 @@ fileprivate struct CalcFlatNode {
 
 /// The bits on `CalcFlatNode.flags`.
 ///
-/// A bitfield rather than four `Bool`s, so the node stays inside the 8-byte tail slot it shares with
-/// `valueID`, `unitType`, `alternative` and `percentHint`, and the fifth predicate costs nothing.
+/// A bitfield rather than separate `Bool`s, so the node stays inside the 8-byte tail slot it shares
+/// with `valueID`, `unitType`, `alternative` and `percentHint`, and each further predicate costs
+/// nothing.
 fileprivate enum CalcFlatNodeFlags {
     /// `clamp()` whose MINIMUM bound is the keyword `none` rather than a subtree.
     ///
@@ -2023,18 +2025,6 @@ fileprivate enum CalcFlatNodeFlags {
     /// subtree -- an alternative this file has not been taught, sitting inside a side, still has to
     /// decline the whole tree -- so the distinction has to be a mark rather than an omission.
     static let insideAnchorSide: UInt8 = 1 << 3
-    /// This node's `Type` must be computed FRESH from its operands at emit, not carried.
-    ///
-    /// `clamp()` collapsing to `min()`/`max()` is the one rule in the whole file that changes an
-    /// operation's kind, and `convertToMin`/`convertToMax` (`+Simplification.cpp:1019`-`:1045`)
-    /// compute `toType(min)` rather than reusing the `Clamp`'s type -- which they must, since the
-    /// new node's slots are a subset of the old one's. Every other surviving operation keeps its
-    /// cached type, which is `copyAndSimplify`'s `getType(root)` at `:1821`.
-    ///
-    /// Carried by `replace`, and that is correct rather than incidental: a converted `Min` promoted
-    /// into its parent's slot -- `min(clamp(none, 1px, 2em))` -- is the same `Child` the C++ moves
-    /// up, with the fresh type already on it.
-    static let recomputeType: UInt8 = 1 << 4
 }
 
 /// Where a pre-order descent over the ORIGINAL tree got to.
@@ -2656,6 +2646,59 @@ fileprivate extension CalcFlatTree {
             cursor = nodes[Int(cursor)].nextSibling
         }
         return nil
+    }
+
+    /// `getType(const Child&)` (`CSSCalcTree.cpp:453`-`:456`) for the node this slot WILL EMIT.
+    ///
+    /// Two answers and no third, and neither is a fresh derivation of anything.
+    ///
+    /// An OPERATION answers with the type `calcFlatten` read off its original, because that is the
+    /// type its emitted node carries whichever of the three emit routes it takes: `buildOperation` is
+    /// handed exactly this value, and `calcEmitFromOrigin` reaches `rebuildFrom`, which stamps
+    /// `getType(alternative)` -- the same accessor on the same node. A node promoted by `replace`
+    /// carries the promoted node's type with it, so that stays true after list surgery.
+    ///
+    /// A LEAF answers from its own payload, because a leaf's `Type` is discarded at construction
+    /// (`ChildConstruction<Leaf>::make` ignores its `Type` argument, `CSSCalcTree.h:1002`) and so is
+    /// never stored to be read back. The seven overloads at `CSSCalcTree.cpp:415`-`:451` are
+    /// `leafType` for the four numeric kinds, `determineType(unit)` for a `Symbol`, and the identity
+    /// type for `sibling-count()` and `sibling-index()`.
+    ///
+    /// `nil` is the C++'s `std::nullopt` and must never be defaulted: `Type()` is a legitimate value,
+    /// the dimensionless `<number>`.
+    ///
+    /// THE NODE BY VALUE, NOT ITS INDEX, and that is a runtime-trap decision rather than a style
+    /// one. Both callers have already read the node -- `simplifyClamp` asks `numericLeaf` of each
+    /// bound before it can decide to convert -- so taking the index here would re-index the
+    /// `MutableSpan` at a data-dependent offset the optimizer cannot fold against the caller's
+    /// earlier one, and the census shows it as an extra `index out of bounds` condition.
+    /// `CalcFlatNode` is 40 trivial bytes on a path only a `clamp()` with one keyword bound that
+    /// could not fold ever reaches.
+    func emittedType(_ node: CalcFlatNode, _ options: CalcSimplification) -> CalcType? {
+        switch node.alternative {
+        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
+            guard let leaf = node.numericLeaf else {
+                return nil
+            }
+            return options.leafType(leaf)
+
+        case .Symbol:
+            // `getType(const Symbol&)` is `determineType(root.unit)` (`CSSCalcTree.cpp:438`-`:441`),
+            // and the flat node's `unitType` IS `Symbol::unit` -- it is the same field
+            // `simplifySymbol` hands to `resolveSymbol`.
+            guard let unit = WebCore.CSSUnitType(rawValue: node.unitType) else {
+                // Never taken: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
+                return nil
+            }
+            return CalcType.determineType(unit)
+
+        case .SiblingCount, .SiblingIndex:
+            // `CSSCalcTree.cpp:443`-`:451`, both the identity type.
+            return CalcType()
+
+        default:
+            return node.type
+        }
     }
 }
 
@@ -4017,7 +4060,7 @@ fileprivate extension CalcFlatTree {
                 options.unitsMatch(value, maximum), options.magnitudeComparable(value) else {
                 // All three of the C++'s `convertToMin()` sites (`:1050`, `:1055`, `:1060`), plus
                 // `max` not being a `Numeric` at all, which is the first of them.
-                convertToMinMax(i, isMax: false)
+                convertToMinMax(i, nodes[valueChild], nodes[maximumChild], isMax: false, options)
                 return
             }
             setLeaf(i, value.withValue(CalcExecutor.min(value.value, maximum.value)))
@@ -4034,7 +4077,7 @@ fileprivate extension CalcFlatTree {
         }
         guard let minimum = nodes[minimumChild].numericLeaf, options.switchTogether(minimum, value),
             options.unitsMatch(minimum, value), options.magnitudeComparable(value) else {
-            convertToMinMax(i, isMax: true)
+            convertToMinMax(i, nodes[minimumChild], nodes[valueChild], isMax: true, options)
             return
         }
         setLeaf(i, value.withValue(CalcExecutor.max(minimum.value, value.value)))
@@ -4047,24 +4090,46 @@ fileprivate extension CalcFlatTree {
     /// coincidence: the C++ builds a fresh two-element `Vector<Child>` in `val, max` order for
     /// `convertToMin` and `min, val` order for `convertToMax`, and the flat child list is ALREADY in
     /// exactly those orders -- child 0 is whichever of the three slots the keyword did not occupy
-    /// first. So the whole conversion is the kind byte and a flag.
+    /// first. So both conversions take the list as it stands, and `first`/`second` here are always
+    /// child 0 and child 1.
     ///
-    /// `recomputeType` because the new node's type is `toType(min)` and not the `Clamp`'s; see the
-    /// flag's own comment and `emit`'s `Min`/`Max` arm.
+    /// THE NEW TYPE IS COMPUTED HERE RATHER THAN AT EMIT, and that is what closes the one coverage
+    /// hole this file had. `toType(Min)` and `toType(Max)` are `Type::add` over the two children
+    /// -- `Min::input` and `Max::input` are `AllowedTypes::Any`, so `getValidatedTypeFor` never
+    /// refuses; `merge` is `MergePolicy::Consistent`, which is `Type::consistentType`; and `output`
+    /// is `OutputTransform::None`, so `transformType` is the identity (`CSSCalcTree.cpp:509`-`:523`,
+    /// `CSSCalcType.h:378`-`:435`). `consistentType` is CALLED, not transcribed.
+    ///
+    /// A FAILING MERGE LEAVES THE NODE A `Clamp`, which is exactly what the C++ does with it:
+    /// `convertToMin` returns `std::nullopt` (`:1021`), `simplify(Clamp&)` propagates it, and
+    /// `copyAndSimplify` (`:1818`-`:1821`) rebuilds the `Clamp` with `getType(root)`. Emit's
+    /// `default` arm rebuilds it from the same two operands through `rebuildFrom`, which takes
+    /// `getType(alternative)` off the same original -- the same node, not a near one. This used to
+    /// be the island's last decline: the type was recomputed at emit, by which time `buildOperation`
+    /// had already consumed the operands into the node it could not build, so a failure had nowhere
+    /// to go but a whole-tree decline. Asking BEFORE the conversion instead means there is nothing
+    /// to unwind.
     ///
     /// THE C++ HAS A DEFECT HERE THAT THIS CANNOT REPRODUCE. `convertToMin` moves `root.val` and
     /// `root.max` into its new `Vector` BEFORE testing `toType`, and returns `std::nullopt` on
-    /// failure -- at which point `copyAndSimplify` (`:1818`-`:1821`) rebuilds a `Clamp` from
-    /// children that have been moved from, i.e. an `IndirectNode` holding a null `UniqueRef`.
-    /// `root.val` is always a numeric leaf on this path so it is harmless; `root.max` can be an
-    /// arbitrary subtree. Reachability is unverified and probably nil, since the parser type-checks
-    /// `clamp()`'s three arguments for consistency. There is no moved-from state here: a `toType`
-    /// that fails is `buildOperation` answering false, which declines the whole tree, and the C++ arm
-    /// then runs and executes the same undefined behaviour -- so the port neither fixes nor worsens
-    /// it. Recorded as a to-file WebKit bug and as a safety-ledger entry.
-    private mutating func convertToMinMax(_ i: Int, isMax: Bool) {
+    /// failure -- at which point `copyAndSimplify` rebuilds a `Clamp` from children that have been
+    /// moved from, i.e. an `IndirectNode` holding a null `UniqueRef`. `root.val` is always a numeric
+    /// leaf on this path so it is harmless; `root.max` can be an arbitrary subtree. Reachability is
+    /// unverified and probably nil, since the parser type-checks `clamp()`'s three arguments for
+    /// consistency. Nothing is moved here, so the port does not reproduce it -- and it no longer
+    /// declines into the C++ arm to have it executed either. Recorded as a to-file WebKit bug and as
+    /// a safety-ledger entry.
+    private mutating func convertToMinMax(_ i: Int, _ first: CalcFlatNode, _ second: CalcFlatNode, isMax: Bool, _ options: CalcSimplification) {
+        guard let firstType = emittedType(first, options),
+            let secondType = emittedType(second, options),
+            let merged = CalcType.consistentType(firstType, secondType).value else {
+            // The types do not merge, so the node stays a `Clamp` and `emit`'s `default` arm rebuilds
+            // it from these same two operands. Not a decline: the C++ does not build the `min()`
+            // either.
+            return
+        }
         nodes[i].alternative = isMax ? .Max : .Min
-        nodes[i].flags |= CalcFlatNodeFlags.recomputeType
+        nodes[i].type = merged
     }
 
     /// `simplifyForRound<Op>` (`+Simplification.cpp:328`-`:337`), shared by `round(nearest|up|down|
@@ -5106,28 +5171,23 @@ fileprivate extension CalcFlatTree {
             return calcEmitFromOrigin(node.origin, pushed, false, i == 0, original, &builder)
         }
 
-        // The node's OWN type, not a fresh `toType` of the operands, EXCEPT for the one rule that
-        // changes an operation's kind. `copyAndSimplify` ends at `makeChild(WTF::move(simplified),
-        // getType(root))` (`+Simplification.cpp:1821`) -- the original node's type -- so recomputing
-        // here diverges from the C++ for any surviving operator whose children changed shape.
-        // Measured, not supposed: `calc((2 / 3px) * 4px)` survives as `Product{6px, 4px}` on both
-        // arms and SERIALIZES identically, so only simplifycheck's structural oracle catches it; the
-        // C++ keeps the parse-time type where a fresh `toType` computes px^2. That is why `flatten`
-        // pays `getType` per operator node, and why it skips it for the seven leaf alternatives,
-        // whose type `makeChild` discards.
+        // THE NODE'S OWN TYPE, ALWAYS, and never a fresh `toType` of the operands.
+        // `copyAndSimplify` ends at `makeChild(WTF::move(simplified), getType(root))`
+        // (`+Simplification.cpp:1821`) -- the original node's type -- so recomputing here diverges
+        // from the C++ for any surviving operator whose children changed shape. Measured, not
+        // supposed: `calc((2 / 3px) * 4px)` survives as `Product{6px, 4px}` on both arms and
+        // SERIALIZES identically, so only simplifycheck's structural oracle catches it; the C++
+        // keeps the parse-time type where a fresh `toType` computes px^2. That is why `flatten` pays
+        // `getType` per operator node, and why it skips it for the seven leaf alternatives, whose
+        // type `makeChild` discards.
         //
-        // ONE CALL RATHER THAN TWO, AND ONE BOUNDARY ENTRY RATHER THAN TWO, and the flag that used to
-        // be an overload selector is a bit this node already carries: a `clamp()` that `simplifyClamp`
-        // rewrote to a `min()`/`max()` has `recomputeType` set, and that is exactly the case where the
-        // node's carried type is the `Clamp`'s and must not be used --
-        // `convertToMin`/`convertToMax` compute `toType` over the operands (`:1019`-`:1045`). Passing
-        // the bit costs nothing that reading it for a separate call did not, and it retires a second
-        // `buildOperation` overload, the pair of wrappers over a shared static body, and the
-        // `const Type*` parameter that body threaded. It also takes an arm off a switch `emit` runs at
-        // every node, which is the shape that cost `simplifyNode` 6.7 instructions per simplification
-        // for its thirty-first label.
-        return builder.buildOperation(node.alternative, pushed, node.type,
-            node.flags & CalcFlatNodeFlags.recomputeType != 0, i == 0)
+        // THE ONE OPERATION WHOSE KIND CHANGES CARRIES A TYPE TOO. `clamp()` collapsing to
+        // `min()`/`max()` has no original node to take a type from, and `convertToMin`/`convertToMax`
+        // compute `toType` over the operands (`:1019`-`:1045`) -- but `convertToMinMax` has already
+        // done that, in Swift, and written the answer into this node. So there is no second type
+        // rule, no `recomputeType` selector to pass, and no way for construction to fail on a type:
+        // a merge that would have failed left the node a `Clamp`, which this switch does not reach.
+        return builder.buildOperation(node.alternative, pushed, node.type, i == 0)
     }
 }
 

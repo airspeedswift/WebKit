@@ -2260,7 +2260,7 @@ void CSSCalcSwiftBuilder::clearOperands() noexcept
     m_operands->value.shrink(0);
 }
 
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool recomputeType, bool isRoot) noexcept
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot) noexcept
 {
     auto& stack = m_operands->value;
     if (!childCount || childCount > stack.size())
@@ -2269,19 +2269,6 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
     size_t base = stack.size() - childCount;
 
     auto finish = [&](auto&& op) -> bool {
-        // The type is computed into a LOCAL before the move, never inline beside it: argument
-        // evaluation order is unspecified, so `makeChild(WTF::move(op), toType(op))` can read a
-        // moved-from node whose `UniqueRef` is already null. That manifests as an OOM kill with no
-        // output at all, not as anything legible.
-        //
-        // A fresh `toType` only when the caller has no type to carry -- the `clamp()` rewrite, which
-        // is the one rule that changes an operation's kind. `toType` returning `std::nullopt` is not
-        // a boundary defect: for that rewrite it is the same `std::nullopt` `convertToMin` returns at
-        // :1021, i.e. the C++ would not have built this node either, so false means "decline", not
-        // "impossible".
-        std::optional<Type> type = recomputeType ? toType(op) : std::optional<Type> { carriedType };
-        if (!type)
-            return false;
         stack.shrink(base);
         // `constructAndAppend`, not `append(makeChild(...))`: the same in-place construction
         // `pushLeaf` uses. `makeChild` hands back a whole `Child`, and appending one move-constructs
@@ -2290,7 +2277,13 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         // slot. Naming the alternative instead picks the variant member at COMPILE time.
         // `makeIndirectNode` is `ChildConstruction`'s own indirect half (CSSCalcTree.h), so this is
         // not a second spelling of how an operation node is built.
-        constructOperand(*m_operands, isRoot, makeIndirectNode(WTF::move(op), *type));
+        //
+        // No `toType` here, and that is the point of `carriedType`. The one rewrite whose output
+        // kind is not its input kind -- `clamp()` to `min()`/`max()` -- computes its own type in
+        // `CalcFlatTree.convertToMinMax` and carries it like every other node, so there is no second
+        // type rule and no failure mode a caller would have to unwind an already-consumed operand
+        // stack to recover from.
+        constructOperand(*m_operands, isRoot, makeIndirectNode(WTF::move(op), carriedType));
         return true;
     };
 
