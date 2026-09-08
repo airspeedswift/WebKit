@@ -1173,11 +1173,6 @@ CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const noexcept
     return swiftOperationInfo(*m_node);
 }
 
-CSSCalcSwiftCalcMixWeight CSSCalcSwiftNode::calcMixItemWeight(uint32_t index) const noexcept
-{
-    return swiftCalcMixItemWeight(*m_node, index);
-}
-
 CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const noexcept
 {
     auto* found = childInSerializationOrder(*m_node, index);
@@ -1186,18 +1181,6 @@ CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const noexcept
     // default-constructed handle would turn that into a silent wrong serialization instead of a stop.
     RELEASE_ASSERT(found);
     return CSSCalcSwiftNode { found };
-}
-
-// Tree order is now just `Child::operator[]`, so this is a handle wrap and nothing else. It stays
-// only until the Swift reader borrows a `CSSCalc::Child` directly (revisit log R149 step 1b), at
-// which point it and `CSSCalcSwiftNode` go together.
-//
-// `info().childCount` is `Child::childCount()`, the same walker this indexes, so the count and the
-// indices cannot disagree -- which is what the two-walker arrangement this replaced had to argue
-// for in prose.
-CSSCalcSwiftNode CSSCalcSwiftNode::childInTreeOrder(uint32_t index) const noexcept
-{
-    return CSSCalcSwiftNode { &(*m_node)[index] };
 }
 
 void CSSCalcSwiftSink::appendLiteral(uint8_t literal) noexcept

@@ -2773,12 +2773,17 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
             sink += info.childCount + static_cast<uint32_t>(info.kind);
             break;
         }
-        case 2: {  // READ: childInTreeOrder(0) -- the accessor R144 found to be O(N) per call.
-            // The handle is bound to a named node, not to a temporary: `childInTreeOrder` is
-            // `[[clang::lifetimebound]]` on `this`, so `CSSCalcSwiftNode { &fixture }.childInTreeOrder(0)`
+        case 2: {  // READ: childAt(0) -- the accessor R144 found to be O(N) per call.
+            // The handle is bound to a named node, not to a temporary: `childAt` is
+            // `[[clang::lifetimebound]]` on `this`, so `CSSCalcSwiftNode { &fixture }.childAt(0)`
             // in one expression is a dangling read (-Wdangling catches it).
+            //
+            // This is the SERIALIZATION-order accessor, which for a `Sum` or `Product` fixture also
+            // runs `generateSortedChildrenMap`. Read this case as "the surviving child accessor",
+            // not as a number comparable with what the tree-order accessor measured before it was
+            // deleted as dead.
             auto parent = CSSCalcSwiftNode { &fixture };
-            auto child = parent.childInTreeOrder(0);
+            auto child = parent.childAt(0);
             sink += static_cast<uint32_t>(child.info().kind);
             break;
         }

@@ -319,7 +319,7 @@ static constexpr uint8_t numberOfCSSCalcSwiftAlternatives = 0 CSS_CALC_SWIFT_FOR
 // that runs for `anchor()` and `random()` only.
 //
 // The one *presence* test that is not here is `CalcMix`'s per-item weight: it is per item rather
-// than per node, so it needs a per-index accessor, which is `CSSCalcSwiftNode::calcMixItemWeight`.
+// than per node, so it needs a per-index accessor, which is `swiftCalcMixItemWeight`.
 // The presence test, the `Raw`/`Calc` test and the value all cross now, because `simplify(CalcMix&)`
 // does arithmetic on the weights and produces new ones. The serialization upcall is unchanged and
 // still writes the separator and number in C++ without needing any of them.
@@ -509,35 +509,6 @@ struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
     // have to own or a second representation of the tree. If a measurement finds this costly, the
     // fix is an iterator handle, not a flattened array.
     WEBCORE_EXPORT CSSCalcSwiftNode childAt(uint32_t index) const noexcept [[clang::lifetimebound]];
-
-    // The `index`th child, in tree order -- what `forAllChildNodes` yields, unsorted.
-    //
-    // A second accessor rather than a flag on `childAt`, because serialization needs the sorted
-    // order for `Sum` and `Product` and simplification needs tree order for the same two: it
-    // reconstructs the node from its children, and doing so in sort order would silently permute
-    // every multi-unit sum in the document.
-    //
-    // `info().childCount` serves both orders, since sorting a `Sum`'s children permutes them
-    // without adding or dropping any.
-    //
-    // `[[clang::lifetimebound]]`, prefix and nothing else, is the one spelling of six that imports
-    // without a #ClangDeclarationImport warning.
-    WEBCORE_EXPORT CSSCalcSwiftNode childInTreeOrder(uint32_t index) const noexcept [[clang::lifetimebound]];
-
-    // The weight of `CalcMix` item `index` -- the one payload of any alternative that is neither a
-    // child subtree nor a scalar on `info()`.
-    //
-    // A per-index accessor, needed because simplification does arithmetic on the weights: spec
-    // steps 1 to 5 operate on them and normalisation produces new ones, so the value has to cross
-    // and the weight's presence and kind (`Raw`/`Calc`) are decided in Swift rather than in C++.
-    // Serialization does not need this -- its `calcMixWeight` upcall writes the separator and the
-    // number directly in C++ without the value crossing.
-    //
-    // `index` is an item index, which is also a child index: `forAllChildNodes`' hand-written
-    // `CalcMix` overload (CSSCalcTree+Traversal.h:127) yields each item's `value` once, in item
-    // order, and nothing for a weight. So `info().childCount` is the item count and this shares its
-    // bound.
-    CSSCalcSwiftCalcMixWeight calcMixItemWeight(uint32_t index) const noexcept;
 
 private:
     // So that `appendOperationArgument` can reach the node it is being asked to write a piece of,
@@ -1103,7 +1074,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // stylesheet, not a decline.
     //
     // The `SharingFixed` arm is decided here, in C++, rather than in Swift -- the only such
-    // decision left, now that `CSSCalcSwiftNode::calcMixItemWeight` moved `CalcMix`'s per-item
+    // decision left, now that `swiftCalcMixItemWeight` moved `CalcMix`'s per-item
     // weight presence back to Swift. `simplify(Random&)` resolves a `fixed <number>` locally when
     // it is a `Raw` and answers nothing when it is a `Calc`, rather than going through
     // `resolveRandomBaseValue`, whose own fixed arm would run `Style::toStyle` and evaluate the
