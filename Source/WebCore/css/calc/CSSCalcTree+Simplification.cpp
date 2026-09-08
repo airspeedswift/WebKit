@@ -2255,10 +2255,12 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount
     return true;
 }
 
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
 void CSSCalcSwiftBuilder::clearOperands() noexcept
 {
     m_operands->value.shrink(0);
 }
+#endif
 
 bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot) noexcept
 {
@@ -2549,23 +2551,6 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double valu
     if (auto lengthUnit = CSS::toLengthUnit(static_cast<CSSUnitType>(unitType)); lengthUnit && m_options->conversionData)
         return resolvedCanonicalLength(Style::resolveLength(value, *lengthUnit, *m_options->conversionData));
     return unresolvedNumber;
-}
-
-bool CSSCalcSwiftBuilder::isLengthUnit(uint16_t unitType) const noexcept
-{
-    // `isLength(id)` from :611, with `id` recovered the same way the caller there gets it. The real
-    // predicate is called rather than restated: the 48-of-64 membership set exists exactly once, in
-    // CSSCalcTree+NumericIdentity.h:215.
-    //
-    // Routed through a `NonCanonicalDimension` because that is the only numeric kind this is asked
-    // about: `toNumericIdentity(const NonCanonicalDimension&)` is the overload that maps a
-    // `CSSUnitType` onto an identity, the same overload :610 reaches for a non-canonical term.
-    // `.value` is inert -- `toNumericIdentity` reads only `unit`.
-    //
-    // A unit outside the 56 `toNumericIdentity` enumerates lands on its `ASSERT_NOT_REACHED` branch
-    // and comes back as `NumericIdentity::Number`, which `isLength` answers false for -- the
-    // conservative direction, leaving the term in the sum rather than removing it.
-    return isLength(toNumericIdentity(NonCanonicalDimension { .value = 0, .unit = static_cast<CSSUnitType>(unitType) }));
 }
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)

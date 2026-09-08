@@ -1325,19 +1325,21 @@ private extension CalcSimplification {
     // MARK: `Sum`'s zero-length removal
 
     /// `isLength(id) && options.allowZeroValueLengthRemovalFromSum` (`:611`). `.number`/`.percentage`
-    /// never qualify; `.canonicalDimension` qualifies only for `Px`; `.nonCanonicalDimension` (48 of 56
-    /// units) crosses to `isLengthUnit`. The flag is tested first so the upcall is skipped when it
-    /// cannot be used, and the caller only reaches it for a merged value of exactly zero.
+    /// never qualify; `.canonicalDimension` qualifies only for `Px`; `.nonCanonicalDimension` asks
+    /// the real predicate. The flag is tested first so the work is skipped when it cannot be used,
+    /// and the caller only reaches it for a merged value of exactly zero.
+    ///
+    /// `toNumericIdentity` and `isLength` are the C++ definitions, called directly rather than
+    /// through an upcall: both are `constexpr` free functions over an enum, so they import, and the
+    /// 48-of-64 membership set stays in CSSCalcTree+NumericIdentity.h where it always was. Nothing
+    /// is transcribed here.
     ///
     /// The `Px` special case is stated once, here, because it is a disagreement rather than a
-    /// detail: the `isLengthUnit(uint16_t)` upcall (`+Simplification.cpp:2470`) routes through
-    /// `toNumericIdentity(NonCanonicalDimension{...})`, which answers `Number` for `CSSUnitType::Px`
-    /// and so returns FALSE for canonical px, where `isLength(PX)` in the C++ is true.
+    /// detail: `toNumericIdentity(NonCanonicalDimension{...})` answers `Number` for
+    /// `CSSUnitType::Px` and so returns FALSE for canonical px, where `isLength(PX)` in the C++ is
+    /// true. `.value` is inert -- `toNumericIdentity` reads only `unit`.
     @inline(always)
-    func lengthRemovalAllowed(
-        _ leaf: NumericLeaf,
-        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
-    ) -> Bool {
+    func lengthRemovalAllowed(_ leaf: NumericLeaf) -> Bool {
         guard allowZeroValueLengthRemovalFromSum else {
             return false
         }
@@ -1347,7 +1349,21 @@ private extension CalcSimplification {
         case .canonicalDimension:
             return leaf.unitType == UInt16(WebCore.CSSUnitType.Px.rawValue)
         case .nonCanonicalDimension:
-            return builder.isLengthUnit(leaf.unitType)
+            // `UInt8(exactly:)`, not `UInt8(_:)`, which traps: narrowing the boundary's `uint16_t`
+            // unit back must be able to fail. `CSSUnitType(rawValue:)` beside it is not a real
+            // check -- an imported C++ scoped enum's `init?(rawValue:)` accepts any value of the
+            // underlying type -- but that is exactly the C++'s own behaviour here: a unit outside
+            // the 56 `toNumericIdentity` enumerates lands on its `ASSERT_NOT_REACHED` branch and
+            // comes back `NumericIdentity::Number`, which `isLength` answers false for. The
+            // conservative direction: leave the term in the sum rather than remove it.
+            guard let raw = UInt8(exactly: leaf.unitType),
+                  let unit = WebCore.CSSUnitType(rawValue: raw) else {
+                return false
+            }
+            var dimension = WebCore.CSSCalc.NonCanonicalDimension()
+            dimension.value = 0
+            dimension.unit = unit
+            return WebCore.CSSCalc.isLength(WebCore.CSSCalc.toNumericIdentity(dimension))
         }
     }
 
@@ -2906,11 +2922,11 @@ fileprivate extension CalcFlatTree {
     /// `builder` is `Optional` for exactly one reason, and not as a design preference:
     /// `cssCalcFlatSimplifyProbeSwift` -- whose C++ signature is fixed by the benchmark harness that
     /// calls it -- has no builder to hand over. Two things are read through it here,
-    /// `lengthRemovalAllowed`'s `isLengthUnit` and `simplifyNonCanonicalDimension`'s
-    /// `resolveRelativeLength`, and `nil` cannot change an answer on any tree the production route
-    /// sends here, because that route always passes the builder. It CAN change one on the probe's own
-    /// trees, which is why the `nil` behaviour is pinned at each site rather than assumed unreachable:
-    /// a relative length with no conversion data to resolve against is the C++'s `nullopt`.
+    /// One thing is read through it here, `simplifyNonCanonicalDimension`'s `resolveRelativeLength`,
+    /// and `nil` cannot change an answer on any tree the production route sends here, because that
+    /// route always passes the builder. It CAN change one on the probe's own trees, which is why the
+    /// `nil` behaviour is pinned at that site rather than assumed unreachable: a relative length with
+    /// no conversion data to resolve against is the C++'s `nullopt`.
     ///
     /// `original` is the tree `calcFlatten` walked, threaded down for the folds whose upcall takes a
     /// `CSSCalc::Child` -- `resolveStyleCoupledValue` and `swiftCalcMixItemWeight`. They reach it
@@ -3701,25 +3717,9 @@ fileprivate extension CalcFlatTree {
                 // `firstInstance.canRemove = canRemoveIfZero && !mergedValue;` (`:625`) -- an
                 // ASSIGNMENT, so a bucket made removable by an earlier merge is cleared when a later
                 // one lands non-zero. `!mergedValue` is true for both `+0` and `-0`, which `== 0` is
-                // and a sign test would not be. Spelled as `if`/`else` rather than `&&` because
-                // `&&`'s autoclosure right operand cannot capture what `lengthRemovalAllowed` needs,
-                // and written in this order so the upcall inside it is skipped for every non-zero
-                // merge.
-                //
-                // `let builder` unwraps here rather than inside `lengthRemovalAllowed`, so that
-                // function keeps its non-`Optional` `borrowing` parameter: promoting a `borrowing`
-                // argument into an `Optional`
-                // is a CONSUME, and the diagnostic for it ("'builder' is borrowed and cannot be
-                // consumed") names the call site, not the promotion. A `nil` builder answers false,
-                // which only ever mis-answers a `NonCanonicalDimension`; the production route always
-                // passes a builder, and the only caller that does not is the benchmark probe, whose
-                // fixture holds `Number` leaves alone.
-                let removable: Bool
-                if merged == 0, let builder {
-                    removable = options.lengthRemovalAllowed(leaf, builder)
-                } else {
-                    removable = false
-                }
+                // and a sign test would not be. Written in this order so the unit classification is
+                // skipped for every non-zero merge.
+                let removable = merged == 0 && options.lengthRemovalAllowed(leaf)
                 if removable != canRemove[key] {
                     // `&+=`: guarded on `removable != canRemove[key]` and paired with the assignment
                     // below, so this counter is exactly "how many of the 128 buckets have
@@ -3738,12 +3738,7 @@ fileprivate extension CalcFlatTree {
             // a `UInt32` node count, so `c <= UInt32.max - 1` and `c &+ 1` fits `UInt32` exactly.
             // Same argument `calcFlattenSubtree` gives for `UInt32(truncatingIfNeeded: out.count)`.
             offsets[key] = UInt32(truncatingIfNeeded: c &+ 1)
-            let removable: Bool
-            if nodes[c].value == 0, let builder {
-                removable = options.lengthRemovalAllowed(leaf, builder)
-            } else {
-                removable = false
-            }
+            let removable = nodes[c].value == 0 && options.lengthRemovalAllowed(leaf)
             if removable != canRemove[key] {
                 removableBuckets &+= removable ? 1 : -1
                 canRemove[key] = removable
@@ -5195,8 +5190,9 @@ fileprivate extension CalcFlatTree {
 ///
 /// All three fields at their C++ default, which is what a probe wants: the fixtures are timed for the
 /// shape of the pass, and an options-dependent arm would make the number depend on a value the
-/// harness does not pass. `allowZeroValueLengthRemovalFromSum` false also means the one arm that
-/// would reach `isLengthUnit` is never taken, which is why the probes can hand `simplify` no builder.
+/// harness does not pass. `allowZeroValueLengthRemovalFromSum` false also means the zero-length
+/// removal arm is never taken, and the only remaining builder read is `resolveRelativeLength`, which
+/// is why the probes can hand `simplify` no builder.
 private var calcFlatProbeOptions: CalcSimplification {
     return CalcSimplification(
         percentageResolveToDimension: false,

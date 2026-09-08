@@ -49,8 +49,8 @@
 // (`cssprobe/trapcensus/noexceptprobe/`), a throwing and a `noexcept` callee compile to
 // instruction-for-instruction identical code except for the throwing arm's trailing `brk #0x1`. At
 // the census taken before these keywords were added, that cost the simplification island 62 `brk`s,
-// two of which were reachable *conditionally* -- the `bl; cbz; brk` around `isLengthUnit` -- and so
-// were live trap conditions rather than pure size.
+// two of which were reachable *conditionally* -- the `bl; cbz; brk` around the zero-length-removal
+// upcall that has since been retired -- and so were live trap conditions rather than pure size.
 //
 // Why the annotation is correct rather than a hazard, which is the direction that matters, since
 // `noexcept` over something that can throw converts an exception into `std::terminate`:
@@ -750,8 +750,9 @@ struct CSSCalcSwiftSimplificationOptions {
     // is the predicate below -- and inert for everything else.
     uint8_t category;
     // `options.allowZeroValueLengthRemovalFromSum`. `simplify(Sum&)` reads it at
-    // CSSCalcTree+Simplification.cpp:611, and `isLengthUnit` below is the other half of that one
-    // site. Not a rare flag -- four production callers set it.
+    // CSSCalcTree+Simplification.cpp:611, and Swift answers the `isLength` half of that one site
+    // itself, by calling CSSCalcTree+NumericIdentity.h's own predicate. Not a rare flag -- four
+    // production callers set it.
     bool allowZeroValueLengthRemovalFromSum;
     // Whether `options.conversionData` holds a value. Swift cannot be given
     // `CSSToLengthConversionData` and does not need it: every use of it is inside
@@ -932,18 +933,21 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
     WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false) noexcept;
 
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
     // Drop every operand.
     //
-    // The benchmark's, and only the benchmark's: `copyAndSimplify` builds a fresh
-    // `CSSCalcSwiftOperandStack` per call, so nothing on a real path ever re-enters a used one. It
-    // is a member here rather than a line in the benchmark because the stack reaches the timed loop
-    // only through this builder, and the loop has to be on the SWIFT side -- that is what hoists the
-    // flat tree's two buffers across iterations, and allocating them per call read 2338 retired
-    // instructions against 458 hoisted.
+    // The benchmark's, and only the benchmark's -- so it is compiled out of a shipping build, and
+    // its one Swift caller (`cssCalcFlatEmitProbeSwift`) already sits behind the same guard.
+    // `copyAndSimplify` builds a fresh `CSSCalcSwiftOperandStack` per call, so nothing on a real
+    // path ever re-enters a used one. It is a member rather than a line in the benchmark because
+    // the stack reaches the timed loop only through this builder, and the loop has to be on the
+    // SWIFT side -- that is what hoists the flat tree's two buffers across iterations, and
+    // allocating them per call read 2338 retired instructions against 458 hoisted.
     //
     // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
     // that this header stays self-contained and does not pull in wtf/Vector.h.
     WEBCORE_EXPORT void clearOperands() noexcept;
+#endif
 
     // `simplify(Symbol&)` (CSSCalcTree+Simplification.cpp:516-524) in full --
     // `makeNumeric(options.symbolTable.get(id)->value, unit)`.
@@ -978,24 +982,6 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // `alternative` is still reported for the reason `CSSCalcSwiftNumericResult::alternative` gives.
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const noexcept;
 
-    // `isLength(toNumericIdentity(...))` (CSSCalcTree+NumericIdentity.h:215), which
-    // `simplify(Sum&)` reads at CSSCalcTree+Simplification.cpp:611 to decide whether a zero-valued
-    // term can be dropped from a sum.
-    //
-    // In C++ because the answer is a 48-of-64 membership set over a generated unit enum, and
-    // transcribing it in either direction would be a duplicated table. A Swift denylist of the
-    // eight non-length non-canonical units (`Rad`, `Grad`, `Turn`, `Ms`, `Khz`, `X`, `Dpi`,
-    // `Dpcm`) was rejected: a new angle or time unit added to `CSSUnitType` would then be silently
-    // classified as a length and removed from every sum with a zero of it. A `bool isLength` field
-    // on `CSSCalcSwiftNodeInfo` was rejected on cost: `info()` runs for every node of every tree,
-    // and this would add a 56-case switch to answer a question only one operation asks.
-    //
-    // Not on any hot path: three of the four numeric kinds are decided in Swift from `unitType`
-    // alone, so this is reached only for a `NonCanonicalDimension` term whose value is exactly
-    // zero with `allowZeroValueLengthRemovalFromSum` set. `calc(0em + 1px)` reaches it; nothing
-    // else does.
-    WEBCORE_EXPORT bool isLengthUnit(uint16_t unitType) const noexcept;
-
     // The fourth upcall, and the only place `Style::BuilderState` reaches this boundary.
     //
     // Covers three style-coupled operations: `sibling-count()`, `sibling-index()`
@@ -1022,7 +1008,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     //
     // Not a precomputed field on `CSSCalcSwiftSimplificationOptions`, which would otherwise be the
     // cheapest possible crossing (one per `copyAndSimplify` instead of one per node), for the reason
-    // `isLengthUnit` above gives: `siblingCount()` and `siblingIndex()` walk the element's parent's
+    // `resolveRelativeLength` above gives: `siblingCount()` and `siblingIndex()` walk the element's parent's
     // child list, so a field would run that walk for every `calc()` in every stylesheet to answer a
     // question almost none of them ask. `random()` could not use one at all -- its answer depends on
     // the node's key.

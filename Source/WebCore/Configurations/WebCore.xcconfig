@@ -168,6 +168,16 @@ WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS_YES = -DENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=1
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CONDITIONS_$(WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE));
 WK_CSS_TOKENIZER_SWIFT_BRIDGE_CONDITIONS_YES = ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE;
 
+// And the same switch again, this time for the Swift step's CLANG IMPORTER, which is a third
+// place and not covered by either of the two above. OTHER_CFLAGS does not reach it, so a C++
+// declaration inside `#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)` is invisible to Swift without this
+// -- and the failure is a plain "has no member", naming neither the guard nor the flag. That is
+// what lets a bench-only upcall be compiled out of a shipping build instead of being carried in
+// the production boundary because Swift could not otherwise see it.
+WK_CSS_TOKENIZER_SWIFT_BRIDGE_SWIFT_CFLAGS = $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_SWIFT_CFLAGS_$(WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE));
+WK_CSS_TOKENIZER_SWIFT_BRIDGE_SWIFT_CFLAGS_YES = -Xcc -DENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=1;
+OTHER_SWIFT_FLAGS = $(inherited) $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_SWIFT_CFLAGS);
+
 OTHER_CFLAGS = $(inherited) $(WK_PGO_USE_CFLAGS) $(WK_PGO_GEN_FLAGS) $(WK_CSS_TOKENIZER_SWIFT_BRIDGE_CFLAGS);
 
 // Remove below workaround once fix from rdar://146134116 is universally available in all supported configurations.
