@@ -33,7 +33,7 @@
 // unit that includes it must be able to see every boundary's types -- the per-boundary
 // Clang modules in WebCore_Private.modulemap isolate what Swift may reach, not what C++
 // must declare. Leave out CSSCalcSwiftTypes.h and the generated thunk for
-// cssCalcSerializeSwift fails with "no member named 'CSSCalcSwiftNode' in namespace
+// cssCalcSerializeSwift fails with "no member named 'CSSCalcSwiftSink' in namespace
 // 'WebCore::CSSCalc'" in a file that has nothing to do with calc().
 //
 // This header states that module-wide requirement once, so adding a new boundary's headers

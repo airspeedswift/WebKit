@@ -51,7 +51,7 @@ namespace CSSCalc {
 // CSSCalcTree+Serialization.h for the guard and WebCore.xcconfig for the build setting.
 //
 // The sorting block below is deliberately outside all three regions: `sortPriority` and
-// `generateSortedChildrenMap` are called from `childInSerializationOrder` at :1139, and with the
+// `generateSortedChildrenMap` are called from `swiftSerializationChildIndex`, and with the
 // regions removed that becomes their only caller (the serializer's own uses, at :655 and :710, are
 // both inside region 2). So this code stays needed even once the rest of the serializer is gone.
 #if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
@@ -1125,12 +1125,21 @@ CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node) noexcept
     return out;
 }
 
-// The children of `node` in the order the serializer must visit them.
+// The tree-order index of `node`'s `index`th child in the order the serializer must visit them,
+// or `node.childCount()` when there is no such child.
 //
 // For `Sum` and `Product` that is the SORTED order: css-values-4 steps 6 and 7 both begin "Sort
 // root's children", keyed by `sortPriority` above, a 60-case unit order generated with
 // `__COUNTER__`. That generated table stays in C++, so this file answers in sorted order and only
 // ever names a position; every other kind answers in tree order, since no other kind sorts.
+//
+// An INDEX rather than the child, so Swift reaches the child through `Child::operator[]` -- the
+// same checked borrow the simplification island already uses -- and no cursor type, no reference
+// return and no permutation buffer crosses. `Child::operator[]` is what `childNodeAt` answers for a
+// `Sum` too (`+Traversal.h`'s `Children` slot is `&children[index]`), so naming a position into the
+// `Children` here and subscripting the `Child` there reach the same element. An out-of-range answer
+// is `childCount()`, which `Child::operator[]`'s own `RELEASE_ASSERT` stops on: the two disagreeing
+// means the tree changed under a borrow, and stopping is better than a wrong serialization.
 //
 // `generateSortedChildrenMap` runs per access rather than once per node, making an n-child Sum
 // O(n^2 log n). Left unoptimized because real calc trees are a handful of nodes; caching it would
@@ -1140,7 +1149,7 @@ CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node) noexcept
 // lambda is instantiated once per alternative, and each copy re-entered the child walk and its own
 // `switchOn`, which measured at 10,252 instructions plus 38 leaf lambdas of ~303 each (~22 KB)
 // against 302 instructions for the equivalent `get_if` version.
-static const Child* childInSerializationOrder(const Child& node, uint32_t index)
+uint32_t swiftSerializationChildIndex(const Child& node, uint32_t index) noexcept
 {
     const Children* sorts = nullptr;
     if (auto* sum = get_if<IndirectNode<Sum>>(&node))
@@ -1148,39 +1157,13 @@ static const Child* childInSerializationOrder(const Child& node, uint32_t index)
     else if (auto* product = get_if<IndirectNode<Product>>(&node))
         sorts = &(*product)->children;
 
-    if (sorts) {
-        auto sortedChildrenMap = generateSortedChildrenMap(*sorts);
-        if (index >= sortedChildrenMap.size())
-            return nullptr;
-        return &(*sorts)[sortedChildrenMap[index].index];
-    }
+    if (!sorts)
+        return index < node.childCount() ? index : static_cast<uint32_t>(node.childCount());
 
-    if (index >= node.childCount())
-        return nullptr;
-    return &node[index];
-}
-
-// The three POD reads, forwarded. `CSSCalcSwiftNode` is now a handle over a `Child` and nothing
-// more: the Swift simplifier reads the tree directly and only the serialization boundary still
-// takes one. Both these and the handle go when serialization follows (revisit log R149 step 1b).
-CSSCalcSwiftNodeInfo CSSCalcSwiftNode::info() const noexcept
-{
-    return swiftNodeInfo(*m_node);
-}
-
-CSSCalcSwiftOperationInfo CSSCalcSwiftNode::operationInfo() const noexcept
-{
-    return swiftOperationInfo(*m_node);
-}
-
-CSSCalcSwiftNode CSSCalcSwiftNode::childAt(uint32_t index) const noexcept
-{
-    auto* found = childInSerializationOrder(*m_node, index);
-    // Not a clamp and not a null return: this only ever indexes below the `childCount` it was just
-    // given, so reaching here means the two disagree -- the tree changed under a borrow -- and a
-    // default-constructed handle would turn that into a silent wrong serialization instead of a stop.
-    RELEASE_ASSERT(found);
-    return CSSCalcSwiftNode { found };
+    auto sortedChildrenMap = generateSortedChildrenMap(*sorts);
+    if (index >= sortedChildrenMap.size())
+        return static_cast<uint32_t>(sorts->size());
+    return static_cast<uint32_t>(sortedChildrenMap[index].index);
 }
 
 void CSSCalcSwiftSink::appendLiteral(uint8_t literal) noexcept
@@ -1232,7 +1215,7 @@ void CSSCalcSwiftSink::appendValueIDName(uint16_t valueID) noexcept
     m_builder->append(nameLiteralForSerialization(static_cast<CSSValueID>(valueID)));
 }
 
-void CSSCalcSwiftSink::appendOperationArgument(const CSSCalcSwiftNode& node, uint8_t part, uint32_t index) noexcept
+void CSSCalcSwiftSink::appendOperationArgument(const Child& node, uint8_t part, uint32_t index) noexcept
 {
     // Selected by name, like `appendLiteral`, so the numbering `CSSCalcSwiftOperationPart` declares
     // in Swift is never transcribed here.
@@ -1245,21 +1228,21 @@ void CSSCalcSwiftSink::appendOperationArgument(const CSSCalcSwiftNode& node, uin
     case CSSCalcSwiftOperationPartDashedIdent: {
         // `random()`'s `<random-cache-key>` name, or `anchor()`/`anchor-size()`'s
         // `<anchor-element>`. Which one is unambiguous from the node's own alternative, and this is
-        // only asked when `operationInfo()` said there is one.
+        // only asked when `swiftOperationInfo` said there is one.
         const CSS::CustomIdent* ident = nullptr;
-        if (auto* random = get_if<IndirectNode<Random>>(node.m_node)) {
+        if (auto* random = get_if<IndirectNode<Random>>(&node)) {
             if (auto* key = get_if<Random::Key>(&(*random)->sharing))
                 ident = key->name ? &*key->name : nullptr;
-        } else if (auto* anchor = get_if<IndirectNode<Anchor>>(node.m_node))
+        } else if (auto* anchor = get_if<IndirectNode<Anchor>>(&node))
             ident = (*anchor)->elementName ? &*(*anchor)->elementName : nullptr;
-        else if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(node.m_node))
+        else if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node))
             ident = (*anchorSize)->elementName ? &*(*anchorSize)->elementName : nullptr;
         RELEASE_ASSERT(ident);
         CSS::serializationForCSS(*m_builder, *m_context, *ident);
         return;
     }
     case CSSCalcSwiftOperationPartRandomFixedValue: {
-        auto* random = get_if<IndirectNode<Random>>(node.m_node);
+        auto* random = get_if<IndirectNode<Random>>(&node);
         RELEASE_ASSERT(random);
         auto* fixed = get_if<Random::SharingFixed>(&(*random)->sharing);
         RELEASE_ASSERT(fixed);
@@ -1268,10 +1251,10 @@ void CSSCalcSwiftSink::appendOperationArgument(const CSSCalcSwiftNode& node, uin
     }
     case CSSCalcSwiftOperationPartCalcMixWeight: {
         // The one presence test that stays in C++: the weight is per item, so exposing it here
-        // would need a per-index accessor beside `childAt` for a value that has nowhere else to be
-        // spelled anyway. The leading space belongs to the weight, exactly as in
+        // would need a per-index accessor beside the child index, for a value that has nowhere
+        // else to be spelled anyway. The leading space belongs to the weight, exactly as in
         // `serializeMathFunctionArguments(IndirectNode<CalcMix>)`.
-        auto* calcMix = get_if<IndirectNode<CalcMix>>(node.m_node);
+        auto* calcMix = get_if<IndirectNode<CalcMix>>(&node);
         RELEASE_ASSERT(calcMix);
         RELEASE_ASSERT(index < (*calcMix)->children.size());
         const auto& item = (*calcMix)->children[index];
@@ -1342,16 +1325,16 @@ static bool trySerializeWithSwiftIsland(StringBuilder& builder, const Tree& tree
 {
     CSSCalcSwiftSink sink { builder, options.serializationContext };
     // The stage and the range are the whole of `SerializationState` this cannot read for itself:
-    // `Stage` is on the `Tree` and the range is on the options, while the handle passed in is a
-    // cursor onto a `Child`. Two doubles rather than a `CSS::Range`, because `clampValue` reads
-    // `min` and `max`, and the two `RangeParseTimeBehavior` members belong to the parser.
-    auto result = cssCalcSerializeSwift(CSSCalcSwiftNode { &tree.root }, sink, tree.stage == Stage::Computed, options.range.min, options.range.max);
+    // `Stage` is on the `Tree` and the range is on the options, while what is passed in is the root
+    // `Child`. Two doubles rather than a `CSS::Range`, because `clampValue` reads `min` and `max`,
+    // and the two `RangeParseTimeBehavior` members belong to the parser.
+    auto result = cssCalcSerializeSwift(tree.root, sink, tree.stage == Stage::Computed, options.range.min, options.range.max);
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
     s_swiftCalls.fetch_add(1, std::memory_order_relaxed);
     s_lastNodeCount.store(result.nodeCount, std::memory_order_relaxed);
     s_lastKindMask.store(result.kindMask, std::memory_order_relaxed);
-    s_lastRootKind.store(static_cast<uint32_t>(CSSCalcSwiftNode { &tree.root }.info().kind), std::memory_order_relaxed);
+    s_lastRootKind.store(static_cast<uint32_t>(swiftNodeInfo(tree.root).kind), std::memory_order_relaxed);
     if (s_forceDecline.load(std::memory_order_relaxed)) {
         s_declines.fetch_add(1, std::memory_order_relaxed);
         return false;

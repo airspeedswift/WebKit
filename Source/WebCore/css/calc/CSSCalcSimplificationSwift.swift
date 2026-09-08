@@ -28,7 +28,7 @@ public import WebCore_Private.CSSCalcSwiftTypes
 // `CSSCalc::Child` itself: this file walks the REAL tree, not a handle over it.
 //
 // `Child::operator[]` yields a checked borrow of a child and `Child::childCount()` bounds the loop,
-// so the `CSSCalcSwiftNode` accessor facade is off the reading path entirely. The subscript
+// and there is no accessor facade over it at all -- a node is a `Child` on both sides. The subscript
 // spelling is load-bearing rather than stylistic -- CSSCalcTree.h explains why at the declaration,
 // and rdar://140443562 is the upstream item that would let it be a named accessor.
 //
@@ -2409,8 +2409,9 @@ fileprivate struct CalcFlattenReport {
 /// `firstChild` is `me + 1` rather than the index child 0 reports, and that is exact rather than an
 /// approximation: appending is pre-order, so a node's first child is always the next slot.
 ///
-/// Tree order, not serialization order: `childAt` sorts a `Sum`'s and a `Product`'s children by
-/// unit for the serializer, which would silently permute a multi-unit sum here.
+/// Tree order, not serialization order: `swiftSerializationChildIndex` sorts a `Sum`'s and a
+/// `Product`'s children by unit for the serializer, which would silently permute a multi-unit sum
+/// here.
 fileprivate func calcFlatten(
     _ node: borrowing WebCore.CSSCalc.Child,
     _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
@@ -2586,7 +2587,7 @@ fileprivate func calcFlattenSubtree(
     }
 
     // A second crossing, taken only for the one alternative that needs it, on the same rule
-    // `CSSCalcSwiftNode::operationInfo` states: `info()` runs for every node of every tree, and
+    // `swiftOperationInfo` states: `swiftNodeInfo` runs for every node of every tree, and
     // this answers a question only `anchor()` asks.
     if info.alternative == .Anchor, !WebCore.CSSCalc.swiftOperationInfo(node).anchorSideIsKeyword {
         flags |= CalcFlatNodeFlags.anchorSideIsSubtree

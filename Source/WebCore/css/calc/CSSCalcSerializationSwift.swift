@@ -21,9 +21,14 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 // THE POSSIBILITY OF SUCH DAMAGE.
 
-// Only this file's own boundary types, not the WebCore_Private umbrella -- see
-// CSSCalcSwiftTypes.h for why.
+// This file's own boundary types.
 public import WebCore_Private.CSSCalcSwiftTypes
+
+// `CSSCalc::Child` itself: this file walks the REAL tree, not a handle over it, exactly as
+// CSSCalcSimplificationSwift.swift does. `Child::operator[]` yields a checked borrow of a child and
+// `Child::childCount()` bounds the loop; the subscript spelling is load-bearing rather than
+// stylistic, and CSSCalcTree.h explains why at the declaration.
+internal import WebCore_Private.Core
 
 // Swift port of CSSCalcTree+Serialization.cpp for CSS calc() serialization, selected by
 // USE_SWIFT_CSS_CALC_SERIALIZATION.
@@ -82,8 +87,9 @@ public import WebCore_Private.CSSCalcSwiftTypes
 //
 // Sort order and operator names are both C++ upcalls, for the same reason number formatting is.
 // Steps 6 and 7 sort root's children by a generated 60-case unit table
-// (`CSSCalcTree+Serialization.cpp:146`), so `childAt` answers in serialization order already --
-// sorted for `Sum` and `Product`, tree order otherwise -- and this file only ever names a position.
+// (`CSSCalcTree+Serialization.cpp:146`), so `swiftSerializationChildIndex` answers in serialization
+// order already -- sorted for `Sum` and `Product`, tree order otherwise -- and this file only ever
+// names a position, then takes the borrow itself through `Child::operator[]`.
 // `nameLiteralForSerialization` is generated from CSSValueKeywords.in, so this file carries a
 // `CSSValueID` and `appendValueIDName` owns the spelling; the twenty-six plain math functions
 // therefore cost no name table here. `sink.appendNumber` likewise routes to C++'s
@@ -93,7 +99,7 @@ public import WebCore_Private.CSSCalcSwiftTypes
 // The walk establishes coverage over the whole tree before any output is appended, since a partial
 // emit into C++'s `StringBuilder` cannot be undone.
 //
-// The tree crosses as a borrowed `~Escapable` handle and the output as a `SWIFT_SAFE` sink taken
+// The tree crosses as a borrowed non-copyable `Child` and the output as a `SWIFT_SAFE` sink taken
 // `inout`; neither is a pointer this file can see, so there is no `unsafe` marker here.
 
 /// Whether this file serialized a tree, or left it for the C++ serializer.
@@ -187,6 +193,19 @@ enum CSSCalcSwiftOperationPart: UInt8 {
     case calcMixWeight = 2
 }
 
+/// The tree-order position of `node`'s `index`th child IN SERIALIZATION ORDER, for subscripting
+/// `node` with.
+///
+/// For a `Sum` or a `Product` that is not tree order: steps 6 and 7 both begin "Sort root's
+/// children", and the key is a 60-case generated unit table that must not be transcribed here. C++
+/// owns the sort and answers with a permutation ENTRY, and the child itself is reached through
+/// `Child::operator[]` -- so a position is named here and C++ owns what that position means, with
+/// no permutation buffer crossing and no cursor type. Every other kind is the identity.
+@inline(always)
+private func serializationOrder(_ node: borrowing WebCore.CSSCalc.Child, _ index: UInt32) -> Int {
+    return Int(WebCore.CSSCalc.swiftSerializationChildIndex(node, index))
+}
+
 /// One bit per `CSSCalcSwiftNodeKind`, for the mask the walk reports.
 @inline(always)
 private func kindBit(_ kind: WebCore.CSSCalc.CSSCalcSwiftNodeKind) -> UInt32 {
@@ -248,7 +267,7 @@ private func isSerializableNode(
         // both write the separator before each item.
         return true
     case .AnchorFunction, .AnchorSizeFunction:
-        // The count is checked against `operationInfo()` in `walk`, which is where the record that
+        // The count is checked against `swiftOperationInfo` in `walk`, which is where the record that
         // says how many children there SHOULD be is available. Two predicates rather than one
         // because this one is also asked about nodes deep inside a tree, where the extra crossing
         // would be paid for every node of every kind.
@@ -311,7 +330,7 @@ private func isSerializableRoot(
 /// The extra condition `anchor()` and `anchor-size()` have to meet, which `isSerializableNode`
 /// cannot express from a kind and a count.
 ///
-/// First, the count has to agree with the record: `operationInfo()` says whether the
+/// First, the count has to agree with the record: `swiftOperationInfo` says whether the
 /// `<anchor-side>` is a keyword and whether there is a fallback, and `childCount` says how many
 /// subtrees the bridge hands over. The fallback is written at index `anchorSideIsKeyword ? 0 : 1`,
 /// so if those two came apart this would serialize the side as the fallback or index past the end.
@@ -324,10 +343,10 @@ private func isSerializableRoot(
 /// be declined here too, where the C++ would reach the same defect.
 @inline(always)
 private func anchorArgumentsAreSerializable(
-    _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+    _ node: borrowing WebCore.CSSCalc.Child,
     _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo
 ) -> Bool {
-    let operation = node.operationInfo()
+    let operation = WebCore.CSSCalc.swiftOperationInfo(node)
 
     var expected: UInt32 = operation.hasFallback ? 1 : 0
     if info.kind == .AnchorFunction && !operation.anchorSideIsKeyword {
@@ -339,8 +358,7 @@ private func anchorArgumentsAreSerializable(
 
     var index: UInt32 = 0
     while index < info.childCount {
-        let child = node.childAt(index)
-        let childInfo = child.info()
+        let childInfo = WebCore.CSSCalc.swiftNodeInfo(node[serializationOrder(node, index)])
         if !isSerializableRoot(childInfo.kind, childInfo.childCount) {
             return false
         }
@@ -354,16 +372,16 @@ private func anchorArgumentsAreSerializable(
 ///
 /// Recursive rather than an explicit stack: calc trees are shallow -- the deepest expression in the
 /// whole WPT css-values corpus is single digits of nodes -- and the parser bounds depth long before
-/// this runs. An explicit worklist would need a Swift container of a `~Escapable` element, and no
-/// standard container accepts one.
+/// this runs. An explicit worklist would need a Swift container of a non-copyable borrowed
+/// element, and no standard container holds a borrow.
 private func walk(
-    _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+    _ node: borrowing WebCore.CSSCalc.Child,
     _ nodeCount: inout UInt32,
     _ kindMask: inout UInt32
 ) -> Bool {
-    // One crossing per node, not five: `info()` answers the kind, the child count and every POD
+    // One crossing per node, not five: `swiftNodeInfo` answers the kind, the child count and every POD
     // payload together, because they all come off the same variant discriminant.
-    let info = node.info()
+    let info = WebCore.CSSCalc.swiftNodeInfo(node)
     nodeCount += 1
     kindMask |= kindBit(info.kind)
 
@@ -382,7 +400,7 @@ private func walk(
         // Kept as a full traversal even once `everyNodeSerializable` is false, so that the node
         // count and the kind mask describe the whole tree rather than the prefix walked before the
         // first operator: a mask that stopped early would under-report the kinds not yet handled.
-        if !walk(node.childAt(index), &nodeCount, &kindMask) {
+        if !walk(node[serializationOrder(node, index)], &nodeCount, &kindMask) {
             everyNodeSerializable = false
         }
         index += 1
@@ -407,7 +425,7 @@ private func walk(
 /// them.
 private struct CalcSerialization {
     /// `state.stage == Stage::Computed`. It arrives from the caller rather than from the tree,
-    /// because `Stage` lives on `CSSCalc::Tree` and the handle here is a cursor onto a `Child`.
+    /// because `Stage` lives on `CSSCalc::Tree` and what this file is handed is a `Child`.
     let isComputedStage: Bool
     /// `state.range.min` and `state.range.max`.
     let rangeMinimum: Double
@@ -443,11 +461,11 @@ private struct CalcSerialization {
     /// rather than by editing the output afterwards, which is what the C++ does too and is why a
     /// `StringBuilder` suffices for both.
     func serializeCalculationTree(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         includingGroupingParenthesis includeGrouping: Bool,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         switch info.kind {
         case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
             // 2. If root is a numeric value, serialize root per the normal rules for it.
@@ -465,7 +483,7 @@ private struct CalcSerialization {
             // including inheriting this node's grouping parenthesis, which is what
             // `serializeCalculationTree(IndirectNode<Deg2Rad>)` does by passing `state` through
             // unchanged (`+Serialization.cpp:762`).
-            serializeCalculationTree(node.childAt(0), includingGroupingParenthesis: includeGrouping, &sink)
+            serializeCalculationTree(node[serializationOrder(node, 0)], includingGroupingParenthesis: includeGrouping, &sink)
 
         case .Function, .RoundFunction, .ProgressNoClampFunction,
              .ClampWithNoneMinimum, .ClampWithNoneMaximum,
@@ -491,7 +509,7 @@ private struct CalcSerialization {
                 sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
             }
             sink.appendLiteral(CSSCalcSwiftLiteral.negateOpen.rawValue)
-            serializeCalculationTree(node.childAt(0), includingGroupingParenthesis: true, &sink)
+            serializeCalculationTree(node[serializationOrder(node, 0)], includingGroupingParenthesis: true, &sink)
             if includeGrouping {
                 sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
             }
@@ -502,7 +520,7 @@ private struct CalcSerialization {
                 sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
             }
             sink.appendLiteral(CSSCalcSwiftLiteral.invertOpen.rawValue)
-            serializeCalculationTree(node.childAt(0), includingGroupingParenthesis: true, &sink)
+            serializeCalculationTree(node[serializationOrder(node, 0)], includingGroupingParenthesis: true, &sink)
             if includeGrouping {
                 sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
             }
@@ -537,7 +555,7 @@ private struct CalcSerialization {
     /// a `Sum` *inside* an argument re-establishes `Include` for its own children, which is what makes
     /// `min(1px + 1em, (1rem + 1vw) * 2)` come out with one set of parentheses and not two.
     func serializeMathFunctionCall(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
@@ -590,13 +608,13 @@ private struct CalcSerialization {
             if info.kind == .ClampWithNoneMinimum {
                 sink.appendLiteral(CSSCalcSwiftLiteral.noneKeyword.rawValue)
                 sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
-                serializeCalculationTree(node.childAt(0), includingGroupingParenthesis: false, &sink)
+                serializeCalculationTree(node[serializationOrder(node, 0)], includingGroupingParenthesis: false, &sink)
             }
             while index < info.childCount {
                 if index > 0 {
                     sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
                 }
-                serializeCalculationTree(node.childAt(index), includingGroupingParenthesis: false, &sink)
+                serializeCalculationTree(node[serializationOrder(node, index)], includingGroupingParenthesis: false, &sink)
                 index += 1
             }
             if info.kind == .ClampWithNoneMaximum {
@@ -620,11 +638,11 @@ private struct CalcSerialization {
     /// separators, so an empty key would come out as `random(, 1px, 1em)` on both sides -- the same
     /// output, whether or not the (compiled-out) assertion would have fired.
     func serializeRandomArguments(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let operation = node.operationInfo()
+        let operation = WebCore.CSSCalc.swiftOperationInfo(node)
 
         if operation.randomSharingIsKey {
             var wroteSomething = false
@@ -659,7 +677,7 @@ private struct CalcSerialization {
             if index > 0 {
                 sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
             }
-            serializeCalculationTree(node.childAt(index), includingGroupingParenthesis: false, &sink)
+            serializeCalculationTree(node[serializationOrder(node, index)], includingGroupingParenthesis: false, &sink)
             index += 1
         }
     }
@@ -673,7 +691,7 @@ private struct CalcSerialization {
     /// this loop has no presence test of its own; `CSSCalcSwiftOperationInfo` records why that check
     /// stays in C++.
     func serializeCalcMixArguments(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
@@ -682,7 +700,7 @@ private struct CalcSerialization {
             if index > 0 {
                 sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
             }
-            serializeCalculationTree(node.childAt(index), includingGroupingParenthesis: false, &sink)
+            serializeCalculationTree(node[serializationOrder(node, index)], includingGroupingParenthesis: false, &sink)
             sink.appendOperationArgument(node, CSSCalcSwiftOperationPart.calcMixWeight.rawValue, index)
             index += 1
         }
@@ -697,10 +715,10 @@ private struct CalcSerialization {
     /// function, calc() can't be omitted in arguments". `walk` has already established that every one
     /// of them is serializable in ROOT position, which is the narrower condition that routing implies.
     func serializeAnchorArguments(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let operation = node.operationInfo()
+        let operation = WebCore.CSSCalc.swiftOperationInfo(node)
 
         if operation.hasElementName {
             sink.appendOperationArgument(node, CSSCalcSwiftOperationPart.dashedIdent.rawValue, 0)
@@ -713,13 +731,13 @@ private struct CalcSerialization {
         if operation.anchorSideIsKeyword {
             sink.appendValueIDName(operation.valueID)
         } else {
-            serializeWithoutOmittingPrefix(node.childAt(0), &sink)
+            serializeWithoutOmittingPrefix(node[serializationOrder(node, 0)], &sink)
             fallbackIndex = 1
         }
 
         if operation.hasFallback {
             sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
-            serializeWithoutOmittingPrefix(node.childAt(fallbackIndex), &sink)
+            serializeWithoutOmittingPrefix(node[serializationOrder(node, fallbackIndex)], &sink)
         }
     }
 
@@ -735,10 +753,10 @@ private struct CalcSerialization {
     /// `anchorSizeDimensionValueID` and `appendValueIDName` writes it through the generated table. The
     /// C++ side keeps its own six literals independently, on purpose.
     func serializeAnchorSizeArguments(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let operation = node.operationInfo()
+        let operation = WebCore.CSSCalc.swiftOperationInfo(node)
 
         if operation.hasElementName {
             sink.appendOperationArgument(node, CSSCalcSwiftOperationPart.dashedIdent.rawValue, 0)
@@ -755,7 +773,7 @@ private struct CalcSerialization {
             if operation.hasElementName || operation.hasDimension {
                 sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
             }
-            serializeWithoutOmittingPrefix(node.childAt(0), &sink)
+            serializeWithoutOmittingPrefix(node[serializationOrder(node, 0)], &sink)
         }
     }
 
@@ -768,10 +786,10 @@ private struct CalcSerialization {
     /// mechanism and neither is correct without the other.
     @inline(always)
     func serializeWithoutOmittingPrefix(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let info = node.info()
+        let info = WebCore.CSSCalc.swiftNodeInfo(node)
         switch info.kind {
         case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension,
              .Symbol, .SiblingCount, .SiblingIndex:
@@ -786,10 +804,10 @@ private struct CalcSerialization {
 
     /// Step 6, the Sum node.
     ///
-    /// The child order is `childAt`'s, which for a Sum is the *sorted* order that step 6 requires -- C++
-    /// owns that sort, because its key is a generated 60-case unit table.
+    /// The child order is `swiftSerializationChildIndex`'s, which for a Sum is the *sorted* order that
+    /// step 6 requires -- C++ owns that sort, because its key is a generated 60-case unit table.
     func serializeSum(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ childCount: UInt32,
         includingGroupingParenthesis includeGrouping: Bool,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
@@ -801,38 +819,11 @@ private struct CalcSerialization {
         // - Serialize root's first child. Every child below is serialized WITH its grouping parenthesis,
         //   which is `ParenthesisSaver`'s only job in the C++: the Omit that a math-function wrapper
         //   installed applies to this node and not to its children.
-        serializeCalculationTree(node.childAt(0), includingGroupingParenthesis: true, &sink)
+        serializeCalculationTree(node[serializationOrder(node, 0)], includingGroupingParenthesis: true, &sink)
 
         var index: UInt32 = 1
         while index < childCount {
-            let child = node.childAt(index)
-            let childInfo = child.info()
-            switch childInfo.kind {
-            case .Negate:
-                // 6.1. If child is a Negate node, append " - " and serialize the Negate's child.
-                sink.appendLiteral(CSSCalcSwiftLiteral.minus.rawValue)
-                serializeCalculationTree(child.childAt(0), includingGroupingParenthesis: true, &sink)
-
-            case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
-                // 6.2. If child is a negative numeric value, append " - " and serialize its negation.
-                //
-                // `< 0` has IEEE semantics on both sides, which is load-bearing rather than incidental:
-                // `-0.0 < 0` is false and `Double.nan < 0` is false, so both take the " + " branch and
-                // serialize as themselves, exactly as the C++ `child.value < 0` does. A `signbit` or an
-                // `isLess` spelling would have diverged on those two.
-                if childInfo.numericValue < 0 {
-                    sink.appendLiteral(CSSCalcSwiftLiteral.minus.rawValue)
-                    sink.appendNumber(-childInfo.numericValue, childInfo.unitType)
-                } else {
-                    sink.appendLiteral(CSSCalcSwiftLiteral.plus.rawValue)
-                    sink.appendNumber(childInfo.numericValue, childInfo.unitType)
-                }
-
-            default:
-                // 6.3. Otherwise, append " + " and serialize child.
-                sink.appendLiteral(CSSCalcSwiftLiteral.plus.rawValue)
-                serializeCalculationTree(child, includingGroupingParenthesis: true, &sink)
-            }
+            serializeSumTerm(node[serializationOrder(node, index)], &sink)
             index += 1
         }
 
@@ -841,11 +832,51 @@ private struct CalcSerialization {
         }
     }
 
+    /// One later term of a `Sum`, with its own ` + ` or ` - ` separator.
+    ///
+    /// A `borrowing` PARAMETER rather than a `let` in the loop above, and that is the whole reason
+    /// this is a function: `Child` is non-copyable, so `let child = node[i]` is a consume of a
+    /// borrow and does not compile, and Swift has no borrowing local binding to spell instead
+    /// (toolchain filings section 49). A parameter is one, and a subscript in argument position is
+    /// the shape `calcDescendToOrigin` has shipped since R144. No closure, so no `partial_apply`.
+    func serializeSumTerm(
+        _ child: borrowing WebCore.CSSCalc.Child,
+        _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
+    ) {
+        let childInfo = WebCore.CSSCalc.swiftNodeInfo(child)
+        switch childInfo.kind {
+        case .Negate:
+            // 6.1. If child is a Negate node, append " - " and serialize the Negate's child.
+            sink.appendLiteral(CSSCalcSwiftLiteral.minus.rawValue)
+            serializeCalculationTree(child[serializationOrder(child, 0)], includingGroupingParenthesis: true, &sink)
+
+        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
+            // 6.2. If child is a negative numeric value, append " - " and serialize its negation.
+            //
+            // `< 0` has IEEE semantics on both sides, which is load-bearing rather than incidental:
+            // `-0.0 < 0` is false and `Double.nan < 0` is false, so both take the " + " branch and
+            // serialize as themselves, exactly as the C++ `child.value < 0` does. A `signbit` or an
+            // `isLess` spelling would have diverged on those two.
+            if childInfo.numericValue < 0 {
+                sink.appendLiteral(CSSCalcSwiftLiteral.minus.rawValue)
+                sink.appendNumber(-childInfo.numericValue, childInfo.unitType)
+            } else {
+                sink.appendLiteral(CSSCalcSwiftLiteral.plus.rawValue)
+                sink.appendNumber(childInfo.numericValue, childInfo.unitType)
+            }
+
+        default:
+            // 6.3. Otherwise, append " + " and serialize child.
+            sink.appendLiteral(CSSCalcSwiftLiteral.plus.rawValue)
+            serializeCalculationTree(child, includingGroupingParenthesis: true, &sink)
+        }
+    }
+
     /// Step 7, the Product node. Same shape as step 6 with `Invert`/` / `/` * ` in place of
     /// `Negate`/` - `/` + `, and with no negative-value case -- a Product does not rewrite a negative
     /// child, which is why this is not one function with a flag.
     func serializeProduct(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ childCount: UInt32,
         includingGroupingParenthesis includeGrouping: Bool,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
@@ -854,25 +885,33 @@ private struct CalcSerialization {
             sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
         }
 
-        serializeCalculationTree(node.childAt(0), includingGroupingParenthesis: true, &sink)
+        serializeCalculationTree(node[serializationOrder(node, 0)], includingGroupingParenthesis: true, &sink)
 
         var index: UInt32 = 1
         while index < childCount {
-            let child = node.childAt(index)
-            if child.info().kind == .Invert {
-                // 7.1. If child is an Invert node, append " / " and serialize the Invert's child.
-                sink.appendLiteral(CSSCalcSwiftLiteral.dividedBy.rawValue)
-                serializeCalculationTree(child.childAt(0), includingGroupingParenthesis: true, &sink)
-            } else {
-                // 7.2. Otherwise, append " * " and serialize child.
-                sink.appendLiteral(CSSCalcSwiftLiteral.times.rawValue)
-                serializeCalculationTree(child, includingGroupingParenthesis: true, &sink)
-            }
+            serializeProductTerm(node[serializationOrder(node, index)], &sink)
             index += 1
         }
 
         if includeGrouping {
             sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+        }
+    }
+
+    /// One later term of a `Product`. A `borrowing` parameter for the reason `serializeSumTerm`
+    /// gives.
+    func serializeProductTerm(
+        _ child: borrowing WebCore.CSSCalc.Child,
+        _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
+    ) {
+        if WebCore.CSSCalc.swiftNodeInfo(child).kind == .Invert {
+            // 7.1. If child is an Invert node, append " / " and serialize the Invert's child.
+            sink.appendLiteral(CSSCalcSwiftLiteral.dividedBy.rawValue)
+            serializeCalculationTree(child[serializationOrder(child, 0)], includingGroupingParenthesis: true, &sink)
+        } else {
+            // 7.2. Otherwise, append " * " and serialize child.
+            sink.appendLiteral(CSSCalcSwiftLiteral.times.rawValue)
+            serializeCalculationTree(child, includingGroupingParenthesis: true, &sink)
         }
     }
 
@@ -890,7 +929,7 @@ private struct CalcSerialization {
     /// math function at the `Computed` stage serializes byte for byte as it does at `Specified`.
     @inline(always)
     func serializeMathFunction(
-        _ node: borrowing WebCore.CSSCalc.CSSCalcSwiftNode,
+        _ node: borrowing WebCore.CSSCalc.Child,
         _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
@@ -962,11 +1001,11 @@ private struct CalcSerialization {
 ///
 /// `isComputedStage`, `rangeMinimum` and `rangeMaximum` come from the caller rather than from the
 /// tree, because `Stage` lives on `CSSCalc::Tree` and the range lives on `SerializationOptions`,
-/// while the handle here is a cursor onto a `Child`. Together they are the rest of
+/// while what this file is handed is a `Child`. Together they are the rest of
 /// `SerializationState`; see `CalcSerialization`.
 @_expose(Cxx)
 public func cssCalcSerializeSwift(
-    _ root: WebCore.CSSCalc.CSSCalcSwiftNode,
+    _ root: borrowing WebCore.CSSCalc.Child,
     _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink,
     _ isComputedStage: Bool,
     _ rangeMinimum: Double,
@@ -980,7 +1019,7 @@ public func cssCalcSerializeSwift(
     // cases that succeeded is not a coverage measurement.
     let everyNodeSerializable = walk(root, &nodeCount, &kindMask)
 
-    let rootInfo = root.info()
+    let rootInfo = WebCore.CSSCalc.swiftNodeInfo(root)
     guard everyNodeSerializable, isSerializableRoot(rootInfo.kind, rootInfo.childCount) else {
         return WebCore.CSSCalc.CSSCalcSwiftSerializationResult(
             kindMask: kindMask,

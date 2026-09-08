@@ -189,7 +189,7 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
     // that made it reachable declines instead of dropping a bound.
     ClampWithNoneMinimum,
     ClampWithNoneMaximum,
-    // The last four, each carrying non-tree arguments that `childAt` cannot reach. What they need
+    // The last four, each carrying non-tree arguments no child index can reach. What they need
     // beyond `CSSCalcSwiftNodeInfo` arrives in `CSSCalcSwiftOperationInfo` below, and their
     // `valueID` is `Op::id` -- `random`, `calc-mix`, `anchor`, `anchor-size` -- exactly as
     // `Function`'s is, so the four function names still cost nothing on the Swift side.
@@ -445,91 +445,12 @@ struct CSSCalcSwiftNodeInfo {
     CSSCalcSwiftAlternative alternative;
 };
 
-// A borrowed cursor onto one node of a live CSSCalc::Tree.
+// MARK: - Reading a node
 //
-// Always a `Child`, i.e. a subtree, which keeps this an 8-byte handle with nothing to
-// discriminate. `clamp()`'s `none` bound is the one argument that is not a subtree, carried by
-// the parent's *kind* rather than by a cursor that could point at something else -- see
-// `CSSCalcSwiftNodeKind::ClampWithNoneMinimum`.
-//
-// `SWIFT_NONESCAPABLE` is the point: the handle borrows a node owned by a tree on the C++ stack,
-// and `~Escapable` is what makes the compiler enforce that it cannot outlive the borrow.
-//
-// Three annotations are load-bearing: `SWIFT_SAFE` clears the residual unsafety of the private
-// `const Child*` member, without which every call site needs an `unsafe` marker; the
-// constructors' `@lifetime(immortal)` / `@lifetime(copy node)` are what make a method *returning*
-// this type import at all, rather than being silently dropped; and `[[clang::lifetimebound]]` on
-// `childAt`, prefix and nothing else, is the one of six lifetime spellings that imports without a
-// #ClangDeclarationImport warning.
-struct SWIFT_SAFE SWIFT_NONESCAPABLE CSSCalcSwiftNode {
-    __attribute__((swift_attr("@lifetime(immortal)")))
-    CSSCalcSwiftNode() noexcept
-        : m_node(nullptr)
-    {
-    }
-
-    __attribute__((swift_attr("@lifetime(copy node)")))
-    CSSCalcSwiftNode(const Child* node [[clang::lifetimebound]]) noexcept
-        : m_node(node)
-    {
-    }
-
-    CSSCalcSwiftNode(const CSSCalcSwiftNode&) = default;
-
-    // Everything about this node, from one crossing.
-    //
-    // One call rather than five separate accessors (`kind`, `childCount`, `numericValue`,
-    // `unitType`, `valueID`): each of those was a separate `WTF::switchOn` over the same
-    // 41-alternative `Variant`, so splitting them would re-derive the same discriminant up to five
-    // times per node to answer questions this answers together.
-    CSSCalcSwiftNodeInfo info() const noexcept;
-
-    // Everything the four operation kinds below need beyond `info()`, from one more crossing.
-    //
-    // Separate from `info()` rather than folded into it because `info()` runs for every node of
-    // every tree, and this answers questions only four rare kinds ask. Called only when the kind
-    // says to.
-    CSSCalcSwiftOperationInfo operationInfo() const noexcept;
-
-    // The `index`th child, IN SERIALIZATION ORDER.
-    //
-    // For `Sum` and `Product` that is not tree order: css-values-4 steps 6 and 7 both begin "Sort
-    // root's children", and the sort key is `sortPriority`, a 60-case unit order generated with
-    // `__COUNTER__` (CSSCalcTree+Serialization.cpp:146). Transcribing that table into Swift is
-    // exactly the duplication this port is not allowed to do, and handing Swift a permutation to
-    // apply would need a buffer the boundary would have to own. So C++ answers in the sorted order
-    // it already computes, the same way it already answers `formatCSSNumberValue` -- a position is
-    // named here and C++ owns what that position means. Every other kind answers in tree order,
-    // because no other kind sorts.
-    //
-    // Linear, so a full walk is quadratic in the node count, and for Sum and Product it also
-    // re-sorts per access. That is deliberate and priced rather than assumed: a calc expression's
-    // tree is a handful of nodes (the deepest in the whole WPT css-values corpus is single digits),
-    // and the alternative -- handing Swift a child *list* -- is either a buffer the boundary would
-    // have to own or a second representation of the tree. If a measurement finds this costly, the
-    // fix is an iterator handle, not a flattened array.
-    WEBCORE_EXPORT CSSCalcSwiftNode childAt(uint32_t index) const noexcept [[clang::lifetimebound]];
-
-private:
-    // So that `appendOperationArgument` can reach the node it is being asked to write a piece of,
-    // and so that the builder can reach the node it is being asked to copy or reconstruct. The
-    // alternative -- a public accessor handing out the `Child*` -- would put a raw pointer in the
-    // Swift-visible surface of a type whose whole point is that no pointer crosses.
-    friend struct CSSCalcSwiftSink;
-    friend struct CSSCalcSwiftBuilder;
-
-    const Child* m_node;
-};
-
-// MARK: - Reading a node, without a handle
-//
-// The three POD reads above, spelled over a borrowed `CSSCalc::Child` instead of over a
-// `CSSCalcSwiftNode`. These are the implementations; the members forward to them.
-//
-// This is what lets the Swift simplifier walk the real tree. `Child::operator[]` gives it a checked
-// borrow of a child (CSSCalcTree.h says why it must stay an operator), `Child::childCount()` bounds
-// the loop, and these three answer everything else -- so `CSSCalcSwiftNode` is no longer on the
-// reading path and goes away once serialization follows (revisit log R149 step 1b).
+// Four free readers over a borrowed `CSSCalc::Child`. Together with `Child::operator[]`, which
+// gives Swift a checked borrow of a child (CSSCalcTree.h says why it must stay an operator), and
+// `Child::childCount()`, which bounds the loop, this is the whole reading surface of both calc
+// islands. There is no cursor type: a node is a `Child` on both sides.
 //
 // A `const Child&` PARAMETER is safe to Swift, unlike a `const Child&` RETURN: only the return
 // position imports as `UnsafePointer`. And every return here is a POD by value, which is
@@ -541,6 +462,25 @@ private:
 WEBCORE_EXPORT CSSCalcSwiftNodeInfo swiftNodeInfo(const Child&) noexcept;
 WEBCORE_EXPORT CSSCalcSwiftOperationInfo swiftOperationInfo(const Child&) noexcept;
 WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child&, uint32_t index) noexcept;
+
+// The TREE-ORDER index of `node`'s `index`th child IN SERIALIZATION ORDER, or `node.childCount()`
+// for an out-of-range request.
+//
+// For `Sum` and `Product` serialization order is not tree order: css-values-4 steps 6 and 7 both
+// begin "Sort root's children", and the key is `sortPriority`, a 60-case unit order generated with
+// `__COUNTER__` (CSSCalcTree+Serialization.cpp:146). That generated table must not be transcribed
+// into Swift, so C++ keeps the sort. Every other kind is the identity, because no other kind sorts.
+//
+// A permutation ENTRY, not a child: a `const Child&` return would import as `UnsafePointer`, so the
+// sorted child cannot be handed over as a reference at all. Handing back the INDEX instead lets
+// Swift take the borrow through `Child::operator[]`, which is the route the simplification island
+// already uses everywhere -- so no permutation buffer crosses and this boundary owns no storage.
+//
+// Linear per access, and for `Sum` and `Product` it re-sorts per access, so a full walk is
+// quadratic in the child count. Deliberate and priced rather than assumed: a calc expression's
+// child lists are a handful of nodes (the widest in the whole WPT css-values corpus is single
+// digits), and the alternative is a buffer this boundary would have to own.
+WEBCORE_EXPORT uint32_t swiftSerializationChildIndex(const Child&, uint32_t index) noexcept;
 
 // Where the serialization output goes.
 //
@@ -601,10 +541,10 @@ struct SWIFT_SAFE CSSCalcSwiftSink {
     // One entry selected by `part` rather than four named methods, for the reason `appendLiteral`
     // gives. `index` is meaningful only for `calcMixWeight`, where it selects the item.
     //
-    // Taken by `const&`, which is load-bearing: by value this method imports as `unsafe`, because
-    // the sink's struct-level `SWIFT_SAFE` does not reach a parameter that is itself
-    // `~Escapable`. By const reference: zero `unsafe`.
-    WEBCORE_EXPORT void appendOperationArgument(const CSSCalcSwiftNode&, uint8_t part, uint32_t index) noexcept;
+    // The node itself rather than a cursor onto it, for the reason the four readers above give: a
+    // `const Child&` parameter is safe to Swift and needs no annotation, where a `const Child&`
+    // return would not be.
+    WEBCORE_EXPORT void appendOperationArgument(const Child&, uint8_t part, uint32_t index) noexcept;
 
 private:
     WTF::StringBuilder* m_builder;
@@ -633,7 +573,7 @@ struct CSSCalcSwiftSerializationResult {
 
 // MARK: - The Swift calc simplification path (CSSCalcSimplificationSwift.swift)
 //
-// Shares `CSSCalcSwiftNode`, `CSSCalcSwiftNodeInfo` and `CSSCalcSwiftNodeKind` with the
+// Shares the four free readers, `CSSCalcSwiftNodeInfo` and `CSSCalcSwiftNodeKind` with the
 // serialization boundary above, and adds the half that did not exist: a way for Swift to
 // construct nodes.
 //
