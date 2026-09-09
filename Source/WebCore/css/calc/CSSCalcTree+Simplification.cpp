@@ -53,7 +53,6 @@
 namespace WebCore {
 namespace CSSCalc {
 
-static auto copyAndSimplify(const Random::Sharing&, const SimplificationOptions&) -> Random::Sharing;
 static auto copyAndSimplify(const CalcMix::Item&, const SimplificationOptions&) -> CalcMix::Item;
 static auto copyAndSimplify(const Vector<CalcMix::Item>&, const SimplificationOptions&) -> Vector<CalcMix::Item>;
 static auto copyAndSimplify(const CSS::Keyword::None&, const SimplificationOptions&) -> CSS::Keyword::None;
@@ -1769,11 +1768,6 @@ std::optional<Child> simplify(AnchorSize& anchorSize, const SimplificationOption
 
 // MARK: Copy & Simplify.
 
-Random::Sharing copyAndSimplify(const Random::Sharing& root, const SimplificationOptions&)
-{
-    return root;
-}
-
 CalcMix::Item copyAndSimplify(const CalcMix::Item& root, const SimplificationOptions& options)
 {
     return { .value = copyAndSimplify(root.value, options), .weight = root.weight };
@@ -1826,12 +1820,37 @@ template<Leaf Op> static auto copyAndSimplifyChildren(const Op& op, const Simpli
 // do. `elementName` and `dimension` are not subtrees at all.
 template<typename Op, typename MapSlot> static Op rebuildChildren(const IndirectNode<Op>& root, NOESCAPE MapSlot&& mapSlot)
 {
+    // `Random::Sharing` is a `<random-key>`, not a `<calc-sum>`: the one tuple slot in any operation
+    // that is not a subtree. Passed through here, once, rather than through an identity overload in
+    // each mapper -- both had one, stating the same fact twice.
+    //
+    // The type is NAMED rather than tested with `requires { mapSlot(slot); }`, deliberately: the
+    // `requires` form compiles and would silently pass through any slot shape a mapper does not
+    // handle, which is exactly the failure `rebuildSlot`'s overload set exists to turn into a
+    // compile error.
+    //
+    // ALWAYS_INLINE_LAMBDA IS LOAD-BEARING AND MEASURED. Without it the extra call layer moves the
+    // inliner's decision for a caller this does not touch: `copyAndSimplify(const Children&)` stops
+    // being emitted out of line and is inlined into `Child::switchOn<copyAndSimplify>` (2992 -> 3021
+    // instructions) while `WTF::map` is outlined in its place, costing the C++ arm ~2 retired
+    // instructions PER NODE -- real +0.49% on `real` and +0.69% on `depth12`, measured against a
+    // +-0.08% floor (cssprobe/validate/bench-item2-0909.txt, the 2x2 in
+    // arms/calc-mapslot-item2-parked.md). With it, all 605 CSSCalc symbols are instruction-identical
+    // to the tree without this change and `__text` differs only in the `__LINE__` immediates the
+    // added lines shift.
+    auto mapChildSlot = [&](const auto& slot) ALWAYS_INLINE_LAMBDA {
+        if constexpr (std::same_as<std::decay_t<decltype(slot)>, Random::Sharing>)
+            return slot;
+        else
+            return mapSlot(slot);
+    };
+
     if constexpr (std::same_as<Op, Anchor>)
         return Anchor { .elementName = root->elementName, .side = copy(root->side), .fallback = mapSlot(root->fallback) };
     else if constexpr (std::same_as<Op, AnchorSize>)
         return AnchorSize { .elementName = root->elementName, .dimension = root->dimension, .fallback = mapSlot(root->fallback) };
     else
-        return WTF::apply([&](const auto& ...x) { return Op { mapSlot(x)... }; }, *root);
+        return WTF::apply([&](const auto& ...x) { return Op { mapChildSlot(x)... }; }, *root);
 }
 
 template<typename Op> static auto copyAndSimplifyChildren(const IndirectNode<Op>& root, const SimplificationOptions& options) -> Op
@@ -2000,9 +2019,11 @@ struct RebuildCursor {
     }
 };
 
-// One overload per slot shape, which is what makes `rebuildFrom` generic over all operations:
-// `WTF::apply` hands each tuple slot to this set. Adding an operation adds no code here unless it
-// adds a new slot shape, in which case it fails to compile rather than silently mishandling it.
+// One overload per CHILD-SHAPED slot, which is what makes `rebuildFrom` generic over all
+// operations: `rebuildChildren` hands each tuple slot that holds a subtree to this set, and passes
+// the one that does not (`Random::Sharing`) through itself. Adding an operation adds no code here
+// unless it adds a new slot shape, in which case it fails to compile rather than silently
+// mishandling it.
 static Child rebuildSlot(const Child&, RebuildCursor& cursor)
 {
     return cursor.take();
@@ -2044,13 +2065,6 @@ static Children rebuildSlot(const Children&, RebuildCursor& cursor)
     for (size_t i = std::exchange(cursor.next, cursor.end); i < cursor.end; ++i)
         children.append(WTF::move(cursor.stack[i]));
     return Children { WTF::move(children) };
-}
-
-static Random::Sharing rebuildSlot(const Random::Sharing& original, RebuildCursor&)
-{
-    // Not a subtree, and copyAndSimplify(const Random::Sharing&) at :1742 returns it unchanged too,
-    // so it comes straight off the original.
-    return original;
 }
 
 static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, RebuildCursor& cursor)
