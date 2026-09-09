@@ -266,19 +266,14 @@ struct Child {
     // Both are O(1) in the child count -- they walk the tuple SLOTS, of which the widest operation
     // has four -- so reading a node's children one at a time is linear rather than quadratic.
     //
-    // `operator[]` RATHER THAN A NAMED ACCESSOR, and that is not a style choice. Swift's Clang
-    // importer maps `operator[]` to a `subscript` and `operator*` to `pointee`, and those two
-    // spellings alone yield a checked BORROW of a non-copyable C++ type. The identical signature
-    // under any other name -- with `[[clang::lifetimebound]]`, and even with
-    // `swift_attr("@lifetime(borrow self)")`, which states exactly the missing fact -- imports as
-    // `UnsafePointer<Child>` and is rejected under -strict-memory-safety. Measured across sixteen
-    // arms in ~/src/webkit-swift-ports/cssprobe/childreader, with the named/operator pair declared
-    // on one class and exercised in one file; recorded as swift-cpp-interop-notes.md section 97 and
-    // swift-toolchain-filings.md section 48, and tracked upstream as rdar://140443562 (extend
-    // borrow accessors to arbitrary imported C++ methods). These two names and no others because
-    // `pointee` and `subscript` are synthesized as address accessors (rdar://108773658). Renaming
-    // this to `childAt` would compile in C++ and silently remove the Swift calc island's only safe
-    // route into the tree.
+    // `operator[]` rather than a named accessor, because Swift's Clang importer maps `operator[]`
+    // to a `subscript` and `operator*` to `pointee`, and those two spellings alone yield a checked
+    // borrow of a non-copyable C++ type. The identical signature under any other name -- including
+    // with `[[clang::lifetimebound]]` or `swift_attr("@lifetime(borrow self)")` -- imports as
+    // `UnsafePointer<Child>` and is rejected under -strict-memory-safety. Only these two names,
+    // because `pointee` and `subscript` are synthesized as address accessors (rdar://108773658);
+    // extending borrow accessors to other imported C++ methods is rdar://140443562. Renaming this to
+    // a plain member would compile in C++ and remove the Swift code's only safe route into the tree.
     size_t childCount() const;
     const Child& operator[](size_t index) const LIFETIME_BOUND;
 

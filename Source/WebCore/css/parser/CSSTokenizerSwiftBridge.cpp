@@ -336,8 +336,7 @@ static bool bitwiseEqualSlot(const CSSCalc::Children& a, const CSSCalc::Children
 static bool bitwiseEqualSlot(const CSSCalc::Random::Sharing& a, const CSSCalc::Random::Sharing& b)
 {
     // `operator==` and not a bitwise walk: `Sharing` is never computed, only copied through
-    // unchanged (`copyAndSimplify(const Random::Sharing&)`), so the `double` inside `SharingFixed`
-    // is the same object's value on both sides and cannot have been rounded differently.
+    // unchanged, so the `double` inside `SharingFixed` is the same object's value on both sides.
     return a == b;
 }
 

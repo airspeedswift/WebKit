@@ -21,27 +21,13 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 // THE POSSIBILITY OF SUCH DAMAGE.
 
-// The boundary's POD record types -- `CSSCalcSwiftNodeInfo`, the builder, the result -- and the
-// three free functions that read a node's scalars. See CSSCalcSwiftTypes.h.
 public import WebCore_Private.CSSCalcSwiftTypes
 
-// `CSSCalc::Child` itself: this file walks the REAL tree, not a handle over it.
-//
-// `Child::operator[]` yields a checked borrow of a child and `Child::childCount()` bounds the loop,
-// so the `CSSCalcSwiftNode` accessor facade is off the reading path entirely. The subscript
-// spelling is load-bearing rather than stylistic -- CSSCalcTree.h explains why at the declaration,
-// and rdar://140443562 is the upstream item that would let it be a named accessor.
-//
-// This is the WebCore_Private umbrella, which CSSCalcSwiftTypes.h's header comment used to say
-// could not be imported at all. It can (R139); `Child` and every operation are safe types once
-// their pointer-bearing members are hidden, which CSSCalcTree.h does.
 internal import WebCore_Private.Core
 
-// The CSS unit vocabulary plus the conversion constants `canonicalize` multiplies by.
-//
-// `CSSUnits.h` is not self-contained, so the constants are split into namespace-scope `constexpr
-// double`s, which import cleanly. `internal`, not `public`, because a `public` Swift signature
-// naming an imported C++ enum is refused under library evolution.
+// `CSSUnits.h` is not self-contained, so the conversion constants are split into namespace-scope
+// `constexpr double`s, which import cleanly. Not `public`: a `public` Swift signature naming an
+// imported C++ enum is refused under library evolution.
 internal import WebCore_Private.CSSUnitsSwiftTypes
 
 // The three <angle> conversion constants. Imported through the submodule rather than plain
@@ -1155,20 +1141,9 @@ private extension CalcSimplification {
 
     // MARK: `Sum`'s zero-length removal
 
-    /// `isLength(id) && options.allowZeroValueLengthRemovalFromSum` (`:611`). `.number`/`.percentage`
-    /// never qualify; `.canonicalDimension` qualifies only for `Px`; `.nonCanonicalDimension` (48 of 56
-    /// units) crosses to `isLengthUnit`. The flag is tested first so the upcall is skipped when it
-    /// cannot be used, and the caller only reaches it for a merged value of exactly zero.
-    ///
-    /// The `Px` special case is stated once, here, because it is a disagreement rather than a
-    /// detail: the `isLengthUnit(uint16_t)` upcall (`+Simplification.cpp:2470`) routes through
-    /// `toNumericIdentity(NonCanonicalDimension{...})`, which answers `Number` for `CSSUnitType::Px`
-    /// and so returns FALSE for canonical px, where `isLength(PX)` in the C++ is true.
+    /// `isLength(id) && options.allowZeroValueLengthRemovalFromSum` (`:611`).
     @inline(always)
-    func lengthRemovalAllowed(
-        _ leaf: NumericLeaf,
-        _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder
-    ) -> Bool {
+    func lengthRemovalAllowed(_ leaf: NumericLeaf) -> Bool {
         guard allowZeroValueLengthRemovalFromSum else {
             return false
         }
@@ -1178,7 +1153,21 @@ private extension CalcSimplification {
         case .canonicalDimension:
             return leaf.unitType == UInt16(WebCore.CSSUnitType.Px.rawValue)
         case .nonCanonicalDimension:
-            return builder.isLengthUnit(leaf.unitType)
+            // `UInt8(exactly:)`, not `UInt8(_:)`, which traps: narrowing the boundary's `uint16_t`
+            // unit back must be able to fail. `CSSUnitType(rawValue:)` beside it is not a real
+            // check -- an imported C++ scoped enum's `init?(rawValue:)` accepts any value of the
+            // underlying type -- but that is exactly the C++'s own behaviour here: a unit outside
+            // the 56 `toNumericIdentity` enumerates lands on its `ASSERT_NOT_REACHED` branch and
+            // comes back `NumericIdentity::Number`, which `isLength` answers false for. The
+            // conservative direction: leave the term in the sum rather than remove it.
+            guard let raw = UInt8(exactly: leaf.unitType),
+                  let unit = WebCore.CSSUnitType(rawValue: raw) else {
+                return false
+            }
+            var dimension = WebCore.CSSCalc.NonCanonicalDimension()
+            dimension.value = 0
+            dimension.unit = unit
+            return WebCore.CSSCalc.isLength(WebCore.CSSCalc.toNumericIdentity(dimension))
         }
     }
 
@@ -1391,24 +1380,13 @@ private func calcSimplifyFlatTree(
 
     if let emitted {
         guard emitted else {
-            // `emit` returning false is a construction refusing. Two shapes, and only one of them
-            // has an alternative to name: `buildOperation` answering
-            // `std::nullopt` from `toType` for a `clamp()` this pass rewrote to a `min()`/`max()`
-            // whose children's types do not merge -- which is the same `std::nullopt`
-            // `convertToMin` returns at `+Simplification.cpp:1021`, so the C++ arm does not build
-            // it either -- and a builder contract violation, which has no one alternative behind
-            // it. The first blames `.Clamp`, the second has no single alternative to name. An
-            // UNATTRIBUTED decline is one nobody can close, and `simplifycheck`'s guard 3b fails
-            // outright on one.
-            //
-            // ASKED OF `kindMask`, which the flattening pass already computed, rather than of a bit
-            // the fold sets and `emitRoot` reports. That is deliberately coarser -- a tree whose
-            // `clamp()` folded away entirely and that then failed to emit for some other reason
-            // blames `.Clamp` too -- and it is what the cheap answer costs: carrying the precise
-            // one back out widens the closure's return type, which measured 92 retired instructions
-            // per simplification on the single-node band (see `emitRoot`).
-            return declined(report.kindMask, report.nodeCount,
-                report.kindMask & CalcFlatCoverage.bit(.Clamp) != 0 ? .Clamp : nil)
+            // `emit` returning false is a builder contract violation: either the mid-pass
+            // `declined` valve, or `pushLeaf`/`rebuildFrom`/`buildOperation` was handed something
+            // outside its own contract. None of those has one alternative behind it, so none is
+            // blamed -- a confident wrong attribution is worse than none, and an unattributed
+            // refusal is the right treatment for a contract violation. A refusal that is a
+            // coverage refusal must name what it refused.
+            return declined(report.kindMask, report.nodeCount, nil)
         }
         return WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
             kindMask: report.kindMask,
@@ -1680,8 +1658,9 @@ fileprivate struct CalcFlatNode {
 
 /// The bits on `CalcFlatNode.flags`.
 ///
-/// A bitfield rather than four `Bool`s, so the node stays inside the 8-byte tail slot it shares with
-/// `valueID`, `unitType`, `alternative` and `percentHint`, and the fifth predicate costs nothing.
+/// A bitfield rather than separate `Bool`s, so the node stays inside the 8-byte tail slot it shares
+/// with `valueID`, `unitType`, `alternative` and `percentHint`, and each further predicate costs
+/// nothing.
 fileprivate enum CalcFlatNodeFlags {
     /// `clamp()` whose MINIMUM bound is the keyword `none` rather than a subtree.
     ///
@@ -1704,18 +1683,6 @@ fileprivate enum CalcFlatNodeFlags {
     /// subtree -- an alternative this file has not been taught, sitting inside a side, still has to
     /// decline the whole tree -- so the distinction has to be a mark rather than an omission.
     static let insideAnchorSide: UInt8 = 1 << 3
-    /// This node's `Type` must be computed FRESH from its operands at emit, not carried.
-    ///
-    /// `clamp()` collapsing to `min()`/`max()` is the one rule in the whole file that changes an
-    /// operation's kind, and `convertToMin`/`convertToMax` (`+Simplification.cpp:1019`-`:1045`)
-    /// compute `toType(min)` rather than reusing the `Clamp`'s type -- which they must, since the
-    /// new node's slots are a subset of the old one's. Every other surviving operation keeps its
-    /// cached type, which is `copyAndSimplify`'s `getType(root)` at `:1821`.
-    ///
-    /// Carried by `replace`, and that is correct rather than incidental: a converted `Min` promoted
-    /// into its parent's slot -- `min(clamp(none, 1px, 2em))` -- is the same `Child` the C++ moves
-    /// up, with the fresh type already on it.
-    static let recomputeType: UInt8 = 1 << 4
 }
 
 /// Where a pre-order descent over the original tree got to.
@@ -1997,8 +1964,9 @@ fileprivate struct CalcFlattenReport {
 /// `firstChild` is `me + 1` rather than the index child 0 reports, and that is exact rather than an
 /// approximation: appending is pre-order, so a node's first child is always the next slot.
 ///
-/// Tree order, not serialization order: `childAt` sorts a `Sum`'s and a `Product`'s children by
-/// unit for the serializer, which would silently permute a multi-unit sum here.
+/// Tree order, not serialization order: `swiftSerializationChildIndex` sorts a `Sum`'s and a
+/// `Product`'s children by unit for the serializer, which would silently permute a multi-unit sum
+/// here.
 fileprivate func calcFlatten(
     _ node: borrowing WebCore.CSSCalc.Child,
     _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
@@ -2128,9 +2096,6 @@ fileprivate func calcFlattenSubtree(
     default: break
     }
 
-    // A second crossing, taken only for the one alternative that needs it, on the same rule
-    // `CSSCalcSwiftNode::operationInfo` states: `info()` runs for every node of every tree, and
-    // this answers a question only `anchor()` asks.
     if info.alternative == .Anchor, !WebCore.CSSCalc.swiftOperationInfo(node).anchorSideIsKeyword {
         flags |= CalcFlatNodeFlags.anchorSideIsSubtree
     }
@@ -2188,6 +2153,55 @@ fileprivate extension CalcFlatTree {
             cursor = nodes[Int(cursor)].nextSibling
         }
         return nil
+    }
+
+    /// `getType(const Child&)` (`CSSCalcTree.cpp:453`-`:456`) for the node this slot WILL EMIT.
+    ///
+    /// Two answers and no third, and neither is a fresh derivation of anything.
+    ///
+    /// An OPERATION answers with the type `calcFlatten` read off its original, because that is the
+    /// type its emitted node carries whichever of the three emit routes it takes: `buildOperation` is
+    /// handed exactly this value, and `calcEmitFromOrigin` reaches `rebuildFrom`, which stamps
+    /// `getType(alternative)` -- the same accessor on the same node. A node promoted by `replace`
+    /// carries the promoted node's type with it, so that stays true after list surgery.
+    ///
+    /// A LEAF answers from its own payload, because a leaf's `Type` is discarded at construction
+    /// (`ChildConstruction<Leaf>::make` ignores its `Type` argument, `CSSCalcTree.h:1002`) and so is
+    /// never stored to be read back. The seven overloads at `CSSCalcTree.cpp:415`-`:451` are
+    /// `leafType` for the four numeric kinds, `determineType(unit)` for a `Symbol`, and the identity
+    /// type for `sibling-count()` and `sibling-index()`.
+    ///
+    /// `nil` is the C++'s `std::nullopt` and must never be defaulted: `Type()` is a legitimate value,
+    /// the dimensionless `<number>`.
+    ///
+    /// THE NODE BY VALUE, NOT ITS INDEX, and that is a runtime-trap decision rather than a style
+    /// one. Both callers have already read the node -- `simplifyClamp` asks `numericLeaf` of each
+    /// bound before it can decide to convert -- so taking the index here would re-index the
+    /// `MutableSpan` at a data-dependent offset the optimizer cannot fold against the caller's
+    /// earlier one, and the census shows it as an extra `index out of bounds` condition.
+    /// `CalcFlatNode` is 40 trivial bytes on a path only a `clamp()` with one keyword bound that
+    /// could not fold ever reaches.
+    func emittedType(_ node: CalcFlatNode, _ options: CalcSimplification) -> CalcType? {
+        switch node.alternative {
+        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
+            guard let leaf = node.numericLeaf else {
+                return nil
+            }
+            return options.leafType(leaf)
+
+        case .Symbol:
+            guard let unit = WebCore.CSSUnitType(rawValue: node.unitType) else {
+                // Never taken: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
+                return nil
+            }
+            return CalcType.determineType(unit)
+
+        case .SiblingCount, .SiblingIndex:
+            return CalcType()
+
+        default:
+            return node.type
+        }
     }
 }
 
@@ -2277,28 +2291,10 @@ private func calcFlatMinMaxSurvives(
 }
 
 fileprivate extension CalcFlatTree {
-    /// Simplify the whole tree, children before parents, in one reverse pass.
-    ///
-    /// `options` is a `CalcSimplification`, which is where the fields the C++ reads --
-    /// `allowZeroValueLengthRemovalFromSum` at `:612` and `category` at `:886` -- are spelled.
-    ///
-    /// `builder` is `Optional` for exactly one reason, and not as a design preference:
-    /// `cssCalcFlatSimplifyProbeSwift` -- whose C++ signature is fixed by the benchmark harness that
-    /// calls it -- has no builder to hand over. Two things are read through it here,
-    /// `lengthRemovalAllowed`'s `isLengthUnit` and `simplifyNonCanonicalDimension`'s
-    /// `resolveRelativeLength`, and `nil` cannot change an answer on any tree the production route
-    /// sends here, because that route always passes the builder. It CAN change one on the probe's own
-    /// trees, which is why the `nil` behaviour is pinned at each site rather than assumed unreachable:
-    /// a relative length with no conversion data to resolve against is the C++'s `nullopt`.
-    ///
-    /// `original` is the tree `calcFlatten` walked, threaded down for the folds whose upcall takes a
-    /// `CSSCalc::Child` -- `resolveStyleCoupledValue` and `swiftCalcMixItemWeight`. They reach it
-    /// through `withCalcOriginalNode`, at the node's own place in the reverse scan, which is the
-    /// position `copyAndSimplify` resolves at too. Taking them during `calcFlatten` instead would
-    /// have been O(1) rather than O(index), and was rejected: it resolves an `anchor()` BEFORE its
-    /// fallback is simplified and resolves a `random()` whose bounds the fold has not yet checked,
-    /// so it can make an upcall -- and, for `anchor()`, a
-    /// `setCurrentPropertyInvalidAtComputedValueTime` side effect -- that the C++ arm never makes.
+    /// `builder` is `Optional` because `cssCalcFlatSimplifyProbeSwift`, whose C++ signature is fixed
+    /// by the harness that calls it, has no builder to hand over. One thing is read through it,
+    /// `simplifyNonCanonicalDimension`'s `resolveRelativeLength`, and `nil` cannot change an answer
+    /// on any tree the production route sends here, because that route always passes the builder.
     mutating func simplify(
         _ original: borrowing WebCore.CSSCalc.Child,
         _ options: CalcSimplification,
@@ -2904,31 +2900,14 @@ fileprivate extension CalcFlatTree {
                 let first = Int(offsets[key]) - 1
                 let merged = CalcExecutor.sum(nodes[first].value, nodes[c].value)
                 nodes[first].value = merged
-                // `&+=`: at most one merge per child of the sibling list, so `merges <= nodes.count`.
                 merges &+= 1
 
                 // `firstInstance.canRemove = canRemoveIfZero && !mergedValue;` (`:625`) -- an
-                // ASSIGNMENT, so a bucket made removable by an earlier merge is cleared when a later
-                // one lands non-zero. `!mergedValue` is true for both `+0` and `-0`, which `== 0` is
-                // and a sign test would not be. Spelled as `if`/`else` rather than `&&` because
-                // `&&`'s autoclosure right operand cannot capture what `lengthRemovalAllowed` needs,
-                // and written in this order so the upcall inside it is skipped for every non-zero
-                // merge.
-                //
-                // `let builder` unwraps here rather than inside `lengthRemovalAllowed`, so that
-                // function keeps its non-`Optional` `borrowing` parameter: promoting a `borrowing`
-                // argument into an `Optional`
-                // is a CONSUME, and the diagnostic for it ("'builder' is borrowed and cannot be
-                // consumed") names the call site, not the promotion. A `nil` builder answers false,
-                // which only ever mis-answers a `NonCanonicalDimension`; the production route always
-                // passes a builder, and the only caller that does not is the benchmark probe, whose
-                // fixture holds `Number` leaves alone.
-                let removable: Bool
-                if merged == 0, let builder {
-                    removable = options.lengthRemovalAllowed(leaf, builder)
-                } else {
-                    removable = false
-                }
+                // assignment, so a bucket made removable by an earlier merge is cleared when a
+                // later one lands non-zero. `!mergedValue` is true for both `+0` and `-0`, which
+                // `== 0` is and a sign test would not be. Written in this order so the unit
+                // classification is skipped for every non-zero merge.
+                let removable = merged == 0 && options.lengthRemovalAllowed(leaf)
                 if removable != canRemove[key] {
                     // `&+=`: guarded on `removable != canRemove[key]` and paired with the assignment
                     // below, so this counter is exactly "how many of the 128 buckets have
@@ -2943,12 +2922,7 @@ fileprivate extension CalcFlatTree {
             // !child.value };` (`:630`-`:634`). `c + 1` is a node index, not a term position: see
             // `calcFlatSumSurvives`.
             offsets[key] = UInt32(truncatingIfNeeded: c &+ 1)
-            let removable: Bool
-            if nodes[c].value == 0, let builder {
-                removable = options.lengthRemovalAllowed(leaf, builder)
-            } else {
-                removable = false
-            }
+            let removable = nodes[c].value == 0 && options.lengthRemovalAllowed(leaf)
             if removable != canRemove[key] {
                 removableBuckets &+= removable ? 1 : -1
                 canRemove[key] = removable
@@ -3214,7 +3188,7 @@ fileprivate extension CalcFlatTree {
                 options.unitsMatch(value, maximum), options.magnitudeComparable(value) else {
                 // All three of the C++'s `convertToMin()` sites (`:1050`, `:1055`, `:1060`), plus
                 // `max` not being a `Numeric` at all, which is the first of them.
-                convertToMinMax(i, isMax: false)
+                convertToMinMax(i, nodes[valueChild], nodes[maximumChild], isMax: false, options)
                 return
             }
             setLeaf(i, value.withValue(CalcExecutor.min(value.value, maximum.value)))
@@ -3230,7 +3204,7 @@ fileprivate extension CalcFlatTree {
         }
         guard let minimum = nodes[minimumChild].numericLeaf, options.switchTogether(minimum, value),
             options.unitsMatch(minimum, value), options.magnitudeComparable(value) else {
-            convertToMinMax(i, isMax: true)
+            convertToMinMax(i, nodes[minimumChild], nodes[valueChild], isMax: true, options)
             return
         }
         setLeaf(i, value.withValue(CalcExecutor.max(minimum.value, value.value)))
@@ -3239,28 +3213,44 @@ fileprivate extension CalcFlatTree {
     /// `convertToMin` / `convertToMax` (`+Simplification.cpp:1019`-`:1045`): a `clamp()` with one
     /// keyword bound that could not be folded becomes the equivalent two-argument `min()`/`max()`.
     ///
-    /// NO LIST SURGERY AT ALL, and that is the flat representation paying off rather than a
-    /// coincidence: the C++ builds a fresh two-element `Vector<Child>` in `val, max` order for
-    /// `convertToMin` and `min, val` order for `convertToMax`, and the flat child list is ALREADY in
-    /// exactly those orders -- child 0 is whichever of the three slots the keyword did not occupy
-    /// first. So the whole conversion is the kind byte and a flag.
+    /// No list surgery at all: the C++ builds a fresh two-element `Vector<Child>` in `val, max`
+    /// order for `convertToMin` and `min, val` order for `convertToMax`, and the flat child list is
+    /// already in exactly those orders -- child 0 is whichever of the three slots the keyword did
+    /// not occupy first. So both conversions take the list as it stands, and `first`/`second` here
+    /// are always child 0 and child 1.
     ///
-    /// `recomputeType` because the new node's type is `toType(min)` and not the `Clamp`'s; see the
-    /// flag's own comment and `emit`'s `Min`/`Max` arm.
+    /// The new type is computed here rather than at emit, and that is what closes the one coverage
+    /// hole this fold had. `toType(Min)` and `toType(Max)` are `Type::add` over the two children:
+    /// `Min::input` and `Max::input` are `AllowedTypes::Any`, so `getValidatedTypeFor` never
+    /// refuses; `merge` is `MergePolicy::Consistent`, which is `Type::consistentType`; and `output`
+    /// is `OutputTransform::None`, so `transformType` is the identity (`CSSCalcTree.cpp:509`-`:523`,
+    /// `CSSCalcType.h:378`-`:435`). `consistentType` is called, not transcribed. Asking before the
+    /// conversion is what leaves nothing to unwind: recomputing the type at emit would find the
+    /// operands already consumed into a node that cannot be built.
     ///
-    /// THE C++ HAS A DEFECT HERE THAT THIS CANNOT REPRODUCE. `convertToMin` moves `root.val` and
-    /// `root.max` into its new `Vector` BEFORE testing `toType`, and returns `std::nullopt` on
-    /// failure -- at which point `copyAndSimplify` (`:1818`-`:1821`) rebuilds a `Clamp` from
-    /// children that have been moved from, i.e. an `IndirectNode` holding a null `UniqueRef`.
-    /// `root.val` is always a numeric leaf on this path so it is harmless; `root.max` can be an
-    /// arbitrary subtree. Reachability is unverified and probably nil, since the parser type-checks
-    /// `clamp()`'s three arguments for consistency. There is no moved-from state here: a `toType`
-    /// that fails is `buildOperation` answering false, which declines the whole tree, and the C++ arm
-    /// then runs and executes the same undefined behaviour -- so the port neither fixes nor worsens
-    /// it. Recorded as a to-file WebKit bug and as a safety-ledger entry.
-    private mutating func convertToMinMax(_ i: Int, isMax: Bool) {
+    /// A failing merge leaves the node a `Clamp`, which is exactly what the C++ does with it:
+    /// `convertToMin` returns `std::nullopt` (`:1021`), `simplify(Clamp&)` propagates it, and
+    /// `copyAndSimplify` (`:1818`-`:1821`) rebuilds the `Clamp` with `getType(root)`. Emit's
+    /// `default` case rebuilds it from the same two operands through `rebuildFrom`, which takes
+    /// `getType(alternative)` off the same original.
+    ///
+    /// FIXME: `convertToMin` in the C++ moves `root.val` and `root.max` into its new `Vector`
+    /// before testing `toType`, and returns `std::nullopt` on failure, at which point
+    /// `copyAndSimplify` rebuilds a `Clamp` from children that have been moved from -- an
+    /// `IndirectNode` holding a null `UniqueRef`. `root.val` is always a numeric leaf on that path,
+    /// but `root.max` can be an arbitrary subtree. Nothing is moved here, so this port does not
+    /// reproduce it.
+    private mutating func convertToMinMax(_ i: Int, _ first: CalcFlatNode, _ second: CalcFlatNode, isMax: Bool, _ options: CalcSimplification) {
+        guard let firstType = emittedType(first, options),
+            let secondType = emittedType(second, options),
+            let merged = CalcType.consistentType(firstType, secondType).value else {
+            // The types do not merge, so the node stays a `Clamp` and `emit`'s `default` case
+            // rebuilds it from these same two operands. Not a refusal: the C++ does not build the
+            // `min()` either.
+            return
+        }
         nodes[i].alternative = isMax ? .Max : .Min
-        nodes[i].flags |= CalcFlatNodeFlags.recomputeType
+        nodes[i].type = merged
     }
 
     /// `simplifyForRound<Op>` (`+Simplification.cpp:328`-`:337`), shared by
@@ -4057,37 +4047,12 @@ fileprivate extension CalcFlatTree {
             return calcEmitFromOrigin(node.origin, pushed, false, i == 0, original, &builder)
         }
 
-        // The node's OWN type, not a fresh `toType` of the operands, EXCEPT for the one rule that
-        // changes an operation's kind. `copyAndSimplify` ends at `makeChild(WTF::move(simplified),
-        // getType(root))` (`+Simplification.cpp:1821`) -- the original node's type -- so recomputing
-        // here diverges from the C++ for any surviving operator whose children changed shape.
-        // Measured, not supposed: `calc((2 / 3px) * 4px)` survives as `Product{6px, 4px}` on both
-        // arms and SERIALIZES identically, so only simplifycheck's structural oracle catches it; the
-        // C++ keeps the parse-time type where a fresh `toType` computes px^2. That is why `flatten`
-        // pays `getType` per operator node, and why it skips it for the seven leaf alternatives,
-        // whose type `makeChild` discards.
-        //
-        // ONE CALL RATHER THAN TWO, AND ONE BOUNDARY ENTRY RATHER THAN TWO, and the flag that used to
-        // be an overload selector is a bit this node already carries: a `clamp()` that `simplifyClamp`
-        // rewrote to a `min()`/`max()` has `recomputeType` set, and that is exactly the case where the
-        // node's carried type is the `Clamp`'s and must not be used --
-        // `convertToMin`/`convertToMax` compute `toType` over the operands (`:1019`-`:1045`). Passing
-        // the bit costs nothing that reading it for a separate call did not, and it retires a second
-        // `buildOperation` overload, the pair of wrappers over a shared static body, and the
-        // `const Type*` parameter that body threaded. It also takes an arm off a switch `emit` runs at
-        // every node, which is the shape that cost `simplifyNode` 6.7 instructions per simplification
-        // for its thirty-first label.
-        return builder.buildOperation(node.alternative, pushed, node.type,
-            node.flags & CalcFlatNodeFlags.recomputeType != 0, i == 0)
+        // The node's own type, always, and never a fresh `toType` of the operands.
+        return builder.buildOperation(node.alternative, pushed, node.type, i == 0)
     }
 }
 
 /// The `SimplificationOptions` the two flat probes run under.
-///
-/// All three fields at their C++ default, which is what a probe wants: the fixtures are timed for the
-/// shape of the pass, and an options-dependent arm would make the number depend on a value the
-/// harness does not pass. `allowZeroValueLengthRemovalFromSum` false also means the one arm that
-/// would reach `isLengthUnit` is never taken, which is why the probes can hand `simplify` no builder.
 private var calcFlatProbeOptions: CalcSimplification {
     return CalcSimplification(
         percentageResolveToDimension: false,
