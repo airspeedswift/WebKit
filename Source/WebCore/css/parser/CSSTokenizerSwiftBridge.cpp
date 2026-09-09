@@ -1983,6 +1983,8 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcChildAlternativeCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char*, size_t, bool, uint32_t, uint32_t*);
+// ENTRY 14. See the definition; it is the only band in the rig that includes the parser.
+WEBCORE_EXPORT uint64_t webCoreCSSCalcParseBench(const char*, size_t, unsigned parseSimplification, uint32_t iterations, uint32_t* outParsed, uint32_t* outNodeCount, uint32_t* outCategory);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
@@ -2296,6 +2298,81 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char* text, size
         auto simplified = CSSCalc::copyAndSimplify(*parsed.tree, options, arm);
         fold = fold * 1000003 + static_cast<uint64_t>(simplified.root.index());
         fold = fold * 1000003 + static_cast<uint64_t>(simplified.type.percent);
+    }
+    return fold;
+}
+
+// ENTRY 14. Throughput of ONE `CSSCalc::ParseSimplification` mode of the WHOLE parse, for the
+// round-major driver in cssprobe/validate/parsebench.cpp.
+//
+// WHY A SECOND BENCH ENTRY RATHER THAN A PARAMETER ON THE ONE ABOVE. That one parses ONCE, outside
+// its loop, deliberately: it times simplification, and a parse costs far more than one
+// simplification of what it produced. This one puts the parse INSIDE the loop, which is the whole
+// difference and the whole point. Folding the two would make the existing calc bands unreadable.
+//
+// WHY IT IS NEEDED AT ALL. No band in this rig includes the parser: `cssbench` reaches
+// `webCoreCSSTokenizerBenchIntegrated`, which walks a token range and never reaches the declaration
+// parser, and `calcbench` reaches the entry above. P7b stage A MOVES work between the parse and
+// simplification -- eighteen per-operation `simplify(Op&, ...)` calls during the parse become one
+// whole-tree `copyAndSimplify` at the end -- so a simplification-only band would see the terminal
+// pass arrive and never see the eager passes leave. It would report a pure regression for a change
+// whose net effect is unknown.
+//
+// ONE ENTRY WITH A MODE SELECTOR rather than two frameworks, exactly as
+// `webCoreCSSTokenizerBenchIntegrated` and `webCoreCSSCalcRoundTrip` do: every configuration then
+// comes out of one binary, interleaved inside one process, so there is no cross-build drift to
+// attribute and no framework ordering to control for. The tokenizer, the `ParserOptions` and the
+// type check are the same code in all three modes and cancel in the within-binary difference; the
+// driver reports that difference and the absolute numbers both, so the dilution is visible rather
+// than assumed.
+//
+// ONE CATEGORY, NOT ELEVEN, and that is the reason `parseCalcExpression` was split. See the note
+// there: timing the category loop charges the eager arm for simplifying every rejected parse, which
+// is enough to reverse the sign. The accepting category is found once, outside the loop, and
+// reported through `outCategory` so the driver can print it rather than assume it.
+//
+// `outNodeCount` IS THE POSITIVE CONTROL'S RAW MATERIAL, and it is why this returns something other
+// than a fold. A build that ignores the mode argument -- one built before the gate, or one where
+// `parseAndSimplify` stopped reading it -- returns three identical timings and reads as "stage A is
+// free". The driver refuses to time anything until `None` produces a strictly larger tree than
+// `Eager` on at least six corpus cases and `Terminal` lands on exactly `Eager`'s node count on every
+// one of them. The node count is taken OUTSIDE the loop for that reason: a tree walk inside it would
+// be proportional to tree size, which is exactly what differs between the modes.
+//
+// `fold` exists only to stop the loop being eliminated; the result is otherwise unused and the whole
+// body is dead code without it. It folds the root's alternative and the tree's percent hint, so a
+// mode returning a structurally different answer cannot fold identically.
+//
+// NOTE FOR ANYONE READING A NUMBER FROM THIS: in a build with the bridge enabled, the `Terminal`
+// mode's one whole-tree island call pays five relaxed atomics that the `Eager` mode does not
+// (CSSCalcTree+Simplification.cpp, all `#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)`), so the difference
+// is biased against `Terminal`. It is per TREE, not per node; `calcbench --atomic-floor` prices the
+// sequence at 1.63 ns and it should be subtracted before quoting a shipping number.
+WEBCORE_EXPORT uint64_t webCoreCSSCalcParseBench(const char* text, size_t length, unsigned parseSimplification, uint32_t iterations, uint32_t* outParsed, uint32_t* outNodeCount, uint32_t* outCategory)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto mode = static_cast<CSSCalc::ParseSimplification>(parseSimplification);
+
+    // One full parse outside the loop, to find the accepting category and fill the out-parameters.
+    // Its cost is amortised away by `iterations`, exactly as the entry above amortises its parse.
+    auto probe = parseCalcExpression(source, mode);
+    if (outParsed)
+        *outParsed = probe.tree ? 1 : 0;
+    if (outNodeCount)
+        *outNodeCount = probe.tree ? nodeCountOfSubtree(probe.tree->root) : 0;
+    if (outCategory)
+        *outCategory = static_cast<uint32_t>(probe.category);
+    if (!probe.tree)
+        return 0;
+    auto category = probe.category;
+
+    uint64_t fold = 0;
+    for (uint32_t i = 0; i < iterations; ++i) {
+        auto parsed = parseCalcExpressionAtCategory(source, category, mode);
+        if (!parsed.tree)
+            return 0;
+        fold = fold * 1000003 + static_cast<uint64_t>(parsed.tree->root.index());
+        fold = fold * 1000003 + static_cast<uint64_t>(parsed.tree->type.percent);
     }
     return fold;
 }
