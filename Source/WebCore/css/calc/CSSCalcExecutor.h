@@ -234,10 +234,29 @@ template<> struct OperatorExecutor<Operator::Clamp> {
     }
 };
 
+// `std::isfinite`, NOT `!std::isinf`, in all four round executors below.
+//
+// css-values-4 conditions this whole branch on "If A is FINITE but B is infinite"
+// (https://drafts.csswg.org/css-values/#round-infinities), and `!std::isinf(A)` is true for a NaN
+// A as well as for a finite one. A NaN then reached `std::signbit(A)`, whose answer IEEE 754-2019
+// §6.3 leaves unspecified for a NaN produced by arithmetic -- so `round(down, NaN, infinity)`
+// returned `-infinity` or `+0` according to a sign bit nothing defines, where the spec's general
+// NaN rule requires NaN. With `std::isfinite` the NaN falls through to `getNearestMultiples`,
+// which is NaN on every path, and the result is `calc(NaN)`.
+//
+// NO NON-NaN INPUT CHANGES: `std::isfinite(x)` and `!std::isinf(x)` differ only at NaN, so every
+// case in round-mod-rem-computed.html answers exactly as before. That file has no
+// `round(<NaN>, Infinity)` case, which is why this survived; the reachable route is not a literal
+// (the parser folds those) but a Sum whose operands resolve to NaN only at computed-value time --
+// relative colour syntax with a `none` channel is one.
+//
+// Found by the Swift simplification island's differential: the two arms disagreed on the SIGN of
+// the NaN a `Sum` of oppositely-signed NaNs produces -- unspecified, and harmless until this
+// branch turned it into `calc(-infinity)` against `calc(0)`.
 template<> struct OperatorExecutor<Operator::RoundNearest> {
     double operator()(double valueToRound, double roundingInterval)
     {
-        if (!std::isinf(valueToRound) && std::isinf(roundingInterval))
+        if (std::isfinite(valueToRound) && std::isinf(roundingInterval))
             return std::signbit(valueToRound) ? -0.0 : +0.0;
         auto [lower, upper] = getNearestMultiples(valueToRound, roundingInterval);
         return std::abs(upper - valueToRound) <= std::abs(roundingInterval) / 2 ? upper : lower;
@@ -252,7 +271,7 @@ template<> struct OperatorExecutor<Operator::RoundNearest> {
 template<> struct OperatorExecutor<Operator::RoundUp> {
     double operator()(double valueToRound, double roundingInterval)
     {
-        if (!std::isinf(valueToRound) && std::isinf(roundingInterval)) {
+        if (std::isfinite(valueToRound) && std::isinf(roundingInterval)) {
             if (!valueToRound)
                 return valueToRound;
             return std::signbit(valueToRound) ? -0.0 : std::numeric_limits<double>::infinity();
@@ -269,7 +288,7 @@ template<> struct OperatorExecutor<Operator::RoundUp> {
 template<> struct OperatorExecutor<Operator::RoundDown> {
     double operator()(double valueToRound, double roundingInterval)
     {
-        if (!std::isinf(valueToRound) && std::isinf(roundingInterval)) {
+        if (std::isfinite(valueToRound) && std::isinf(roundingInterval)) {
             if (!valueToRound)
                 return valueToRound;
             return std::signbit(valueToRound) ? -std::numeric_limits<double>::infinity() : +0.0;
@@ -286,7 +305,7 @@ template<> struct OperatorExecutor<Operator::RoundDown> {
 template<> struct OperatorExecutor<Operator::RoundToZero> {
     double operator()(double valueToRound, double roundingInterval)
     {
-        if (!std::isinf(valueToRound) && std::isinf(roundingInterval))
+        if (std::isfinite(valueToRound) && std::isinf(roundingInterval))
             return std::signbit(valueToRound) ? -0.0 : +0.0;
         auto [lower, upper] = getNearestMultiples(valueToRound, roundingInterval);
         return std::abs(upper) < std::abs(lower) ? upper : lower;

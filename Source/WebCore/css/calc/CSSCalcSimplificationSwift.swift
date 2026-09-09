@@ -427,10 +427,16 @@ private enum CalcExecutor {
     }
 
     /// `OperatorExecutor<Operator::RoundNearest>` (CSSCalcExecutor.h:237-:250).
+    ///
+    /// `isFinite`, not `!isInfinite`, in this and the three below -- and the C++ was changed in the
+    /// same commit, so this is still a transcription rather than a divergence. The two differ only
+    /// at NaN, which css-values-4 excludes from the branch ("If A is FINITE but B is infinite") and
+    /// which then reached a `signbit` IEEE 754-2019 §6.3 leaves unspecified. See the block comment
+    /// above `OperatorExecutor<Operator::RoundNearest>` for the whole finding.
     @inline(always)
     static func roundNearest(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
-        // `if (!std::isinf(valueToRound) && std::isinf(roundingInterval)) return std::signbit(valueToRound) ? -0.0 : +0.0;`
-        if !valueToRound.isInfinite && roundingInterval.isInfinite {
+        // `if (std::isfinite(valueToRound) && std::isinf(roundingInterval)) return std::signbit(valueToRound) ? -0.0 : +0.0;`
+        if valueToRound.isFinite && roundingInterval.isInfinite {
             return valueToRound.sign == .minus ? -0.0 : 0.0
         }
         let (lower, upper) = nearestMultiples(valueToRound, roundingInterval)
@@ -441,7 +447,7 @@ private enum CalcExecutor {
     /// `OperatorExecutor<Operator::RoundUp>` (CSSCalcExecutor.h:252-:267).
     @inline(always)
     static func roundUp(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
-        if !valueToRound.isInfinite && roundingInterval.isInfinite {
+        if valueToRound.isFinite && roundingInterval.isInfinite {
             // `if (!valueToRound) return valueToRound;` -- returns the ZERO ITSELF, so `-0` stays
             // `-0`, which the `+0.0` literal below would not preserve.
             if valueToRound == 0 {
@@ -455,7 +461,7 @@ private enum CalcExecutor {
     /// `OperatorExecutor<Operator::RoundDown>` (CSSCalcExecutor.h:269-:284).
     @inline(always)
     static func roundDown(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
-        if !valueToRound.isInfinite && roundingInterval.isInfinite {
+        if valueToRound.isFinite && roundingInterval.isInfinite {
             if valueToRound == 0 {
                 return valueToRound
             }
@@ -467,7 +473,7 @@ private enum CalcExecutor {
     /// `OperatorExecutor<Operator::RoundToZero>` (CSSCalcExecutor.h:286-:299).
     @inline(always)
     static func roundToZero(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
-        if !valueToRound.isInfinite && roundingInterval.isInfinite {
+        if valueToRound.isFinite && roundingInterval.isInfinite {
             return valueToRound.sign == .minus ? -0.0 : 0.0
         }
         let (lower, upper) = nearestMultiples(valueToRound, roundingInterval)
