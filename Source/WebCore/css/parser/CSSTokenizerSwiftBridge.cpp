@@ -1847,6 +1847,7 @@ WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplificati
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSCalcSimplificationSetForceDecline(bool);
 WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationDeclineCount(void);
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationIslandDeclineCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationHarnessCallCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcChildAlternativeCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
@@ -2151,6 +2152,22 @@ WEBCORE_EXPORT void webCoreCSSCalcSimplificationSetForceDecline(bool force)
 WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationDeclineCount(void)
 {
     return s_simplifyComparisonDeclines.load(std::memory_order_relaxed);
+}
+
+// The ISLAND's own decline counter, which the entry above is NOT: that one reports
+// `s_simplifyComparisonDeclines`, incremented only inside the two comparison entries, so a harness
+// driving the island through `webCoreCSSCalcSimplificationBench` reads a counter that cannot move.
+// `calcbench` did exactly that and printed `0 declines during the timed rounds` on every run of
+// every arm ever measured -- a coverage guard that was structurally incapable of failing, which is
+// the shape CLAUDE.md §2 calls a check that silently passes while measuring nothing.
+//
+// Two entries and not one: the comparison harness wants the comparison count (a decline inside
+// `runArm` is already visible to it through `result.declined`) and a bench driver wants the
+// island's. Keeping both named is cheaper than one entry that means different things to its two
+// callers, which is how this went wrong the first time.
+WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationIslandDeclineCount(void)
+{
+    return CSSCalc::webCoreCSSCalcSimplificationDeclineCount();
 }
 
 // A FORWARDER, and it has to be one. Everything from `extern "C" {` at :979 is at global scope, so
