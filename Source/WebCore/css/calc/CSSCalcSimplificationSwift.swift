@@ -2685,12 +2685,15 @@ fileprivate extension CalcFlatTree {
     /// the dimensionless `<number>`.
     ///
     /// THE NODE BY VALUE, NOT ITS INDEX, and that is a runtime-trap decision rather than a style
-    /// one. Both callers have already read the node -- `simplifyClamp` asks `numericLeaf` of each
-    /// bound before it can decide to convert -- so taking the index here would re-index the
-    /// `MutableSpan` at a data-dependent offset the optimizer cannot fold against the caller's
-    /// earlier one, and the census shows it as an extra `index out of bounds` condition.
-    /// `CalcFlatNode` is 40 trivial bytes on a path only a `clamp()` with one keyword bound that
-    /// could not fold ever reaches.
+    /// one. `simplifyClamp`, which is two of the three call sites, has already read both bounds --
+    /// it asks `numericLeaf` of each before it can decide to convert -- so taking the index here
+    /// would re-index the `MutableSpan` at a data-dependent offset the optimizer cannot fold against
+    /// the caller's earlier one, and the census shows it as an extra `index out of bounds`
+    /// condition. `calcMixFoldToZero`, the third, has not, and pays that one subscript at the call
+    /// site instead; it is on the same cold path and the signature is not worth splitting for it.
+    /// `CalcFlatNode` is 40 trivial bytes, and neither path -- a `clamp()` with one keyword bound
+    /// that could not fold, or a `calc-mix()` whose weights are all zero -- is one any real captured
+    /// payload reaches.
     func emittedType(_ node: CalcFlatNode, _ options: CalcSimplification) -> CalcType? {
         switch node.alternative {
         case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
@@ -4586,15 +4589,25 @@ fileprivate extension CalcFlatTree {
     /// and `:1589`): when every weight is known zero the whole `calc-mix()` becomes a zero of the
     /// FIRST item's category.
     ///
-    /// The category comes from `getType(child.value)`, which this file can answer for a folded leaf
-    /// and cannot for an operation -- a recursive type computation with no boundary accessor behind
-    /// it. That is a narrow, named gap and it declines rather than guessing:
-    /// `calc-mix(sibling-index() 0%, 2 0%)` with no builder state hits it,
-    /// `calc-mix(1em 0%, 2em 0%)` does not. The C++'s `zeroValueMatchingChild` has the same gap,
-    /// and this reports the same blame.
+    /// The category comes from `getType(child.value)`, and `emittedType` is that accessor: the four
+    /// numeric leaves from their own payload, a `Symbol` from its unit, the identity type for the two
+    /// sibling functions, and every OPERATION from the type the flat node carries, which is the field
+    /// `getType(const IndirectNode<T>&)` reads (`CSSCalcTree.h:1019`-`:1022`).
+    ///
+    /// IT USED TO ASK `numericLeaf` AND DECLINE ON AN OPERATION, and that was the island's last
+    /// coverage hole: `calc-mix(1% * sibling-index() 0%, 3px 0%)` folds to `calc(0%)` in the C++ and
+    /// declined here, because a `sibling-index()` with no builder state leaves the first item a
+    /// `Product` rather than a leaf. The comment that stood here called `getType` on an operation "a
+    /// recursive type computation with no boundary accessor behind it" and said the C++ had the same
+    /// gap. All three were wrong -- it is a field read, the accessor was already in this file for
+    /// `simplifyClamp`, and the C++ answers for every alternative. Reached only on unsimplified
+    /// input, since an eager parse folds the whole `calc-mix()` before the island sees it.
+    ///
+    /// `nil` still declines, and now means only what `emittedType` means by it: a `Type` the C++
+    /// would have had too, which is the C++'s own `ASSERT(category)` at `:1457`.
     private mutating func calcMixFoldToZero(_ i: Int, _ options: CalcSimplification) {
-        guard let first = child(i, 0), let leaf = nodes[first].numericLeaf,
-            let childType = options.leafType(leaf),
+        guard let first = child(i, 0),
+            let childType = emittedType(nodes[first], options),
             let category = childType.calculationCategory().value,
             // `.value = 0`, a literal in all eleven of the C++'s arms -- positive zero.
             let zero = options.numericLeafForCategory(category, 0) else {
