@@ -126,15 +126,18 @@ static constexpr Simplifier defaultSimplifier =
 
 // Whether the C++ recursive `copyAndSimplify` walk is compiled in at all.
 //
-// Its reach is shorter than it might look: three things outside this keep the C++ path reachable
-// no matter what:
+// Its reach is shorter than it might look. Three things outside this kept the C++ path reachable
+// no matter what, and one of them is gone:
 //
-//  - the 42 per-operation `simplify(Op&, ...)` overloads below have a caller that is not
-//    `copyAndSimplify` at all: StyleCalculationTree+Conversion.cpp:181 calls `simplify` on a
-//    freshly built operation node during Style conversion;
-//  - `copyAndSimplify(const Child&, ...)` is called by CSSCalcTree+Parser.cpp:1638, and it is also
-//    the recursion the whole family bottoms out in, so it cannot take a Swift arm without Swift
-//    re-entering itself once per node;
+//  - the 42 per-operation `simplify(Op&, ...)` overloads below still have a caller that is not
+//    `copyAndSimplify`: the eighteen sites in CSSCalcTree+Parser.cpp that simplify during the
+//    parse. StyleCalculationTree+Conversion.cpp's `toCSS(const IndirectNode<CalculationOp>&)` was
+//    a second such caller and is CORRECTED: `toCSS(const Tree&)` now builds the tree unsimplified
+//    and runs one whole-tree `copyAndSimplify` at the end, which is what the other direction in
+//    that file has always done;
+//  - `copyAndSimplify(const Child&, ...)` is called by CSSCalcTree+Parser.cpp's
+//    `parseCalcDimension`, and it is also the recursion the whole family bottoms out in, so it
+//    cannot take a Swift arm without Swift re-entering itself once per node;
 //  - `canonicalize` has a second caller in CSSCalcTree+Evaluation.cpp:143.
 //
 // So this mode guards exactly one thing: the body of `copyAndSimplify(const Tree&, ...)`. With
