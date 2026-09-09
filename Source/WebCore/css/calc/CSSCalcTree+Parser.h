@@ -67,13 +67,17 @@ struct ParserOptions {
 // a compile-time selector with a named default -- so that both behaviours stay in tree and the
 // differential can run either on demand.
 //
-//   Eager     today's production behaviour. The parse simplifies node by node as it builds, through
-//             the eighteen per-operation `simplify(Op&, ...)` call sites in CSSCalcTree+Parser.cpp,
-//             and returns a tree that is already at a fixed point for the options it was parsed
-//             with. There is NO terminal whole-tree pass.
-//   Terminal  the parse builds the tree and simplifies it ONCE at the end, through
-//             `copyAndSimplify(Tree)` -- which is the entry the Swift island already serves at 0
-//             declines over all 41 alternatives. This is what puts the island on the parse path.
+//   Eager     the behaviour that shipped until this file's default moved to `Terminal`. The parse
+//             simplifies node by node as it builds, through the eighteen per-operation
+//             `simplify(Op&, ...)` call sites in CSSCalcTree+Parser.cpp, and returns a tree that is
+//             already at a fixed point for the options it was parsed with. There is NO terminal
+//             whole-tree pass. Retained because the differential compares the two arms, and because
+//             it is the only arm a `CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN` build can offer.
+//   Terminal  TODAY'S PRODUCTION BEHAVIOUR. The parse builds the tree and simplifies it ONCE at the
+//             end, through `copyAndSimplify(Tree)` -- which is the entry the Swift island already
+//             serves at 0 declines over all 41 alternatives. This is what puts the island on the
+//             parse path: with `WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION=YES` the island now sees every
+//             `calc()` in every stylesheet, which it never did while the default was `Eager`.
 //   None      the parse does not simplify at all. `Terminal` is exactly `None` followed by one
 //             `copyAndSimplify`, and that is how it is implemented.
 //
@@ -83,13 +87,25 @@ struct ParserOptions {
 // an unsimplified parse is a configuration this file already runs in production. All three
 // enumerators do here what the recursion already does one level down.
 //
-// A NOTE FOR WHOEVER FLIPS THE DEFAULT. `defaultParseSimplification` is used as a DEFAULT ARGUMENT,
-// so it is evaluated in the CALLER's translation unit. That is fine while it is a plain constant. If
-// it is ever made to depend on a build define, every target that calls `parseAndSimplify` needs that
-// define -- the `CombinedURLFilters::defaultBuilder` trap, which silently left ten tests on the old
-// arm and would have reported a false pass.
+// A NOTE FOR WHOEVER CHANGES THE DEFAULT. `defaultParseSimplification` is used as a DEFAULT
+// ARGUMENT, so it is evaluated in the CALLER's translation unit. That is fine while it is a plain
+// constant. If it is ever made to depend on a build define, every target that calls
+// `parseAndSimplify` needs that define -- the `CombinedURLFilters::defaultBuilder` trap, which
+// silently left ten tests on the old arm and would have reported a false pass.
+//
+// THE CHECK THAT SETTLES IT COSTS ONE COMMAND, and it is worth writing down because a warning in a
+// header is not a warning that fires. `parseAndSimplify` is not inline, so every caller emits the
+// selector as an immediate at the call site; `Terminal` is 1 and `Eager` is 0:
+//
+//   objdump -d --macho --no-show-raw-insn WebCore.framework/WebCore \
+//     | grep -B 14 'bl.*CSSCalc16parseAndSimplify' | grep 'w4, #'
+//
+// It must print `mov w4, #0x1` for each of the three callers that take the default --
+// `SizesAttributeParser::parse`, `CSSNumericValue::parse` and `CSS::UnevaluatedCalcBase::parseBase`
+// -- and nothing for `parseCalcExpressionAtCategory`, which passes the mode in a register because
+// the differential selects it per call.
 enum class ParseSimplification : uint8_t { Eager, Terminal, None };
-static constexpr ParseSimplification defaultParseSimplification = ParseSimplification::Eager;
+static constexpr ParseSimplification defaultParseSimplification = ParseSimplification::Terminal;
 
 // Parses and simplifies the provided `CSSParserTokenRange` into a CSSCalc::Tree. Returns `std::nullopt` on failure.
 std::optional<Tree> parseAndSimplify(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification);
