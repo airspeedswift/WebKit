@@ -380,8 +380,7 @@ private enum CalcExecutor {
     /// `OperatorExecutor<Operator::RoundNearest>` (CSSCalcExecutor.h:237-:250).
     @inline(always)
     static func roundNearest(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
-        // `if (!std::isinf(valueToRound) && std::isinf(roundingInterval)) return std::signbit(valueToRound) ? -0.0 : +0.0;`
-        if !valueToRound.isInfinite && roundingInterval.isInfinite {
+        if valueToRound.isFinite && roundingInterval.isInfinite {
             return valueToRound.sign == .minus ? -0.0 : 0.0
         }
         let (lower, upper) = nearestMultiples(valueToRound, roundingInterval)
@@ -391,7 +390,7 @@ private enum CalcExecutor {
     /// `OperatorExecutor<Operator::RoundUp>` (CSSCalcExecutor.h:252-:267).
     @inline(always)
     static func roundUp(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
-        if !valueToRound.isInfinite && roundingInterval.isInfinite {
+        if valueToRound.isFinite && roundingInterval.isInfinite {
             // `if (!valueToRound) return valueToRound;` -- returns the zero itself, so `-0` stays
             // `-0`, which the `+0.0` literal below would not preserve.
             if valueToRound == 0 {
@@ -405,7 +404,7 @@ private enum CalcExecutor {
     /// `OperatorExecutor<Operator::RoundDown>` (CSSCalcExecutor.h:269-:284).
     @inline(always)
     static func roundDown(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
-        if !valueToRound.isInfinite && roundingInterval.isInfinite {
+        if valueToRound.isFinite && roundingInterval.isInfinite {
             if valueToRound == 0 {
                 return valueToRound
             }
@@ -417,7 +416,7 @@ private enum CalcExecutor {
     /// `OperatorExecutor<Operator::RoundToZero>` (CSSCalcExecutor.h:286-:299).
     @inline(always)
     static func roundToZero(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
-        if !valueToRound.isInfinite && roundingInterval.isInfinite {
+        if valueToRound.isFinite && roundingInterval.isInfinite {
             return valueToRound.sign == .minus ? -0.0 : 0.0
         }
         let (lower, upper) = nearestMultiples(valueToRound, roundingInterval)
@@ -2155,32 +2154,7 @@ fileprivate extension CalcFlatTree {
         return nil
     }
 
-    /// `getType(const Child&)` (`CSSCalcTree.cpp:453`-`:456`) for the node this slot WILL EMIT.
-    ///
-    /// Two answers and no third, and neither is a fresh derivation of anything.
-    ///
-    /// An OPERATION answers with the type `calcFlatten` read off its original, because that is the
-    /// type its emitted node carries whichever of the three emit routes it takes: `buildOperation` is
-    /// handed exactly this value, and `calcEmitFromOrigin` reaches `rebuildFrom`, which stamps
-    /// `getType(alternative)` -- the same accessor on the same node. A node promoted by `replace`
-    /// carries the promoted node's type with it, so that stays true after list surgery.
-    ///
-    /// A LEAF answers from its own payload, because a leaf's `Type` is discarded at construction
-    /// (`ChildConstruction<Leaf>::make` ignores its `Type` argument, `CSSCalcTree.h:1002`) and so is
-    /// never stored to be read back. The seven overloads at `CSSCalcTree.cpp:415`-`:451` are
-    /// `leafType` for the four numeric kinds, `determineType(unit)` for a `Symbol`, and the identity
-    /// type for `sibling-count()` and `sibling-index()`.
-    ///
-    /// `nil` is the C++'s `std::nullopt` and must never be defaulted: `Type()` is a legitimate value,
-    /// the dimensionless `<number>`.
-    ///
-    /// THE NODE BY VALUE, NOT ITS INDEX, and that is a runtime-trap decision rather than a style
-    /// one. Both callers have already read the node -- `simplifyClamp` asks `numericLeaf` of each
-    /// bound before it can decide to convert -- so taking the index here would re-index the
-    /// `MutableSpan` at a data-dependent offset the optimizer cannot fold against the caller's
-    /// earlier one, and the census shows it as an extra `index out of bounds` condition.
-    /// `CalcFlatNode` is 40 trivial bytes on a path only a `clamp()` with one keyword bound that
-    /// could not fold ever reaches.
+    /// `getType(const Child&)` (`CSSCalcTree.cpp:453`-`:456`) for the node this slot will emit.
     func emittedType(_ node: CalcFlatNode, _ options: CalcSimplification) -> CalcType? {
         switch node.alternative {
         case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
@@ -3634,17 +3608,10 @@ fileprivate extension CalcFlatTree {
 
     /// `zeroValueMatchingChild(children[0])` (`+Simplification.cpp:1454`-`:1482`, called at `:1516`
     /// and `:1589`): when every weight is known zero the whole `calc-mix()` becomes a zero of the
-    /// FIRST item's category.
-    ///
-    /// The category comes from `getType(child.value)`, which this file can answer for a folded leaf
-    /// and cannot for an operation -- a recursive type computation with no boundary accessor behind
-    /// it. That is a narrow, named gap and it declines rather than guessing:
-    /// `calc-mix(sibling-index() 0%, 2 0%)` with no builder state hits it,
-    /// `calc-mix(1em 0%, 2em 0%)` does not. The C++'s `zeroValueMatchingChild` has the same gap,
-    /// and this reports the same blame.
+    /// first item's category.
     private mutating func calcMixFoldToZero(_ i: Int, _ options: CalcSimplification) {
-        guard let first = child(i, 0), let leaf = nodes[first].numericLeaf,
-            let childType = options.leafType(leaf),
+        guard let first = child(i, 0),
+            let childType = emittedType(nodes[first], options),
             let category = childType.calculationCategory().value,
             let zero = options.numericLeafForCategory(category, 0) else {
             declined = true

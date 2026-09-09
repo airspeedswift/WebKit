@@ -1086,6 +1086,13 @@ constexpr CSSUnitType toCSSUnit(const NonCanonicalDimension& dimension) { return
 
 bool isNumeric(const Child& root);
 
+// True for the seven `Leaf` alternatives. Stated once because three places branch on it and must
+// agree: `serializeWithoutOmittingPrefix`, which prints a `calc()` prefix for everything else;
+// `consumeValueWithoutSimplifyingRootCalc`, which builds the one-child `Sum` that makes an anchor
+// slot's argument non-`Leaf`; and `rebuildChildren`, which restores that wrapper after a whole-tree
+// pass collapses it.
+bool isLeaf(const Child& root);
+
 // Convenience constructors
 
 // Makes the appropriate child type (number, percentage, canonical-dimensions, non-canonical-dimension) based on the CSSUnitType.

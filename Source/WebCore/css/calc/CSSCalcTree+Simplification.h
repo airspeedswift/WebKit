@@ -233,11 +233,28 @@ std::optional<Child> simplify(AnchorSize&, const SimplificationOptions&);
 std::optional<CanonicalDimension> canonicalize(NonCanonicalDimension, const std::optional<CSSToLengthConversionData>&);
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
-// Test-only, reached from CSSTokenizerSwiftBridge.cpp, compiled out otherwise. The counter and
-// the switch live beside the code that declines rather than in the bridge: a decline is invisible
-// in an output comparison, since the C++ answer for a declined tree is the same C++ answer
-// already trusted, so the count has to come from the code that declined, not from the code that
-// asked.
+// A second condition, inside the first, over the four counters written on every whole-tree call.
+// Those four are the only instrumentation with a cost on the timed path -- one `ldadd` and three
+// relaxed stores -- so they are separable from the benchmark entry points, which a measurement
+// build needs to export without paying for the counters.
+//
+// Default on, so `WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=YES` keeps its existing meaning.
+// `-DCSS_CALC_SWIFT_HARNESS_COUNTERS=0` gives the shipping shape of the hot path while still
+// exporting the benchmark entry point. The differential harness needs the counters: with them off
+// the accessors below report an empty walk, which fails its coverage assertion rather than quietly
+// passing on a build that measured nothing.
+#if !defined(CSS_CALC_SWIFT_HARNESS_COUNTERS)
+#define CSS_CALC_SWIFT_HARNESS_COUNTERS 1
+#endif
+
+// Test-only, reached from CSSTokenizerSwiftBridge.cpp, compiled out otherwise. The counter and the
+// switch live beside the code that falls back rather than in the bridge: falling back is invisible
+// in an output comparison, since the C++ answer for such a tree is the answer already trusted, so
+// the count has to come from the code that made the decision.
+//
+// These two are not under `CSS_CALC_SWIFT_HARNESS_COUNTERS`: the counter is incremented only on
+// the fallback branches, which the timed rounds never take, and the force hook is the only positive
+// control that the Swift path is reached at all. Its residual cost is a relaxed load and a `cbz`.
 void webCoreCSSCalcSimplificationSetForceDecline(bool);
 unsigned webCoreCSSCalcSimplificationDeclineCount(void);
 // The last walk's node count and kind mask, so a test can assert that the walk really descended
@@ -245,6 +262,10 @@ unsigned webCoreCSSCalcSimplificationDeclineCount(void);
 // on `CSSCalcSwiftAlternative` (`Node`'s own 41 variant alternatives);
 // `CSSCalcSwiftSimplificationResult::kindMask` says why that differs from the serialization
 // mask, which is 32 bits over 23 serialization shapes.
+//
+// These four are the ones `CSS_CALC_SWIFT_HARNESS_COUNTERS` compiles out. The declarations stay,
+// so nothing that resolves them changes shape; with the counters off they report that no walk was
+// recorded: 0 nodes, an empty mask, and 0xFF for the alternative.
 uint32_t webCoreCSSCalcSimplificationLastNodeCount(void);
 uint64_t webCoreCSSCalcSimplificationLastKindMask(void);
 // The `CSSCalcSwiftAlternative` the last walk stopped on, or 0xFF when it did not stop or when no

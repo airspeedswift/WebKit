@@ -116,7 +116,7 @@ static std::optional<TypedChild> parseCalcNumber(const CSSParserToken&, ParserSt
 static std::optional<TypedChild> parseCalcPercentage(const CSSParserToken&, ParserState&);
 static std::optional<TypedChild> parseCalcDimension(const CSSParserToken&, ParserState&);
 
-std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions)
+std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, ParseSimplification parseSimplification)
 {
     auto function = range.peek().functionId();
     if (!isCalcFunction(function))
@@ -133,6 +133,11 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
         .parserOptions = parserOptions,
         .simplificationOptions = &simplificationOptions
     };
+
+    // Every per-operation site tests `state.simplificationOptions`, so nulling the pointer is the
+    // whole of `Terminal` and `None` on the way in, and no site needs to know which mode it is in.
+    if (parseSimplification != ParseSimplification::Eager)
+        state.simplificationOptions = nullptr;
 
     auto root = parseCalcFunction(tokens, function, 0, state);
 
@@ -157,6 +162,12 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     };
 
     LOG_WITH_STREAM(Calc, stream << "Completed top level parse/simplification for function '" << nameLiteralForSerialization(function) << "': " << serializationForCSS(result, { parserOptions.range, CSS::defaultSerializationContext() }) << ", type: " << getType(result.root) << ", category=" << parserOptions.category << ", requires-conversion-data: " << result.requiresConversionData);
+
+    // `Terminal` is `None` plus this one call, which is why the two are one enumerator apart rather
+    // than two code paths. `copyAndSimplify(Tree)` takes `Simplifier = defaultSimplifier`. Placed
+    // after the log so that the log describes the parse rather than its simplification.
+    if (parseSimplification == ParseSimplification::Terminal)
+        return copyAndSimplify(result, simplificationOptions);
 
     return result;
 }
@@ -931,13 +942,13 @@ static std::optional<TypedChild> consumeValueWithoutSimplifyingRootCalc(CSSParse
     if (!typedValue)
         return { };
 
-    auto isLeafValue = WTF::switchOn(typedValue->child,
-        [](Leaf auto&) { return true; },
-        [](auto&) { return false; }
-    );
+    auto isLeafValue = isLeaf(typedValue->child);
 
     if (isFunction && isLeafValue) {
-        // Wrap in Sum to keep top level calc() function in serialization.
+        // Wrap in Sum to keep top level calc() function in serialization. `anchor()` is not a math
+        // function, so `serializeWithoutOmittingPrefix` prints a `calc()` only for a non-`Leaf`
+        // child, and this wrapper is the tree's only record that the author wrote one. A whole-tree
+        // `copyAndSimplify` collapses it (css-values-4 8.3) and `rebuildChildren` restores it.
         Vector<Child> children;
         children.append(WTF::move(typedValue->child));
 
