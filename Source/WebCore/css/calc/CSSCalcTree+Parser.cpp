@@ -116,7 +116,7 @@ static std::optional<TypedChild> parseCalcNumber(const CSSParserToken&, ParserSt
 static std::optional<TypedChild> parseCalcPercentage(const CSSParserToken&, ParserState&);
 static std::optional<TypedChild> parseCalcDimension(const CSSParserToken&, ParserState&);
 
-std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions)
+std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, ParseSimplification parseSimplification)
 {
     auto function = range.peek().functionId();
     if (!isCalcFunction(function))
@@ -133,6 +133,13 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
         .parserOptions = parserOptions,
         .simplificationOptions = &simplificationOptions
     };
+
+    // The eighteen per-operation sites below are already written as
+    // `if (auto* simplificationOptions = state.simplificationOptions)`, so nulling the pointer is
+    // the whole of `Terminal` and `None` on the way in. No site needs to know which mode it is in,
+    // and `consumeAnchor`'s `percentageState` shows the parser already runs this way.
+    if (parseSimplification != ParseSimplification::Eager)
+        state.simplificationOptions = nullptr;
 
     auto root = parseCalcFunction(tokens, function, 0, state);
 
@@ -157,6 +164,13 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     };
 
     LOG_WITH_STREAM(Calc, stream << "Completed top level parse/simplification for function '" << nameLiteralForSerialization(function) << "': " << serializationForCSS(result, { parserOptions.range, CSS::defaultSerializationContext() }) << ", type: " << getType(result.root) << ", category=" << parserOptions.category << ", requires-conversion-data: " << result.requiresConversionData);
+
+    // `Terminal` is `None` plus this one call, which is why the two are one enumerator apart rather
+    // than two code paths. `copyAndSimplify(Tree)` takes `Simplifier = defaultSimplifier`, so this is
+    // also the line that puts the Swift island on the parse path when the island is the default.
+    // Placed after the log so that the log still describes the parse, as it always has.
+    if (parseSimplification == ParseSimplification::Terminal)
+        return copyAndSimplify(result, simplificationOptions);
 
     return result;
 }

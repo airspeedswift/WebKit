@@ -209,7 +209,11 @@ struct ParsedCalc {
 // `conversionData` is deliberately `std::nullopt`, matching the production parse at
 // CSSUnevaluatedCalc.cpp:167: with no conversion data, simplification cannot fold length units
 // into canonical form, so operator nodes survive into the tree instead of collapsing to a leaf.
-ParsedCalc parseCalcExpression(const String& source)
+// `parseSimplification` selects WHEN the parse simplifies -- see `CSSCalc::ParseSimplification`. It
+// is a parameter rather than process state on purpose: a set/clear pair around a loop that returns
+// from the middle leaves the flag set for every later case in the run, and that failure reads as a
+// corpus problem rather than an invocation one.
+ParsedCalc parseCalcExpression(const String& source, CSSCalc::ParseSimplification parseSimplification = CSSCalc::ParseSimplification::Eager)
 {
     for (auto category : calcCategories) {
         CSSTokenizer tokenizer(source);
@@ -248,7 +252,7 @@ ParsedCalc parseCalcExpression(const String& source)
             .allowZeroValueLengthRemovalFromSum = false,
         };
 
-        auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions);
+        auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification);
         // A trailing token means the expression was only partly consumed, which is not a parse.
         if (tree && range.atEnd())
             return { WTF::move(tree), category, WebCore::CSS::All };
@@ -546,6 +550,36 @@ static uint32_t nodeCountOfSubtree(const CSSCalc::Child& root)
     uint32_t count = 0;
     forEachNodeOfSubtree(root, [&](const CSSCalc::Child&) { ++count; });
     return count;
+}
+
+// Does the subtree contain a `Sum` with a `Sum` directly among its children, or a `Product` with a
+// `Product`? That is exactly the shape css-values-4 step 8.1 (CSSCalcTree+Simplification.cpp:555)
+// and the outer half of step 9.1 (`:744`) splice, and the shape `CalcFlatTree.spliceNestedChildren`
+// implements on the Swift side.
+//
+// IT IS UNREACHABLE FROM A PRE-SIMPLIFIED PARSE, which is the whole reason it is reported. The
+// parser simplifies bottom-up, so by the time an outer `Sum` is built its inner `Sum` has already
+// been spliced into it. Every case this differential ran before phase U therefore has this at 0, and
+// the count of phase-U cases where it is 1 is the exact number of mismatches negative control NC-4
+// -- an island with the splice disabled -- has to produce.
+static bool subtreeHasSpliceableNesting(const CSSCalc::Child& root)
+{
+    bool found = false;
+    forEachNodeOfSubtree(root, [&](const CSSCalc::Child& node) {
+        if (auto* sum = get_if<CSSCalc::IndirectNode<CSSCalc::Sum>>(&node.value)) {
+            for (const auto& child : (*sum)->children) {
+                if (WTF::holdsAlternative<CSSCalc::IndirectNode<CSSCalc::Sum>>(child.value))
+                    found = true;
+            }
+        }
+        if (auto* product = get_if<CSSCalc::IndirectNode<CSSCalc::Product>>(&node.value)) {
+            for (const auto& child : (*product)->children) {
+                if (WTF::holdsAlternative<CSSCalc::IndirectNode<CSSCalc::Product>>(child.value))
+                    found = true;
+            }
+        }
+    });
+    return found;
 }
 
 // Whether any numeric leaf in the subtree is a NaN.
@@ -1746,12 +1780,22 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void)
 // failure modes a string comparison does not.
 //
 // The non-obvious part: `parseAndSimplify` runs simplification incrementally during the parse, with
-// the same `SimplificationOptions`, at 22 sites in CSSCalcTree+Parser.cpp. A parsed tree is
+// the same `SimplificationOptions`, at EIGHTEEN per-operation `simplify(Op&, ...)` sites in
+// CSSCalcTree+Parser.cpp (`:251` `:261` `:323` `:378` `:407` `:449` `:555` `:584` `:623` `:747`
+// `:802` `:884` `:997` `:1423` `:1451` `:1489` `:1517` `:1592`) plus one `copyAndSimplify(const
+// Child&)` at `:1638`, and it has no terminal whole-tree pass. (This comment said "22 sites" for
+// five slices; the count was never checked and the enumeration above is
+// webkit-swift-ports/cssprobe/notes/calc-deletable-callers-0908.md section 1.1's.) A parsed tree is
 // therefore already at a fixed point for the options it was parsed with, so handing it back to
 // `copyAndSimplify` with those same options is the identity on essentially every case. Entry 1
 // parses at a fixed baseline -- `parseCalcExpression`'s options, the production ones from
 // CSSUnevaluatedCalc.cpp:167 -- and simplifies under a caller-supplied set instead, so that when the
 // two differ in a way simplification reads, real work happens.
+//
+// AND THAT IS A DIFFERENT AXIS FROM THE ONE THE FIXED POINT HIDES. Sweeping the OPTIONS gets real
+// work out of a pre-simplified tree; it does not get an UNSIMPLIFIED tree.
+// `CSSCalc::ParseSimplification::None` is the second value of that axis, and it is also the
+// production gate P7b stage A introduces -- the seam and the shipping change are the same change.
 
 // The swept options, passed by pointer rather than as nine scalars so that an axis can be added
 // without re-spelling the signature of every entry in four places.
@@ -1769,6 +1813,25 @@ struct CSSCalcSimplificationOptionsSpec {
     uint32_t allowZeroValueLengthRemovalFromSum;
     // 0 Stage::Specified, 1 Stage::Computed, applied to the parsed tree before simplifying.
     uint32_t stage;
+    // `CSSCalc::ParseSimplification` as a `uint32_t`: 0 Eager, 1 Terminal, 2 None. Only 0 and 2 are
+    // used by entry 1 -- 0 is the historical behaviour, and 2 is the UNSIMPLIFIED-TREE AXIS.
+    //
+    // THIS IS AN AXIS, NOT A MODE, and it is the axis this differential never varied: the comment
+    // above says a parsed tree "is therefore already at a fixed point", and entry 1's answer was to
+    // sweep the OPTIONS instead. That is a different axis. Nine corpora at one parameter value is
+    // corpus coverage, not parameter coverage -- the content-extensions failure exactly.
+    //
+    // Entry 1 does NOT pass 1 (`Terminal`), and that is deliberate rather than an omission: under
+    // `None` the harness gets the raw tree and `compareSimplificationOfTree` runs BOTH simplifier
+    // arms on that one object, which is what makes it impossible to pair a C++ answer for one case
+    // with a Swift answer for another. Its `Simplifier::Cpp` result IS the `Terminal` tree, so
+    // comparison (a) -- eager against terminal, both C++ -- comes out of the same call as comparison
+    // (b) and neither costs a third parse.
+    //
+    // Appended last on purpose. A harness built against the old layout passes a 40-byte struct and
+    // this field reads whatever follows it, which is why the harness keys "the arm is real" on
+    // entry 13's PRESENCE and never on this field.
+    uint32_t parseSimplification;
 };
 
 // One case's worth of comparison. Mirrored field-for-field by `struct Comparison` in
@@ -1823,17 +1886,58 @@ struct CSSCalcSimplificationComparison {
     // `resetSimplificationBuilderStates`.
     uint32_t cppInvalidAtComputedValueTime;
     uint32_t swiftInvalidAtComputedValueTime;
+
+    // THE SIX PHASE-U FIELDS. Written only when `spec->parseSimplification == None` is set.
+    //
+    // WHY THE BASELINE HALF IS COMPUTED HERE AND NOT BY A SECOND CALL FROM THE HARNESS. Two calls
+    // would work and would be wrong three ways: the harness's guard 2 (call tally) and guard 11
+    // (decline tally) would both need a phase-specific exemption; the two parses would be two
+    // unrelated `Tree` objects, so nothing stronger than a string comparison would be available
+    // across them; and `bitwiseEqualTree` -- the only oracle in this differential that can see a
+    // signed zero or a per-node `Type` -- takes two live trees and lives on this side. One extra
+    // parse buys a BITWISE guard 19 instead of a textual one.
+    uint64_t baselineKindMask;
+    // A `Sum` directly under a `Sum`, or a `Product` directly under a `Product`, anywhere in the
+    // input. css-values-4 step 8.1 / 9.1 -- the splice at CSSCalcTree+Simplification.cpp:555 and
+    // :744, and `CalcFlatTree.spliceNestedChildren` on the Swift side -- is the only thing that acts
+    // on that shape, and a PRE-SIMPLIFIED parse cannot present one, because the inner node was
+    // spliced at its own `simplify` call. So this is 0 for every case the differential ran before
+    // phase U, and it is what makes negative control NC-4's required mismatch count exact.
+    uint32_t inputHasSpliceableNesting;
+    // Did the same text parse at the BASELINE (eager simplification on)? The harness's guard 18
+    // asserts this equals `parsed`: suppressing simplification must change the tree and never the
+    // parse, because the parse-time type is computed from the unsimplified children in both arms and
+    // a folded replacement carries `*outputType` unchanged.
+    uint32_t baselineParsed;
+    uint32_t baselineNodeCount;
+    uint32_t baselineRootKind;
+    // `bitwiseEqualTree(copyAndSimplify(unsimplifiedTree, swept, Cpp), baselineParsedTree)`. At the
+    // baseline tuple this is the entire test of "the parser's 18 eager `simplify(Op&)` sites and one
+    // terminal whole-tree `copyAndSimplify` compute the same thing" -- the measurement
+    // webkit-swift-ports/cssprobe/notes/calc-deletable-callers-0908.md section 10 item 9 asks for and
+    // has never had. Meaningless at a swept tuple, where the two are simplified under different
+    // options; the harness reads it at the baseline tuple only.
+    uint32_t eagerMatchesWholeTree;
+    // Was `eagerMatchesWholeTree` actually computed? It is written by ENTRY 1 ONLY, and only when a
+    // baseline tree exists, so a zero in the field above has two meanings and the harness must not
+    // read the wrong one. Guard 19 asserts this is set on every case it counts -- without it, a
+    // build in which the computation was skipped reports "0 failures" and reads as a pass.
+    uint32_t eagerTerminalComputed;
 };
 
 // The layout is pinned rather than merely described. These two structs cross a `dlsym` boundary
 // into a caller that declares its own copies; a field inserted on one side and not the other does
 // not fail to link, it silently shifts every field after it, so a mismatch would compare unrelated
 // fields against each other without any diagnostic.
-static_assert(sizeof(CSSCalcSimplificationOptionsSpec) == 40);
+static_assert(sizeof(CSSCalcSimplificationOptionsSpec) == 48);
 static_assert(offsetof(CSSCalcSimplificationOptionsSpec, rangeMinimum) == 8);
 static_assert(offsetof(CSSCalcSimplificationOptionsSpec, conversionDataKind) == 24);
 static_assert(offsetof(CSSCalcSimplificationOptionsSpec, stage) == 36);
-static_assert(sizeof(CSSCalcSimplificationComparison) == 120);
+static_assert(offsetof(CSSCalcSimplificationOptionsSpec, parseSimplification) == 40);
+// `eagerTerminalComputed` lands in what was tail padding, so the size is UNCHANGED at 152 and a
+// harness built against the previous layout would still link and still read every other field
+// correctly. That is precisely why the offset is asserted too: size alone would not have noticed.
+static_assert(sizeof(CSSCalcSimplificationComparison) == 152);
 static_assert(offsetof(CSSCalcSimplificationComparison, parseCategory) == 84);
 static_assert(offsetof(CSSCalcSimplificationComparison, inputKindMask) == 88);
 static_assert(offsetof(CSSCalcSimplificationComparison, islandKindMask) == 96);
@@ -1841,6 +1945,13 @@ static_assert(offsetof(CSSCalcSimplificationComparison, cppLength) == 104);
 static_assert(offsetof(CSSCalcSimplificationComparison, swiftLength) == 108);
 static_assert(offsetof(CSSCalcSimplificationComparison, cppInvalidAtComputedValueTime) == 112);
 static_assert(offsetof(CSSCalcSimplificationComparison, swiftInvalidAtComputedValueTime) == 116);
+static_assert(offsetof(CSSCalcSimplificationComparison, baselineKindMask) == 120);
+static_assert(offsetof(CSSCalcSimplificationComparison, inputHasSpliceableNesting) == 128);
+static_assert(offsetof(CSSCalcSimplificationComparison, baselineParsed) == 132);
+static_assert(offsetof(CSSCalcSimplificationComparison, baselineNodeCount) == 136);
+static_assert(offsetof(CSSCalcSimplificationComparison, baselineRootKind) == 140);
+static_assert(offsetof(CSSCalcSimplificationComparison, eagerMatchesWholeTree) == 144);
+static_assert(offsetof(CSSCalcSimplificationComparison, eagerTerminalComputed) == 148);
 
 WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplification(const char*, size_t, const CSSCalcSimplificationOptionsSpec*, char*, size_t, char*, size_t);
 WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplificationConstructed(unsigned, const CSSCalcSimplificationOptionsSpec*, char*, size_t, char*, size_t);
@@ -1858,6 +1969,26 @@ WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
 WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingCount(void);
 WEBCORE_EXPORT unsigned webCoreCSSCalcSimplificationFixtureSiblingIndex(void);
+
+// ENTRY 13. Does this WebCore understand `CSSCalcSimplificationOptionsSpec::parseSimplification`?
+//
+// Its ABSENCE is the only thing that can tell the harness apart from the one state that would make
+// its unsimplified-tree arm silently vacuous: a framework built before that field existed still
+// exports entry 1, still reads the first 40 bytes of the spec, ignores the flag, and hands back a
+// comparison over a tree the C++ already simplified. Phase U would then run, agree on everything,
+// and report as passing while re-measuring the axis value phases A-H already cover. So the harness
+// dlsym's this separately and does not run phase U at all when it is missing -- the same shape as
+// entries 10 and 10b, for the opposite reason: those degrade coverage, this one would fake it.
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationUnsimplifiedParseAvailable(void);
+
+// ENTRY 14. Decomposes comparison (a)'s bitwise verdict into which of `bitwiseEqualTree`'s four
+// components disagreed. Purely diagnostic: guard 19's failing cases on this corpus all serialize
+// identically, so the bare verdict names no mechanism. See the definition for the bit assignment.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcSimplificationEagerTerminalDelta(const char*, size_t);
+
+// ENTRY 15. The raw bits of each arm's result root, for the four phase-U cases where both arms
+// serialize `calc(NaN)` and the bitwise oracle still says no. Diagnostic only.
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationRootBits(const char*, size_t, const CSSCalcSimplificationOptionsSpec*, uint64_t*, uint64_t*);
 
 // ENTRIES 11 AND 12 compare `canonicalize` directly, parameterized over the full `CSSUnitType`
 // range rather than only the units a parsed CSS corpus happens to use.
@@ -1953,7 +2084,10 @@ static CSSCalc::SimplificationOptions makeSimplificationOptions(const CSSCalcSim
 // Everything the two comparison entries share. Both arms run on the same input `Tree` object inside
 // one call, which is what makes it impossible to pair a C++ answer for one case with a Swift answer
 // for another.
-static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree&& inputTree, const CSSCalcSimplificationOptionsSpec* spec, uint32_t parseCategory, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
+// `baselineTree` is the SAME text parsed with the parser's eager simplification left ON, supplied
+// only by entry 1 and only when `spec->parseSimplification == None` is set. It is what turns the phase-U
+// fields from a claim into a measurement.
+static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree&& inputTree, std::optional<CSSCalc::Tree>&& baselineTree, const CSSCalcSimplificationOptionsSpec* spec, uint32_t parseCategory, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
 {
     CSSCalcSimplificationComparison result { };
     result.declineKind = 0xFF;
@@ -1971,9 +2105,29 @@ static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree
         .requiresConversionData = inputTree.requiresConversionData,
     };
 
+    // The baseline tree gets the SAME `stage` override the input does, so that `eagerMatchesWholeTree`
+    // below is a comparison of the two simplification routes and not of the stage the harness asked
+    // for against the `Specified` every parse produces.
+    std::optional<CSSCalc::Tree> baseline;
+    if (baselineTree) {
+        baseline = CSSCalc::Tree {
+            .root = WTF::move(baselineTree->root),
+            .type = baselineTree->type,
+            .stage = input.stage,
+            .requiresConversionData = baselineTree->requiresConversionData,
+        };
+    }
+
     result.inputKindMask = alternativeMaskOfSubtree(input.root);
     result.inputNodeCount = nodeCountOfSubtree(input.root);
     result.inputRootKind = static_cast<uint32_t>(input.root.value.index());
+    result.inputHasSpliceableNesting = subtreeHasSpliceableNesting(input.root) ? 1 : 0;
+    if (baseline) {
+        result.baselineParsed = 1;
+        result.baselineKindMask = alternativeMaskOfSubtree(baseline->root);
+        result.baselineNodeCount = nodeCountOfSubtree(baseline->root);
+        result.baselineRootKind = static_cast<uint32_t>(baseline->root.value.index());
+    }
 
     // The two comparison runs use separate builder states, and each one's options are scoped so the
     // `CheckedPtr` inside them is released before the next reset; see
@@ -2009,6 +2163,15 @@ static CSSCalcSimplificationComparison compareSimplificationOfTree(CSSCalc::Tree
         s_simplifyComparisonDeclines.fetch_add(1, std::memory_order_relaxed);
     result.declineKind = CSSCalc::webCoreCSSCalcSimplificationLastDeclineAlternative();
     result.islandKindMask = CSSCalc::webCoreCSSCalcSimplificationLastKindMask();
+
+    // GUARD 19 IS NOT COMPUTED HERE, and the comment that said it was is the corrected claim. The
+    // premise was "at the baseline tuple `armOptions` is the parse's own options" -- and it is not,
+    // because the harness's baseline tuple pins conversion data, symbol table, the zero-removal flag
+    // and stage but NOT the CATEGORY, while `parseCalcExpression` picks the category per case. So
+    // `cppTree` here is simplified at the swept category and the eager tree was simplified at the
+    // parse's, and six of guard 19's eleven first-run failures were that mismatch rather than an
+    // eager/terminal divergence. Entry 1 computes (a) against the parse's own options instead and
+    // overwrites the field; see the comment there.
 
     result.agree = bitwiseEqualTree(cppTree, swiftTree) ? 1 : 0;
     result.agreeDefaulted = cppTree == swiftTree ? 1 : 0;
@@ -2107,11 +2270,75 @@ WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplificati
     result.declineKind = 0xFF;
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
 
-    auto parsed = parseCalcExpression(source);
-    if (!parsed.tree)
-        return result;
+    // SPEC VALUE 3 IS A CONTROL, NOT A `ParseSimplification`: "parse EAGER, but compute the
+    // baseline anyway". It exists because `--control simplifiedinput` (NC-2) has to reproduce the
+    // exact state the arm must detect -- the harness asked for unsimplified trees and got
+    // pre-simplified ones -- and simply passing `Eager` does not: with no baseline computed, guard
+    // 18 fires on every case and guard 17's `strictlyLarger == 0` comes out of "no case got past
+    // the parse-agreement gate" rather than out of "input and baseline are the same tree". Both
+    // exit 1, and only one of them is the vacuity the control names. `Eager` on its own stays free
+    // for the 924,951-case sweep, which must not pay a second parse.
+    auto specMode = spec->parseSimplification;
+    bool forceSimplifiedInput = specMode == 3;
+    auto mode = forceSimplifiedInput
+        ? CSSCalc::ParseSimplification::Eager
+        : static_cast<CSSCalc::ParseSimplification>(specMode);
 
-    return compareSimplificationOfTree(WTF::move(*parsed.tree), spec, static_cast<uint32_t>(parsed.category), cppOut, cppCapacity, swiftOut, swiftCapacity);
+    // THE SECOND PARSE, and it happens only when the axis is off its historical value, so nothing
+    // about the 924,951-tuple sweep's cost or behaviour moves. It is the EAGER tree -- today's
+    // production output -- and it is what both comparison (a) and the vacuity guards are computed
+    // against. Parsed here rather than by a second call from the harness for the three reasons the
+    // `CSSCalcSimplificationComparison` phase-U block gives.
+    std::optional<CSSCalc::Tree> baseline;
+    if (mode != CSSCalc::ParseSimplification::Eager || forceSimplifiedInput) {
+        // Named, because `WTF::move` static_asserts on an lvalue reference and a temporary's member
+        // is not one.
+        auto baselineParse = parseCalcExpression(source, CSSCalc::ParseSimplification::Eager);
+        baseline = WTF::move(baselineParse.tree);
+    }
+
+    auto parsed = parseCalcExpression(source, mode);
+    if (!parsed.tree) {
+        // REPORTED EVEN ON THE FAILING PATH. "the eager parse succeeded and the unsimplified one did
+        // not" is precisely what the harness's guard 18 exists to catch, and it is invisible if this
+        // returns the zeroed struct.
+        result.baselineParsed = baseline ? 1 : 0;
+        return result;
+    }
+
+    // COMPARISON (a), COMPUTED HERE AND NOT FROM `cppTree`, and the difference is not cosmetic.
+    //
+    // `ParseSimplification::Terminal` calls `copyAndSimplify(result, simplificationOptions)` with the
+    // PARSE's OWN options -- CSSCalcTree+Parser.cpp -- whose `category` is whichever category the
+    // parse succeeded at. `compareSimplificationOfTree` simplifies under the SPEC's options instead,
+    // and the harness's "baseline tuple" pins conversion data, symbol table, the zero-removal flag
+    // and stage but NOT the category. So on any expression that parses at a category other than the
+    // tuple's -- `min(1em, 1rem, 3%, 4%)` parses at LengthPercentage while the baseline tuple sweeps
+    // Number -- reading (a) off `cppTree` compares an eager tree simplified at category 9 against a
+    // terminal tree simplified at category 1, and reports a divergence that is the harness's own.
+    // Measured 2026-09-09: six of guard 19's eleven failures were exactly that, and all six agree
+    // when the categories are matched.
+    //
+    // So (a) is computed against the parse's options, which is the comparison it claims to be, and
+    // it is now independent of the swept tuple. `Simplifier::Cpp` explicitly: no Swift runs on
+    // either side of (a).
+    if (baseline) {
+        auto parseOptions = CSSCalc::SimplificationOptions {
+            .category = parsed.category,
+            .range = parsed.range,
+            .conversionData = std::nullopt,
+            .symbolTable = { },
+            .allowZeroValueLengthRemovalFromSum = false,
+        };
+        auto terminal = CSSCalc::copyAndSimplify(*parsed.tree, parseOptions, CSSCalc::Simplifier::Cpp);
+        result.eagerMatchesWholeTree = bitwiseEqualTree(terminal, *baseline) ? 1 : 0;
+        result.eagerTerminalComputed = 1;
+    }
+
+    auto comparison = compareSimplificationOfTree(WTF::move(*parsed.tree), WTF::move(baseline), spec, static_cast<uint32_t>(parsed.category), cppOut, cppCapacity, swiftOut, swiftCapacity);
+    comparison.eagerMatchesWholeTree = result.eagerMatchesWholeTree;
+    comparison.eagerTerminalComputed = result.eagerTerminalComputed;
+    return comparison;
 }
 
 // The same comparison over a tree built directly rather than parsed. `constructSimplificationShape`
@@ -2133,7 +2360,10 @@ WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplificati
     if (!tree)
         return result;
 
-    return compareSimplificationOfTree(WTF::move(*tree), spec, spec->category, cppOut, cppCapacity, swiftOut, swiftCapacity);
+    // `std::nullopt`: a CONSTRUCTED tree has no parse, so it has no baseline counterpart and none of
+    // the six phase-U fields is meaningful for it. They stay zero, and the harness only reads them
+    // for cases whose tuple selects `ParseSimplification::None`, which no constructed case does.
+    return compareSimplificationOfTree(WTF::move(*tree), std::nullopt, spec, spec->category, cppOut, cppCapacity, swiftOut, swiftCapacity);
 }
 
 // The compile-time default, so a build that ignored WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION cannot
@@ -2214,6 +2444,122 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void)
 WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void)
 {
     return simplificationConstructedShapeCount;
+}
+
+// ENTRY 13. See the declaration for why this exists at all rather than the harness simply setting
+// the flag and trusting it.
+//
+// It answers the question CONSTRUCTIVELY rather than returning a bare `true`: it parses one
+// expression both ways and requires the unsimplified tree to be strictly larger.
+//
+// THE WITNESS WAS `calc(1px)` AND THAT WAS WRONG -- it returns false on a build that carries the
+// axis perfectly, which is the one answer this entry must never give. The claim behind it was that
+// "the parser wraps a single term in a `Sum` and step 8.2 collapses the wrapper". It does not wrap:
+// `parseCalcProduct` and `parseCalcSum` both `return firstValue` before constructing anything when
+// no operator follows (CSSCalcTree+Parser.cpp:1511-1512 and :1445-1446), so `calc(1px)` is a bare
+// `CanonicalDimension` in EVERY mode and this entry compared 1 against 1. The one-child `Sum`
+// wrapper is built only by `consumeValueWithoutSimplifyingRootCalc` (`:916`-`:921`), which only
+// `anchor()` and `anchor-size()` reach. The two comments elsewhere in this file that say
+// `parseAndSimplify` "folds that wrapper away" (`constructRootShape`, and
+// `webCoreCSSCalcCompareSerializationStaged`) reach the right conclusion -- the root is the leaf --
+// by the wrong route; their unwrap is inert because there is nothing to unwrap.
+//
+// `calc(1px + 2px)` is the smallest witness with no room for coincidence: two same-unit canonical
+// terms, so the eager parse folds `Sum{1px, 2px}` to a single `CanonicalDimension(3px)` while the
+// unsimplified parse keeps all three nodes. The exact counts are asserted rather than only their
+// order, so a future simplification change that stops folding fails here loudly instead of quietly
+// weakening the guard this entry exists to be.
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationUnsimplifiedParseAvailable(void)
+{
+    auto eager = parseCalcExpression("calc(1px + 2px)"_str, CSSCalc::ParseSimplification::Eager);
+    auto none = parseCalcExpression("calc(1px + 2px)"_str, CSSCalc::ParseSimplification::None);
+    if (!eager.tree || !none.tree)
+        return false;
+    return nodeCountOfSubtree(eager.tree->root) == 1 && nodeCountOfSubtree(none.tree->root) == 3;
+}
+
+// ENTRY 14. WHICH of `bitwiseEqualTree`'s four components made comparison (a) fail.
+//
+// Guard 19 reports a bare verdict, and on this corpus every failing case serializes IDENTICALLY on
+// both arms, with the same node count and the same root alternative -- so "they differ" carries no
+// attribution at all and the eight failing expressions look like eight unrelated findings. This
+// splits the verdict into its parts so the mechanism can be named rather than guessed at:
+//
+//   bit 0  Tree::stage
+//   bit 1  Tree::requiresConversionData
+//   bit 2  Tree::type                        -- the whole-tree type, recomputed by the terminal pass
+//   bit 3  the subtree, per-node, bitwise    -- a stored per-node `Type`, a signed zero, a
+//                                              `Percentage::hint`, or a leaf double
+//
+// Returns 0 when the two arms agree and `0xFFFF` when the text did not parse on both.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcSimplificationEagerTerminalDelta(const char* text, size_t length)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto eager = parseCalcExpression(source, CSSCalc::ParseSimplification::Eager);
+    auto raw = parseCalcExpression(source, CSSCalc::ParseSimplification::None);
+    if (!eager.tree || !raw.tree)
+        return 0xFFFF;
+
+    // Exactly the options `parseCalcExpression` parsed with, so this is the terminal arm as
+    // `ParseSimplification::Terminal` would run it.
+    auto options = CSSCalc::SimplificationOptions {
+        .category = eager.category,
+        .range = WebCore::CSS::All,
+        .conversionData = std::nullopt,
+        .symbolTable = { },
+        .allowZeroValueLengthRemovalFromSum = false,
+    };
+    auto terminal = CSSCalc::copyAndSimplify(*raw.tree, options, CSSCalc::Simplifier::Cpp);
+
+    uint32_t delta = 0;
+    if (terminal.stage != eager.tree->stage)
+        delta |= 1u << 0;
+    if (terminal.requiresConversionData != eager.tree->requiresConversionData)
+        delta |= 1u << 1;
+    if (!(terminal.type == eager.tree->type))
+        delta |= 1u << 2;
+    if (!bitwiseEqualChild(terminal.root, eager.tree->root))
+        delta |= 1u << 3;
+    return delta;
+}
+
+// ENTRY 15. The RAW BITS of each arm's result root, for a case the bitwise oracle rejects while
+// both arms serialize identically.
+//
+// Phase U turned up four such cases and no earlier phase ever did: `calc(g - b)` and friends with
+// the symbols bound to NaN, where `cpp` and `swift` both print `calc(NaN)` and `sameBits` says no.
+// Serialization cannot show a NaN's sign or payload and neither can the harness's report, so
+// without this the finding could only be described, not attributed. Two separate out pointers
+// rather than a two-element array: an indexed write trips -Wunsafe-buffer-usage, which is on with
+// -Werror here, and a `std::span` would not survive the `dlsym` the harness reaches this through.
+// Returns 1 when both roots were numeric leaves.
+WEBCORE_EXPORT bool webCoreCSSCalcSimplificationRootBits(const char* text, size_t length, const CSSCalcSimplificationOptionsSpec* spec, uint64_t* cppBits, uint64_t* swiftBits)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto parsed = parseCalcExpression(source, static_cast<CSSCalc::ParseSimplification>(spec->parseSimplification));
+    if (!parsed.tree)
+        return false;
+
+    auto options = CSSCalc::SimplificationOptions {
+        .category = static_cast<WebCore::CSS::Category>(spec->category),
+        .range = { spec->rangeMinimum, spec->rangeMaximum },
+        .conversionData = std::nullopt,
+        .symbolTable = simplificationSymbolTable(spec->symbolTableKind),
+        .allowZeroValueLengthRemovalFromSum = !!spec->allowZeroValueLengthRemovalFromSum,
+    };
+
+    auto rootBits = [](const CSSCalc::Child& root, uint64_t& bits) {
+        return WTF::switchOn(root.value,
+            [&](const CSSCalc::Number& n) { bits = std::bit_cast<uint64_t>(n.value); return true; },
+            [&](const CSSCalc::Percentage& p) { bits = std::bit_cast<uint64_t>(p.value); return true; },
+            [&](const CSSCalc::CanonicalDimension& d) { bits = std::bit_cast<uint64_t>(d.value); return true; },
+            [&](const CSSCalc::NonCanonicalDimension& d) { bits = std::bit_cast<uint64_t>(d.value); return true; },
+            [&](const auto&) { return false; });
+    };
+
+    auto cppTree = CSSCalc::copyAndSimplify(*parsed.tree, options, CSSCalc::Simplifier::Cpp);
+    auto swiftTree = CSSCalc::copyAndSimplify(*parsed.tree, options, CSSCalc::Simplifier::Swift);
+    return rootBits(cppTree.root, *cppBits) && rootBits(swiftTree.root, *swiftBits);
 }
 
 // ENTRY 10. Does the conversion-data fixture support font-metric-relative units?
