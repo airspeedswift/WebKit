@@ -1736,6 +1736,7 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcChildAlternativeCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcCategoryCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char*, size_t, bool, uint32_t, uint32_t*);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcParseBench(const char*, size_t, unsigned parseSimplification, uint32_t iterations, uint32_t* outParsed, uint32_t* outNodeCount, uint32_t* outCategory);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
@@ -2009,6 +2010,50 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char* text, size
         auto simplified = CSSCalc::copyAndSimplify(*parsed.tree, options, arm);
         fold = fold * 1000003 + static_cast<uint64_t>(simplified.root.index());
         fold = fold * 1000003 + static_cast<uint64_t>(simplified.type.percent);
+    }
+    return fold;
+}
+
+// Throughput of one `CSSCalc::ParseSimplification` mode of the whole parse.
+//
+// A second bench entry rather than a parameter on the one above, because that one parses once
+// outside its loop and this one puts the parse inside it. Moving work between the parse and
+// simplification is invisible to a simplification-only band, which would see a terminal pass
+// arrive and never see the eager passes leave.
+//
+// One category, not eleven, which is why `parseCalcExpressionAtCategory` is separate: timing the
+// category loop charges the eager path for simplifying every rejected parse, which is enough to
+// reverse the sign. `outNodeCount` is what lets a caller refuse to time a build that ignores the
+// mode argument, and is taken outside the loop because a tree walk inside it would be proportional
+// to tree size. `fold` exists only to stop the loop being eliminated.
+//
+// With the bridge enabled, the `Terminal` mode's one whole-tree Swift call pays five relaxed
+// atomics that `Eager` does not, per tree rather than per node.
+WEBCORE_EXPORT uint64_t webCoreCSSCalcParseBench(const char* text, size_t length, unsigned parseSimplification, uint32_t iterations, uint32_t* outParsed, uint32_t* outNodeCount, uint32_t* outCategory)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto mode = static_cast<CSSCalc::ParseSimplification>(parseSimplification);
+
+    // One full parse outside the loop, to find the accepting category and fill the out-parameters.
+    // Its cost is amortised away by `iterations`.
+    auto probe = parseCalcExpression(source, mode);
+    if (outParsed)
+        *outParsed = probe.tree ? 1 : 0;
+    if (outNodeCount)
+        *outNodeCount = probe.tree ? nodeCountOfSubtree(probe.tree->root) : 0;
+    if (outCategory)
+        *outCategory = static_cast<uint32_t>(probe.category);
+    if (!probe.tree)
+        return 0;
+    auto category = probe.category;
+
+    uint64_t fold = 0;
+    for (uint32_t i = 0; i < iterations; ++i) {
+        auto parsed = parseCalcExpressionAtCategory(source, category, mode);
+        if (!parsed.tree)
+            return 0;
+        fold = fold * 1000003 + static_cast<uint64_t>(parsed.tree->root.index());
+        fold = fold * 1000003 + static_cast<uint64_t>(parsed.tree->type.percent);
     }
     return fold;
 }

@@ -184,10 +184,10 @@ template<typename CalculationOp> CSSCalc::Child toCSS(const IndirectNode<Calcula
 
     auto op = WTF::apply([&](const auto& ...x) { return CalcOp { toCSS(x, options)... }; } , *root);
 
-    if (auto replacement = CSSCalc::simplify(op, options.simplification))
-        return WTF::move(*replacement);
-
+    // Not simplified here: `toCSS(const Tree&)` below runs one whole-tree `copyAndSimplify`
+    // instead, as `toStyle` does in the other direction.
     auto type = toType(op);
+    ASSERT(type);
     return CSSCalc::makeChild(WTF::move(op), *type);
 }
 
@@ -359,14 +359,28 @@ CSSCalc::Tree toCSS(const Tree& tree, const ToCSSOptions& toCSSOptions)
         },
     };
 
-    auto root = toCSS(tree.root, conversionOptions);
-    auto type = CSSCalc::getType(root);
-
-    return CSSCalc::Tree {
-        .root = WTF::move(root),
-        .type = type,
+    auto converted = CSSCalc::Tree {
+        .root = toCSS(tree.root, conversionOptions),
+        .type = CSSCalc::Type { },
         .stage = CSSCalc::Stage::Computed,
     };
+
+    // One simplification of the finished tree, in place of one per node on the way up.
+    // `conversionOptions.simplification` is the same options object the per-node calls took, and its
+    // `.conversionData` is `std::nullopt` above, so the per-node pass could not canonicalise
+    // anything: it folded, and folding a tree bottom-up in one pass is what `copyAndSimplify` does.
+    //
+    // The simplifier is left to `copyAndSimplify`'s default argument, so this conversion follows the
+    // build's configured simplifier, as `toStyle` below does. Naming `Simplifier::Cpp` here would
+    // make every Style-to-CSS conversion in a build with the C++ simplifier compiled out reach
+    // `RELEASE_ASSERT_NOT_REACHED`.
+    auto simplified = CSSCalc::copyAndSimplify(converted, conversionOptions.simplification);
+
+    // Taken from the simplified root, which is where the per-node form took it from too: `getType`
+    // ran after every child had been folded. `copyAndSimplify` copies `Tree::type` through
+    // unchanged, so reading it off `converted` would give the type of the unfolded tree.
+    simplified.type = CSSCalc::getType(simplified.root);
+    return simplified;
 }
 
 Tree toStyle(const CSSCalc::Tree& tree, const ToStyleOptions& toStyleOptions)

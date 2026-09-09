@@ -107,6 +107,39 @@ struct TypedChild {
     Type type;
 };
 
+// Builds `op` into a `Child`, folding it away first if this parse simplifies eagerly.
+//
+// This is the parser's only call into the C++ simplifier, so a build with
+// CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN off needs just this one guard. In that build the node is
+// returned unsimplified and the whole-tree `copyAndSimplify` at the end of `parseAndSimplify`
+// simplifies it instead.
+template<typename Op> static Child makeSimplifiedChild(Op&& op, Type type, ParserState& state)
+{
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
+    if (auto* simplificationOptions = state.simplificationOptions) {
+        if (auto replacement = simplify(op, *simplificationOptions))
+            return WTF::move(*replacement);
+    }
+#else
+    UNUSED_PARAM(state);
+#endif
+    return makeChild(WTF::move(op), type);
+}
+
+// The same, for the sites that return the node's type alongside it. A folded replacement carries
+// the same type as an unfolded one, so the type is applied once here.
+template<typename Op> static TypedChild makeSimplifiedTypedChild(Op&& op, Type type, ParserState& state)
+{
+    return TypedChild { makeSimplifiedChild(WTF::move(op), type, state), type };
+}
+
+// `ParseSimplification::Eager` is the C++ simplifier, called once per operation during the parse
+// rather than once at the end, so it is not selectable in a build that compiles the C++ simplifier
+// out. Checked at build time because the failure it prevents is neither a crash nor a parse
+// failure but a correctly shaped tree that was never simplified.
+static_assert(CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN || defaultParseSimplification != ParseSimplification::Eager,
+    "WK_USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK=YES compiles out the parser's eager simplification, so defaultParseSimplification must not be Eager");
+
 static std::optional<TypedChild> parseCalcFunction(CSSParserTokenRange&, CSSValueID functionID, int depth, ParserState&);
 static std::optional<TypedChild> parseCalcSum(CSSParserTokenRange&, int depth, ParserState&);
 static std::optional<TypedChild> parseCalcProduct(CSSParserTokenRange&, int depth, ParserState&);
@@ -281,21 +314,11 @@ template<typename Op> static std::optional<TypedChild> consumeExactlyOneArgument
     if constexpr (std::same_as<Op, Sin> || std::same_as<Op, Cos> || std::same_as<Op, Tan>) {
         if (sum->type.template matchesAny<Type::Match::Angle>({ .allowsPercentHint = true })) {
             Deg2Rad conversion { .angle = WTF::move(op.a) };
-            if (auto* simplificationOptions = state.simplificationOptions) {
-                if (auto replacement = simplify(conversion, *simplificationOptions))
-                    op.a = WTF::move(*replacement);
-                else
-                    op.a = makeChild(WTF::move(conversion), Type { });
-            } else
-                op.a = makeChild(WTF::move(conversion), Type { });
+            op.a = makeSimplifiedChild(WTF::move(conversion), Type { }, state);
         }
     }
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 template<typename Op> static std::optional<TypedChild> consumeOneOrMoreArguments(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -353,11 +376,7 @@ template<typename Op> static std::optional<TypedChild> consumeOneOrMoreArguments
 
     Op op { WTF::move(children) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 template<typename Op> static std::optional<TypedChild> consumeExactlyTwoArguments(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -408,11 +427,7 @@ template<typename Op> static std::optional<TypedChild> consumeExactlyTwoArgument
 
     Op op { WTF::move(sumA->child), WTF::move(sumB->child) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 template<typename Op> static std::optional<TypedChild> consumeOneOrTwoArguments(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -437,11 +452,7 @@ template<typename Op> static std::optional<TypedChild> consumeOneOrTwoArguments(
 
         Op op { WTF::move(sumA->child), std::nullopt };
 
-        if (auto* simplificationOptions = state.simplificationOptions) {
-            if (auto replacement = simplify(op, *simplificationOptions))
-                return TypedChild { WTF::move(*replacement), *outputType };
-        }
-        return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+        return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
     }
 
     if (!CSSPropertyParserHelpers::consumeCommaIncludingWhitespace(tokens)) {
@@ -479,11 +490,7 @@ template<typename Op> static std::optional<TypedChild> consumeOneOrTwoArguments(
 
     Op op { WTF::move(sumA->child), WTF::move(sumB->child) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 static std::optional<TypedChild> consumeClamp(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -585,11 +592,7 @@ static std::optional<TypedChild> consumeClamp(CSSParserTokenRange& tokens, int d
 
     Op op { WTF::move(min->child), WTF::move(val->child), WTF::move(max->child) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 template<typename Op> static std::optional<TypedChild> consumeRoundArguments(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -614,11 +617,7 @@ template<typename Op> static std::optional<TypedChild> consumeRoundArguments(CSS
 
         Op op { WTF::move(sumA->child), std::nullopt };
 
-        if (auto* simplificationOptions = state.simplificationOptions) {
-            if (auto replacement = simplify(op, *simplificationOptions))
-                return TypedChild { WTF::move(*replacement), *outputType };
-        }
-        return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+        return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
     }
 
     if (!CSSPropertyParserHelpers::consumeCommaIncludingWhitespace(tokens)) {
@@ -653,12 +652,7 @@ template<typename Op> static std::optional<TypedChild> consumeRoundArguments(CSS
 
     LOG_WITH_STREAM(Calc, stream << "Succeeded 'round(" << nameLiteralForSerialization(Op::id) << ")' (two arguments) function: type is " << *outputType);
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 static std::optional<TypedChild> consumeRound(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -777,12 +771,7 @@ static std::optional<TypedChild> consumeRandom(CSSParserTokenRange& tokens, int 
 
         Op op { WTF::move(*sharing), WTF::move(min->child), WTF::move(max->child), std::nullopt };
 
-        if (auto* simplificationOptions = state.simplificationOptions) {
-            if (auto replacement = simplify(op, *simplificationOptions))
-                return TypedChild { WTF::move(*replacement), *outputType };
-        }
-
-        return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+        return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
     }
 
     if (!CSSPropertyParserHelpers::consumeCommaIncludingWhitespace(tokens)) {
@@ -832,11 +821,7 @@ static std::optional<TypedChild> consumeRandom(CSSParserTokenRange& tokens, int 
 
     Op op { WTF::move(*sharing), WTF::move(min->child), WTF::move(max->child), WTF::move(step->child) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 template<typename Op>
@@ -914,11 +899,7 @@ static std::optional<TypedChild> consumeProgressImpl(CSSParserTokenRange& tokens
 
     Op op { WTF::move(value->child), WTF::move(start->child), WTF::move(end->child) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 static std::optional<TypedChild> consumeProgress(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -1027,11 +1008,7 @@ static std::optional<TypedChild> consumeCalcMix(CSSParserTokenRange& tokens, int
 
     Op op { WTF::move(children) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(op, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), *outputType };
-    }
-    return TypedChild { makeChild(WTF::move(op), *outputType), *outputType };
+    return makeSimplifiedTypedChild(WTF::move(op), *outputType, state);
 }
 
 // Parse the fallback value specified in anchor() and anchor-size() as a <length> or
@@ -1453,11 +1430,7 @@ std::optional<TypedChild> parseCalcSum(CSSParserTokenRange& tokens, int depth, P
                 Negate negate { WTF::move(next.child) };
                 auto negateType = next.type;
 
-                if (auto* simplificationOptions = state.simplificationOptions) {
-                    if (auto replacement = simplify(negate, *simplificationOptions))
-                        return TypedChild { WTF::move(*replacement), negateType };
-                }
-                return TypedChild { makeChild(WTF::move(negate), negateType), negateType };
+                return makeSimplifiedTypedChild(WTF::move(negate), negateType, state);
             };
 
             nextValue = negate(*nextValue, state);
@@ -1481,12 +1454,7 @@ std::optional<TypedChild> parseCalcSum(CSSParserTokenRange& tokens, int depth, P
 
     Sum sum { WTF::move(children) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(sum, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), sumType };
-    }
-
-    return TypedChild { makeChild(WTF::move(sum), sumType), sumType };
+    return makeSimplifiedTypedChild(WTF::move(sum), sumType, state);
 }
 
 std::optional<TypedChild> parseCalcProduct(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -1519,11 +1487,7 @@ std::optional<TypedChild> parseCalcProduct(CSSParserTokenRange& tokens, int dept
                 Invert invert { WTF::move(next.child) };
                 auto invertType = Type::invert(next.type);
 
-                if (auto* simplificationOptions = state.simplificationOptions) {
-                    if (auto replacement = simplify(invert, *simplificationOptions))
-                        return TypedChild { WTF::move(*replacement), invertType };
-                }
-                return TypedChild { makeChild(WTF::move(invert), invertType), invertType };
+                return makeSimplifiedTypedChild(WTF::move(invert), invertType, state);
             };
 
             nextValue = invert(*nextValue, state);
@@ -1547,11 +1511,7 @@ std::optional<TypedChild> parseCalcProduct(CSSParserTokenRange& tokens, int dept
 
     Product product { WTF::move(children) };
 
-    if (auto* simplificationOptions = state.simplificationOptions) {
-        if (auto replacement = simplify(product, *simplificationOptions))
-            return TypedChild { WTF::move(*replacement), productType };
-    }
-    return TypedChild { makeChild(WTF::move(product), productType), productType };
+    return makeSimplifiedTypedChild(WTF::move(product), productType, state);
 }
 
 std::optional<TypedChild> parseCalcValue(CSSParserTokenRange& tokens, int depth, ParserState& state)
@@ -1622,12 +1582,7 @@ std::optional<TypedChild> parseCalcKeyword(const CSSParserToken& token, ParserSt
             state.requiresConversionData = true;
         }
 
-        if (auto* simplificationOptions = state.simplificationOptions) {
-            if (auto replacement = simplify(child, *simplificationOptions))
-                return TypedChild { WTF::move(*replacement), type };
-        }
-
-        return TypedChild { makeChild(WTF::move(child)), type };
+        return makeSimplifiedTypedChild(WTF::move(child), type, state);
     }
 
     if (auto constant = lookupConstantNumber(token.id())) {
@@ -1668,8 +1623,13 @@ std::optional<TypedChild> parseCalcDimension(const CSSParserToken& token, Parser
         state.requiresConversionData = true;
     }
 
+    // This site starts from a finished `Child`, so it cannot use `makeSimplifiedChild`:
+    // `makeNumeric` has already built the leaf, and what runs on it is the recursive
+    // `copyAndSimplify(const Child&, ...)`, which for a dimension leaf is `canonicalize`.
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
     if (auto* simplificationOptions = state.simplificationOptions)
         return TypedChild { copyAndSimplify(WTF::move(child), *simplificationOptions), type };
+#endif
     return TypedChild { WTF::move(child), type };
 }
 

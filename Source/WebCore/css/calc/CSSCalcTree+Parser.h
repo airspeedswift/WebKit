@@ -63,33 +63,29 @@ struct ParserOptions {
     CSSPropertyParserOptions propertyOptions;
 };
 
-// WHEN the parse simplifies. Shaped exactly like `CSSCalc::Simplifier` and `CSSCalc::Serializer` --
-// a compile-time selector with a named default -- so that both behaviours stay in tree and the
-// differential can run either on demand.
+// When the parse simplifies. Shaped like `CSSCalc::Simplifier` and `CSSCalc::Serializer`: a
+// compile-time selector with a named default.
 //
-//   Eager     today's production behaviour. The parse simplifies node by node as it builds, through
-//             the eighteen per-operation `simplify(Op&, ...)` call sites in CSSCalcTree+Parser.cpp,
-//             and returns a tree that is already at a fixed point for the options it was parsed
-//             with. There is NO terminal whole-tree pass.
-//   Terminal  the parse builds the tree and simplifies it ONCE at the end, through
-//             `copyAndSimplify(Tree)` -- which is the entry the Swift island already serves at 0
-//             declines over all 41 alternatives. This is what puts the island on the parse path.
-//   None      the parse does not simplify at all. `Terminal` is exactly `None` followed by one
-//             `copyAndSimplify`, and that is how it is implemented.
+//   Eager     the parse simplifies node by node as it builds, through the per-operation
+//             `simplify(Op&, ...)` call sites in CSSCalcTree+Parser.cpp, and returns a tree already
+//             at a fixed point for the options it was parsed with. There is no terminal whole-tree
+//             pass. This is the one mode a build with the C++ simplifier compiled out cannot offer,
+//             and the one mode the Swift parser does not implement.
+//   Terminal  the parse builds the tree and simplifies it once at the end, through
+//             `copyAndSimplify(Tree)`.
+//   None      the parse does not simplify at all. `Terminal` is `None` followed by one
+//             `copyAndSimplify`, and is implemented that way.
 //
-// `None` IS NOT A TEST-ONLY ENUMERATOR bolted on for the differential, although the differential is
-// its first caller: `consumeAnchor` already builds a `ParserState` with a null
-// `simplificationOptions` for the anchor-side `<percentage>` sub-parse (CSSCalcTree+Parser.cpp), so
-// an unsimplified parse is a configuration this file already runs in production. All three
-// enumerators do here what the recursion already does one level down.
+// `None` is not a test-only mode: `consumeAnchor` builds a `ParserState` with a null
+// `simplificationOptions` for the anchor-side `<percentage>` sub-parse, so an unsimplified parse is
+// a configuration this file already runs in production.
 //
-// A NOTE FOR WHOEVER FLIPS THE DEFAULT. `defaultParseSimplification` is used as a DEFAULT ARGUMENT,
-// so it is evaluated in the CALLER's translation unit. That is fine while it is a plain constant. If
-// it is ever made to depend on a build define, every target that calls `parseAndSimplify` needs that
-// define -- the `CombinedURLFilters::defaultBuilder` trap, which silently left ten tests on the old
-// arm and would have reported a false pass.
+// `defaultParseSimplification` is used as a default argument, so it is evaluated in the caller's
+// translation unit. That is fine while it is a plain constant; were it ever made to depend on a
+// build define, every target that calls `parseAndSimplify` would need that define or callers would
+// silently select different modes.
 enum class ParseSimplification : uint8_t { Eager, Terminal, None };
-static constexpr ParseSimplification defaultParseSimplification = ParseSimplification::Eager;
+static constexpr ParseSimplification defaultParseSimplification = ParseSimplification::Terminal;
 
 // Parses and simplifies the provided `CSSParserTokenRange` into a CSSCalc::Tree. Returns `std::nullopt` on failure.
 std::optional<Tree> parseAndSimplify(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification);

@@ -124,22 +124,14 @@ static constexpr Simplifier defaultSimplifier =
     Simplifier::Cpp;
 #endif
 
-// Whether the C++ recursive `copyAndSimplify` walk is compiled in at all.
-//
-// Its reach is shorter than it might look: three things outside this keep the C++ path reachable
-// no matter what:
-//
-//  - the 42 per-operation `simplify(Op&, ...)` overloads below have a caller that is not
-//    `copyAndSimplify` at all: StyleCalculationTree+Conversion.cpp:181 calls `simplify` on a
-//    freshly built operation node during Style conversion;
-//  - `copyAndSimplify(const Child&, ...)` is called by CSSCalcTree+Parser.cpp:1638, and it is also
-//    the recursion the whole family bottoms out in, so it cannot take a Swift arm without Swift
-//    re-entering itself once per node;
-//  - `canonicalize` has a second caller in CSSCalcTree+Evaluation.cpp:143.
-//
-// So this mode guards exactly one thing: the body of `copyAndSimplify(const Tree&, ...)`. With
-// the C++ arm compiled out, a decline becomes a build-enforced stop rather than a silent
+// Whether the C++ recursive `copyAndSimplify` walk is compiled in at all. With it compiled out,
+// anything the Swift simplifier cannot handle is a build-enforced stop rather than a silent
 // fallback.
+//
+// How much this can cover is bounded by the callers of the per-operation pieces from outside the
+// whole-tree walk: `canonicalize` has a second caller in CSSCalcTree+Evaluation.cpp, and the Swift
+// boundary code in CSSCalcTree+Simplification.cpp calls `rebuildChildren`,
+// `evaluateAnchorFunction` and `evaluateAnchorSizeFunction`.
 #if defined(USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK) && USE_SWIFT_CSS_CALC_SIMPLIFICATION_NO_FALLBACK
 #if !defined(USE_SWIFT_CSS_CALC_SIMPLIFICATION) || !USE_SWIFT_CSS_CALC_SIMPLIFICATION
 // Diagnosed here rather than left to produce a link error naming `copyAndSimplify`, which is what
