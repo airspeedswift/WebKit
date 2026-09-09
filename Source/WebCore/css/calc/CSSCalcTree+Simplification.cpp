@@ -2563,12 +2563,19 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double valu
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
 // Test-only, and compiled out otherwise so the production path pays no load for them. Same set and
 // same reasons as CSSCalcTree+Serialization.cpp:1277's.
+//
+// The four under `CSS_CALC_ISLAND_HARNESS_COUNTERS` are further separable from the other two: they
+// are written on EVERY whole-tree call, where the decline counter is written only on a decline and
+// the force-decline flag is only read. `CSSCalcTree+Simplification.h` says why that second gate
+// exists and which configuration is which.
 static std::atomic<bool> s_simplificationForceDecline;
 static std::atomic<unsigned> s_simplificationDeclines;
+#if CSS_CALC_ISLAND_HARNESS_COUNTERS
 static std::atomic<uint32_t> s_simplificationLastNodeCount;
 static std::atomic<uint64_t> s_simplificationLastKindMask;
 static std::atomic<uint8_t> s_simplificationLastDeclineAlternative { 0xFF };
 static std::atomic<uint64_t> s_simplificationSwiftCalls;
+#endif
 
 void webCoreCSSCalcSimplificationSetForceDecline(bool force)
 {
@@ -2582,22 +2589,43 @@ unsigned webCoreCSSCalcSimplificationDeclineCount(void)
 
 uint32_t webCoreCSSCalcSimplificationLastNodeCount(void)
 {
+#if CSS_CALC_ISLAND_HARNESS_COUNTERS
     return s_simplificationLastNodeCount.load(std::memory_order_relaxed);
+#else
+    // "No walk was recorded", not "a walk of zero nodes". The four accessors below answer this way
+    // rather than disappearing so that a harness `dlsym`ing them still links; what makes the
+    // configuration impossible to mistake is that an empty mask fails `simplifycheck`'s coverage
+    // assertion, which is the assertion that would otherwise silently pass on a build that
+    // measured nothing.
+    return 0;
+#endif
 }
 
 uint64_t webCoreCSSCalcSimplificationLastKindMask(void)
 {
+#if CSS_CALC_ISLAND_HARNESS_COUNTERS
     return s_simplificationLastKindMask.load(std::memory_order_relaxed);
+#else
+    return 0;
+#endif
 }
 
 uint8_t webCoreCSSCalcSimplificationLastDeclineAlternative(void)
 {
+#if CSS_CALC_ISLAND_HARNESS_COUNTERS
     return s_simplificationLastDeclineAlternative.load(std::memory_order_relaxed);
+#else
+    return 0xFF;
+#endif
 }
 
 uint64_t webCoreCSSCalcSimplificationSwiftCallCount(void)
 {
+#if CSS_CALC_ISLAND_HARNESS_COUNTERS
     return s_simplificationSwiftCalls.load(std::memory_order_relaxed);
+#else
+    return 0;
+#endif
 }
 
 // Per-primitive timing, to split the island's FIXED per-whole-tree cost between the read crossing
@@ -2900,12 +2928,17 @@ static bool trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOpt
     auto result = cssCalcSimplifySwift(tree.root, builder, swiftOptions);
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+#if CSS_CALC_ISLAND_HARNESS_COUNTERS
+    // THE ONLY INSTRUMENTATION ON THE TIMED PATH, which is why it has its own gate: one atomic RMW
+    // and three relaxed stores, and an atomic RMW does not pipeline. Nothing here is read by
+    // `calcbench`; it is the differential harness's self-report.
     s_simplificationSwiftCalls.fetch_add(1, std::memory_order_relaxed);
     s_simplificationLastNodeCount.store(result.nodeCount, std::memory_order_relaxed);
     s_simplificationLastKindMask.store(result.kindMask, std::memory_order_relaxed);
     // Recorded even when this simplified, where it is 0xFF: a simplified tree names no reason just
     // as a declined one does.
     s_simplificationLastDeclineAlternative.store(result.declineAlternative, std::memory_order_relaxed);
+#endif
     if (s_simplificationForceDecline.load(std::memory_order_relaxed)) {
         s_simplificationDeclines.fetch_add(1, std::memory_order_relaxed);
         return false;

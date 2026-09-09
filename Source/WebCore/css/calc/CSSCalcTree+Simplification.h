@@ -249,11 +249,35 @@ std::optional<Child> simplify(AnchorSize&, const SimplificationOptions&);
 std::optional<CanonicalDimension> canonicalize(NonCanonicalDimension, const std::optional<CSSToLengthConversionData>&);
 
 #if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// A SECOND gate, inside the first, over the four counters the island writes on EVERY whole-tree
+// call. It exists because those four are the only instrumentation with a cost on the timed path --
+// one `ldadd` and three relaxed stores, twelve retired instructions with the force-decline load,
+// priced at 1.63 ns per call by `calcbench --atomic-floor` -- and until now they shared a gate with
+// the bench entry points, so no arm could export the entry points needed to MEASURE them without
+// also paying for them. Every published island figure therefore carries them, and none of them
+// could say by how much. See `cssprobe/notes/calc-fixed-cost-attribution-0909.md` §5.
+//
+// Default ON, so `WK_ENABLE_CSS_TOKENIZER_SWIFT_BRIDGE=YES` keeps meaning exactly what it meant.
+// `-DCSS_CALC_ISLAND_HARNESS_COUNTERS=0` gives the SHIPPING shape of the island's hot path while
+// still exporting `webCoreCSSCalcSimplificationBench`, which is the measurement configuration and
+// nothing else: the differential harness NEEDS these counters, and with them off the accessors
+// below report an empty walk, which is what makes `simplifycheck`'s coverage assertion FAIL rather
+// than quietly pass on a build that measured nothing.
+#if !defined(CSS_CALC_ISLAND_HARNESS_COUNTERS)
+#define CSS_CALC_ISLAND_HARNESS_COUNTERS 1
+#endif
+
 // Test-only, reached from CSSTokenizerSwiftBridge.cpp, compiled out otherwise. The counter and
 // the switch live beside the code that declines rather than in the bridge: a decline is invisible
 // in an output comparison, since the C++ answer for a declined tree is the same C++ answer
 // already trusted, so the count has to come from the code that declined, not from the code that
 // asked.
+//
+// These two are NOT under `CSS_CALC_ISLAND_HARNESS_COUNTERS`: `s_simplificationDeclines` is
+// incremented only on the decline branches, which the timed rounds never take, and the
+// force-decline hook is the only non-vacuous positive control `calcbench` has that the Swift arm is
+// reached at all -- compiling it out would leave the measurement configuration unable to prove it
+// measured Swift. Its residual cost (a relaxed load and a `cbz`) is quoted separately.
 void webCoreCSSCalcSimplificationSetForceDecline(bool);
 unsigned webCoreCSSCalcSimplificationDeclineCount(void);
 // The last walk's node count and kind mask, so a test can assert that the walk really descended
@@ -261,6 +285,10 @@ unsigned webCoreCSSCalcSimplificationDeclineCount(void);
 // on `CSSCalcSwiftAlternative` (`Node`'s own 41 variant alternatives);
 // `CSSCalcSwiftSimplificationResult::kindMask` says why that differs from the serialization
 // mask, which is 32 bits over 23 serialization shapes.
+//
+// These four are the ones `CSS_CALC_ISLAND_HARNESS_COUNTERS` compiles out. The declarations stay,
+// so nothing that `dlsym`s them changes shape; with the counters off they answer "no walk was
+// recorded" -- 0 nodes, an empty mask, and 0xFF for the declining alternative.
 uint32_t webCoreCSSCalcSimplificationLastNodeCount(void);
 uint64_t webCoreCSSCalcSimplificationLastKindMask(void);
 // The `CSSCalcSwiftAlternative` the last walk declined on, or 0xFF for "did not decline" and for
