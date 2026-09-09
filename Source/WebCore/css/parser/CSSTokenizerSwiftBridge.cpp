@@ -2009,6 +2009,13 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcSimplificationEagerTerminalDelta(const cha
 // serialize `calc(NaN)` and the bitwise oracle still says no. Diagnostic only.
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationRootBits(const char*, size_t, const CSSCalcSimplificationOptionsSpec*, uint64_t*, uint64_t*);
 
+// Entry 17's flag; see its definition for what it perturbs and why the previous control could not.
+static std::atomic<bool> s_eagerTerminalPerturb;
+
+// ENTRY 17. Perturbs comparison (a) -- guard 19 -- so that the guard has a negative control that
+// actually reaches it. See the definition for why the harness's previous one could not.
+WEBCORE_EXPORT void webCoreCSSCalcSimplificationSetEagerTerminalPerturb(bool);
+
 struct CSSCalcStyleRoundTripResult {
     uint32_t parsed;        // the text parsed as a calc at the requested category
     uint32_t nodeCount;     // of the CSS tree that came back
@@ -2361,7 +2368,9 @@ WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplificati
             .range = parsed.range,
             .conversionData = std::nullopt,
             .symbolTable = { },
-            .allowZeroValueLengthRemovalFromSum = false,
+            // `false` is what the parse passes. The perturbation flips exactly this, and only for
+            // the terminal side, which is what gives guard 19 a negative control; see entry 17.
+            .allowZeroValueLengthRemovalFromSum = s_eagerTerminalPerturb.load(std::memory_order_relaxed),
         };
         auto terminal = CSSCalc::copyAndSimplify(*parsed.tree, parseOptions, CSSCalc::Simplifier::Cpp);
         result.eagerMatchesWholeTree = bitwiseEqualTree(terminal, *baseline) ? 1 : 0;
@@ -2509,6 +2518,32 @@ WEBCORE_EXPORT bool webCoreCSSCalcSimplificationUnsimplifiedParseAvailable(void)
     if (!eager.tree || !none.tree)
         return false;
     return nodeCountOfSubtree(eager.tree->root) == 1 && nodeCountOfSubtree(none.tree->root) == 3;
+}
+
+// ENTRY 17. THE NEGATIVE CONTROL FOR GUARD 19, because the harness's previous one stopped
+// reaching it and nobody noticed for a day.
+//
+// `--control eageroffbaseline` moved guard 19's evaluation from the cd:none baseline tuple to the
+// cd:16px one, on the reasoning that the terminal pass would then canonicalize font-relative units
+// the eager parse could not, and must therefore disagree. That reasoning describes a version of
+// comparison (a) that no longer exists: (a) is computed HERE, in entry 1, against the parse's own
+// options, precisely so that the swept tuple cannot contaminate it -- "it is now independent of
+// the swept tuple", as the comment there says. Moving the tuple changes only WHICH cases have
+// their verdict counted. MEASURED: the five failures that control reported were the five anchor
+// cases the main run reported anyway, and its own mechanism contributed zero; fixing the anchor
+// defect took it to zero failures and exposed the control as inert.
+//
+// This reaches (a) instead, by flipping `allowZeroValueLengthRemovalFromSum` on the TERMINAL side
+// only. That flag is a live axis -- the differential's phase E2 measures it changing 48 of 132
+// cases -- so with it set the terminal pass really does compute a different tree from the eager
+// parse, and a guard 19 that cannot see that is a guard 19 that cannot see anything.
+//
+// A plain relaxed atomic, matching `webCoreCSSColorSetForceDecline`: set it, run the sweep, clear
+// it. Defaults to false, so a harness that never calls it gets the production comparison. Declared
+// beside the other comparison statics, above entry 1, which is its one reader.
+WEBCORE_EXPORT void webCoreCSSCalcSimplificationSetEagerTerminalPerturb(bool perturb)
+{
+    s_eagerTerminalPerturb.store(perturb, std::memory_order_relaxed);
 }
 
 // ENTRY 14. WHICH of `bitwiseEqualTree`'s four components made comparison (a) fail.
