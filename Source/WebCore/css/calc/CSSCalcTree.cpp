@@ -253,6 +253,14 @@ bool isNumeric(const Child& root)
     );
 }
 
+bool isLeaf(const Child& root)
+{
+    return WTF::switchOn(root,
+        []<Leaf T>(const T&) { return true; },
+        [](const auto&) { return false; }
+    );
+}
+
 Child makeNumeric(double value, CSSUnitType unit)
 {
     switch (unit) {

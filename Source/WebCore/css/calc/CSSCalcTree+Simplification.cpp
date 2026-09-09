@@ -1727,6 +1727,58 @@ static std::optional<double> evaluateAnchorSizeFunction(const AnchorSize& anchor
     return Style::AnchorPositionEvaluator::evaluateSize(builderState, anchorSizeScopedName, anchorSize.dimension);
 }
 
+// MARK: - The `calc()` prefix an anchor slot carries, and why a whole-tree pass has to restore it.
+//
+// `anchor()` and `anchor-size()` are NOT math functions, so a `calc()` written inside one is not
+// omitted from the serialization the way it is inside `min()`: `serializeWithoutOmittingPrefix`
+// (CSSCalcTree+Serialization.cpp:576) prints a prefix for a non-`Leaf` child and nothing at all for
+// a `Leaf`. The tree has nowhere else to record that the author wrote a math function here, so
+// `consumeValueWithoutSimplifyingRootCalc` (CSSCalcTree+Parser.cpp:913 -- "Wrap in Sum to keep top
+// level calc() function in serialization") encodes it as a ONE-CHILD `Sum` in the slot. The anchor
+// slots are the only position in the whole tree where such a node means anything: `parseCalcSum`
+// and `parseCalcProduct` both return the single term rather than building a wrapper, and at the
+// root of a `Tree` the prefix comes from `serializeMathFunction`'s `Numeric` overload instead.
+//
+// css-values-4 8.3's one-term collapse (`simplify(Sum&)` above, "Special case a root with one
+// child") is entitled to remove that wrapper, and does. That is invisible while every
+// simplification happens per-operation DURING the parse, because nothing then re-simplifies the
+// slot. It stops being invisible the moment a WHOLE-TREE `copyAndSimplify` runs over a parsed tree,
+// which is exactly what `ParseSimplification::Terminal` does. Measured against the shipping eager
+// parser, both shapes:
+//
+//     anchor(--a top, calc(1em * 2))  ->  anchor(--a top, calc(2em))    Sum{leaf} in the slot
+//                                     ->  anchor(--a top, 2em)          bare leaf in the slot
+//     anchor(--a top, 1px)            ->  anchor(--a top, 1px)          control: never gains one
+//
+// (~/src/webkit-swift-ports/cssprobe/validate/anchorserialize.cpp, thirteen cases, including the
+// bare-literal controls that must not gain a prefix and the WPT-pinned `anchor(calc(50%))`.)
+//
+// So `rebuildChildren` restores the wrapper for a slot that went in as a math function and came out
+// as a leaf, and the two substitution sites below drop it again: once the `anchor()` is gone the
+// former fallback is an ordinary subtree, and the ordinary serialization rules supply its prefix.
+//
+// The slot as it came out of the pass, with the wrapper put back if the pass flattened a math
+// function into a leaf. `before` is the input slot, `after` the mapped one.
+static std::optional<Child> anchorSlotKeepingPrefix(const std::optional<Child>& before, std::optional<Child>&& after)
+{
+    if (!before || !after || isLeaf(*before) || !isLeaf(*after))
+        return WTF::move(after);
+    auto type = getType(*after);
+    return makeChild(Sum { Vector<Child>::from(WTF::move(*after)) }, type);
+}
+
+// The slot on its way OUT of an anchor node that is being replaced by it. The wrapper only ever
+// meant "this argument of anchor() keeps its prefix", so it is removed here rather than left to
+// travel up the tree as a one-term `Sum` that no other node would have produced -- which would
+// also make the pass non-idempotent, since a second one would collapse it.
+static std::optional<Child> anchorSlotLeavingTheNode(std::optional<Child>&& slot)
+{
+    auto* sum = slot ? get_if<IndirectNode<Sum>>(&*slot) : nullptr;
+    if (sum && (*sum)->children.size() == 1)
+        return WTF::move((*sum)->children[0]);
+    return WTF::move(slot);
+}
+
 std::optional<Child> simplify(Anchor& anchor, const SimplificationOptions& options)
 {
     if (!options.conversionData || !options.conversionData->styleBuilderState())
@@ -1742,7 +1794,7 @@ std::optional<Child> simplify(Anchor& anchor, const SimplificationOptions& optio
             options.conversionData->styleBuilderState()->setCurrentPropertyInvalidAtComputedValueTime();
 
         // Replace the anchor node with the fallback node.
-        return std::exchange(anchor.fallback, { });
+        return anchorSlotLeavingTheNode(std::exchange(anchor.fallback, { }));
     }
     return CanonicalDimension { .value = *result, .dimension = CanonicalDimension::Dimension::Length };
 }
@@ -1760,7 +1812,7 @@ std::optional<Child> simplify(AnchorSize& anchorSize, const SimplificationOption
         if (!anchorSize.fallback)
             options.conversionData->styleBuilderState()->setCurrentPropertyInvalidAtComputedValueTime();
 
-        return std::exchange(anchorSize.fallback, { });
+        return anchorSlotLeavingTheNode(std::exchange(anchorSize.fallback, { }));
     }
 
     return CanonicalDimension { .value = *result, .dimension = CanonicalDimension::Dimension::Length };
@@ -1818,6 +1870,10 @@ template<Leaf Op> static auto copyAndSimplifyChildren(const Op& op, const Simpli
 // `side` is COPIED, not mapped: `simplify` is not applied to the `<anchor-side>` subtree, because
 // doing so would fold `anchor(--a calc(25% + 25%))` to `anchor(--a 50%)`, which this file does not
 // do. `elementName` and `dimension` are not subtrees at all.
+//
+// `fallback` IS mapped, and the asymmetry is why it goes through `anchorSlotKeepingPrefix`: because
+// the side is copied its one-child `Sum` survives, and because the fallback is simplified its own
+// has to be restored. See that function for what the wrapper means and for the measurement.
 template<typename Op, typename MapSlot> static Op rebuildChildren(const IndirectNode<Op>& root, NOESCAPE MapSlot&& mapSlot)
 {
     // `Random::Sharing` is a `<random-key>`, not a `<calc-sum>`: the one tuple slot in any operation
@@ -1846,9 +1902,9 @@ template<typename Op, typename MapSlot> static Op rebuildChildren(const Indirect
     };
 
     if constexpr (std::same_as<Op, Anchor>)
-        return Anchor { .elementName = root->elementName, .side = copy(root->side), .fallback = mapSlot(root->fallback) };
+        return Anchor { .elementName = root->elementName, .side = copy(root->side), .fallback = anchorSlotKeepingPrefix(root->fallback, mapSlot(root->fallback)) };
     else if constexpr (std::same_as<Op, AnchorSize>)
-        return AnchorSize { .elementName = root->elementName, .dimension = root->dimension, .fallback = mapSlot(root->fallback) };
+        return AnchorSize { .elementName = root->elementName, .dimension = root->dimension, .fallback = anchorSlotKeepingPrefix(root->fallback, mapSlot(root->fallback)) };
     else
         return WTF::apply([&](const auto& ...x) { return Op { mapChildSlot(x)... }; }, *root);
 }

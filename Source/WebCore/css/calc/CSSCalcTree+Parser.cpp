@@ -922,13 +922,13 @@ static std::optional<TypedChild> consumeValueWithoutSimplifyingRootCalc(CSSParse
     if (!typedValue)
         return { };
 
-    auto isLeafValue = WTF::switchOn(typedValue->child,
-        [](Leaf auto&) { return true; },
-        [](auto&) { return false; }
-    );
+    auto isLeafValue = isLeaf(typedValue->child);
 
     if (isFunction && isLeafValue) {
-        // Wrap in Sum to keep top level calc() function in serialization.
+        // Wrap in Sum to keep top level calc() function in serialization. `anchor()` is not a math
+        // function, so `serializeWithoutOmittingPrefix` prints a `calc()` only for a non-`Leaf`
+        // child, and this wrapper is the tree's ONLY record that the author wrote one. A whole-tree
+        // `copyAndSimplify` collapses it (css-values-4 8.3) and `rebuildChildren` puts it back.
         Vector<Child> children;
         children.append(WTF::move(typedValue->child));
 
