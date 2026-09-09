@@ -2032,10 +2032,17 @@ static Children rebuildSlot(const Children&, RebuildCursor& cursor)
     // lets a Sum lose a zero term, a min() fold two arguments together, or a Product collapse to a
     // single factor. Children is always the only slot for the operations that have one (Sum,
     // Product, Min, Max, Hypot), so "the rest" is unambiguous.
+    //
+    // Moved straight out of the stack rather than through `take()`, which returns a `Child` BY
+    // VALUE and so costs a second out-of-line 41-alternative `mpark` variant move per operand --
+    // measured at ~42 retired instructions each on the ladder bands (the `movecut` probe in
+    // notes/calc-buildoperation-widening-REFUTED-0908.md section 6). `take()`'s only behavioural
+    // extra is its `exhausted()` guard, which the loop bound enforces instead; the cursor is
+    // advanced once because every remaining operand is taken.
     Vector<Child> children;
     children.reserveInitialCapacity(cursor.end - cursor.next);
-    while (!cursor.exhausted())
-        children.append(cursor.take());
+    for (size_t i = std::exchange(cursor.next, cursor.end); i < cursor.end; ++i)
+        children.append(WTF::move(cursor.stack[i]));
     return Children { WTF::move(children) };
 }
 
