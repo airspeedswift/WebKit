@@ -102,6 +102,10 @@
 #include "ProcessWarming.h"
 #include "Settings.h"
 #include "StyleBuilderState.h"
+// The Style<->CSS calculation conversion, for the round-trip entry. Both are project headers in
+// WebCore's own sources, so they need no export.
+#include "StyleCalculationTree.h"
+#include "StyleCalculationTree+Conversion.h"
 // WebCoreSwift-Generated.h is module-scoped, so any translation unit that includes it must declare
 // every Swift boundary type in the module, not just the ones this file calls.
 // WebCoreSwiftBoundaryTypes.h states that requirement once.
@@ -213,49 +217,64 @@ struct ParsedCalc {
 // is a parameter rather than process state on purpose: a set/clear pair around a loop that returns
 // from the middle leaves the flag set for every later case in the run, and that failure reads as a
 // corpus problem rather than an invocation one.
+//
+// Split from the category loop below so that ONE category can be named directly. The Style
+// round-trip entry needs that: `Style::Calculation::toStyle` accepts `LengthPercentage` and
+// `AnglePercentage` only, and taking whichever category the search happened to settle on would
+// convert a tree parsed at `Integer` under `LengthPercentage` options -- a different
+// `Percentage::hint`, so a different tree, for a reason that has nothing to do with the conversion
+// under test.
+ParsedCalc parseCalcExpressionAtCategory(const String& source, WebCore::CSS::Category category, CSSCalc::ParseSimplification parseSimplification)
+{
+    CSSTokenizer tokenizer(source);
+    auto range = tokenizer.tokenRange();
+    if (range.atEnd())
+        return { };
+
+    // `currentRule` and `currentProperty` are both load-bearing, not boilerplate:
+    // CSSCalcTree+Parser.cpp:1346-1349 rejects the tree-counting functions unless the rule is a
+    // Style or Keyframe rule AND a real property is named. With the defaults
+    // (`currentProperty == CSSPropertyInvalid`) those two node kinds never appear.
+    auto parserState = WebCore::CSS::PropertyParserState {
+        .context = calcParserContext(),
+        .currentRule = StyleRuleType::Style,
+        .currentProperty = CSSPropertyWidth,
+    };
+    auto parserOptions = CSSCalc::ParserOptions {
+        .category = category,
+        .range = WebCore::CSS::All,
+        .allowedSymbols = calcAllowedSymbols(),
+        // Both policies default to `Forbid`, and with the defaults `anchor()` and
+        // `anchor-size()` are rejected outright at CSSCalcTree+Parser.cpp:1043 and :1136, making
+        // the `Anchor` and `AnchorSize` alternatives unreachable through this entry. Those two
+        // alternatives also report a child count of 0 regardless of contents (`tuple_size` 0,
+        // webkit.org/b/280798), so they are exactly the ones that must not go untested.
+        .propertyOptions = {
+            .anchorPolicy = AnchorPolicy::Allow,
+            .anchorSizePolicy = AnchorSizePolicy::Allow,
+        },
+    };
+    auto simplificationOptions = CSSCalc::SimplificationOptions {
+        .category = category,
+        .range = WebCore::CSS::All,
+        .conversionData = std::nullopt,
+        .symbolTable = { },
+        .allowZeroValueLengthRemovalFromSum = false,
+    };
+
+    auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification);
+    // A trailing token means the expression was only partly consumed, which is not a parse.
+    if (tree && range.atEnd())
+        return { WTF::move(tree), category, WebCore::CSS::All };
+    return { };
+}
+
 ParsedCalc parseCalcExpression(const String& source, CSSCalc::ParseSimplification parseSimplification = CSSCalc::ParseSimplification::Eager)
 {
     for (auto category : calcCategories) {
-        CSSTokenizer tokenizer(source);
-        auto range = tokenizer.tokenRange();
-        if (range.atEnd())
-            return { };
-
-        // `currentRule` and `currentProperty` are both load-bearing, not boilerplate:
-        // CSSCalcTree+Parser.cpp:1346-1349 rejects the tree-counting functions unless the rule is a
-        // Style or Keyframe rule AND a real property is named. With the defaults
-        // (`currentProperty == CSSPropertyInvalid`) those two node kinds never appear.
-        auto parserState = WebCore::CSS::PropertyParserState {
-            .context = calcParserContext(),
-            .currentRule = StyleRuleType::Style,
-            .currentProperty = CSSPropertyWidth,
-        };
-        auto parserOptions = CSSCalc::ParserOptions {
-            .category = category,
-            .range = WebCore::CSS::All,
-            .allowedSymbols = calcAllowedSymbols(),
-            // Both policies default to `Forbid`, and with the defaults `anchor()` and
-            // `anchor-size()` are rejected outright at CSSCalcTree+Parser.cpp:1043 and :1136, making
-            // the `Anchor` and `AnchorSize` alternatives unreachable through this entry. Those two
-            // alternatives also report a child count of 0 regardless of contents (`tuple_size` 0,
-            // webkit.org/b/280798), so they are exactly the ones that must not go untested.
-            .propertyOptions = {
-                .anchorPolicy = AnchorPolicy::Allow,
-                .anchorSizePolicy = AnchorSizePolicy::Allow,
-            },
-        };
-        auto simplificationOptions = CSSCalc::SimplificationOptions {
-            .category = category,
-            .range = WebCore::CSS::All,
-            .conversionData = std::nullopt,
-            .symbolTable = { },
-            .allowZeroValueLengthRemovalFromSum = false,
-        };
-
-        auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification);
-        // A trailing token means the expression was only partly consumed, which is not a parse.
-        if (tree && range.atEnd())
-            return { WTF::move(tree), category, WebCore::CSS::All };
+        auto parsed = parseCalcExpressionAtCategory(source, category, parseSimplification);
+        if (parsed.tree)
+            return parsed;
     }
     return { };
 }
@@ -1990,6 +2009,20 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcSimplificationEagerTerminalDelta(const cha
 // serialize `calc(NaN)` and the bitwise oracle still says no. Diagnostic only.
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationRootBits(const char*, size_t, const CSSCalcSimplificationOptionsSpec*, uint64_t*, uint64_t*);
 
+struct CSSCalcStyleRoundTripResult {
+    uint32_t parsed;        // the text parsed as a calc at the requested category
+    uint32_t nodeCount;     // of the CSS tree that came back
+    uint32_t rootKind;      // its root's `Node` alternative index
+    uint32_t stage;         // `Tree::stage`, which `toCSS` sets to `Computed`
+    uint32_t textLength;    // the true length, so a truncated compare cannot read as agreement
+    uint32_t styleRootKind; // the intermediate `Style::Calculation::Tree`'s root alternative
+    uint32_t styleDepth;    // and its depth, so a corpus that reaches only leaves cannot read as coverage
+    uint64_t kindMask;      // 1 << index for every alternative the CSS tree contains
+    uint64_t digest;        // see above
+    uint64_t treeTypeBits;  // `Tree::type`, which the round trip recomputes
+};
+WEBCORE_EXPORT CSSCalcStyleRoundTripResult webCoreCSSCalcStyleRoundTrip(const char*, size_t, uint32_t, uint32_t, char*, size_t);
+
 // ENTRIES 11 AND 12 compare `canonicalize` directly, parameterized over the full `CSSUnitType`
 // range rather than only the units a parsed CSS corpus happens to use.
 // `canonicalize` (CSSCalcTree+Simplification.cpp:169-287) is a seventy-case `switch` over
@@ -2560,6 +2593,140 @@ WEBCORE_EXPORT bool webCoreCSSCalcSimplificationRootBits(const char* text, size_
     auto cppTree = CSSCalc::copyAndSimplify(*parsed.tree, options, CSSCalc::Simplifier::Cpp);
     auto swiftTree = CSSCalc::copyAndSimplify(*parsed.tree, options, CSSCalc::Simplifier::Swift);
     return rootBits(cppTree.root, *cppBits) && rootBits(swiftTree.root, *swiftBits);
+}
+
+// ENTRY 16. The Style -> CSS conversion round trip, reported in enough detail to be compared
+// ACROSS TWO BUILDS.
+//
+// WHAT HAS NO ORACLE, AND WHY THIS IS THE ONLY SHAPE ONE CAN TAKE. `Style::Calculation::toCSS`
+// (StyleCalculationTree+Conversion.cpp) is one of the two directions of the computed-value
+// conversion, and the differential in this file has never touched it: every phase drives
+// `copyAndSimplify` over a `CSSCalc::Tree` directly. `toCSS`'s per-operation
+// `CSSCalc::simplify(Op&, ...)` call is the last caller of the 42 overloads outside
+// `copyAndSimplify`, and replacing it with one whole-tree pass is a behaviour change nothing in
+// this repository would catch.
+//
+// The two arms of that change cannot coexist in one binary: the per-node arm IS the production
+// code being replaced, and there is no options value that turns it off (unlike the parser, whose
+// `ParserState::simplificationOptions` may be null). So the comparison has to be one entry, run in
+// two builds, whose report is stable enough to diff. That is what `digest` is for.
+//
+// WHAT `digest` COVERS THAT THE SERIALIZATION DOES NOT. The identified divergence class is the
+// stored per-node `Type`: the per-node arm computes `toType(op)` over children that are ALREADY
+// simplified, while a whole-tree pass computes it over unsimplified children and `copyAndSimplify`
+// then rebuilds with `getType(root)`, i.e. with that same unsimplified-derived type. A `Type`
+// differs in `percentHint` or in an exponent without changing one character of the serialization,
+// which is exactly the `Product{6px, 4px}` class this differential already catches 57 times
+// elsewhere. So the digest mixes in each node's stored `Type`, in walk order, alongside its
+// alternative index and its leaf bits.
+//
+// `conversionDataKind` is passed rather than fixed because `toStyle` DEREFERENCES
+// `conversionData->styleBuilderState()` for `CalcMix` and `Random` (StyleCalculationTree+Conversion.cpp
+// :208, :228). Kind 3 or 4 is therefore required for a corpus that contains either; kinds 0..2
+// would take EXC_BAD_ACCESS rather than declining.
+
+// FNV-1a over the bytes of one `Type`. `Type` is seven `int8_t` exponents plus a one-byte
+// `PercentHintValue`, all of them value-initialised, so its object representation has no padding
+// to make this non-deterministic.
+static uint64_t mixType(uint64_t hash, const CSSCalc::Type& type)
+{
+    auto mixByte = [&](uint8_t byte) {
+        hash ^= byte;
+        hash *= 0x00000100000001B3ull;
+    };
+    mixByte(static_cast<uint8_t>(type.length));
+    mixByte(static_cast<uint8_t>(type.angle));
+    mixByte(static_cast<uint8_t>(type.time));
+    mixByte(static_cast<uint8_t>(type.frequency));
+    mixByte(static_cast<uint8_t>(type.resolution));
+    mixByte(static_cast<uint8_t>(type.flex));
+    mixByte(static_cast<uint8_t>(type.percent));
+    mixByte(type.percentHint ? static_cast<uint8_t>(*type.percentHint) : 0);
+    return hash;
+}
+
+static uint64_t digestOfSubtree(const CSSCalc::Child& root)
+{
+    uint64_t hash = 0xCBF29CE484222325ull;
+    auto mixWord = [&](uint64_t word) {
+        for (unsigned i = 0; i < 8; ++i) {
+            hash ^= static_cast<uint8_t>(word >> (i * 8));
+            hash *= 0x00000100000001B3ull;
+        }
+    };
+    forEachNodeOfSubtree(root, [&](const CSSCalc::Child& node) {
+        mixWord(node.value.index());
+        hash = mixType(hash, CSSCalc::getType(node));
+        WTF::switchOn(node.value,
+            [&]<CSSCalc::Numeric T>(const T& leaf) { mixWord(std::bit_cast<uint64_t>(leaf.value)); },
+            [&](const auto&) { });
+        if (auto* dimension = get_if<CSSCalc::CanonicalDimension>(&node.value))
+            mixWord(static_cast<uint64_t>(dimension->dimension));
+        if (auto* dimension = get_if<CSSCalc::NonCanonicalDimension>(&node.value))
+            mixWord(static_cast<uint64_t>(dimension->unit));
+    });
+    return hash;
+}
+
+WEBCORE_EXPORT CSSCalcStyleRoundTripResult webCoreCSSCalcStyleRoundTrip(const char* text, size_t length, uint32_t category, uint32_t conversionDataKind, char* out, size_t capacity)
+{
+    CSSCalcStyleRoundTripResult result { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto parsed = parseCalcExpressionAtCategory(source, static_cast<WebCore::CSS::Category>(category), CSSCalc::ParseSimplification::Eager);
+    if (!parsed.tree)
+        return result;
+    result.parsed = 1;
+
+    // Scoped, because `ToStyleOptions::conversionData` holds a `CheckedPtr` to the builder state and
+    // `CanMakeCheckedPtr`'s destructor RELEASE_ASSERTs the count is zero when the fixture is reset.
+    CSSCalc::Tree roundTripped = [&] {
+        if (simplificationConversionDataCarriesBuilderState(conversionDataKind))
+            resetSimplificationBuilderStates();
+        auto fontSize = simplificationConversionDataFontSize(conversionDataKind);
+        auto conversionData = [&]() -> std::optional<CSSToLengthConversionData> {
+            if (!conversionDataKind)
+                return std::nullopt;
+            if (simplificationConversionDataCarriesBuilderState(conversionDataKind))
+                return CSSToLengthConversionData { simplificationStyleAtFontSize(fontSize), simplificationBuilderStateAtFontSize(fontSize) };
+            return CSSToLengthConversionData { simplificationStyleAtFontSize(fontSize), nullptr, nullptr, nullptr, nullptr };
+        }();
+
+        auto styleTree = WebCore::Style::Calculation::toStyle(*parsed.tree, WebCore::Style::Calculation::ToStyleOptions {
+            .category = static_cast<WebCore::CSS::Category>(category),
+            .range = WebCore::CSS::All,
+            .conversionData = WTF::move(conversionData),
+            .symbolTable = { },
+        });
+        result.styleRootKind = static_cast<uint32_t>(styleTree.root.value.index());
+        // `computeDepth`, not a node count, because the Style tree has no generic walk in this file
+        // and a depth is the check that matters: a corpus whose Style trees are all leaves would
+        // exercise the conversion's leaf overloads only, and this differential would read as green
+        // while covering nothing. The driver asserts the maximum over the corpus is > 1.
+        result.styleDepth = static_cast<uint32_t>(WebCore::Style::Calculation::computeDepth(styleTree));
+
+        return WebCore::Style::Calculation::toCSS(styleTree, WebCore::Style::Calculation::ToCSSOptions {
+            .category = static_cast<WebCore::CSS::Category>(category),
+            .range = WebCore::CSS::All,
+        });
+    }();
+
+    result.nodeCount = nodeCountOfSubtree(roundTripped.root);
+    result.rootKind = static_cast<uint32_t>(roundTripped.root.value.index());
+    result.stage = static_cast<uint32_t>(roundTripped.stage);
+    result.kindMask = alternativeMaskOfSubtree(roundTripped.root);
+    result.digest = digestOfSubtree(roundTripped.root);
+    result.treeTypeBits = mixType(0xCBF29CE484222325ull, roundTripped.type);
+
+    auto serializationOptions = CSSCalc::SerializationOptions {
+        .range = WebCore::CSS::All,
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+    // Through `Serializer::Cpp` explicitly: this entry is about the CONVERSION, and taking the
+    // build's default serializer would let a serialization arm change move the table.
+    result.textLength = static_cast<uint32_t>(copyOutSerialization(
+        CSSCalc::serializationForCSS(roundTripped, serializationOptions, CSSCalc::Serializer::Cpp), out, capacity));
+    return result;
 }
 
 // ENTRY 10. Does the conversion-data fixture support font-metric-relative units?
