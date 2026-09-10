@@ -495,6 +495,31 @@ WEBCORE_EXPORT uint32_t swiftSerializationChildIndex(const Child&, uint32_t inde
 // is better here: the sink lives on the C++ stack for exactly one `serializationForCSS` call, so a
 // refcounted sink would cost a heap allocation per call on a path `cssText` and getComputedStyle
 // reach, and "immortal" would be a claim that is not true.
+//
+// WHY THE `SWIFT_SAFE` CLAIM HOLDS, which is a separate question from the paragraph above and is the
+// one that matters. `SWIFT_SAFE` is `swift_attr("safe")`: an UNCHECKED assertion that this type
+// safely encapsulates its unsafe constituents. Nothing verifies it -- and WebCore's Swift is built
+// with `-strict-memory-safety` and `-Werror StrictMemorySafety`, so without the annotation the two
+// raw pointer members below would make the whole type unsafe to Swift and every use of it would need
+// an `unsafe` marker. Two of the island's zero `unsafe` markers rest on this line and on the
+// matching one on `CSSCalcSwiftBuilder`, so the claim is stated rather than left implicit:
+//
+//   * The referents outlive every use. The sink is constructed at exactly one site --
+//     `trySerializeWithSwiftIsland` (CSSCalcTree+Serialization.cpp) -- from that function's own
+//     `StringBuilder&` parameter and from `options.serializationContext`, both of which the caller
+//     of `serializationForCSS` owns; it is passed straight to `cssCalcSerializeSwift` in the next
+//     statement and destroyed at the end of that scope. `[[clang::lifetimebound]]` on both
+//     constructor parameters is what makes a temporary at that site a clang diagnostic rather than a
+//     silent dangle, so the one-site claim is enforced for any site added later.
+//   * Swift does not extend either pointer's reach, and this is the bullet that needs checking
+//     rather than asserting: the struct imports as an ordinary copyable value, so a copy COULD carry
+//     `m_builder` into a stored property. None does. Every one of the thirteen Swift signatures that
+//     names this type (`CSSCalcSerializationSwift.swift`) takes it `inout`, no Swift type declares a
+//     stored property of it, and no escaping closure captures it -- an `inout` argument cannot be
+//     captured by one in any case. So every copy of `m_builder` is a parameter whose lifetime nests
+//     inside the C++ call that supplied it.
+//   * The output is disjoint from the input, so the `inout` costs nothing in exclusivity terms: the
+//     `StringBuilder` being appended to is not reachable from the `Child` tree being read.
 struct SWIFT_SAFE CSSCalcSwiftSink {
     CSSCalcSwiftSink(WTF::StringBuilder& builder [[clang::lifetimebound]], const CSS::SerializationContext& context [[clang::lifetimebound]]) noexcept
         : m_builder(&builder)
@@ -722,6 +747,31 @@ struct CSSCalcSwiftSimplificationOptions {
 // finished subtree; a parent then says how many operands it consumes and gets one back, which is
 // what lets `rebuildFrom` be generic and keeps `~Escapable` out of the picture -- no Swift
 // container ever holds a `Child`, because the container is the C++ stack.
+//
+// WHY THE `SWIFT_SAFE` CLAIM HOLDS. As on `CSSCalcSwiftSink` (see the longer note there for what
+// `swift_attr("safe")` is and why an unchecked assertion is load-bearing here), the annotation is an
+// UNCHECKED claim that the two raw pointer members below are safely encapsulated, and the island's
+// `unsafe` count of zero rests on it. What makes it true:
+//
+//   * The referents outlive every use. Six construction sites, all in
+//     CSSCalcTree+Simplification.cpp: the production one is `trySimplifyWithSwiftIsland`, over that
+//     function's `CSSCalcSwiftOperandStack&` parameter -- storage owned by `swiftSimplifiedRoot`'s
+//     frame, which is also the frame holding the root slot the walk writes into -- and its
+//     `const SimplificationOptions&`. The other five are `calcbench`'s probe entries, each over a
+//     stack local declared immediately above. In all six the builder is destroyed in the same scope
+//     that built it, before the referents go away. `[[clang::lifetimebound]]` on both constructor
+//     parameters keeps a temporary at any future site a clang diagnostic rather than a dangle.
+//   * Swift does not extend either pointer's reach, and the check is less trivial than the sink's
+//     because this type is NOT only passed `inout`: the `simplifyX` family takes it by value as an
+//     `Optional`, so copies of `m_operands` do exist. They are all parameters. No Swift type declares
+//     a stored property of this type (grep for one: there is none), no escaping closure captures it,
+//     and the by-value copies only travel further down the same recursion, so every copy's lifetime
+//     nests inside the one C++ call.
+//   * The `inout` builder is held across borrows of the input tree, which relies on EXCLUSIVITY and
+//     is worth stating because it is the one non-obvious part: `simplify` borrows the original
+//     `Child` while mutating the builder. That is sound by input/output disjointness -- the operand
+//     stack and root slot are freshly constructed C++ storage, not reachable from the input tree --
+//     so the two accesses can never overlap, whatever order the optimizer picks.
 struct SWIFT_SAFE CSSCalcSwiftBuilder {
     CSSCalcSwiftBuilder(CSSCalcSwiftOperandStack& operands [[clang::lifetimebound]], const SimplificationOptions& options [[clang::lifetimebound]]) noexcept
         : m_operands(&operands)

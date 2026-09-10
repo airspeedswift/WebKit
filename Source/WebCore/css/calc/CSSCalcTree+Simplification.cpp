@@ -1874,6 +1874,16 @@ template<Leaf Op> static auto copyAndSimplifyChildren(const Op& op, const Simpli
 // `fallback` IS mapped, and the asymmetry is why it goes through `anchorSlotKeepingPrefix`: because
 // the side is copied its one-child `Sum` survives, and because the fallback is simplified its own
 // has to be restored. See that function for what the wrapper means and for the measurement.
+//
+// `NOESCAPE` is `__attribute__((noescape))` -- an UNCHECKED assertion, so it is justified rather than
+// left to the reader. It holds by inspection and the inspection is exhaustive: `mapSlot` appears in
+// this function in call position only, three times (the tuple-slot map and one `mapSlot(root->fallback)`
+// in each of the `Anchor` / `AnchorSize` branches). It is never stored, returned, bound to a
+// reference, or captured by anything. Both callers -- `copyAndSimplifyChildren` (:1914) and
+// `CSSCalcSwiftBuilder::rebuildFrom` (:2317) -- pass a `[&]` lambda that is a temporary in the call
+// expression, so an escape would be a dangling capture rather than a lifetime extension. This is
+// C++-internal: `static` in one translation unit, not part of the Swift boundary, so no Swift-side
+// safety claim depends on it.
 template<typename Op, typename MapSlot> static Op rebuildChildren(const IndirectNode<Op>& root, NOESCAPE MapSlot&& mapSlot)
 {
     // `Random::Sharing` is a `<random-key>`, not a `<calc-sum>`: the one tuple slot in any operation
