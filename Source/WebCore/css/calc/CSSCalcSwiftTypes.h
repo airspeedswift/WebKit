@@ -930,28 +930,6 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
     WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false) noexcept;
 
-    // Move the single remaining operand into the root slot.
-    //
-    // WHY THE PARSER NEEDS THIS AND THE SIMPLIFIER DOES NOT. The simplifier walks a tree it already
-    // has, so it knows which node is the root before it builds it and passes `isRoot` -- which
-    // constructs straight into the root slot and moves nothing. A recursive-descent parser does not
-    // know: whether the first `<calc-product>` is the whole expression or the first operand of a
-    // sum is only settled after it has been parsed and pushed. Deciding by lookahead would mean
-    // scanning for a top-level `+` at every nesting level before descending.
-    //
-    // Costs one `Child` move per parse -- an out-of-line 41-alternative variant move, ~42
-    // instructions, measured on the `RebuildCursor::take()` arm. Once per whole parse, not per
-    // node, and it goes away if the grammar ever builds into the flat form and emits in one pass.
-    // Returns false if the stack does not hold exactly one operand, which is a boundary contract
-    // violation rather than a parse outcome.
-    //
-    // NOT BEHIND `ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)`, and it was, which broke the shipping build.
-    // The grammar that calls it is production -- `138c8b38c1c9` moved it out of that gate for
-    // exactly this reason -- and so is its C++ driver `cssCalcSwiftParseIntoChild`, whose own
-    // declaration below says `parseAndSimplify` calls it when the parse path is gated on. Two
-    // symbols were left behind by that move; this is one of them.
-    WEBCORE_EXPORT bool finishRoot() noexcept;
-
     // Drop every operand.
     //
     // Two callers and they are not the same kind: `cssCalcSwiftParseIntoChild`'s failure and
@@ -966,6 +944,14 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     //
     // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
     // that this header stays self-contained and does not pull in wtf/Vector.h.
+    //
+    // THERE USED TO BE A `finishRoot()` BESIDE THIS, and it is gone rather than moved. It moved the
+    // single remaining operand into the root slot, because a recursive-descent parser does not know
+    // which node is the root until the descent is over -- one `Child` move per parse, an
+    // out-of-line 41-alternative variant move at ~42 instructions. Its own comment said it "goes
+    // away if the grammar ever builds into the flat form and emits in one pass", which is what the
+    // grammar now does: `emitParsed` walks a finished flat tree, so it knows the root before it
+    // builds it and passes `isRoot` like every other construction here.
     WEBCORE_EXPORT void clearOperands() noexcept;
 
     // `simplify(Symbol&)` (CSSCalcTree+Simplification.cpp:516-524) in full --
@@ -1360,16 +1346,27 @@ WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
 WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept;
 
 // Drives the Swift grammar over `innerRange` -- the tokens INSIDE a `calc()`, which is what
-// `consumeFunction` leaves -- and constructs the parsed tree into `outRoot`.
+// `consumeFunction` leaves -- simplifies the result, and constructs it into `outRoot`.
 //
 // Lives beside the operand stack rather than at the call site because `CSSCalcSwiftOperandStack` is
 // only forward-declared in this header (it holds a `WTF::Vector<Child>`, and this header must stay
 // self-contained), so no other translation unit can build one. That is also the production shape:
 // when the parse path is gated on, `parseAndSimplify` calls exactly this.
 //
+// PARSE AND SIMPLIFICATION ARE ONE PASS. The grammar writes the island's own `CalcFlatNode` form,
+// the island's existing per-alternative simplification runs over it in place, and a `CSSCalc::Child`
+// is materialised once at the end. That is one per-node representation conversion where the shape
+// this replaced had three: the grammar built a `Child` per node, and `ParseSimplification::Terminal`
+// then flattened it back into `CalcFlatNode`s and emitted it again.
+//
+// `simplify` false skips the middle pass, matching `ParseSimplification::None`. It exists for the
+// grammar differential, which must compare an UNSIMPLIFIED tree -- against a simplified one a parse
+// defect and a commutative fold can cancel, since `Sum{2px, 1px}` and `Sum{1px, 2px}` agree after
+// folding. Production is `Terminal`, which is this parameter's default.
+//
 // Returns `Parsed` only when the whole range was consumed AND the boundary contract held -- the
 // root slot taken and the operand stack empty. Anything else leaves `outRoot` untouched.
-WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const SimplificationOptions&, Child& outRoot) noexcept;
+WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const SimplificationOptions&, Child& outRoot, bool simplify = true) noexcept;
 
 } // namespace CSSCalc
 } // namespace WebCore

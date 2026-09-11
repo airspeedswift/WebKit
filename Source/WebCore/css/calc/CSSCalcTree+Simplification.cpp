@@ -2179,13 +2179,34 @@ static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, 
     return items;
 }
 
-CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot) noexcept
+// The `SimplificationOptions` fields Swift reads, as a POD.
+//
+// One definition rather than one per entry point, because there are now two: the whole-tree
+// simplification (`trySimplifyWithSwiftIsland`) and the fused parse (`cssCalcSwiftParseIntoChild`),
+// which runs the same in-Swift pass over a tree the grammar built rather than one it flattened.
+// Two hand-written copies of a six-field conversion is exactly the shape that goes out of step.
+static CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const SimplificationOptions& options)
+{
+    return CSSCalcSwiftSimplificationOptions {
+        .rangeMinimum = options.range.min,
+        .rangeMaximum = options.range.max,
+        .category = static_cast<uint8_t>(options.category),
+        .allowZeroValueLengthRemovalFromSum = options.allowZeroValueLengthRemovalFromSum,
+        .hasConversionData = options.conversionData.has_value(),
+        // Derived here, not in Swift: it is an eleven-case switch over `CSS::Category` whose whole
+        // content is "is it one of these two", and deriving it in Swift would duplicate the
+        // category table there.
+        .percentageResolveToDimension = percentageResolveToDimension(options),
+    };
+}
+
+CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot, bool simplify) noexcept
 {
     CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot };
     CSSCalcSwiftBuilder builder { operands, options };
     auto cursor = CSSCalcSwiftParseCursor { innerRange };
 
-    auto result = cssCalcParseSwift(cursor, builder, parseOptions);
+    auto result = cssCalcParseSwift(cursor, builder, parseOptions, swiftSimplificationOptions(options), simplify);
 
     if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Parsed)) {
         // A failed or declined descent can leave partial operands behind; drop them rather than
@@ -2196,23 +2217,14 @@ CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& in
 
     // The same contract the simplification entry checks, and for the same reason: a boundary that
     // came apart must be a fallback to the C++ arm, not a tree built from whatever was left on the
-    // stack. `finishRoot` should already have taken the slot, so a non-null one here means the
-    // descent finished while leaving the caller's placeholder in place.
+    // stack. The emit constructs the root straight into the slot -- it knows which node is the root,
+    // which is what removed `finishRoot` -- so a non-null one here means the descent finished while
+    // leaving the caller's placeholder in place.
     if (operands.rootSlot || !operands.value.isEmpty()) {
         builder.clearOperands();
         result.outcome = static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Failed);
     }
     return result;
-}
-
-bool CSSCalcSwiftBuilder::finishRoot() noexcept
-{
-    if (!m_operands->rootSlot || m_operands->value.size() != 1)
-        return false;
-    *m_operands->rootSlot = WTF::move(m_operands->value.last());
-    m_operands->value.removeLast();
-    m_operands->rootSlot = nullptr;
-    return true;
 }
 
 bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot) noexcept
@@ -3015,17 +3027,7 @@ static bool trySimplifyWithSwiftIsland(const Tree& tree, const SimplificationOpt
 {
     CSSCalcSwiftBuilder builder { operands, options };
 
-    auto swiftOptions = CSSCalcSwiftSimplificationOptions {
-        .rangeMinimum = options.range.min,
-        .rangeMaximum = options.range.max,
-        .category = static_cast<uint8_t>(options.category),
-        .allowZeroValueLengthRemovalFromSum = options.allowZeroValueLengthRemovalFromSum,
-        .hasConversionData = options.conversionData.has_value(),
-        // Derived here, not in Swift: it is an eleven-case switch over `CSS::Category` whose whole
-        // content is "is it one of these two", and deriving it in Swift would duplicate the
-        // category table there.
-        .percentageResolveToDimension = percentageResolveToDimension(options),
-    };
+    auto swiftOptions = swiftSimplificationOptions(options);
 
     auto result = cssCalcSimplifySwift(tree.root, builder, swiftOptions);
 
