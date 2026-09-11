@@ -93,6 +93,33 @@ framework module WebCore_Private [system] {
     }
 
     module Core {
+        // CSSValueKeywords.h IS LISTED HERE, AHEAD OF THE UMBRELLA, SO THAT ITS COMPLETE
+        // DEFINITION OF `enum CSSValueID : uint16_t` IS THE FIRST ONE THIS MODULE'S AST SEES.
+        //
+        // Without this line Swift can name the TYPE `WebCore.CSSValueID` but NO ENUMERATOR of it:
+        // `WebCore.CSSValueMin` and all 1322 siblings are "no member". The cause is not Swift and
+        // not this enum's size. An incomplete `enum X : uint16_t;` declaration that is parsed
+        // BEFORE the complete definition, anywhere in the same Clang module, makes the importer
+        // bring the type in with an empty enumerator list. Twenty-two WebCore headers
+        // forward-declare `CSSValueID` that way rather than include this 112 KB generated header
+        // -- CSSBackgroundRepeatValue.h, CSSCounterStyleRegistry.h, CSSFunctionValue.h and
+        // nineteen more -- and an `umbrella` directory is walked in filename order, so several of
+        // them are parsed before "CSSValueKeywords.h" is reached.
+        //
+        // Naming the header here parses it first and costs nothing else: it is already a member of
+        // this module via the umbrella (which is why it must also be excluded below), so no
+        // translation unit gains an include and the module's contents are unchanged. The
+        // alternative fixes are all worse: replacing the forward declarations with `#include`s puts
+        // a 112 KB generated header into twenty-two widely-included ones, and a dedicated
+        // non-umbrella submodule does NOT work -- the forward declaration only has to be parsed
+        // first, not be in the same submodule.
+        //
+        // Measured both ways against WebCore's own Swift step, 2026-09-11:
+        // ~/src/webkit-swift-ports/cssprobe/e0/modulefix/ (the real tree) and
+        // ~/src/webkit-swift-ports/cssprobe/e0/twinorder/variants.py (fourteen reduced variants,
+        // including the negative control that only the FIRST-parsed declaration matters).
+        header "CSSValueKeywords.h"
+
         // Workaround for rdar://173516139: PrivateHeaders includes a header
         // "WorkAround173516139.h" that the build system regenerates whenever
         // the header list changes.
@@ -124,6 +151,10 @@ framework module WebCore_Private [system] {
         exclude header "CSSCalcSwiftTypes.h"
         exclude header "CSSCalcType.h"
         exclude header "CSSPrimitiveNumericCategory.h"
+
+        // Stated as a header of Core above, ahead of the umbrella, so that it is parsed first.
+        // See the comment at that line: without it no `CSSValueID` enumerator imports into Swift.
+        exclude header "CSSValueKeywords.h"
 
         module * {
             export *
