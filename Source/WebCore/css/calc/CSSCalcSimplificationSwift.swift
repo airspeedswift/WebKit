@@ -212,6 +212,213 @@ private func percentHintFromRawValue(_ raw: UInt8) -> WebCore.CSSCalc.PercentHin
     return nil
 }
 
+// MARK: - The `Type` algebra: arm selection
+
+/// Which implementation answers the css-typed-om `Type` algebra for THIS FILE's call sites. Both
+/// are compiled in; this chooses which one, at compile time. Same arrangement as
+/// `CSSCalc::Simplifier` and `CSSCalc::Serializer`, and for the same reason: the C++ stays in tree
+/// and stays selectable, which is the schedule, and the differential names an arm EXPLICITLY
+/// rather than taking `defaultTypeAlgebra`, so an ignored build flag cannot masquerade as a pass.
+///
+/// A Swift `enum` and a Swift `let`, and that is the point of this stage rather than an accident
+/// of it: the selector costs **zero production C++**. `CSSCalcType.{h,cpp}` are byte-identical
+/// before and after. The `Cpp` arm is not a fallback kept alive for the island -- it is the same
+/// code the C++ parser, `CSSCalcTree.cpp`'s `toType` and CSS Typed OM's `CSSMathValue` already
+/// call, so it cannot be deleted and does not need a guard.
+///
+/// R10 -- a gate selected in two places at once -- does NOT apply. `defaultTypeAlgebra` is a Swift
+/// `let` in one whole-module-optimized module, not a C++ `static constexpr` used as a default
+/// argument and therefore evaluated in each caller's translation unit.
+private enum CalcTypeAlgebraArm {
+    /// `CSSCalcType.cpp`, reached through the C++ interop boundary.
+    case cpp
+    /// The bodies below.
+    case swift
+}
+
+/// The arm the production call sites take. **Flipping this one token is the differential's arm**,
+/// in the same way every other `validate/arms/*.patch` in this port is one token or one block.
+///
+/// Deliberately NOT an xcconfig flag. `USE_SWIFT_CSS_CALC_SIMPLIFICATION` exists because a C++
+/// caller outside this file has to pick the simplifier; nothing outside this file picks the type
+/// algebra, so a build-system knob would be three lines of xcconfig buying nothing.
+private let defaultTypeAlgebra = CalcTypeAlgebraArm.swift
+
+// MARK: - The `Type` algebra in Swift
+
+private extension CalcType {
+
+    /// The C++'s `if (type.percentHint)` -- `PercentHintValue`'s `explicit operator bool`
+    /// (`CSSCalcType.h:90`).
+    ///
+    /// A comparison against a default-constructed `PercentHintValue`, not a decode to `UInt8`.
+    /// `PercentHintValue::m_value` is PRIVATE and nothing reads it; `percentHintRawValue` above
+    /// needs six comparisons to get at it, and **the algebra never needs to**. Every operation
+    /// here either COPIES a hint or tests two for equality, and the imported defaulted
+    /// `operator==` (`CSSCalcType.h:89`) does both directly. That is why porting the algebra needs
+    /// no accessor added to the C++ and no `unsafe`.
+    @inline(always)
+    var hasPercentHint: Bool {
+        // `!(… == …)`, not `!=`. The imported defaulted `operator==` (`CSSCalcType.h:89`) gives
+        // Swift `==` and NOT `!=`: C++20 synthesises the negation, the ClangImporter does not, and
+        // the diagnostic is "binary operator '!=' cannot be applied" rather than anything naming
+        // the rewrite rule.
+        return !(percentHint == CalcType.PercentHintValue())
+    }
+
+    /// css-typed-om step 2, shared verbatim by "add two types" (`CSSCalcType.cpp:50`-`:60`) and
+    /// "multiply two types" (`:124`-`:135`) -- the two C++ bodies are identical apart from a
+    /// comment, and are written once here.
+    ///
+    /// `false` is the shared failure exit: both hints non-null and different. On `true` both types
+    /// carry the same hint.
+    ///
+    /// The C++ writes `type2.percentHint = *type1.percentHint`, i.e. it unwraps to a `PercentHint`
+    /// and lets the converting constructor re-wrap it. Assigning the `PercentHintValue` straight
+    /// across is bit-identical -- the constructor is `static_cast<InternalValue>(hint)`
+    /// (`CSSCalcType.h:84`-`:87`) and the source is non-null on that branch -- and it avoids the
+    /// unwrap, which is the operation the private storage makes awkward.
+    @inline(always)
+    static func normalizePercentHints(
+        _ type1: inout CalcType,
+        _ type2: inout CalcType
+    ) -> Bool {
+        if type1.hasPercentHint && type2.hasPercentHint {
+            return type1.percentHint == type2.percentHint
+        }
+        if type1.hasPercentHint {
+            type2.percentHint = type1.percentHint
+        } else if type2.hasPercentHint {
+            type1.percentHint = type2.percentHint
+        }
+        return true
+    }
+
+    /// One lane of `multiply`'s step 4, accumulating the overflow flag rather than branching per
+    /// lane, so the seven are a straight run of `adds`/`csinc` rather than seven early exits.
+    ///
+    /// `addingReportingOverflow` is the exact analogue of the C++'s `checkedSum<int8_t>`
+    /// (`CSSCalcType.cpp:142`-`:144`). Not `&+`, which would silently wrap where the C++ REFUSES,
+    /// and not `+`, which would TRAP where the C++ returns `std::nullopt` -- a Swift-only abort on
+    /// input the C++ merely declines. Neither substitute is detectable on any tree the corpus
+    /// builds; the extremal arm of the differential is what tests this lane.
+    @inline(always)
+    static func sumExponent(_ a: Int8, _ b: Int8, _ overflowed: inout Bool) -> Int8 {
+        let (result, didOverflow) = a.addingReportingOverflow(b)
+        overflowed = overflowed || didOverflow
+        return result
+    }
+
+    /// `Type::multiply` (`CSSCalcType.cpp:110`-`:153`).
+    ///
+    /// The C++ adds the seven exponents in a loop over `allBaseTypes()` whose body is
+    /// `operator[]`, a SEVEN-WAY SWITCH on a runtime index (`CSSCalcType.h:201`-`:231`) -- so the
+    /// switch is a real branch on every one of the seven iterations, twice, once per operand.
+    /// Written straight-line here over the named fields. **That is the same algorithm with the
+    /// C++'s own loop unrolled**, not a different one: `allBaseTypes()` is a compile-time list and
+    /// the field names ARE the enumeration, so Swift can spell what C++ needed a subscript for.
+    /// It is also why this port needs no `Type::operator[]` equivalent and no index type.
+    @inline(always)
+    func multiplied(by other: CalcType) -> CalcType? {
+        var type1 = self
+        var type2 = other
+
+        // Steps 2/3.
+        guard Self.normalizePercentHints(&type1, &type2) else {
+            return nil
+        }
+
+        // Step 4.
+        var finalType = CalcType()
+        var overflowed = false
+        finalType.length = Self.sumExponent(type1.length, type2.length, &overflowed)
+        finalType.angle = Self.sumExponent(type1.angle, type2.angle, &overflowed)
+        finalType.time = Self.sumExponent(type1.time, type2.time, &overflowed)
+        finalType.frequency = Self.sumExponent(type1.frequency, type2.frequency, &overflowed)
+        finalType.resolution = Self.sumExponent(type1.resolution, type2.resolution, &overflowed)
+        finalType.flex = Self.sumExponent(type1.flex, type2.flex, &overflowed)
+        finalType.percent = Self.sumExponent(type1.percent, type2.percent, &overflowed)
+        if overflowed {
+            // "NOTE: This is amended in our implementation to return `failure` if exponent would
+            // overflow." (`CSSCalcType.cpp:141`)
+            return nil
+        }
+
+        // "Set finalType's percent hint to type1's percent hint." (`:148`-`:149`) -- type1's, after
+        // step 2 has already made the two agree.
+        finalType.percentHint = type1.percentHint
+
+        // Step 5.
+        return finalType
+    }
+
+    /// `Type::invert` (`CSSCalcType.cpp:155`-`:170`).
+    ///
+    /// `0 &- exponent`, NOT `-exponent`, and this is a correctness point rather than a style one.
+    /// The C++ is `result[unit] = -1 * type[unit]`: the operand promotes to `int`, multiplies, and
+    /// NARROWS back to `int8_t`. For -128 that is 128 narrowed, which on every target WebKit ships
+    /// is -128. Swift's unary `-` on `Int8` TRAPS on -128, so the literal translation would turn a
+    /// defined C++ answer into an abort. `&-` reproduces the C++ bit for bit and adds no trap
+    /// condition to the census.
+    ///
+    /// -128 IS reachable: `multiply` admits any sum that fits in `Int8`, so two `Product`s of
+    /// exponent -64 get there, and `invert` is then called on the result by step 9.4's `Invert`
+    /// arm. Not reachable from the corpus, which is why the differential carries an extremal set
+    /// the corpus cannot produce.
+    @inline(always)
+    func inverted() -> CalcType {
+        // "Let result be a new type with an initially empty ordered map and a percent hint matching
+        // that of type." (`:160`-`:162`)
+        var result = CalcType()
+        result.percentHint = percentHint
+
+        // "For each unit -> exponent of type, set result[unit] to (-1 * exponent)." (`:164`-`:166`)
+        result.length = 0 &- length
+        result.angle = 0 &- angle
+        result.time = 0 &- time
+        result.frequency = 0 &- frequency
+        result.resolution = 0 &- resolution
+        result.flex = 0 &- flex
+        result.percent = 0 &- percent
+
+        return result
+    }
+}
+
+/// `Type::multiply` through the selected arm.
+///
+/// `@inline(always)` with a constant `arm` folds the switch away, so the `Cpp` arm costs exactly
+/// the call it costs today and the `Swift` arm costs no dispatch. `@inline(always)`, never
+/// `@inline(__always)`: the underscored spelling is silently declined on exactly the bodies where
+/// it matters.
+@inline(always)
+private func calcTypeMultiply(
+    _ a: CalcType,
+    _ b: CalcType,
+    _ arm: CalcTypeAlgebraArm = defaultTypeAlgebra
+) -> CalcType? {
+    switch arm {
+    case .cpp:
+        return CalcType.multiply(a, b).value
+    case .swift:
+        return a.multiplied(by: b)
+    }
+}
+
+/// `Type::invert` through the selected arm.
+@inline(always)
+private func calcTypeInvert(
+    _ a: CalcType,
+    _ arm: CalcTypeAlgebraArm = defaultTypeAlgebra
+) -> CalcType {
+    switch arm {
+    case .cpp:
+        return CalcType.invert(a)
+    case .swift:
+        return a.inverted()
+    }
+}
+
 /// A numeric leaf the file has decided on: everything `makeChildWithValueBasedOn` carries. Needed
 /// because `CSSCalcSwiftBuilder` is a sink -- once pushed, an operand cannot be read back -- so a
 /// parent must carry the answer out of the recursion itself.
@@ -4948,7 +5155,7 @@ fileprivate extension CalcFlatTree {
             case .percentage, .canonicalDimension:
                 // `Type::multiply(productResult.type, getType(x))` (`:823`, `:832`).
                 guard let factorType = options.numericLeafType(leaf),
-                      let multiplied = CalcType.multiply(productType, factorType).value else {
+                      let multiplied = calcTypeMultiply(productType, factorType) else {
                     return false
                 }
                 productType = multiplied
@@ -4984,8 +5191,8 @@ fileprivate extension CalcFlatTree {
             guard let factorType = options.numericLeafType(inner) else {
                 return false
             }
-            let invertedType = CalcType.invert(factorType)
-            guard let multiplied = CalcType.multiply(productType, invertedType).value else {
+            let invertedType = calcTypeInvert(factorType)
+            guard let multiplied = calcTypeMultiply(productType, invertedType) else {
                 return false
             }
             productType = multiplied
@@ -5286,6 +5493,280 @@ public func cssCalcFlatEmitProbeSwift(
         }
     }
     return emitted
+}
+
+// MARK: - The `Type` algebra differential
+
+/// A test-only exhaustive differential over the two `Type`-algebra arms, driven ENTIRELY FROM SWIFT.
+///
+/// It lives here, not in `CSSTokenizerSwiftBridge.cpp`, because everything it needs is reachable
+/// from Swift: the C++ arm through the interop boundary, the Swift arm directly. Written as a
+/// bridge entry it would have been ~120 lines of C++ restating the universe; written here the C++
+/// side of the harness is the two `@_expose(Cxx)` declarations the compiler generates, and the
+/// stage's "zero new C++" claim survives the *validation*, not just the port.
+///
+/// Both arms are named EXPLICITLY (`.cpp` / `.swift`), never `defaultTypeAlgebra`, so the
+/// differential is valid whichever arm the build ships -- the same reason `CSSCalc::Simplifier` is
+/// named explicitly by the existing bridge, and the reason an ignored build flag cannot masquerade
+/// here as a pass.
+///
+/// Compiled out of every shipping configuration by the gate above, so it is test-only C++'s Swift
+/// counterpart and belongs in neither ratio.
+private struct CalcTypeAlgebraDifferential {
+
+    // The counters, in the order `cssCalcTypeAlgebraDifferentialCounter` reports them. Every one of
+    // these exists to make a specific way of measuring nothing FAIL LOUDLY rather than pass; the
+    // vacuity each answers is named at its declaration.
+    var universeCount = 0            // 0
+    var extremalCount = 0            // 1  V4: axis 2 present at all
+    var multiplyCases = 0            // 2  V5: assert the case count, never the exit status
+    var multiplyMismatches = 0       // 3
+    var invertCases = 0              // 4
+    var invertMismatches = 0         // 5
+    var multiplyBothEngaged = 0      // 6  V1: an all-`nil` sweep compares one bit and nothing else
+    var distinctInputs = 0           // 7  V3: a universe that collapsed to the default value
+    var distinctMultiplyResults = 0  // 8  V3
+    var hintConflictInputs = 0       // 9  V4: the hint-conflict exit
+    var overflowInputs = 0           // 10 V4: the overflow exit -- LIVE ONLY ON AXIS 2
+    var hintPropagatedInputs = 0     // 11 V4: step 2's propagation, the NC-B2 path
+    var invertMinExponentInputs = 0  // 12 V4: the `0 &- (-128)` lane, LIVE ONLY ON AXIS 2
+    var byteVersusEqualsDisagreements = 0 // 13 the `Type`-has-no-padding cross-check
+
+    /// The 8 bytes of a `Type` as one integer: the verdict's cross-check, and the key the distinct
+    /// counts are taken over.
+    ///
+    /// This is the `memcmp` half of the design's "`operator==` decides, a byte compare cross-checks"
+    /// rule. If the two ever disagree, `Type` has acquired padding and its `static_assert(sizeof ==
+    /// 8)` has stopped telling the whole truth -- which is exactly the shape that makes a bitwise
+    /// test pass for months and then fail on an unrelated build.
+    static func encode(_ t: CalcType) -> UInt64 {
+        var bits: UInt64 = 0
+        bits |= UInt64(UInt8(bitPattern: t.length)) << 0
+        bits |= UInt64(UInt8(bitPattern: t.angle)) << 8
+        bits |= UInt64(UInt8(bitPattern: t.time)) << 16
+        bits |= UInt64(UInt8(bitPattern: t.frequency)) << 24
+        bits |= UInt64(UInt8(bitPattern: t.resolution)) << 32
+        bits |= UInt64(UInt8(bitPattern: t.flex)) << 40
+        bits |= UInt64(UInt8(bitPattern: t.percent)) << 48
+        bits |= UInt64(percentHintRawValue(t.percentHint)) << 56
+        return bits
+    }
+
+    /// AXIS 1 -- the reachable set: what the parser and simplifier can actually build.
+    ///
+    /// The seed is the eight values `determineType` can return: `makeNumber()` plus the seven unit
+    /// vectors. That is not an approximation of `determineType`'s 70-way switch, it is its whole
+    /// range, which is worth stating because it is what bounds this axis to something exhaustible.
+    /// Crossed with the seven hint states, then closed under `invert` and one round of `multiply`.
+    static func reachableUniverse() -> [CalcType] {
+        let seeds: [CalcType] = [
+            CalcType.makeNumber(), CalcType.makeLength(), CalcType.makeAngle(), CalcType.makeTime(),
+            CalcType.makeFrequency(), CalcType.makeResolution(), CalcType.makeFlex(), CalcType.makePercent(),
+        ]
+        let hints: [WebCore.CSSCalc.PercentHint] = [.Length, .Angle, .Time, .Frequency, .Resolution, .Flex]
+
+        var seen = Set<UInt64>()
+        var universe: [CalcType] = []
+        func add(_ t: CalcType) {
+            if seen.insert(encode(t)).inserted {
+                universe.append(t)
+            }
+        }
+        for seed in seeds {
+            add(seed)
+            for hint in hints {
+                var hinted = seed
+                hinted.applyPercentHint(hint)
+                add(hinted)
+            }
+        }
+        // One closure round through the C++ arm, so the closure itself cannot be biased by the code
+        // under test.
+        let base = universe
+        for a in base {
+            add(CalcType.invert(a))
+            for b in base {
+                if let product = CalcType.multiply(a, b).value {
+                    add(product)
+                }
+            }
+        }
+        return universe
+    }
+
+    /// AXIS 2 -- the parameter boundary, which the reachable set can NEVER produce.
+    ///
+    /// This is the axis the two arithmetic hazards live on and the only axis that can distinguish
+    /// `0 &- x` from `-x` or `addingReportingOverflow` from `&+`. A sweep without it is inert on
+    /// exactly the substitutions this port introduces, and the four times this project shipped a
+    /// differential that was exhaustive on the wrong axis are why it is built rather than argued.
+    static func extremalUniverse() -> [CalcType] {
+        let edges: [Int8] = [-128, -127, -1, 0, 1, 126, 127]
+        var seen = Set<UInt64>()
+        var universe: [CalcType] = []
+        func add(_ t: CalcType) {
+            if seen.insert(encode(t)).inserted {
+                universe.append(t)
+            }
+        }
+        for e in edges {
+            // One saturated lane, in each of the seven positions.
+            for lane in 0..<7 {
+                var t = CalcType()
+                switch lane {
+                case 0: t.length = e
+                case 1: t.angle = e
+                case 2: t.time = e
+                case 3: t.frequency = e
+                case 4: t.resolution = e
+                case 5: t.flex = e
+                default: t.percent = e
+                }
+                add(t)
+                // A hint ON a saturated type: the two hazards crossed with the hint machinery.
+                var hinted = t
+                hinted.applyPercentHint(.Length)
+                add(hinted)
+            }
+            // Two saturated lanes, so an overflow in one lane cannot be confused with an early exit.
+            var pair = CalcType()
+            pair.length = e
+            pair.percent = e
+            add(pair)
+            // Every lane saturated.
+            var all = CalcType()
+            all.length = e; all.angle = e; all.time = e; all.frequency = e
+            all.resolution = e; all.flex = e; all.percent = e
+            add(all)
+        }
+        return universe
+    }
+
+    /// Whether the C++ `multiply` must refuse this pair for overflow, computed in `Int` by a THIRD
+    /// implementation that cannot overflow at all.
+    ///
+    /// Deliberately not derived from either arm: a coverage counter computed by the code under test
+    /// reports that the code agrees with itself. This is the independent oracle for the exit.
+    static func overflowsIndependently(_ a: CalcType, _ b: CalcType) -> Bool {
+        let lanes: [(Int8, Int8)] = [
+            (a.length, b.length), (a.angle, b.angle), (a.time, b.time), (a.frequency, b.frequency),
+            (a.resolution, b.resolution), (a.flex, b.flex), (a.percent, b.percent),
+        ]
+        for (x, y) in lanes {
+            let sum = Int(x) + Int(y)
+            if sum < -128 || sum > 127 {
+                return true
+            }
+        }
+        return false
+    }
+
+    mutating func run() {
+        let universe = Self.reachableUniverse() + Self.extremalUniverse()
+        universeCount = Self.reachableUniverse().count
+        extremalCount = Self.extremalUniverse().count
+
+        var inputKeys = Set<UInt64>()
+        var resultKeys = Set<UInt64>()
+        for t in universe {
+            inputKeys.insert(Self.encode(t))
+        }
+        distinctInputs = inputKeys.count
+
+        for a in universe {
+            // `invert` -- total, so engagement cannot differ and the verdict is the value.
+            let cppInverted = calcTypeInvert(a, .cpp)
+            let swiftInverted = calcTypeInvert(a, .swift)
+            invertCases += 1
+            if !(cppInverted == swiftInverted) {
+                invertMismatches += 1
+            }
+            if Self.encode(cppInverted) != Self.encode(swiftInverted) {
+                if cppInverted == swiftInverted {
+                    byteVersusEqualsDisagreements += 1
+                }
+            } else if !(cppInverted == swiftInverted) {
+                byteVersusEqualsDisagreements += 1
+            }
+            if a.length == Int8.min || a.angle == Int8.min || a.time == Int8.min
+                || a.frequency == Int8.min || a.resolution == Int8.min || a.flex == Int8.min
+                || a.percent == Int8.min {
+                invertMinExponentInputs += 1
+            }
+
+            for b in universe {
+                multiplyCases += 1
+                let cppProduct = CalcType.multiply(a, b).value
+                let swiftProduct = a.multiplied(by: b)
+
+                // Engagement first, payload only when BOTH are engaged. A `memcmp` over a
+                // disengaged `std::optional<Type>` reads indeterminate payload bytes and is the
+                // flaky test that passes for months.
+                switch (cppProduct, swiftProduct) {
+                case (nil, nil):
+                    break
+                case let (cpp?, swift?):
+                    multiplyBothEngaged += 1
+                    resultKeys.insert(Self.encode(cpp))
+                    let equalByOperator = cpp == swift
+                    let equalByBytes = Self.encode(cpp) == Self.encode(swift)
+                    if !equalByOperator {
+                        multiplyMismatches += 1
+                    }
+                    if equalByOperator != equalByBytes {
+                        byteVersusEqualsDisagreements += 1
+                    }
+                default:
+                    multiplyMismatches += 1
+                }
+
+                if a.hasPercentHint && b.hasPercentHint && !(a.percentHint == b.percentHint) {
+                    hintConflictInputs += 1
+                } else if a.hasPercentHint != b.hasPercentHint {
+                    hintPropagatedInputs += 1
+                }
+                if Self.overflowsIndependently(a, b) {
+                    overflowInputs += 1
+                }
+            }
+        }
+        distinctMultiplyResults = resultKeys.count
+    }
+}
+
+/// Run the `Type`-algebra differential and return one counter; `which == 13` is the total mismatch
+/// count and is the verdict.
+///
+/// One entry point that re-runs the sweep per call, rather than a cached global: a `var` at file
+/// scope is `nonisolated global shared mutable state` and does not compile under this module's
+/// concurrency settings. The sweep is a few hundred thousand integer operations, so re-running it
+/// is cheaper than the machinery that would make a global legal, and it removes any question of a
+/// harness reading a counter from a stale run.
+///
+/// `UInt64.max` for an index this build does not have, so a harness reading a counter that does not
+/// exist gets an unmistakable value rather than a plausible zero.
+@_expose(Cxx)
+public func cssCalcTypeAlgebraDifferential(_ which: UInt32) -> UInt64 {
+    var r = CalcTypeAlgebraDifferential()
+    r.run()
+    switch which {
+    case 0: return UInt64(r.universeCount)
+    case 1: return UInt64(r.extremalCount)
+    case 2: return UInt64(r.multiplyCases)
+    case 3: return UInt64(r.multiplyMismatches)
+    case 4: return UInt64(r.invertCases)
+    case 5: return UInt64(r.invertMismatches)
+    case 6: return UInt64(r.multiplyBothEngaged)
+    case 7: return UInt64(r.distinctInputs)
+    case 8: return UInt64(r.distinctMultiplyResults)
+    case 9: return UInt64(r.hintConflictInputs)
+    case 10: return UInt64(r.overflowInputs)
+    case 11: return UInt64(r.hintPropagatedInputs)
+    case 12: return UInt64(r.invertMinExponentInputs)
+    case 13: return UInt64(r.multiplyMismatches + r.invertMismatches + r.byteVersusEqualsDisagreements)
+    case 14: return UInt64(r.byteVersusEqualsDisagreements)
+    default: return UInt64.max
+    }
 }
 
 #endif
