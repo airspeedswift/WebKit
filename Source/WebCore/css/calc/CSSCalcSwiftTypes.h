@@ -328,6 +328,21 @@ static constexpr uint8_t numberOfCSSCalcSwiftAlternatives = 0 CSS_CALC_SWIFT_FOR
     macro(Asin) macro(Acos) macro(Atan) \
     macro(Sqrt) macro(Exp) macro(Abs) macro(Sign)
 
+// The math functions whose slots are one `Child` and one `std::optional<Child>`: `round()`'s four
+// rounding strategies and `log()` (P7b stage E4).
+//
+// `round()` IS FOUR ALTERNATIVES, NOT ONE WITH A MODE. `consumeRound` selects among four template
+// instantiations on the `<rounding-strategy>` keyword (`CSSCalcTree+Parser.cpp:668`-`:679`) and
+// `CSSCalcSwiftAlternative` already carries all four, so the keyword costs the boundary nothing.
+//
+// NEITHER DOES THE OPTIONAL SLOT. Its two states are separated by the OPERAND COUNT with nothing
+// left over -- `round(X)` pushes one and `round(X, Y)` two -- which is `rebuildSlot(const
+// std::optional<Child>&)`'s own rule at `CSSCalcTree+Simplification.cpp:2098`. That is what makes
+// this list a widening of an existing entry rather than a second `noneMask`.
+#define CSS_CALC_SWIFT_FOR_EACH_OPTIONAL_SECOND_MATH_FUNCTION(macro) \
+    macro(RoundNearest) macro(RoundUp) macro(RoundDown) macro(RoundToZero) \
+    macro(Log)
+
 // Which non-tree argument of an operation node an `appendOperationArgument` upcall should write.
 //
 // Declared in Swift as `CSSCalcSwiftOperationPart` and reaching C++ through

@@ -3627,6 +3627,24 @@ fileprivate extension CalcFlatTree {
             // reverse scan was relied on for at the other call site.
             simplifyClamp(i, options)
 
+        // Stage E4. The same five folds `simplifyColdNode` already dispatches for a flattened tree,
+        // and they reach a parsed one for the same reason `Clamp` and the ten below do: none of
+        // them reads an original node. `simplifyRound` and `simplifyLog` are unchanged.
+        case .RoundNearest:
+            simplifyRound(i, options, CalcExecutor.roundNearest)
+
+        case .RoundUp:
+            simplifyRound(i, options, CalcExecutor.roundUp)
+
+        case .RoundDown:
+            simplifyRound(i, options, CalcExecutor.roundDown)
+
+        case .RoundToZero:
+            simplifyRound(i, options, CalcExecutor.roundToZero)
+
+        case .Log:
+            simplifyLog(i)
+
         case .Deg2Rad:
             simplifyDeg2Rad(i)
 
@@ -6025,9 +6043,17 @@ private enum CalcParsedEmitCoverage {
     /// arithmetic nodes, the two `Children`-slotted comparison functions, the eleven whose only
     /// slot is one `Child` -- `Negate`, `Invert`, and stage E2's ten unary math functions with the
     /// `Deg2Rad` wrapper that goes inside three of them -- and stage E3's `Clamp`, whose two
-    /// `ChildOrNone` bounds ride in the `noneMask` argument.
+    /// `ChildOrNone` bounds ride in the `noneMask` argument. Stage E4 adds the five whose slots are
+    /// `Child a; std::optional<Child> b`: `round()`'s four strategies, which are four alternatives
+    /// rather than one node with a mode, and `log()`. Their second slot's presence is the operand
+    /// count and needs no argument at all.
     static var operationMask: UInt64 {
         return CalcFlatCoverage.bit(.Clamp)
+            | CalcFlatCoverage.bit(.RoundNearest)
+            | CalcFlatCoverage.bit(.RoundUp)
+            | CalcFlatCoverage.bit(.RoundDown)
+            | CalcFlatCoverage.bit(.RoundToZero)
+            | CalcFlatCoverage.bit(.Log)
             | CalcFlatCoverage.bit(.Sum)
             | CalcFlatCoverage.bit(.Product)
             | CalcFlatCoverage.bit(.Min)
@@ -6541,6 +6567,20 @@ private enum CalcFunctionArguments: UInt8 {
     /// first argument grammar that is neither a repetition nor a fixed arity of subtrees, which is
     /// why it is a third case rather than a count.
     case clamp
+    /// `<calc-sum>, <calc-sum>?` -- `consumeOneOrTwoArguments` (`:430`). Stage E4, and `log()` is
+    /// its only member: `round()` has the same SHAPE but a different type rule, below.
+    case oneOrTwo
+    /// `<rounding-strategy>?, <calc-sum>, <calc-sum>?` -- `consumeRound` (`:655`), stage E4.
+    ///
+    /// A FIFTH CASE RATHER THAN `oneOrTwo` PLUS A FLAG, because two things differ and neither is a
+    /// parameter of the other. The leading keyword SELECTS THE ALTERNATIVE -- `RoundNearest`,
+    /// `RoundUp`, `RoundDown`, `RoundToZero` are four variant alternatives, not one node with a
+    /// mode (`CSSCalcSwiftTypes.h:267`-`:270`) -- and `consumeRoundArguments` (`:595`) validates a
+    /// DIFFERENT type from `consumeOneOrTwoArguments`: `AllowedTypes::Number` on the one-argument
+    /// form only, and nothing at all on the two-argument form, where `log()` validates
+    /// `Op::input` on both arguments in both forms. The header says so in as many words --
+    /// "NOTE: This is special cased in the code" (`CSSCalcTree.h:495`-`:499`).
+    case round
 }
 
 /// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `CSSValueID` names, and how its arguments
@@ -6575,6 +6615,8 @@ private func calcParseFunctionAlternative(_ functionId: UInt16)
     case WebCore.CSSValueAbs.rawValue: return (.Abs, .exactlyOne)
     case WebCore.CSSValueSign.rawValue: return (.Sign, .exactlyOne)
     case WebCore.CSSValueClamp.rawValue: return (.Clamp, .clamp)
+    case WebCore.CSSValueRound.rawValue: return (.RoundNearest, .round)
+    case WebCore.CSSValueLog.rawValue: return (.Log, .oneOrTwo)
     default: return nil
     }
 }
@@ -6611,6 +6653,12 @@ private func calcParseFunctionBlock(
             cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
     case .clamp:
         argumentsParsed = calcParseClamp(
+            cursor, &inner, blockEnd, depth + 1, &out, options, &state)
+    case .oneOrTwo:
+        argumentsParsed = calcParseOneOrTwoArguments(
+            cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+    case .round:
+        argumentsParsed = calcParseRound(
             cursor, &inner, blockEnd, depth + 1, &out, options, &state)
     }
     guard let parsed = argumentsParsed else { return nil }
@@ -6844,6 +6892,162 @@ private func calcParseClamp(
 
     guard let me = calcParseAppendOperation(&out, .Clamp, head, childCount, outputType, flags) else { return nil }
     return CalcParsed(index: me, type: outputType)
+}
+
+/// Which `<rounding-strategy>` an ident names, as the alternative it SELECTS.
+///
+/// `consumeIdentRaw<CSSValueNearest, CSSValueToZero, CSSValueUp, CSSValueDown>` (`:659`) is a
+/// four-name match, and nil for every other ident -- which is load-bearing rather than a
+/// fall-through: `round(pi, 2)` must parse `pi` as the constant in the first `<calc-sum>`, not fail.
+///
+/// TESTED ON `id` ALONE, `calcParseSumOrNone`'s resolution for `none`: `CSSCalcSwiftToken.id` is
+/// non-zero only for an IdentToken, so `id == CSSValueUp` already carries the `type() != IdentToken`
+/// test `consumeIdentRaw` performs, and no new byte crosses the boundary for keyword recognition.
+@inline(always)
+private func calcRoundingStrategyAlternative(_ id: UInt16)
+    -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
+    switch id {
+    case UInt16(WebCore.CSSValueNearest.rawValue): return .RoundNearest
+    case UInt16(WebCore.CSSValueUp.rawValue): return .RoundUp
+    case UInt16(WebCore.CSSValueDown.rawValue): return .RoundDown
+    case UInt16(WebCore.CSSValueToZero.rawValue): return .RoundToZero
+    default: return nil
+    }
+}
+
+/// `consumeRound` (`CSSCalcTree+Parser.cpp:655`-`:682`), stage E4:
+/// `round( <rounding-strategy>?, <calc-sum>, <calc-sum>? )`.
+///
+/// THE STRATEGY IS NOT A PARAMETER, IT IS THE ALTERNATIVE, which is why nothing new crosses the
+/// boundary for it: `consumeRound` picks among four template instantiations and this picks among
+/// four `CSSCalcSwiftAlternative` values that already exist. There is no `roundingStrategy` field on
+/// any boundary type and none is wanted.
+///
+/// THE COMMA IS REQUIRED ONLY WHEN A STRATEGY WAS CONSUMED. `round(1.5)` has no strategy and no
+/// comma; `round(up)` has a strategy and no comma and is a FAILURE, not a one-argument round -- the
+/// C++ returns `nullopt` at `:663` before it ever reaches the arguments.
+private func calcParseRound(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    // BEFORE THE PEEK, NOT AFTER, and the differential found this rather than a reading of it.
+    // `consumeIdentRaw` peeks a range whose leading whitespace the caller has already stripped
+    // (`parseCalcValue`'s `innerRange.consumeWhitespace()`, `:1537`), but `calcParseFunctionBlock`
+    // hands its callee the range starting one token past `(` -- so `calcParseClamp` and
+    // `calcParseUnaryFunction` each strip it themselves and so must this. Without it
+    // `round( up , 1.5px , 1px )` saw whitespace, took no strategy, and `up` then reached
+    // `calcParseSum` as a bare ident, i.e. a SYMBOL DECLINE where the C++ parses.
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    var alternative = WebCore.CSSCalc.CSSCalcSwiftAlternative.RoundNearest
+    if index < end, let selected = calcRoundingStrategyAlternative(calcToken(cursor, &state, index).id) {
+        // `range.consumeIncludingWhitespace()`.
+        index += 1
+        calcSkipWhitespace(cursor, &index, end, &state)
+        guard calcParseComma(cursor, &index, end, &state) else { return nil }
+        alternative = selected
+    }
+    return calcParseRoundArguments(cursor, &index, end, depth, &out, options, &state, alternative)
+}
+
+/// `consumeRoundArguments<Op>` (`CSSCalcTree+Parser.cpp:595`-`:653`): `<calc-sum>, <calc-sum>?`
+/// under `round()`'s own type rule.
+///
+/// A SECOND FUNCTION RATHER THAN `calcParseOneOrTwoArguments` WITH A FLAG, and the difference is
+/// not cosmetic. `Round*::input` is `AllowedTypes::Any` -- which `validateType` answers `true` for
+/// unconditionally -- but the ONE-ARGUMENT form checks `AllowedTypes::Number` instead (`:604`),
+/// against the operation's own rule, and the TWO-argument form checks nothing at all, where `log()`
+/// checks `Op::input` on every argument in both forms. Threading that through as a policy value
+/// would turn two compile-time facts into a run-time dispatch on a per-node path, which is the same
+/// reason `calcParseUnaryFunction` writes its five type rules out.
+///
+/// `Round*::merge` is `Consistent` and `Round*::output` is `None`, so the two-argument node's type
+/// is the merge and nothing transforms it.
+private func calcParseRoundArguments(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let a = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    if index == end {
+        // `validateType<AllowedTypes::Number>(sumA->type)`, NOT `Op::input`. `round(1.5px)` is a
+        // failure and `round(1.5)` is not, which no other one-argument family in this grammar does.
+        guard a.type.matchesNumber else { return nil }
+        guard let me = calcParseAppendOperation(&out, alternative, a.index, 1, a.type) else { return nil }
+        return CalcParsed(index: me, type: a.type)
+    }
+
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let merged = a.type.consistentType(with: b.type) else { return nil }
+    calcParseLink(&out, a.index, b.index)
+    guard let me = calcParseAppendOperation(&out, alternative, a.index, 2, merged) else { return nil }
+    return CalcParsed(index: me, type: merged)
+}
+
+/// `consumeOneOrTwoArguments<Op>` (`CSSCalcTree+Parser.cpp:430`-`:491`): `<calc-sum>, <calc-sum>?`,
+/// stage E4. `log()` is its only member in the C++ dispatch.
+///
+/// SPECIALISED TO `Log`'S TYPE RULE for `calcParseArgumentList`'s reason: `input =
+/// AllowedTypes::Number` (so both arguments are checked), `merge = Consistent`, `output =
+/// NumberMadeConsistent` (so the node's type is a fresh `<number>` made consistent with the merge,
+/// exactly `calcParseUnaryFunction`'s `Sqrt`/`Exp` arm and not the merge itself).
+///
+/// THE SECOND SLOT'S PRESENCE IS THE OPERAND COUNT and costs no boundary bit: `Child a;
+/// std::optional<Child> b` has two states and one/two operands separate them with nothing left
+/// over. That is `rebuildSlot(const std::optional<Child>&)`'s own rule, stated at
+/// `CSSCalcTree+Simplification.cpp:2098` -- "presence follows the original ... because childCount
+/// counted only the present operands" -- and it is why E4 needs no analogue of `clamp()`'s mask.
+private func calcParseOneOrTwoArguments(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let a = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard a.type.matchesNumber else { return nil }
+
+    if index == end {
+        guard let transformed = CalcType.makeNumber().madeConsistent(with: a.type) else { return nil }
+        guard let me = calcParseAppendOperation(&out, alternative, a.index, 1, transformed) else { return nil }
+        return CalcParsed(index: me, type: transformed)
+    }
+
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard b.type.matchesNumber else { return nil }
+
+    guard let merged = a.type.consistentType(with: b.type),
+        let transformed = CalcType.makeNumber().madeConsistent(with: merged) else { return nil }
+    calcParseLink(&out, a.index, b.index)
+    guard let me = calcParseAppendOperation(&out, alternative, a.index, 2, transformed) else { return nil }
+    return CalcParsed(index: me, type: transformed)
 }
 
 /// `consumeOneOrMoreArguments<Op>` (`CSSCalcTree+Parser.cpp:321`-`:376`): `<calc-sum>#`, at least
@@ -7164,6 +7368,10 @@ private func calcParseAttempt(
                 descent = calcParseUnaryFunction(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
             case .clamp:
                 descent = calcParseClamp(cursor, &index, end, 0, &out, options, &state)
+            case .oneOrTwo:
+                descent = calcParseOneOrTwoArguments(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+            case .round:
+                descent = calcParseRound(cursor, &index, end, 0, &out, options, &state)
             }
         } else if options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
             || options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {

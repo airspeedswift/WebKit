@@ -2453,6 +2453,26 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return finish(Op { WTF::move(stack[base]) });
     };
 
+    // `Child a; std::optional<Child> b` -- `round()`'s four strategies and `log()` (stage E4).
+    //
+    // THE PRESENCE OF THE SECOND SLOT IS THE OPERAND COUNT AND NOTHING ELSE, which is the whole
+    // reason this stage adds no boundary argument where `clamp()` needed two bits. Two operands
+    // fill both slots, one fills the first and leaves `std::nullopt`, and no third state exists --
+    // `rebuildSlot(const std::optional<Child>&)` states the same rule for the rebuild direction
+    // (`:2098`). The arity check is therefore `<= 2`, and `>= 1` is the entry's own precondition.
+    auto finishOptionalSecond = [&]<typename Op>() -> bool {
+        static_assert(std::tuple_size_v<Op> == 2
+            && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<0, Op>>, Child>
+            && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<1, Op>>, std::optional<Child>>,
+            "buildOperation's optional-second arm fills one Child and one std::optional<Child>; an operation shaped differently must not reach it.");
+        if (childCount > 2)
+            return false;
+        std::optional<Child> second;
+        if (childCount == 2)
+            second = WTF::move(stack[base + 1]);
+        return finish(Op { WTF::move(stack[base]), WTF::move(second) });
+    };
+
     switch (alternative) {
     case CSSCalcSwiftAlternative::Sum:
         return finish(Sum { .children = takeChildren() });
@@ -2501,6 +2521,12 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return finishOneChild.operator()<name>();
     CSS_CALC_SWIFT_FOR_EACH_UNARY_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_ONE_CHILD)
 #undef CSS_CALC_SWIFT_BUILD_ONE_CHILD
+
+#define CSS_CALC_SWIFT_BUILD_OPTIONAL_SECOND(name) \
+    case CSSCalcSwiftAlternative::name: \
+        return finishOptionalSecond.operator()<name>();
+    CSS_CALC_SWIFT_FOR_EACH_OPTIONAL_SECOND_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_OPTIONAL_SECOND)
+#undef CSS_CALC_SWIFT_BUILD_OPTIONAL_SECOND
 
     // `clamp()` (P7b stage E3), and the ONE alternative in the grammar's reach whose slots cannot
     // be filled from the operand stack alone.
