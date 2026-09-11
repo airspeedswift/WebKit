@@ -2405,7 +2405,7 @@ void CSSCalcSwiftBuilder::clearOperands() noexcept
     m_operands->value.shrink(0);
 }
 
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot) noexcept
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot, uint8_t noneMask) noexcept
 {
     auto& stack = m_operands->value;
     if (!childCount || childCount > stack.size())
@@ -2501,6 +2501,33 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return finishOneChild.operator()<name>();
     CSS_CALC_SWIFT_FOR_EACH_UNARY_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_ONE_CHILD)
 #undef CSS_CALC_SWIFT_BUILD_ONE_CHILD
+
+    // `clamp()` (P7b stage E3), and the ONE alternative in the grammar's reach whose slots cannot
+    // be filled from the operand stack alone.
+    //
+    // WHY `noneMask` AND NOTHING ELSE. Two of the three slots are `ChildOrNone`, so a bound is
+    // either a subtree or the keyword. A keyword is not pushed -- the same asymmetry
+    // `rebuildSlot(const ChildOrNone&)` above (`:2107`) has, where the answer comes off the
+    // ORIGINAL node -- so `clamp(none, V, M)` and `clamp(M, V, none)` arrive here indistinguishable
+    // by count, both with two operands. That is two bits of genuinely new information and the
+    // boundary header carries them as a defaulted trailing parameter, which costs no call site and
+    // no line. A sentinel operand would cost a `makeUniqueRef` allocation per `none`, built only to
+    // be discarded.
+    //
+    // THE ARITY CHECK IS THE MASK'S OWN, not a fixed 3: an absent bound is an absent operand, so
+    // the contract is `childCount + popcount(noneMask) == 3`. Getting that wrong is a read past the
+    // top of the stack, which is why it is checked before any slot is taken rather than after.
+    case CSSCalcSwiftAlternative::Clamp: {
+        if (childCount + (noneMask & 1) + ((noneMask >> 1) & 1) != 3)
+            return false;
+        size_t next = base;
+        auto bound = [&](uint8_t bit) -> ChildOrNone {
+            return (noneMask & bit) ? ChildOrNone { CSS::Keyword::None { } } : ChildOrNone { WTF::move(stack[next++]) };
+        };
+        auto minimum = bound(1);
+        auto value = WTF::move(stack[next++]);
+        return finish(Clamp { WTF::move(minimum), WTF::move(value), bound(2) });
+    }
 
     default:
         // Outside the set this entry serves. A contract violation of the caller's own scope rather

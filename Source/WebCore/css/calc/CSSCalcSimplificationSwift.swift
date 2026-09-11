@@ -2575,8 +2575,17 @@ fileprivate enum CalcFlatNodeFlags {
     /// dedicated `CSSCalcSwiftNodeKind`s (`CSSCalcSwiftTypes.h:154-155`); here it is a bit, captured
     /// once during flattening.
     static let clampNoneMinimum: UInt8 = 1 << 0
-    /// `clamp()` whose MAXIMUM bound is the keyword `none`.
+    /// `clamp()`'s MAXIMUM bound is the keyword `none`.
     static let clampNoneMaximum: UInt8 = 1 << 1
+    /// The two bits `CSSCalcSwiftBuilder::buildOperation`'s `noneMask` parameter is defined over.
+    ///
+    /// THE BIT POSITIONS ARE THE BOUNDARY'S, not this enum's private business, and that is the one
+    /// thing about stage E3 a reader has to know: `noneMask` bit 0 is the minimum and bit 1 the
+    /// maximum, stated in `CSSCalcSwiftTypes.h`'s comment on the declaration. They agree here
+    /// because the flat node captured them from `CSSCalcSwiftNodeKind` on the reading side and the
+    /// grammar sets the same two bits, so nothing translates -- and because nothing translates,
+    /// nothing checks, which is what the `e3-nc1-swapmask` negative control is for.
+    static let clampNoneMask: UInt8 = clampNoneMinimum | clampNoneMaximum
     /// `anchor()`'s `<anchor-side>` is a subtree rather than a keyword, so it occupies child slot 0
     /// and the fallback, if there is one, is slot 1.
     static let anchorSideIsSubtree: UInt8 = 1 << 2
@@ -3130,6 +3139,19 @@ fileprivate func calcFlattenSubtree(
     switch info.kind {
     case .ClampWithNoneMinimum: flags |= CalcFlatNodeFlags.clampNoneMinimum
     case .ClampWithNoneMaximum: flags |= CalcFlatNodeFlags.clampNoneMaximum
+    // BOTH bounds are the keyword, which the reading boundary does NOT have a kind for: a
+    // `clamp()` with two `none`s is the plain `Clamp` kind and `Child::operator[]` skips both, so
+    // one child is the whole of what distinguishes it. Setting both bits here rather than leaving
+    // the flags clear is what makes the invariant ONE rule -- `childCount + nones == 3`, checked in
+    // `simplifyClamp` and again in `CSSCalcSwiftBuilder::buildOperation` -- instead of a rule with
+    // an exception the construction side would have to re-derive in C++ (stage E3).
+    //
+    // `.Operation` is the kind, not a `.Clamp` -- there is no such kind. The boundary gives a
+    // `clamp()` one of the two `ClampWithNone...` kinds when EXACTLY ONE bound is the keyword and
+    // the generic operator kind otherwise, so both-`none` and neither-`none` share it and only the
+    // child count separates them.
+    case .Operation where info.alternative == .Clamp && info.childCount == 1:
+        flags |= CalcFlatNodeFlags.clampNoneMask
     default: break
     }
 
@@ -3595,6 +3617,16 @@ fileprivate extension CalcFlatTree {
     @inline(never)
     private mutating func simplifyParsedFunction(_ i: Int, _ options: CalcSimplification) -> Bool {
         switch nodes[i].alternative {
+        case .Clamp:
+            // Stage E3, and it reaches a PARSED tree for the same reason the ten below do: it reads
+            // no original. Its bounds' none-ness is on the flat node's own `flags`, which the
+            // grammar sets and `calcFlatten` sets, and its `min()`/`max()` rewrite goes through
+            // `convertToMinMax`, which computes the new node's `Type` in Swift and writes it before
+            // committing. The forward loop revisits nothing, so the rewritten `Min` is taken as-is
+            // -- which is what `copyAndSimplify` does with it (`:1810`-`:1823`) and the property the
+            // reverse scan was relied on for at the other call site.
+            simplifyClamp(i, options)
+
         case .Deg2Rad:
             simplifyDeg2Rad(i)
 
@@ -4648,7 +4680,9 @@ fileprivate extension CalcFlatTree {
     /// `clamp(none, VAL, MAX)` and `clamp(MIN, VAL, none)` both report two children, because
     /// `Child::operator[]` skips a `ChildOrNone` holding the keyword entirely; the flat node carries
     /// the answer in `clampNoneMinimum`/`clampNoneMaximum`, captured at flatten from the boundary's
-    /// two dedicated `CSSCalcSwiftNodeKind`s. Both keywords at once is the plain `Clamp` kind and one
+    /// two dedicated `CSSCalcSwiftNodeKind`s -- and, for BOTH keywords at once, from the plain `Clamp`
+    /// kind with one child, which `calcFlattenNode` turns into both bits so that this pass and the
+    /// construction boundary share one invariant. The C++ node shape it comes from is the plain one
     /// child, which is what the cross-check below tests.
     ///
     /// THE TWO COLLAPSE BRANCHES USE DIFFERENT ARGUMENT POSITIONS -- `Min(val, max)` at `:1064` and
@@ -4670,11 +4704,17 @@ fileprivate extension CalcFlatTree {
         let minimumIsNone = nodes[i].flags & CalcFlatNodeFlags.clampNoneMinimum != 0
         let maximumIsNone = nodes[i].flags & CalcFlatNodeFlags.clampNoneMaximum != 0
 
-        // The cross-check: exactly one absent bound means two children and vice versa. A mismatch
-        // declines rather than reading a bound out of the wrong slot -- and it must decline rather
-        // than leave the node alone, since `rebuildFrom` would then take the keywords off the
-        // original and produce a node this pass never reasoned about.
-        guard (childCount == 2) == (minimumIsNone || maximumIsNone) else {
+        // The cross-check, and it is the flat node's whole `clamp()` invariant: an absent bound is
+        // an absent child, so `childCount + nones == 3` for all four states. A mismatch declines
+        // rather than reading a bound out of the wrong slot -- and it must decline rather than
+        // leave the node alone, since `rebuildFrom` would then take the keywords off the original
+        // and produce a node this pass never reasoned about.
+        //
+        // `buildOperation` checks the SAME arithmetic on the construction side, which is what lets
+        // the grammar and the flattener write the flags the same way and neither of them special-
+        // case the both-`none` shape.
+        let nones = UInt32(minimumIsNone ? 1 : 0) + UInt32(maximumIsNone ? 1 : 0)
+        guard childCount + nones == 3 else {
             declined = true
             return
         }
@@ -5944,7 +5984,15 @@ fileprivate extension CalcFlatTree {
         }
         // THE NODE'S OWN TYPE, which for a parsed node is the one the grammar's type algebra
         // computed on the way up -- the same value stage D handed to this same entry.
-        return builder.buildOperation(node.alternative, pushed, node.type, isRoot)
+        //
+        // THE MASK IS PASSED UNCONDITIONALLY AND MASKED HERE, not on the C++ side and not behind a
+        // `.Clamp` test. One `and` on a byte this node already loaded, against a branch on a switch
+        // that runs once per emitted node -- E1's `.Min, .Max` labels cost 12.7 instructions per
+        // parse for exactly that shape. Masking here rather than passing `node.flags` raw is what
+        // keeps the boundary's contract "two bits" instead of "the island's private flag byte":
+        // `anchorSideIsSubtree` and `insideAnchorSide` share the byte and mean nothing to C++.
+        return builder.buildOperation(
+            node.alternative, pushed, node.type, isRoot, node.flags & CalcFlatNodeFlags.clampNoneMask)
     }
 }
 
@@ -5974,11 +6022,13 @@ private enum CalcParsedEmitCoverage {
     }
 
     /// The operations `buildOperation` constructs from operands alone: the two `Children`-slotted
-    /// arithmetic nodes, the two `Children`-slotted comparison functions, and the eleven whose only
+    /// arithmetic nodes, the two `Children`-slotted comparison functions, the eleven whose only
     /// slot is one `Child` -- `Negate`, `Invert`, and stage E2's ten unary math functions with the
-    /// `Deg2Rad` wrapper that goes inside three of them.
+    /// `Deg2Rad` wrapper that goes inside three of them -- and stage E3's `Clamp`, whose two
+    /// `ChildOrNone` bounds ride in the `noneMask` argument.
     static var operationMask: UInt64 {
-        return CalcFlatCoverage.bit(.Sum)
+        return CalcFlatCoverage.bit(.Clamp)
+            | CalcFlatCoverage.bit(.Sum)
             | CalcFlatCoverage.bit(.Product)
             | CalcFlatCoverage.bit(.Min)
             | CalcFlatCoverage.bit(.Max)
@@ -6260,7 +6310,8 @@ private func calcParseAppendOperation(
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
     _ firstChild: UInt32,
     _ childCount: UInt32,
-    _ type: CalcType
+    _ type: CalcType,
+    _ flags: UInt8 = 0
 ) -> UInt32? {
     guard out.count < out.capacity else {
         return nil
@@ -6282,7 +6333,7 @@ private func calcParseAppendOperation(
         unitType: 0,
         alternative: alternative,
         percentHint: 0,
-        flags: 0))
+        flags: flags))
     return me
 }
 
@@ -6486,6 +6537,10 @@ private enum CalcFunctionArguments: UInt8 {
     case oneOrMore
     /// Exactly one `<calc-sum>` -- `consumeExactlyOneArgument` (`:280`).
     case exactlyOne
+    /// `[ <calc-sum> | none ], <calc-sum>, [ <calc-sum> | none ]` -- `consumeClamp` (`:493`). The
+    /// first argument grammar that is neither a repetition nor a fixed arity of subtrees, which is
+    /// why it is a third case rather than a count.
+    case clamp
 }
 
 /// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `CSSValueID` names, and how its arguments
@@ -6519,6 +6574,7 @@ private func calcParseFunctionAlternative(_ functionId: UInt16)
     case WebCore.CSSValueExp.rawValue: return (.Exp, .exactlyOne)
     case WebCore.CSSValueAbs.rawValue: return (.Abs, .exactlyOne)
     case WebCore.CSSValueSign.rawValue: return (.Sign, .exactlyOne)
+    case WebCore.CSSValueClamp.rawValue: return (.Clamp, .clamp)
     default: return nil
     }
 }
@@ -6553,6 +6609,9 @@ private func calcParseFunctionBlock(
     case .exactlyOne:
         argumentsParsed = calcParseUnaryFunction(
             cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+    case .clamp:
+        argumentsParsed = calcParseClamp(
+            cursor, &inner, blockEnd, depth + 1, &out, options, &state)
     }
     guard let parsed = argumentsParsed else { return nil }
     // `if (!innerRange.atEnd()) return nullopt`. Vacuous for `<calc-sum>#`, whose loop runs to
@@ -6654,6 +6713,139 @@ private func calcParseUnaryFunction(
     return CalcParsed(index: me, type: outputType)
 }
 
+/// `consumeCommaIncludingWhitespace` (`CSSPropertyParserConsumer+Primitives.h`), as the grammar's
+/// three call sites spell it: the token must BE a comma, and the whitespace after it goes with it.
+///
+/// A function rather than the three inlined lines `calcParseArgumentList` used to carry, because
+/// `clamp()` needs it twice more and "every argument after the first" and "exactly here" are the
+/// same operation. `@inline(always)` so the three-instruction body does not become a call on a
+/// per-argument path.
+@inline(always)
+private func calcParseComma(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState
+) -> Bool {
+    guard index < end, calcToken(cursor, &state, index).type == WebCore.CommaToken else { return false }
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return true
+}
+
+/// `parseCalcSumOrNone` (`CSSCalcTree+Parser.cpp:503`-`:513`): the keyword `none`, or a `<calc-sum>`.
+///
+/// `none` REPORTS `CalcFlatNode.noNode` AS ITS INDEX. It is a keyword, not a subtree: the C++ puts
+/// `CSS::Keyword::None` in the slot and appends no child, so nothing is written to the flat buffer
+/// and nothing becomes an operand. The caller turns the two absences into the two bits
+/// `buildOperation` needs, which is the whole of what `clamp()` costs the boundary.
+///
+/// TESTED BEFORE THE SUM, AND ON `id` ALONE. `CSSCalcSwiftToken.id` is non-zero only for an
+/// IdentToken, so `id == CSSValueNone` already carries the token-type test `CSSParserToken::id()`
+/// performs; and `none` is NOT a `<calc-value>` keyword, so reaching `calcParseSum` with it would
+/// be a failure rather than a fall-through. The C++ does not skip whitespace here either -- the
+/// inner range arrives with it stripped (`parseCalcValue`'s `innerRange.consumeWhitespace()`,
+/// `:1537`) and every comma takes its own -- so neither does this.
+@inline(always)
+private func calcParseSumOrNone(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if index < end, calcToken(cursor, &state, index).id == UInt16(WebCore.CSSValueNone.rawValue) {
+        // `tokens.consumeIncludingWhitespace()`.
+        index += 1
+        calcSkipWhitespace(cursor, &index, end, &state)
+        return CalcParsed(index: CalcFlatNode.noNode, type: CalcType())
+    }
+    return calcParseSum(cursor, &index, end, depth, &out, options, &state)
+}
+
+/// `consumeClamp` (`CSSCalcTree+Parser.cpp:493`-`:591`), stage E3:
+/// `clamp( [ <calc-sum> | none ], <calc-sum>, [ <calc-sum> | none ] )`.
+///
+/// THE TYPE RULE IS FOUR-WAY AND THAT IS NOT A SIMPLIFICATION OF ONE MERGE. `computeType`
+/// (`:547`-`:583`) folds only the bounds that are present: both `none` gives the value's own type
+/// untouched, and a single `none` merges the remaining pair. Folding an empty `Type` in instead
+/// would be a different answer -- `Type { }` is not an identity for `consistentType` -- so the
+/// arms are written out. All three merges are `MergePolicy::Consistent` (`Clamp::merge`,
+/// `CSSCalcTree.h:470`), and there is no `validateType` and no output transform: `Clamp::input` is
+/// `AllowedTypes::Any`, which is `return true`, and `Clamp::output` is `OutputTransform::None`.
+///
+/// NO OPERAND CONTAINER AND NO `Array`, the same as the other two argument grammars: the three
+/// subtrees are already in the flat buffer, and the node names the first and links the rest.
+///
+/// `depth` IS THE FUNCTION'S OWN, not `depth + 1` per argument: `consumeClamp` passes its `depth`
+/// straight to all three `parseCalcSum` calls, and only entering a nested function increments it.
+private func calcParseClamp(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let minimum = calcParseSumOrNone(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard let value = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard let maximum = calcParseSumOrNone(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    let noneMinimum = minimum.index == CalcFlatNode.noNode
+    let noneMaximum = maximum.index == CalcFlatNode.noNode
+
+    let outputType: CalcType
+    if noneMinimum && noneMaximum {
+        outputType = value.type
+    } else if noneMinimum {
+        guard let merged = value.type.consistentType(with: maximum.type) else { return nil }
+        outputType = merged
+    } else if noneMaximum {
+        guard let merged = minimum.type.consistentType(with: value.type) else { return nil }
+        outputType = merged
+    } else {
+        guard let lower = minimum.type.consistentType(with: value.type),
+            let merged = lower.consistentType(with: maximum.type) else { return nil }
+        outputType = merged
+    }
+
+    // The sibling list is min, val, max IN THAT ORDER over the bounds that exist, because
+    // `buildOperation` fills the slots left to right from the top of the operand stack and an
+    // absent bound is an absent operand. `emitParsed` pushes in list order, so list order IS
+    // operand order.
+    var head = value.index
+    var childCount: UInt32 = 1
+    if !noneMinimum {
+        calcParseLink(&out, minimum.index, value.index)
+        head = minimum.index
+        childCount += 1
+    }
+    if !noneMaximum {
+        calcParseLink(&out, value.index, maximum.index)
+        childCount += 1
+    }
+
+    var flags: UInt8 = 0
+    if noneMinimum { flags |= CalcFlatNodeFlags.clampNoneMinimum }
+    if noneMaximum { flags |= CalcFlatNodeFlags.clampNoneMaximum }
+
+    guard let me = calcParseAppendOperation(&out, .Clamp, head, childCount, outputType, flags) else { return nil }
+    return CalcParsed(index: me, type: outputType)
+}
+
 /// `consumeOneOrMoreArguments<Op>` (`CSSCalcTree+Parser.cpp:321`-`:376`): `<calc-sum>#`, at least
 /// one, over the whole range it is given.
 ///
@@ -6690,9 +6882,7 @@ private func calcParseArgumentList(
         // after the first" rather than as a flag. `min(1px 2px)` fails here, which is what the C++
         // does with it.
         if childCount > 0 {
-            guard index < end, calcToken(cursor, &state, index).type == WebCore.CommaToken else { return nil }
-            index += 1
-            calcSkipWhitespace(cursor, &index, end, &state)
+            guard calcParseComma(cursor, &index, end, &state) else { return nil }
         }
 
         guard let argument = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
@@ -6972,6 +7162,8 @@ private func calcParseAttempt(
                 descent = calcParseArgumentList(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
             case .exactlyOne:
                 descent = calcParseUnaryFunction(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+            case .clamp:
+                descent = calcParseClamp(cursor, &index, end, 0, &out, options, &state)
             }
         } else if options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
             || options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {

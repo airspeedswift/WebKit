@@ -950,7 +950,19 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // operands is a contract violation and returns false without touching the stack. Widening the
     // set is a case each, and it is why `Children` never has to reach Swift: this is the only
     // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false) noexcept;
+    //
+    // `noneMask` IS THE ONLY NEW INFORMATION `clamp()` NEEDS, and it is a defaulted trailing
+    // parameter rather than a second entry. Bit 0 set means the MINIMUM bound is the keyword
+    // `none`, bit 1 the MAXIMUM; every other bit is ignored. Operand COUNT cannot carry it --
+    // `clamp(none, V, M)` and `clamp(M, V, none)` both push two operands -- and a sentinel operand
+    // would be a `makeUniqueRef` allocation built only to be discarded, which the allocation bar
+    // refuses. The reading direction has the same asymmetry and answers it the same way, with two
+    // dedicated `CSSCalcSwiftNodeKind`s (`ClampWithNoneMinimum`/`ClampWithNoneMaximum` above);
+    // `rebuildFrom` needs neither, because it reads none-ness off the original node it is given.
+    //
+    // Defaulted and LAST, after `isRoot`, so that the two Swift call sites that pass `isRoot`
+    // positionally are unchanged: a parameter inserted before it would rewrite them for nothing.
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false, uint8_t noneMask = 0) noexcept;
 
     // Drop every operand.
     //
