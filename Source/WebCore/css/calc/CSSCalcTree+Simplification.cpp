@@ -2461,16 +2461,13 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
     // `rebuildSlot(const std::optional<Child>&)` states the same rule for the rebuild direction
     // (`:2098`). The arity check is therefore `<= 2`, and `>= 1` is the entry's own precondition.
     auto finishOptionalSecond = [&]<typename Op>() -> bool {
-        static_assert(std::tuple_size_v<Op> == 2
-            && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<0, Op>>, Child>
+        static_assert(std::tuple_size_v<Op> == 2 && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<0, Op>>, Child>
             && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<1, Op>>, std::optional<Child>>,
             "buildOperation's optional-second arm fills one Child and one std::optional<Child>; an operation shaped differently must not reach it.");
         if (childCount > 2)
             return false;
-        std::optional<Child> second;
-        if (childCount == 2)
-            second = WTF::move(stack[base + 1]);
-        return finish(Op { WTF::move(stack[base]), WTF::move(second) });
+        return finish(Op { WTF::move(stack[base]),
+            childCount == 2 ? std::optional<Child> { WTF::move(stack[base + 1]) } : std::optional<Child> { } });
     };
 
     switch (alternative) {
