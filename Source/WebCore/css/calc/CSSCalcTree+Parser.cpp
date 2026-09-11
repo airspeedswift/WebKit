@@ -1659,7 +1659,30 @@ static_assert(static_cast<uint16_t>(CSSValueInvalid) == 0);
 // token walked past.
 uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
 {
-    return static_cast<uint8_t>(swiftNodeInfo(makeNumeric(0, static_cast<CSSUnitType>(unit))).kind);
+    auto child = makeNumeric(0, static_cast<CSSUnitType>(unit));
+
+    // Asked of the variant directly rather than through `swiftNodeInfo`, which is a 41-way
+    // `WTF::switchOn` -- 43.1 retired instructions measured (`calcbench --primitives`, row
+    // `read info() on a leaf`) -- on a path that can only ever produce four alternatives. This
+    // duplicates no table: `makeNumeric` still owns the seventy-case unit classification and is
+    // still the thing being asked; what changes is how its answer is read back. The four tests
+    // below are a 1:1 correspondence between an alternative and the kind that names it, not a
+    // mapping with content, and `pushLeaf` already switches on exactly these four.
+    if (WTF::holdsAlternative<Number>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Number);
+    if (WTF::holdsAlternative<Percentage>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Percentage);
+    if (WTF::holdsAlternative<CanonicalDimension>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::CanonicalDimension);
+    if (WTF::holdsAlternative<NonCanonicalDimension>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::NonCanonicalDimension);
+
+    // `makeNumeric` produces nothing else for any unit reachable here -- the grammar rejects
+    // `CSSUnitType::Unknown` before asking, and every other non-numeric unit reaches
+    // `makeNumeric`'s own `ASSERT_NOT_REACHED`. Reported rather than guessed: `pushLeaf` treats a
+    // kind outside the four as a contract violation, which is the correct outcome for a unit this
+    // function cannot classify.
+    return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Operation);
 }
 
 bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept
