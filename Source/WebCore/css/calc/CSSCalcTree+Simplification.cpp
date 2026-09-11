@@ -2470,6 +2470,27 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
             childCount == 2 ? std::optional<Child> { WTF::move(stack[base + 1]) } : std::optional<Child> { } });
     };
 
+    // A FIXED NUMBER of plain `Child` slots, two or three -- stage E5's `mod` `rem` `atan2` `pow`
+    // and `progress()`'s two alternatives.
+    //
+    // ONE ARM FOR BOTH ARITIES, driven by `std::tuple_size_v<Op>` rather than by two hand-written
+    // shapes, which is the design note's W-B: a family with a new arity of `Child`s costs zero
+    // lines here. Braced-init evaluates left to right, so slot order is operand order -- the same
+    // guarantee `rebuildChildren`'s `WTF::apply` already relies on (`:1919`).
+    //
+    // Still purely ADDITIVE: `Negate`/`Invert` keep `finishOneChild` and the four `Children`-slotted
+    // arms keep `takeChildren`, because rerouting already-served alternatives onto new machinery is
+    // what the refuted 2026-09-08 widening measured at +7.78 %.
+    auto finishFixedArity = [&]<typename Op>() -> bool {
+        if (childCount != std::tuple_size_v<Op>)
+            return false;
+        return [&]<size_t... I>(std::index_sequence<I...>) {
+            static_assert((std::is_same_v<std::remove_cvref_t<std::tuple_element_t<I, Op>>, Child> && ...),
+                "buildOperation's fixed-arity arm fills N plain Child slots; an operation shaped differently must not reach it.");
+            return finish(Op { WTF::move(stack[base + I])... });
+        }(std::make_index_sequence<std::tuple_size_v<Op>> { });
+    };
+
     switch (alternative) {
     case CSSCalcSwiftAlternative::Sum:
         return finish(Sum { .children = takeChildren() });
@@ -2479,6 +2500,11 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return finish(Min { .children = takeChildren() });
     case CSSCalcSwiftAlternative::Max:
         return finish(Max { .children = takeChildren() });
+    // Stage E5. `hypot` is `Children`-slotted like the four above and shares `min`/`max`'s type
+    // rule exactly, so it joins them here and the Swift side reuses `calcParseArgumentList`
+    // unchanged -- the variadic family costs one arm and no new machinery on either side.
+    case CSSCalcSwiftAlternative::Hypot:
+        return finish(Hypot { .children = takeChildren() });
 
     case CSSCalcSwiftAlternative::Negate:
         if (childCount != 1)
@@ -2524,6 +2550,12 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return finishOptionalSecond.operator()<name>();
     CSS_CALC_SWIFT_FOR_EACH_OPTIONAL_SECOND_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_OPTIONAL_SECOND)
 #undef CSS_CALC_SWIFT_BUILD_OPTIONAL_SECOND
+
+#define CSS_CALC_SWIFT_BUILD_FIXED_ARITY(name) \
+    case CSSCalcSwiftAlternative::name: \
+        return finishFixedArity.operator()<name>();
+    CSS_CALC_SWIFT_FOR_EACH_FIXED_ARITY_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_FIXED_ARITY)
+#undef CSS_CALC_SWIFT_BUILD_FIXED_ARITY
 
     // `clamp()` (P7b stage E3), and the ONE alternative in the grammar's reach whose slots cannot
     // be filled from the operand stack alone.

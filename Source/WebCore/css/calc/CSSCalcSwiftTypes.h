@@ -343,6 +343,21 @@ static constexpr uint8_t numberOfCSSCalcSwiftAlternatives = 0 CSS_CALC_SWIFT_FOR
     macro(RoundNearest) macro(RoundUp) macro(RoundDown) macro(RoundToZero) \
     macro(Log)
 
+// The math functions whose slots are a FIXED NUMBER of plain `Child`s, two or three (P7b stage E5):
+// `mod` `rem` `atan2` `pow`, and `progress()`'s two alternatives.
+//
+// ONE LIST FOR BOTH ARITIES, because `buildOperation` fills them from
+// `std::make_index_sequence<std::tuple_size_v<Op>>` and the arity is therefore not something the
+// list has to say -- the variant declaration already says it. A seventh of either arity costs one
+// line here; one with a slot that is not a `Child` fails to compile at the `static_assert`.
+//
+// `no-clamp` SELECTS THE ALTERNATIVE, as `round()`'s strategy does: `consumeProgress` picks between
+// two template instantiations (`CSSCalcTree+Parser.cpp:906`-`:908`), so the keyword costs the
+// boundary nothing here either.
+#define CSS_CALC_SWIFT_FOR_EACH_FIXED_ARITY_MATH_FUNCTION(macro) \
+    macro(Mod) macro(Rem) macro(Atan2) macro(Pow) \
+    macro(Progress) macro(ProgressNoClamp)
+
 // Which non-tree argument of an operation node an `appendOperationArgument` upcall should write.
 //
 // Declared in Swift as `CSSCalcSwiftOperationPart` and reaching C++ through

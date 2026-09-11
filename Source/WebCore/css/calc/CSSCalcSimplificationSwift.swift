@@ -3645,6 +3645,28 @@ fileprivate extension CalcFlatTree {
         case .Log:
             simplifyLog(i)
 
+        // Stage E5, and the same seven folds `simplifyColdNode` already dispatches.
+        case .Mod:
+            simplifyBinaryOperation(i, options, CalcExecutor.mod)
+
+        case .Rem:
+            simplifyBinaryOperation(i, options, CalcExecutor.rem)
+
+        case .Atan2:
+            simplifyAtan2(i, options)
+
+        case .Pow:
+            simplifyPow(i)
+
+        case .Hypot:
+            simplifyHypot(i, options)
+
+        case .Progress:
+            simplifyProgress(i, options, CalcExecutor.progress)
+
+        case .ProgressNoClamp:
+            simplifyProgress(i, options, CalcExecutor.progressNoClamp)
+
         case .Deg2Rad:
             simplifyDeg2Rad(i)
 
@@ -6054,6 +6076,13 @@ private enum CalcParsedEmitCoverage {
             | CalcFlatCoverage.bit(.RoundDown)
             | CalcFlatCoverage.bit(.RoundToZero)
             | CalcFlatCoverage.bit(.Log)
+            | CalcFlatCoverage.bit(.Hypot)
+            | CalcFlatCoverage.bit(.Mod)
+            | CalcFlatCoverage.bit(.Rem)
+            | CalcFlatCoverage.bit(.Atan2)
+            | CalcFlatCoverage.bit(.Pow)
+            | CalcFlatCoverage.bit(.Progress)
+            | CalcFlatCoverage.bit(.ProgressNoClamp)
             | CalcFlatCoverage.bit(.Sum)
             | CalcFlatCoverage.bit(.Product)
             | CalcFlatCoverage.bit(.Min)
@@ -6581,6 +6610,14 @@ private enum CalcFunctionArguments: UInt8 {
     /// `Op::input` on both arguments in both forms. The header says so in as many words --
     /// "NOTE: This is special cased in the code" (`CSSCalcTree.h:495`-`:499`).
     case round
+    /// Exactly two `<calc-sum>`, comma separated -- `consumeExactlyTwoArguments` (`:379`). Stage E5:
+    /// `mod`, `rem`, `atan2`, `pow`.
+    case exactlyTwo
+    /// `no-clamp? <calc-sum>, <calc-sum>, <calc-sum>` -- `consumeProgress` (`:902`), stage E5.
+    ///
+    /// The keyword takes NO COMMA after it, unlike `round()`'s strategy, and that asymmetry is in
+    /// the C++ too: `consumeRound` requires one at `:663` and `consumeProgress` requires none.
+    case progress
 }
 
 /// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `CSSValueID` names, and how its arguments
@@ -6617,6 +6654,16 @@ private func calcParseFunctionAlternative(_ functionId: UInt16)
     case WebCore.CSSValueClamp.rawValue: return (.Clamp, .clamp)
     case WebCore.CSSValueRound.rawValue: return (.RoundNearest, .round)
     case WebCore.CSSValueLog.rawValue: return (.Log, .oneOrTwo)
+    // Stage E5. `hypot` shares `min`/`max`'s ENTIRE grammar and type rule -- `<calc-sum>#` with
+    // `input = Any`, `merge = Consistent`, `output = None` (`CSSCalcTree.h:765`-`:767`) -- so it
+    // reuses `calcParseArgumentList` unchanged and the variadic case costs one line and no new
+    // container. That is the running-`CalcType`-plus-count idiom, not a `Swift.Array`.
+    case WebCore.CSSValueHypot.rawValue: return (.Hypot, .oneOrMore)
+    case WebCore.CSSValueMod.rawValue: return (.Mod, .exactlyTwo)
+    case WebCore.CSSValueRem.rawValue: return (.Rem, .exactlyTwo)
+    case WebCore.CSSValueAtan2.rawValue: return (.Atan2, .exactlyTwo)
+    case WebCore.CSSValuePow.rawValue: return (.Pow, .exactlyTwo)
+    case WebCore.CSSValueProgress.rawValue: return (.Progress, .progress)
     default: return nil
     }
 }
@@ -6659,6 +6706,12 @@ private func calcParseFunctionBlock(
             cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
     case .round:
         argumentsParsed = calcParseRound(
+            cursor, &inner, blockEnd, depth + 1, &out, options, &state)
+    case .exactlyTwo:
+        argumentsParsed = calcParseTwoArguments(
+            cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+    case .progress:
+        argumentsParsed = calcParseProgress(
             cursor, &inner, blockEnd, depth + 1, &out, options, &state)
     }
     guard let parsed = argumentsParsed else { return nil }
@@ -7050,6 +7103,122 @@ private func calcParseOneOrTwoArguments(
     return CalcParsed(index: me, type: transformed)
 }
 
+/// `consumeExactlyTwoArguments<Op>` (`CSSCalcTree+Parser.cpp:379`-`:428`), stage E5: `mod`, `rem`,
+/// `atan2`, `pow`.
+///
+/// THREE TYPE RULES OVER FOUR FAMILIES, written out for `calcParseUnaryFunction`'s reason -- a
+/// policy value threaded through would be a run-time dispatch for a compile-time fact.
+/// `Mod`/`Rem` are `Any -> None`, `Atan2` is `Any -> AngleMadeConsistent`, `Pow` is
+/// `Number -> None`; all four merge `Consistent`. `Mod`'s header carries an in-tree FIXME saying
+/// the spec wants `Same` and the tests say otherwise (`CSSCalcTree.h:589`) -- this follows the
+/// CODE, which is what the differential compares against.
+///
+/// THE ORDER OF THE LAST TWO CHECKS IS THE C++'s: `atEnd()` is tested BEFORE argument #2's type
+/// (`:403` then `:409`). Both reject, so the outcome is the same either way, and it is written in
+/// this order so the two can be read side by side.
+private func calcParseTwoArguments(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let a = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    // `validateType<Op::input>` on argument #1, which is `return true` for the three `Any` families.
+    if alternative == .Pow && !a.type.matchesNumber { return nil }
+
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    if index != end { return nil }
+    if alternative == .Pow && !b.type.matchesNumber { return nil }
+
+    guard let merged = a.type.consistentType(with: b.type) else { return nil }
+    let outputType: CalcType
+    switch alternative {
+    case .Atan2:
+        guard let transformed = CalcType.makeAngle().madeConsistent(with: merged) else { return nil }
+        outputType = transformed
+    case .Mod, .Rem, .Pow:
+        outputType = merged
+    default:
+        // Not one of the four; unreachable through `calcParseFunctionAlternative`'s `.exactlyTwo`
+        // arm, and a REFUSAL rather than a guess for `calcParseUnaryFunction`'s reason.
+        return nil
+    }
+
+    calcParseLink(&out, a.index, b.index)
+    guard let me = calcParseAppendOperation(&out, alternative, a.index, 2, outputType) else { return nil }
+    return CalcParsed(index: me, type: outputType)
+}
+
+/// `consumeProgress` (`CSSCalcTree+Parser.cpp:902`-`:910`) and `consumeProgressImpl` (`:824`),
+/// stage E5: `progress( no-clamp? <calc-sum>, <calc-sum>, <calc-sum> )`.
+///
+/// `no-clamp` SELECTS THE ALTERNATIVE and takes NO COMMA, which is the one place this differs from
+/// `round()`'s strategy: `consumeRound` requires a comma after its keyword (`:663`) and
+/// `consumeProgress` requires none. Getting that wrong makes `progress(no-clamp 2px, 1px, 3px)` a
+/// failure, which is why the case set carries it with and without the keyword.
+///
+/// THE THREE VALIDATIONS COME AFTER ALL THREE PARSES in the C++ (`:861`-`:876`), not interleaved.
+/// It makes no difference to the outcome -- `Progress::input` is `AllowedTypes::Any`, so all three
+/// are `return true` and there is nothing to call -- and it is recorded so a later family with a
+/// real input rule does not copy the interleaved shape by accident.
+///
+/// `merge` is `Consistent` twice, LEFT-ASSOCIATED: `(value, start)` then that with `end`. `output`
+/// is `NumberMadeConsistent`, so the node's type is a fresh `<number>` made consistent with the
+/// merge -- not the merge itself.
+private func calcParseProgress(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    var alternative = WebCore.CSSCalc.CSSCalcSwiftAlternative.Progress
+    if index < end, calcToken(cursor, &state, index).id == UInt16(WebCore.CSSValueNoClamp.rawValue) {
+        // `consumeIdentRaw<CSSValueNoClamp>`, i.e. `consumeIncludingWhitespace`. No comma.
+        index += 1
+        calcSkipWhitespace(cursor, &index, end, &state)
+        alternative = .ProgressNoClamp
+    }
+
+    guard let value = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard let start = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard let finish = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    if index != end { return nil }
+
+    guard let firstMerge = value.type.consistentType(with: start.type),
+        let merged = firstMerge.consistentType(with: finish.type),
+        let outputType = CalcType.makeNumber().madeConsistent(with: merged) else { return nil }
+
+    // Slot order IS list order, as it is for `clamp()`: `buildOperation` fills left to right from
+    // the top of the operand stack and `emitParsed` pushes in list order.
+    calcParseLink(&out, value.index, start.index)
+    calcParseLink(&out, start.index, finish.index)
+    guard let me = calcParseAppendOperation(&out, alternative, value.index, 3, outputType) else { return nil }
+    return CalcParsed(index: me, type: outputType)
+}
+
 /// `consumeOneOrMoreArguments<Op>` (`CSSCalcTree+Parser.cpp:321`-`:376`): `<calc-sum>#`, at least
 /// one, over the whole range it is given.
 ///
@@ -7372,6 +7541,10 @@ private func calcParseAttempt(
                 descent = calcParseOneOrTwoArguments(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
             case .round:
                 descent = calcParseRound(cursor, &index, end, 0, &out, options, &state)
+            case .exactlyTwo:
+                descent = calcParseTwoArguments(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+            case .progress:
+                descent = calcParseProgress(cursor, &index, end, 0, &out, options, &state)
             }
         } else if options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
             || options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {
