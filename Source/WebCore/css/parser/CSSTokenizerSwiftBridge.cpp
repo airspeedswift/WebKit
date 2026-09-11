@@ -2469,26 +2469,7 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t le
         // Bit pattern, not the value: it is what distinguishes -0.0 from 0.0 and makes two NaNs
         // with different payloads compare unequal, both of which the Swift side folds the same way.
         mix(std::bit_cast<uint64_t>(numericValue));
-        // `id` IS DERIVED INDEPENDENTLY, for the same reason `flags` is below: since stage E1 it
-        // carries two answers discriminated by `type`, and for a `FunctionToken` it is the
-        // `CSSCalcSwiftAlternative` rather than `CSSParserToken::id()`. Re-deriving it here is what
-        // makes this an oracle -- and it is a strictly stronger check than the shape this replaced,
-        // where a separate `functionAlternative` byte was mixed by NEITHER side and crossed
-        // unverified while this differential reported PASS.
-        uint16_t expectedId = static_cast<uint16_t>(token.id());
-        if (type == FunctionToken) {
-            switch (token.functionId()) {
-            case CSSValueMin:
-                expectedId = static_cast<uint16_t>(CSSCalc::CSSCalcSwiftAlternative::Min);
-                break;
-            case CSSValueMax:
-                expectedId = static_cast<uint16_t>(CSSCalc::CSSCalcSwiftAlternative::Max);
-                break;
-            default:
-                break;
-            }
-        }
-        mix(static_cast<uint64_t>(expectedId));
+        mix(static_cast<uint64_t>(token.id()));
         mix(static_cast<uint64_t>(token.functionId()));
         mix(static_cast<uint64_t>(type == DelimiterToken ? token.delimiter() : u'\0'));
         mix(static_cast<uint64_t>(token.unitType()));
@@ -2556,14 +2537,13 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     // entirely until now. Anything else would be asking the grammar to decline, which the corpus
     // does separately.
     //
-    // THE ROOT ALTERNATIVE IS READ OFF THE TOKEN CHANNEL THE GRAMMAR ITSELF READS, not from a second
-    // switch here: a harness-local `CSSValueMin` table could agree with the corpus while the
-    // channel the island uses was broken, which is the shape of a differential that measures
-    // nothing.
+    // Naming the four ids here is safe in a way it was not for one day: the alternative used to
+    // reach Swift down a channel of its own, so a harness-local list could agree with the corpus
+    // while that channel was broken. `functionId` now crosses RAW and is mixed into the token
+    // checksum by both sides, so this list and the grammar's are checked against each other by
+    // `webCoreCSSCalcCompareParseTokens` rather than merely written to match.
     auto functionId = cppRange.peek().functionId();
-    bool isPlainCalc = functionId == CSSValueCalc || functionId == CSSValueWebkitCalc;
-    uint8_t rootAlternative = static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseCursor { cppRange }.tokenAt(0).id);
-    if (!isPlainCalc && !rootAlternative)
+    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc && functionId != CSSValueMin && functionId != CSSValueMax)
         return result;
     result.applicable = true;
 
@@ -2631,7 +2611,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         .category = category,
         .absoluteLengthUnitsOnly = false,
         .hasAllowedSymbols = withSymbols,
-        .rootAlternative = rootAlternative,
+        .rootFunctionId = static_cast<uint16_t>(functionId),
     }, simplificationOptions, root, false);
 
     result.swiftOutcome = swiftResult.outcome;
@@ -2723,7 +2703,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .category = category,
             .absoluteLengthUnitsOnly = false,
             .hasAllowedSymbols = withSymbols,
-            .rootAlternative = rootAlternative,
+            .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, fusedRoot, true);
         result.fusedOutcome = fusedResult.outcome;
         if (result.cppSimplifiedParsed && fusedResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
@@ -2758,12 +2738,9 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
         return 0;
     }
     // Plain `calc()`, or a top-level math function the grammar builds -- `min()`/`max()` since
-    // stage E1. The alternative comes off the same token channel the grammar reads, so this bench
-    // cannot select a band the island would not actually cover.
+    // stage E1. Same list as the differential next door, and checked the same way.
     auto functionId = baseRange.peek().functionId();
-    bool isPlainCalc = functionId == CSSValueCalc || functionId == CSSValueWebkitCalc;
-    uint8_t rootAlternative = static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseCursor { baseRange }.tokenAt(0).id);
-    if (!isPlainCalc && !rootAlternative) {
+    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc && functionId != CSSValueMin && functionId != CSSValueMax) {
         if (outCovered)
             *outCovered = 0;
         return 0;
@@ -2795,7 +2772,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
     auto category = *accepted;
     auto parserOptions = CSSCalc::ParserOptions { .category = category, .range = WebCore::CSS::All, .allowedSymbols = { }, .propertyOptions = { } };
     auto simplificationOptions = CSSCalc::SimplificationOptions { .category = category, .range = WebCore::CSS::All, .conversionData = std::nullopt, .symbolTable = { }, .allowZeroValueLengthRemovalFromSum = false };
-    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .rootAlternative = rootAlternative };
+    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .rootFunctionId = static_cast<uint16_t>(functionId) };
 
     // Coverage is decided by running the Swift arm ONCE, before timing.
     {

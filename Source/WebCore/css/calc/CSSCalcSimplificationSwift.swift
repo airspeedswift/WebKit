@@ -120,28 +120,30 @@ enum CSSCalcSwiftSimplificationOutcome: UInt8 {
 // rather than mirroring it.
 //
 // THE SECOND HALF OF THAT SENTENCE USED TO READ "and a Swift file cannot name a `CSSValueID` to
-// disambiguate further". IT IS WRONG AS WRITTEN and it caused Stage E to be costed against a
-// limitation that is not the one in the way. Measured 2026-09-11 by probe E0, a `-typecheck` replay
-// of WebCore's own Swift step:
+// disambiguate further". IT IS FALSE, AND IT WAS FALSE FOR A REASON THAT WAS WEBKIT'S OWN. This
+// file names `WebCore.CSSValueMin` directly (`calcParseFunctionAlternative` below).
 //
-//   * Swift CAN name the type. `WebCore.CSSValueID` resolves, `MemoryLayout` of it resolves, and
-//     `init(rawValue:)` imports (non-optional -- it comes in as a `RawRepresentable` struct).
-//   * Swift can name NO ENUMERATOR of it. `WebCore.CSSValueMin`, `WebCore.CSSValueID.CSSValueMin`,
-//     the prefix-stripped `.min`, and the `WebCore.CSS.Keyword.Min.value` route were all tried;
-//     all 34 enumerators probed are absent under every spelling. So are `static constexpr` data
-//     members generally, which is why `WebCore.CSSCalc.Min.id` -- C++'s own answer, sitting right
-//     there in `CSSCalcTree.h:432` -- does not import either.
-//   * NEITHER IS A LANGUAGE LIMIT. Both reproduce in fifteen-line C++ twins with clean controls
-//     (`cssprobe/e0/twin/`): an incomplete `enum X : uint16_t;` declaration in a SIBLING HEADER of
-//     the same Clang module suppresses every enumerator of the complete definition -- and WebCore's
-//     `Core` umbrella carries seventeen forward declarations of `CSSValueID`. Removing the sibling
-//     declaration makes all of them visible; a dedicated non-umbrella module for the defining
-//     header does NOT, because the forward declaration only has to be VISIBLE, not first.
+// What was true, measured 2026-09-11 by probe E0 as a `-typecheck` replay of WebCore's own Swift
+// step, is that no ENUMERATOR of `CSSValueID` imported while the type itself did. The cause is not
+// Swift, not this enum's size and not C++ interop: an incomplete `enum X : uint16_t;` declaration
+// parsed BEFORE the complete definition, anywhere in the same Clang module, makes the importer
+// bring the type in with an EMPTY enumerator list. Twenty-two WebCore headers forward-declare
+// `CSSValueID` that way, an `umbrella` directory is walked in filename order, and several of them
+// sort before CSSValueKeywords.h. Listing that header ahead of the umbrella in
+// `WebCore_Private.modulemap` parses it first and all 1322 enumerators import; only the FIRST
+// declaration matters, so no forward declaration had to be touched. Reduced variants with both
+// controls: `cssprobe/e0/twinorder/variants.py`.
 //
-// So the boundary's alternative index is the right design for the first reason above and would be
-// even if the importer were fixed; but the function-identity channel it forced -- the
-// `functionAlternative` byte in `CSSCalcSwiftToken` -- is a workaround with an owner, not a fact
-// about the languages, and it is the thing to delete when the importer is fixed.
+// So the boundary's alternative index is still the right design for the first reason above -- `kind`
+// conflates operations this file must treat differently -- but the function-identity channel it
+// forced, a `CSSCalcSwiftAlternative` riding in `CSSCalcSwiftToken::id`, is GONE. `functionId`
+// crosses raw and is compared against `CSSValueMin` here.
+//
+// STILL MISSING, and the one E0 defect with no WebKit-side fix: Swift imports no `static constexpr`
+// DATA MEMBER of a C++ struct at all -- not an `int`, not a deduced `auto`, not an enum type
+// (`cssprobe/e0/twin/statics.h`). That is why `WebCore.CSSCalc.Min.id`, which exists precisely to
+// name this and sits right there at `CSSCalcTree.h:432`, does not import. It costs nothing here
+// only because the enumerator it would have returned is now reachable directly.
 
 /// `WebCore::CSSCalc::CSSCalcSwiftAlternative`, aliased for line length.
 private typealias CalcAlternative = WebCore.CSSCalc.CSSCalcSwiftAlternative
@@ -6258,7 +6260,7 @@ private func calcParseBlock(
     if !isPlainCalc {
         // A math function the grammar covers: `parseCalcFunction` dispatches on the id and reaches
         // the same `<calc-sum>` recursion the plain-calc arm does, one level down.
-        if let functionAlternative = calcParseFunctionAlternative(token.id) {
+        if let functionAlternative = calcParseFunctionAlternative(token.functionId) {
             return calcParseFunctionBlock(cursor, &index, end, depth, &out, options, &state, functionAlternative)
         }
         if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
@@ -6290,19 +6292,22 @@ private func calcParseBlock(
 
 // MARK: The math functions (P7b stage E1: `min()` and `max()`)
 
-/// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `functionAlternative` byte names, or nil for
-/// a function this grammar does not cover.
+/// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `CSSValueID` names, or nil for a function
+/// this grammar does not cover.
+///
+/// `WebCore.CSSValueMin` IS THE REAL ENUMERATOR, not a transcribed constant -- the thing this
+/// boundary must never do. It reads it because `WebCore_Private.modulemap` lists CSSValueKeywords.h
+/// ahead of Core's umbrella; see the note at `CalcAlternative`.
 ///
 /// TOTAL AND EXPLICIT, never `CSSCalcSwiftAlternative(rawValue:)`, and that is not style: on an
 /// IMPORTED C++ enum `init?(rawValue:)` NEVER FAILS (interop notes 92), so the `guard let` that
-/// spelling invites is vacuous and an out-of-range byte would become an alternative the emit then
-/// hands to `buildOperation`. Same shape as `calcNumericAlternativeForLeafKind` above, for the same
-/// reason: the byte crosses a language boundary and is validated on arrival.
+/// spelling invites is vacuous and an unknown id would become an alternative the emit then hands to
+/// `buildOperation`. Same shape as `calcNumericAlternativeForLeafKind` above.
 @inline(always)
-private func calcParseFunctionAlternative(_ raw: UInt16) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
-    switch raw {
-    case UInt16(WebCore.CSSCalc.CSSCalcSwiftAlternative.Min.rawValue): return .Min
-    case UInt16(WebCore.CSSCalc.CSSCalcSwiftAlternative.Max.rawValue): return .Max
+private func calcParseFunctionAlternative(_ functionId: UInt16) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
+    switch functionId {
+    case WebCore.CSSValueMin.rawValue: return .Min
+    case WebCore.CSSValueMax.rawValue: return .Max
     default: return nil
     }
 }
@@ -6650,7 +6655,7 @@ private func calcParseAttempt(
         // Spelled as an `if`/`else` rather than `Optional.map`, because the branches take `out` and
         // `state` `inout` and a closure cannot capture an `OutputSpan`.
         let descent: CalcParsed?
-        if let rootFunction = calcParseFunctionAlternative(UInt16(options.rootAlternative)) {
+        if let rootFunction = calcParseFunctionAlternative(options.rootFunctionId) {
             descent = calcParseArgumentList(cursor, &index, end, 0, &out, options, &state, rootFunction)
         } else {
             descent = calcParseSum(cursor, &index, end, 0, &out, options, &state)

@@ -1718,35 +1718,20 @@ static uint8_t cssCalcSwiftUnitFlagsFor(CSSUnitType unit) noexcept
     return conversionToCanonicalUnitRequiresConversionData(unit) ? cssCalcSwiftTokenUnitNeedsConversionData : 0;
 }
 
-// BOTH FUNCTION ANSWERS IN ONE PASS: the flag bits in the low byte, the `CSSCalcSwiftAlternative`
-// in the high byte. One switch, one call from `tokenAt`, which runs once per TOKEN.
+// The cheap `FunctionToken` predicates, one bit each, in one pass: `tokenAt` runs once per TOKEN,
+// so this is one call rather than three.
 //
-// THE ALTERNATIVE HALF IS A TOOLCHAIN WORKAROUND AND SHOULD BE DELETED. Swift can name the type
-// `WebCore::CSSValueID` but no enumerator of it, because a sibling header's incomplete
-// `enum CSSValueID : uint16_t;` declaration suppresses the whole enumerator list -- see the note on
-// `CSSCalcSwiftToken::functionAlternative`. With that fixed the grammar compares `functionId`
-// against `CSSValueMin` itself and the alternative byte, this half and the field all go.
-static uint16_t cssCalcSwiftFunctionAnswersFor(CSSValueID functionId) noexcept
+// WHICH math function it is does NOT ride here and used to: Swift now compares `functionId`
+// against `CSSValueMin` itself, because `WebCore_Private.modulemap` lists CSSValueKeywords.h ahead
+// of Core's umbrella and the enumerators therefore import.
+static uint8_t cssCalcSwiftFunctionFlagsFor(CSSValueID functionId) noexcept
 {
     uint8_t flags = 0;
-    uint8_t alternative = 0;
     if (isCalcFunction(functionId))
         flags |= cssCalcSwiftTokenIsCalcFunction;
-    switch (functionId) {
-    case CSSValueCalc:
-    case CSSValueWebkitCalc:
+    if (functionId == CSSValueCalc || functionId == CSSValueWebkitCalc)
         flags |= cssCalcSwiftTokenIsPlainCalcFunction;
-        break;
-    case CSSValueMin:
-        alternative = static_cast<uint8_t>(CSSCalcSwiftAlternative::Min);
-        break;
-    case CSSValueMax:
-        alternative = static_cast<uint8_t>(CSSCalcSwiftAlternative::Max);
-        break;
-    default:
-        break;
-    }
-    return static_cast<uint16_t>(flags) | static_cast<uint16_t>(alternative << 8);
+    return flags;
 }
 
 static_assert(maxExpressionDepth == 100);
@@ -1775,18 +1760,15 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
 
     // Filled only for a DimensionToken: `makeNumeric` is not free, and running it for every
     // whitespace token and operator would cost more than the two crossings this saves.
-    uint16_t functionAnswers = 0;
     uint8_t flags = 0;
     if (type == DimensionToken)
         flags = cssCalcSwiftUnitFlagsFor(token.unitType());
-    else if (type == FunctionToken) {
-        functionAnswers = cssCalcSwiftFunctionAnswersFor(token.functionId());
-        flags = static_cast<uint8_t>(functionAnswers);
-    }
+    else if (type == FunctionToken)
+        flags = cssCalcSwiftFunctionFlagsFor(token.functionId());
 
     return {
         .numericValue = isNumeric ? token.numericValue() : 0,
-        .id = type == FunctionToken ? static_cast<uint16_t>(functionAnswers >> 8) : static_cast<uint16_t>(token.id()),
+        .id = static_cast<uint16_t>(token.id()),
         .functionId = static_cast<uint16_t>(token.functionId()),
         .delimiter = type == DelimiterToken ? token.delimiter() : u'\0',
         .unit = token.unitType(),

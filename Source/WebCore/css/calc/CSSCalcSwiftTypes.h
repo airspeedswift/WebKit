@@ -1163,27 +1163,19 @@ struct CSSCalcSwiftSimplificationResult {
 struct CSSCalcSwiftToken {
     // Meaningful for NumberToken, PercentageToken and DimensionToken.
     double numericValue;
-    // TWO ANSWERS IN ONE FIELD, discriminated by `type` exactly as `numericValue`, `delimiter`,
-    // `unit` and `flags` already are:
-    //   IdentToken    -- the `CSSValueID` raw value.
-    //   FunctionToken -- WHICH MATH FUNCTION it is, as a `CSSCalcSwiftAlternative` raw value, or 0
-    //                    for one the Swift grammar cannot build. Alternative 0 is `Number`, a LEAF,
-    //                    so it can never be a function and needs no separate sentinel.
-    // Zero for every other token type, which is what `CSSParserToken::id()` returns for them.
+    // `CSSValueID` raw value. Non-zero only for IdentToken.
     //
-    // SHARING THE FIELD RATHER THAN ADDING A BYTE IS MEASURED, NOT TIDINESS. A separate
-    // `uint8_t functionAlternative` fits in the struct's six spare bytes and cost SIX RETIRED
+    // IT CARRIED A SECOND ANSWER FOR ONE DAY AND NO LONGER DOES, which is worth recording because
+    // the measurement that shaped it still holds. Stage E1 needed WHICH math function a
+    // `FunctionToken` names to reach Swift, and Swift could not name `CSSValueMin`; a separate
+    // `uint8_t functionAlternative` fits in this struct's six spare bytes and cost SIX RETIRED
     // INSTRUCTIONS PER TOKEN READ -- +17 on a single-leaf parse and +211 on the eight-term band,
-    // 0.711 -> 0.726 on the production pair, reproduced to three decimals across four runs of two
-    // matched-session builds with the C++ column flat to 0.1%. `tokenAt` runs once per token and
-    // returns this struct BY VALUE, so a field it did not have to write is a field it should not
-    // grow. This field is written unconditionally already.
+    // 0.711 -> 0.726 on the production pair. `tokenAt` runs once per token and returns this struct
+    // BY VALUE, so a field it did not have to write is a field it must not grow. Anything a later
+    // stage wants to add here is subject to that price.
     //
-    // THE FUNCTION HALF IS A TOOLCHAIN WORKAROUND AND SHOULD BE DELETED. Swift can name the type
-    // `WebCore::CSSValueID` but no enumerator of it -- a sibling header's incomplete
-    // `enum CSSValueID : uint16_t;` declaration suppresses the whole enumerator list, and Core's
-    // umbrella carries seventeen of them. With that fixed the grammar compares `functionId` against
-    // `CSSValueMin` itself and this overload goes away entirely.
+    // The channel is gone entirely now: `functionId` below already crosses raw, and Swift compares
+    // it against `CSSValueMin` itself (see WebCore_Private.modulemap's `Core` module).
     uint16_t id;
     // `CSSValueID` raw value. Non-zero only for FunctionToken.
     uint16_t functionId;
@@ -1215,7 +1207,6 @@ struct CSSCalcSwiftToken {
     // not make a call to ask. Each is a plain switch on the C++ side; the expensive answer
     // (`makeNumeric`'s) deliberately stays a crossing, see the note above.
     uint8_t flags;
-
 };
 // Bit 0, for a DimensionToken: `conversionToCanonicalUnitRequiresConversionData(unit)`.
 static constexpr uint8_t cssCalcSwiftTokenUnitNeedsConversionData = 1 << 0;
@@ -1311,9 +1302,10 @@ struct CSSCalcSwiftParseOptions {
     // wrong constant would be a wrong stylesheet.
     bool hasAllowedSymbols;
 
-    // The TOP-LEVEL function, as a `CSSCalcSwiftAlternative` raw value, or 0 for `calc()` and
-    // `-webkit-calc()` -- whose body is a bare `<calc-sum>`, which is what this entry took before
-    // Stage E and what alternative 0 (`Number`, a leaf) therefore stands for here.
+    // The TOP-LEVEL function's `CSSValueID` raw value: `CSSValueCalc`, `CSSValueWebkitCalc`, or
+    // whichever math function the grammar covers. The caller has it already -- it is the
+    // `functionId` it tested with `isCalcFunction` -- so this is a copy of a value C++ read, not a
+    // second classification of it.
     //
     // `parseAndSimplify` accepts ANY `isCalcFunction` at the top (`CSSCalcTree+Parser.cpp:171`), so
     // `width: min(1px, 2px)` is a top-level `Min`, but this entry is handed the range INSIDE the
@@ -1321,7 +1313,7 @@ struct CSSCalcSwiftParseOptions {
     // OUTER range, because routing the top level through the block arm would enter its arguments at
     // depth 1 where the C++ enters them at 0 (`parseCalcFunction(tokens, function, 0, state)`) -- a
     // divergence only a 100-deep expression can see and no ordinary corpus contains.
-    uint8_t rootAlternative;
+    uint16_t rootFunctionId;
 };
 
 // Why the parse stopped, when it did.
