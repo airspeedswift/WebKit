@@ -383,6 +383,186 @@ private extension CalcType {
 
         return result
     }
+
+    /// The C++'s `hasNonPercentEntry()` (`CSSCalcType.h:196`-`:199`), which is already written
+    /// straight-line there rather than as a loop -- so this one is a transliteration, not an
+    /// unrolling.
+    @inline(always)
+    var containsNonPercentEntry: Bool {
+        return length != 0 || angle != 0 || time != 0 || frequency != 0 || resolution != 0 || flex != 0
+    }
+
+    /// `Type::applyPercentHint` (`CSSCalcType.h:263`-`:277`), as a value-returning form.
+    ///
+    /// `&+`, NOT `+`, AND THIS IS THE THIRD ARITHMETIC HAZARD OF THE STAGE. The C++ is
+    /// `(*this)[hint] += (*this)[BaseType::Percent]` on an `int8_t`: the operands promote to `int`,
+    /// add, and narrow back, so 127 + 127 is 254 narrowed, which on every target WebKit ships is
+    /// -2. Swift's `+` on `Int8` TRAPS there, turning a defined C++ answer into an abort. Reachable
+    /// only with saturated lanes, which is why the differential carries an extremal set.
+    ///
+    /// THE `default` ARM IS NOT DEAD AND MUST ALIAS TO `length`. The C++ indexes through
+    /// `operator[](PercentHint)` (`CSSCalcType.h:232`-`:245`), whose switch falls out to
+    /// `return length` for a value outside the enum -- `ASSERT_NOT_REACHED_UNDER_CONSTEXPR_CONTEXT`
+    /// is a no-op in a Release build. An imported C++ enum's `init?(rawValue:)` never fails, so an
+    /// out-of-range hint IS constructible in Swift, and `percentageLeafType`'s own comment already
+    /// warns that such a value aliases onto `length`. Matching the C++ here is what keeps that
+    /// warning true.
+    @inline(always)
+    func withPercentHintApplied(_ hint: WebCore.CSSCalc.PercentHint) -> CalcType {
+        var result = self
+        // Step 1 needs no work: "doesn't contain" is represented as 0.
+        // Step 2: add `percent` into the hinted lane, then zero `percent`.
+        switch hint {
+        case .Length: result.length = result.length &+ result.percent
+        case .Angle: result.angle = result.angle &+ result.percent
+        case .Time: result.time = result.time &+ result.percent
+        case .Frequency: result.frequency = result.frequency &+ result.percent
+        case .Resolution: result.resolution = result.resolution &+ result.percent
+        case .Flex: result.flex = result.flex &+ result.percent
+        default: result.length = result.length &+ result.percent
+        }
+        result.percent = 0
+        // Step 3.
+        result.percentHint = CalcType.PercentHintValue(hint)
+        return result
+    }
+
+    /// `Type::allNonZeroValuesEqual` (`CSSCalcType.h:279`-`:289`), unrolled over the seven lanes.
+    ///
+    /// The C++ loops `allBaseTypes()` and indexes with `operator[]`, a seven-way switch on a runtime
+    /// index, so it runs that switch seven times per call and `add` calls this up to fourteen times.
+    /// Written out, it is seven compares.
+    @inline(always)
+    func nonZeroValuesEqual(_ other: CalcType) -> Bool {
+        if length != 0 && length != other.length { return false }
+        if angle != 0 && angle != other.angle { return false }
+        if time != 0 && time != other.time { return false }
+        if frequency != 0 && frequency != other.frequency { return false }
+        if resolution != 0 && resolution != other.resolution { return false }
+        if flex != 0 && flex != other.flex { return false }
+        if percent != 0 && percent != other.percent { return false }
+        return true
+    }
+
+    /// `add`'s merge: "copy all of type1's entries to finalType, and then copy all of type2's
+    /// entries that finalType doesn't already contain" (`CSSCalcType.cpp:66`-`:71`, and again at
+    /// `:87`-`:92` -- the C++ writes it twice, this is written once).
+    ///
+    /// `self` is type1, so the percent hint comes across with it, which is what the C++'s
+    /// `finalType = type1` does. The provisional-hint branch overwrites it afterwards.
+    @inline(always)
+    func mergingAbsentLanes(from other: CalcType) -> CalcType {
+        var result = self
+        if other.length != 0 && result.length == 0 { result.length = other.length }
+        if other.angle != 0 && result.angle == 0 { result.angle = other.angle }
+        if other.time != 0 && result.time == 0 { result.time = other.time }
+        if other.frequency != 0 && result.frequency == 0 { result.frequency = other.frequency }
+        if other.resolution != 0 && result.resolution == 0 { result.resolution = other.resolution }
+        if other.flex != 0 && result.flex == 0 { result.flex = other.flex }
+        if other.percent != 0 && result.percent == 0 { result.percent = other.percent }
+        return result
+    }
+
+    /// One iteration of `add`'s provisional-hint loop (`CSSCalcType.cpp:78`-`:99`).
+    ///
+    /// The C++ applies the hint to `type1` and `type2` IN PLACE, tests, and reverts from copies it
+    /// took at the top of the iteration. Taking the copies forward instead of reverting is the same
+    /// computation with the bookkeeping removed -- there is nothing to revert if nothing was
+    /// mutated -- and it is why this port has six calls where the C++ has a loop with a rollback.
+    static func addUnderHint(
+        _ hint: WebCore.CSSCalc.PercentHint,
+        _ type1: CalcType,
+        _ type2: CalcType
+    ) -> CalcType? {
+        let hinted1 = type1.withPercentHintApplied(hint)
+        let hinted2 = type2.withPercentHintApplied(hint)
+        guard hinted1.nonZeroValuesEqual(hinted2), hinted2.nonZeroValuesEqual(hinted1) else {
+            return nil
+        }
+        var finalType = hinted1.mergingAbsentLanes(from: hinted2)
+        finalType.percentHint = CalcType.PercentHintValue(hint)
+        return finalType
+    }
+
+    /// `Type::add` (`CSSCalcType.cpp:36`-`:107`).
+    ///
+    /// DELIBERATE SPEC DEVIATION, MIRRORING THE C++ IT REPLACES -- do not "fix" this against the
+    /// spec. css-typed-om's "apply the percent hint" is three steps; `CSSCalcType.cpp:56`/`:59`
+    /// performs only the third (assign the hint; do NOT fold `percent` into the hinted lane), and
+    /// step 3's first branch then compares the UN-APPLIED types at `:65`. This port must match that
+    /// or the Stage B differential reports a correct port as wrong. The deviation is a real WebCore
+    /// bug -- web-visible through Typed OM, whose `CSSNumericType::multiplyTypes` has the same
+    /// omission: see `cssprobe/notes/webkit-bug-tocss-empty-optional-0909.md` "Bug 3".
+    /// WHEN THAT BUG IS FIXED, THIS COMMENT AND `normalizePercentHints` CHANGE TOGETHER.
+    ///
+    /// `add`'s own omission is MASKED on spec-legal input by the provisional-hint search below,
+    /// which re-derives the application step 2 should have made -- which is very likely why nobody
+    /// noticed. It is unmasked only by a `Type` carrying both a non-null hint and a non-zero
+    /// `percent` lane, a state the spec forbids and `multiply`'s omission produces.
+    func added(to other: CalcType) -> CalcType? {
+        var type1 = self
+        var type2 = other
+
+        // Step 2, shared verbatim with `multiplied(by:)`.
+        guard CalcType.normalizePercentHints(&type1, &type2) else {
+            return nil
+        }
+
+        // Step 3, first branch (`:64`-`:73`).
+        if type1.nonZeroValuesEqual(type2) && type2.nonZeroValuesEqual(type1) {
+            return type1.mergingAbsentLanes(from: type2)
+        }
+
+        // Step 3, second branch (`:75`-`:103`). The guard is the C++'s own, and it is what keeps
+        // the six-hint search off every pair that cannot benefit from it.
+        guard (type1.percent != 0 || type2.percent != 0)
+            && (type1.containsNonPercentEntry || type2.containsNonPercentEntry) else {
+            return nil
+        }
+
+        // `allPotentialPercentHintTypes()` unrolled. Six calls rather than a loop over a container:
+        // a `Swift.Array` literal here is a heap allocation and a release per call on a path
+        // `consistentType` reaches per node, and an `InlineArray` subscript would add a bounds
+        // check to a census this stage is required not to move.
+        if let merged = CalcType.addUnderHint(.Length, type1, type2) { return merged }
+        if let merged = CalcType.addUnderHint(.Angle, type1, type2) { return merged }
+        if let merged = CalcType.addUnderHint(.Time, type1, type2) { return merged }
+        if let merged = CalcType.addUnderHint(.Frequency, type1, type2) { return merged }
+        if let merged = CalcType.addUnderHint(.Resolution, type1, type2) { return merged }
+        if let merged = CalcType.addUnderHint(.Flex, type1, type2) { return merged }
+
+        // "If the loop finishes without returning finalType, then the types can't be added."
+        return nil
+    }
+
+    /// `Type::sameType` (`CSSCalcType.cpp:172`-`:177`).
+    @inline(always)
+    func sameType(as other: CalcType) -> CalcType? {
+        return (self == other) ? self : nil
+    }
+
+    /// `Type::consistentType` (`CSSCalcType.cpp:180`-`:185`) -- "two or more calculations have a
+    /// consistent type if adding the types doesn't result in failure", so it IS `add`.
+    @inline(always)
+    func consistentType(with other: CalcType) -> CalcType? {
+        return added(to: other)
+    }
+
+    /// `Type::madeConsistent` (`CSSCalcType.cpp:188`-`:200`). `self` is the C++'s `base`.
+    @inline(always)
+    func madeConsistent(with input: CalcType) -> CalcType? {
+        // 1.
+        if hasPercentHint && input.hasPercentHint && !(percentHint == input.percentHint) {
+            return nil
+        }
+        // 2.
+        var base = self
+        if !base.hasPercentHint {
+            base.percentHint = input.percentHint
+        }
+        // 3.
+        return base
+    }
 }
 
 /// `Type::multiply` through the selected arm.
@@ -416,6 +596,86 @@ private func calcTypeInvert(
         return CalcType.invert(a)
     case .swift:
         return a.inverted()
+    }
+}
+
+/// `Type::add` through the selected arm.
+@inline(always)
+private func calcTypeAdd(
+    _ a: CalcType,
+    _ b: CalcType,
+    _ arm: CalcTypeAlgebraArm = defaultTypeAlgebra
+) -> CalcType? {
+    switch arm {
+    case .cpp:
+        return CalcType.add(a, b).value
+    case .swift:
+        return a.added(to: b)
+    }
+}
+
+/// `Type::consistentType` through the selected arm.
+@inline(always)
+private func calcTypeConsistentType(
+    _ a: CalcType,
+    _ b: CalcType,
+    _ arm: CalcTypeAlgebraArm = defaultTypeAlgebra
+) -> CalcType? {
+    switch arm {
+    case .cpp:
+        return CalcType.consistentType(a, b).value
+    case .swift:
+        return a.consistentType(with: b)
+    }
+}
+
+/// `Type::sameType` through the selected arm. NO PRODUCTION CALLER IN THE ISLAND TODAY -- it exists
+/// for `mergeTypes<MergePolicy::Same>` at step B6, and is ported now because the differential covers
+/// it for free alongside `add`, whose input universe it shares.
+@inline(always)
+private func calcTypeSameType(
+    _ a: CalcType,
+    _ b: CalcType,
+    _ arm: CalcTypeAlgebraArm = defaultTypeAlgebra
+) -> CalcType? {
+    switch arm {
+    case .cpp:
+        return CalcType.sameType(a, b).value
+    case .swift:
+        return a.sameType(as: b)
+    }
+}
+
+/// `Type::madeConsistent` through the selected arm. Also no production caller yet; same reason.
+@inline(always)
+private func calcTypeMadeConsistent(
+    _ base: CalcType,
+    _ input: CalcType,
+    _ arm: CalcTypeAlgebraArm = defaultTypeAlgebra
+) -> CalcType? {
+    switch arm {
+    case .cpp:
+        return CalcType.madeConsistent(base, input).value
+    case .swift:
+        return base.madeConsistent(with: input)
+    }
+}
+
+/// `Type::applyPercentHint` through the selected arm, as a value-returning form so both arms have
+/// the same shape. The C++ member is `constexpr` and mutating, so the `cpp` arm copies first.
+@inline(always)
+private func calcTypeApplyPercentHint(
+    _ a: CalcType,
+    _ hint: WebCore.CSSCalc.PercentHint,
+    _ arm: CalcTypeAlgebraArm = defaultTypeAlgebra
+) -> CalcType {
+    switch arm {
+    case .cpp:
+        var copy = a
+        copy.applyPercentHint(hint)
+        return copy
+    case .swift:
+        return a.withPercentHintApplied(hint)
     }
 }
 
@@ -1169,7 +1429,7 @@ private extension CalcSimplification {
             guard let hint = percentHintFromRawValue(leaf.percentHint) else {
                 return nil
             }
-            type.applyPercentHint(hint)
+            type = calcTypeApplyPercentHint(type, hint)
         }
         return type
     }
@@ -4334,7 +4594,7 @@ fileprivate extension CalcFlatTree {
     private mutating func convertToMinMax(_ i: Int, _ first: CalcFlatNode, _ second: CalcFlatNode, isMax: Bool, _ options: CalcSimplification) {
         guard let firstType = emittedType(first, options),
             let secondType = emittedType(second, options),
-            let merged = CalcType.consistentType(firstType, secondType).value else {
+            let merged = calcTypeConsistentType(firstType, secondType) else {
             // The types do not merge, so the node stays a `Clamp` and `emit`'s `default` arm rebuilds
             // it from these same two operands. Not a decline: the C++ does not build the `min()`
             // either.
@@ -5532,6 +5792,23 @@ private struct CalcTypeAlgebraDifferential {
     var invertMinExponentInputs = 0  // 12 V4: the `0 &- (-128)` lane, LIVE ONLY ON AXIS 2
     var byteVersusEqualsDisagreements = 0 // 13 the `Type`-has-no-padding cross-check
 
+    // B2's additions.
+    var addCases = 0                 // 15
+    var addMismatches = 0            // 16
+    var addCppEngaged = 0            // 17 V1 for `add`
+    var addCppHintChanged = 0        // 18 V4: ONLY the provisional-hint branch can set a hint
+                                     //    neither operand carried, and this is read off the C++
+                                     //    arm alone, so it is independent of the code under test
+    var sameTypeMismatches = 0       // 19
+    var madeConsistentMismatches = 0 // 20
+    var madeConsistentCppEngaged = 0 // 21 V1
+    var consistentTypeMismatches = 0 // 22
+    var applyHintCases = 0           // 23 V5
+    var applyHintMismatches = 0      // 24
+    var applyHintOverflowInputs = 0  // 25 V4: the `&+` lane of `applyPercentHint`, AXIS 2 ONLY
+    var applyHintOutOfRangeCases = 0 // 26 V4: the `default:` arm, which aliases onto `length`
+    var mergeCouldCopyInputs = 0     // 27 pairs where `add`'s merge loop could actually copy a lane
+
     /// The 8 bytes of a `Type` as one integer: the verdict's cross-check, and the key the distinct
     /// counts are taken over.
     ///
@@ -5731,6 +6008,120 @@ private struct CalcTypeAlgebraDifferential {
             }
         }
         distinctMultiplyResults = resultKeys.count
+
+        // ---- B2: `applyPercentHint`, over every value crossed with all six hints AND an
+        // out-of-range one. The out-of-range case is not hypothetical: an imported C++ enum's
+        // `init?(rawValue:)` never fails, and an out-of-range hint aliasing onto `length` through
+        // `Type::operator[](PercentHint)` is a bug this island already shipped once
+        // (`percentHintFromRawValue`'s comment). It is the only thing that exercises the Swift
+        // port's `default:` arm.
+        let hints: [WebCore.CSSCalc.PercentHint] = [
+            .Length, .Angle, .Time, .Frequency, .Resolution, .Flex,
+            WebCore.CSSCalc.PercentHint(rawValue: 99)!,
+        ]
+        for t in universe {
+            for (index, hint) in hints.enumerated() {
+                applyHintCases += 1
+                if index == 6 {
+                    applyHintOutOfRangeCases += 1
+                }
+                let cpp = calcTypeApplyPercentHint(t, hint, .cpp)
+                let swift = calcTypeApplyPercentHint(t, hint, .swift)
+                if !(cpp == swift) {
+                    applyHintMismatches += 1
+                }
+                if (Self.encode(cpp) == Self.encode(swift)) != (cpp == swift) {
+                    byteVersusEqualsDisagreements += 1
+                }
+                // Independent oracle, in `Int`, for the `&+` lane: does the hinted lane's sum leave
+                // `Int8`? Lane selection mirrors the C++'s, including the out-of-range aliasing.
+                let lane: Int8
+                switch index {
+                case 1: lane = t.angle
+                case 2: lane = t.time
+                case 3: lane = t.frequency
+                case 4: lane = t.resolution
+                case 5: lane = t.flex
+                default: lane = t.length
+                }
+                let sum = Int(lane) + Int(t.percent)
+                if sum < -128 || sum > 127 {
+                    applyHintOverflowInputs += 1
+                }
+            }
+        }
+
+        // ---- B2: `add`, `sameType`, `consistentType`, `madeConsistent` over the same ordered pairs.
+        for a in universe {
+            for b in universe {
+                addCases += 1
+
+                let cppSum = calcTypeAdd(a, b, .cpp)
+                let swiftSum = calcTypeAdd(a, b, .swift)
+                switch (cppSum, swiftSum) {
+                case (nil, nil):
+                    break
+                case let (cpp?, swift?):
+                    addCppEngaged += 1
+                    if !(cpp == swift) {
+                        addMismatches += 1
+                    }
+                    // Read off the C++ ARM ALONE: a result whose hint matches neither operand's can
+                    // only have come from the provisional-hint branch, because the first branch
+                    // returns `type1`'s hint after step 2 made the two agree.
+                    if !(cpp.percentHint == a.percentHint) && !(cpp.percentHint == b.percentHint) {
+                        addCppHintChanged += 1
+                    }
+                default:
+                    addMismatches += 1
+                }
+
+                // `consistentType` IS `add` in both arms, so this is a cheap check that the two
+                // entry points did not drift apart, not a second sweep of the algebra.
+                switch (calcTypeConsistentType(a, b, .cpp), calcTypeConsistentType(a, b, .swift)) {
+                case (nil, nil): break
+                case let (cpp?, swift?): if !(cpp == swift) { consistentTypeMismatches += 1 }
+                default: consistentTypeMismatches += 1
+                }
+
+                // Is `add`'s merge loop ("copy all of type2's entries that finalType doesn't
+                // already contain") able to copy anything at all? It runs only after
+                // `allNonZeroValuesEqual` has passed BOTH WAYS, which forces every non-zero lane of
+                // one operand to equal the other's -- so a lane that is zero in type1 and non-zero
+                // in type2 would have failed the second call. Computed here in plain `Int` over the
+                // RAW operands (step 2 touches only `percentHint`, never a lane), so it shares no
+                // code with either arm. Predicted 0: the loop is dead under its own precondition,
+                // which is why a control that perturbs it is inert.
+                let la = [Int(a.length), Int(a.angle), Int(a.time), Int(a.frequency),
+                          Int(a.resolution), Int(a.flex), Int(a.percent)]
+                let lb = [Int(b.length), Int(b.angle), Int(b.time), Int(b.frequency),
+                          Int(b.resolution), Int(b.flex), Int(b.percent)]
+                var equalBothWays = true
+                var couldCopy = false
+                for k in 0..<7 {
+                    if la[k] != 0 && la[k] != lb[k] { equalBothWays = false }
+                    if lb[k] != 0 && lb[k] != la[k] { equalBothWays = false }
+                    if la[k] == 0 && lb[k] != 0 { couldCopy = true }
+                }
+                if equalBothWays && couldCopy {
+                    mergeCouldCopyInputs += 1
+                }
+
+                switch (calcTypeSameType(a, b, .cpp), calcTypeSameType(a, b, .swift)) {
+                case (nil, nil): break
+                case let (cpp?, swift?): if !(cpp == swift) { sameTypeMismatches += 1 }
+                default: sameTypeMismatches += 1
+                }
+
+                switch (calcTypeMadeConsistent(a, b, .cpp), calcTypeMadeConsistent(a, b, .swift)) {
+                case (nil, nil): break
+                case let (cpp?, swift?):
+                    madeConsistentCppEngaged += 1
+                    if !(cpp == swift) { madeConsistentMismatches += 1 }
+                default: madeConsistentMismatches += 1
+                }
+            }
+        }
     }
 }
 
@@ -5763,8 +6154,24 @@ public func cssCalcTypeAlgebraDifferential(_ which: UInt32) -> UInt64 {
     case 10: return UInt64(r.overflowInputs)
     case 11: return UInt64(r.hintPropagatedInputs)
     case 12: return UInt64(r.invertMinExponentInputs)
-    case 13: return UInt64(r.multiplyMismatches + r.invertMismatches + r.byteVersusEqualsDisagreements)
+    case 13:
+        return UInt64(r.multiplyMismatches + r.invertMismatches + r.addMismatches
+            + r.sameTypeMismatches + r.madeConsistentMismatches + r.consistentTypeMismatches
+            + r.applyHintMismatches + r.byteVersusEqualsDisagreements)
     case 14: return UInt64(r.byteVersusEqualsDisagreements)
+    case 15: return UInt64(r.addCases)
+    case 16: return UInt64(r.addMismatches)
+    case 17: return UInt64(r.addCppEngaged)
+    case 18: return UInt64(r.addCppHintChanged)
+    case 19: return UInt64(r.sameTypeMismatches)
+    case 20: return UInt64(r.madeConsistentMismatches)
+    case 21: return UInt64(r.madeConsistentCppEngaged)
+    case 22: return UInt64(r.consistentTypeMismatches)
+    case 23: return UInt64(r.applyHintCases)
+    case 24: return UInt64(r.applyHintMismatches)
+    case 25: return UInt64(r.applyHintOverflowInputs)
+    case 26: return UInt64(r.applyHintOutOfRangeCases)
+    case 27: return UInt64(r.mergeCouldCopyInputs)
     default: return UInt64.max
     }
 }
