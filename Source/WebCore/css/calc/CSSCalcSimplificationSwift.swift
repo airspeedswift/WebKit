@@ -115,9 +115,33 @@ enum CSSCalcSwiftSimplificationOutcome: UInt8 {
 
 // Dispatches on `CSSCalcSwiftAlternative`, not `CSSCalcSwiftNodeKind`: `kind` classifies a node by
 // serialization shape, which conflates operations like `min()` and `mod()` that this file must
-// treat differently, and a Swift file cannot name a `CSSValueID` to disambiguate further. So the
-// boundary carries the variant's own alternative index (41 cases, pinned to `Node`'s alternative
-// indices via `WTF::alternativeIndexV`), and this file imports that enum rather than mirroring it.
+// treat differently. So the boundary carries the variant's own alternative index (41 cases, pinned
+// to `Node`'s alternative indices via `WTF::alternativeIndexV`), and this file imports that enum
+// rather than mirroring it.
+//
+// THE SECOND HALF OF THAT SENTENCE USED TO READ "and a Swift file cannot name a `CSSValueID` to
+// disambiguate further". IT IS WRONG AS WRITTEN and it caused Stage E to be costed against a
+// limitation that is not the one in the way. Measured 2026-09-11 by probe E0, a `-typecheck` replay
+// of WebCore's own Swift step:
+//
+//   * Swift CAN name the type. `WebCore.CSSValueID` resolves, `MemoryLayout` of it resolves, and
+//     `init(rawValue:)` imports (non-optional -- it comes in as a `RawRepresentable` struct).
+//   * Swift can name NO ENUMERATOR of it. `WebCore.CSSValueMin`, `WebCore.CSSValueID.CSSValueMin`,
+//     the prefix-stripped `.min`, and the `WebCore.CSS.Keyword.Min.value` route were all tried;
+//     all 34 enumerators probed are absent under every spelling. So are `static constexpr` data
+//     members generally, which is why `WebCore.CSSCalc.Min.id` -- C++'s own answer, sitting right
+//     there in `CSSCalcTree.h:432` -- does not import either.
+//   * NEITHER IS A LANGUAGE LIMIT. Both reproduce in fifteen-line C++ twins with clean controls
+//     (`cssprobe/e0/twin/`): an incomplete `enum X : uint16_t;` declaration in a SIBLING HEADER of
+//     the same Clang module suppresses every enumerator of the complete definition -- and WebCore's
+//     `Core` umbrella carries seventeen forward declarations of `CSSValueID`. Removing the sibling
+//     declaration makes all of them visible; a dedicated non-umbrella module for the defining
+//     header does NOT, because the forward declaration only has to be VISIBLE, not first.
+//
+// So the boundary's alternative index is the right design for the first reason above and would be
+// even if the importer were fixed; but the function-identity channel it forced -- the
+// `functionAlternative` byte in `CSSCalcSwiftToken` -- is a workaround with an owner, not a fact
+// about the languages, and it is the thing to delete when the importer is fixed.
 
 /// `WebCore::CSSCalc::CSSCalcSwiftAlternative`, aliased for line length.
 private typealias CalcAlternative = WebCore.CSSCalc.CSSCalcSwiftAlternative
