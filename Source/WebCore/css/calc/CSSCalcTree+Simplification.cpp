@@ -2200,13 +2200,30 @@ static CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const Simpli
     };
 }
 
-CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot, bool simplify) noexcept
+// Rebuild a `Child` from a stored flat tree, for a consumer that has not been ported yet.
+//
+// The mirror of `cssCalcSwiftParseIntoChild`, and it lives here for the same reason: the operand
+// stack holds a `WTF::Vector<Child>`, so it is only complete in this translation unit and no other
+// file can construct one. All the work is in Swift -- this is the stack, the contract check and
+// nothing else.
+bool cssCalcSwiftEmitStoreIntoChild(CSSCalcSwiftFlatStore& store, const SimplificationOptions& options, Child& outRoot) noexcept
+{
+    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot };
+    CSSCalcSwiftBuilder builder { operands, options };
+    if (!cssCalcSwiftEmitFromStore(&store, builder) || operands.rootSlot || !operands.value.isEmpty()) {
+        builder.clearOperands();
+        return false;
+    }
+    return true;
+}
+
+CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot, bool simplify, CSSCalcSwiftFlatStore* store) noexcept
 {
     CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot };
     CSSCalcSwiftBuilder builder { operands, options };
     auto cursor = CSSCalcSwiftParseCursor { innerRange };
 
-    auto result = cssCalcParseSwift(cursor, builder, parseOptions, swiftSimplificationOptions(options), simplify);
+    auto result = cssCalcParseSwift(cursor, builder, parseOptions, swiftSimplificationOptions(options), simplify, store);
 
     if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Parsed)) {
         // A failed or declined descent can leave partial operands behind; drop them rather than

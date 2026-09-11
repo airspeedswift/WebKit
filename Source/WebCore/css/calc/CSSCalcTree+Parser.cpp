@@ -1778,5 +1778,52 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
     };
 }
 
+// MARK: - The Swift calc STORE (P7c slice C1)
+
+WTF_MAKE_TZONE_ALLOCATED_IMPL(CSSCalcSwiftFlatStore);
+
+CSSCalcSwiftFlatStore::CSSCalcSwiftFlatStore() = default;
+CSSCalcSwiftFlatStore::~CSSCalcSwiftFlatStore() = default;
+
+Ref<CSSCalcSwiftFlatStore> CSSCalcSwiftFlatStore::create()
+{
+    return adoptRef(*new CSSCalcSwiftFlatStore);
+}
+
+size_t CSSCalcSwiftFlatStore::takeNodes(const CSSCalcSwiftFlatNode* __counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount, uint32_t rootIndex) noexcept
+{
+    // `Vector::appendRange` on an empty vector allocates exactly `nodeCount` slots: ONE malloc for
+    // the whole tree, where the `Child` form allocates one `makeUniqueRef<Op>` plus one `Children`
+    // vector per operator node. Assigning rather than appending, because a store is filled once.
+    m_nodes = Vector<CSSCalcSwiftFlatNode>(unsafeMakeSpan(nodes, nodeCount));
+    m_rootIndex = rootIndex;
+    return m_nodes.size();
+}
+
+CSSCalcSwiftFlatNode CSSCalcSwiftFlatStore::nodeAt(uint32_t index) const noexcept
+{
+    // Out of range answers a terminated node rather than trapping, matching what
+    // `CSSCalcSwiftParseCursor::tokenAt` does past the end: the caller is a Swift walk whose
+    // termination condition is the sentinel, so handing it the sentinel makes the walk stop where
+    // a bounds pre-check on the Swift side would have stopped it, and does so without Swift having
+    // to mirror a bound it cannot see.
+    if (index >= m_nodes.size()) {
+        return {
+            .value = 0,
+            .type = { },
+            .firstChild = cssCalcSwiftFlatNoNode,
+            .nextSibling = cssCalcSwiftFlatNoNode,
+            .childCount = 0,
+            .origin = cssCalcSwiftFlatNoNode,
+            .valueID = 0,
+            .unitType = 0,
+            .alternative = CSSCalcSwiftAlternative::Number,
+            .percentHint = 0,
+            .flags = 0,
+        };
+    }
+    return m_nodes[index];
+}
+
 } // namespace CSSCalc
 } // namespace WebCore

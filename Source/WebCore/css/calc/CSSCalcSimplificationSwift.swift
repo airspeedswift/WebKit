@@ -2492,12 +2492,29 @@ private extension CalcSimplification {
 /// storable in an ordinary Swift buffer, and free of the `~Escapable` problem that forced the handle
 /// design in the first place. Same move as the tokenizer island's offset-in-the-pointer-slot design.
 ///
-/// DEFINED IN SWIFT, and that is the point of the exercise rather than an aesthetic preference: the
-/// declaration briefly lived in CSSCalcSwiftTypes.h so that an `emitFlatTree` upcall could take a
-/// `Span` of these, and every consequence of that ran the wrong way -- C++ owning the shape of a
-/// structure only Swift builds, a size `static_assert` to keep the two in step, and a boundary type
-/// that grows a field every time the simplifier learns an alternative. Emit takes no span, so
-/// nothing on the C++ side names this type and nothing has to.
+/// DECLARED IN C++ SINCE P7c SLICE C1, WHICH REVERSES WHAT THIS COMMENT USED TO SAY. The previous
+/// text read: *"DEFINED IN SWIFT, and that is the point of the exercise rather than an aesthetic
+/// preference: the declaration briefly lived in CSSCalcSwiftTypes.h so that an `emitFlatTree` upcall
+/// could take a `Span` of these, and every consequence of that ran the wrong way -- C++ owning the
+/// shape of a structure only Swift builds, a size `static_assert` to keep the two in step, and a
+/// boundary type that grows a field every time the simplifier learns an alternative."* That was
+/// right about the boundary it was written for -- an upcall taking a span -- and it does not survive
+/// the STORAGE question, which is a different question with a different answer:
+///
+/// * Toolchain filings 55: `PrintAsClang` exports even a `@frozen`, `BitwiseCopyable` Swift struct
+///   as a non-trivially-copyable, non-default-constructible C++ class routing copies through the
+///   value witness table, so a Swift-declared node **cannot be a `WTF::Vector` element**. The stored
+///   flat tree is a `WTF::Vector`. Filed, with an acceptance criterion; unavailable, not harder.
+/// * The two C++ producers of a calc tree (`Style::Calculation::toCSS`,
+///   `CSSNumericValue::toCalcTreeNode`) must eventually construct nodes, and cannot name a
+///   Swift-only type.
+///
+/// Two of the three costs the old text named did not materialise. There is still exactly ONE
+/// declaration, so nothing is kept in step by hand and nothing is transcribed -- this is a
+/// `typealias`, not a mirror, and a field added on the C++ side appears here with no edit. The size
+/// `static_assert` earns its place independently: filings 57 records an `@_expose(Cxx)` return-struct
+/// tail-zeroing bug found in production on this island, and the assert is what makes a later field
+/// addition that re-enters its range a build failure rather than a wrong stylesheet.
 ///
 /// `alternative` is the imported C++ enum rather than a Swift mirror of it, so a `switch` here is
 /// checked against the one list (`CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`) and adding a 42nd
@@ -2516,49 +2533,15 @@ private extension CalcSimplification {
 /// Random access to child `k` is O(k) rather than O(1) as a result. That is the right trade: calc
 /// arities are a handful, every hot walk is sequential, and the alternative cost a buffer that could
 /// not be stack-allocated.
-fileprivate struct CalcFlatNode {
-    /// The numeric payload of a leaf. Meaningless for an operation.
-    var value: Double
+fileprivate typealias CalcFlatNode = WebCore.CSSCalc.CSSCalcSwiftFlatNode
 
-    /// The node's own `Type`, carried rather than recomputed.
-    ///
-    /// `rebuildFrom` takes the ORIGINAL node's type (`CSSCalcTree+Simplification.cpp:2147`), which is
-    /// what `copyAndSimplify` does at `:1821`: a node whose children simplified but whose kind did
-    /// not change keeps its type. A flat node has no original to reach at emit time, so it carries
-    /// the type from flattening instead. The alternative -- recomputing `toType` during emit -- is
-    /// what the R151 emit probe did, and it is both extra work per node and a different answer for
-    /// any node whose children changed shape.
-    var type: CalcType
-
-    /// The first child's index, or `CalcFlatNode.noNode` when there are none.
-    var firstChild: UInt32
-    /// The next sibling in the parent's list, or `CalcFlatNode.noNode`.
-    var nextSibling: UInt32
-    /// How many children the list holds. Derivable by walking it, and kept because arity is tested
-    /// far more often than the list is walked.
-    var childCount: UInt32
-
-    /// The pre-order index this node had when the tree was flattened.
-    ///
-    /// Not the same as the node's current slot once simplification starts moving nodes about --
-    /// promoting a grandchild copies a node into an ancestor's slot, and the copy has to keep naming
-    /// the ORIGINAL `CSSCalc::Child` it came from, because that is the only route back to a payload
-    /// no fixed-size node can hold: an `AtomString` element name, a nested `CSSCalcValue` weight, an
-    /// `AnchorSide` subtree, a `Random::Sharing`.
-    var origin: UInt32
-
-    var valueID: UInt16
-    var unitType: UInt8
-    var alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
-    var percentHint: UInt8
-    /// See `CalcFlatNodeFlags`.
-    var flags: UInt8
-
+fileprivate extension CalcFlatNode {
     /// The end-of-list sentinel, and the "no such node" answer.
     ///
-    /// `UInt32.max` cannot collide with a real index: the index space is bounded by the node count,
-    /// and a tree of 2^32 nodes cannot be built -- a `Child` is 24 bytes, so it would need 96 GB.
-    static let noNode: UInt32 = .max
+    /// One declaration, in C++ (`cssCalcSwiftFlatNoNode`), read here rather than restated: a
+    /// sentinel that disagreed across the boundary would make a Swift walk and a C++ walk terminate
+    /// at different nodes, silently.
+    static var noNode: UInt32 { WebCore.CSSCalc.cssCalcSwiftFlatNoNode }
 }
 
 /// The bits on `CalcFlatNode.flags`.
@@ -7452,13 +7435,14 @@ public func cssCalcParseSwift(
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
     _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ simplificationOptions: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
-    _ simplify: Bool
+    _ simplify: Bool,
+    _ store: WebCore.CSSCalc.CSSCalcSwiftFlatStore?
 ) -> WebCore.CSSCalc.CSSCalcSwiftParseResult {
     var result = WebCore.CSSCalc.CSSCalcSwiftParseResult()
     var state = CalcParseState()
 
     var attempt = calcParseAttempt(cursor, &builder, options, simplificationOptions, simplify,
-        calcFlatStackCapacity, &state)
+        calcFlatStackCapacity, &state, store)
 
     // A tree too big for the fixed stack buffer, retried at a size that cannot overflow. Nothing has
     // been observed on the first attempt -- the buffer is scratch, and a descent that overflowed
@@ -7467,7 +7451,7 @@ public func cssCalcParseSwift(
     if attempt.overflowed {
         state = CalcParseState()
         attempt = calcParseAttempt(cursor, &builder, options, simplificationOptions, simplify,
-            calcParseNodeUpperBound(cursor.tokenCount()), &state)
+            calcParseNodeUpperBound(cursor.tokenCount()), &state, store)
     }
 
     guard let type = attempt.type else {
@@ -7511,7 +7495,8 @@ private func calcParseAttempt(
     _ simplificationOptions: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
     _ simplify: Bool,
     _ capacity: Int,
-    _ state: inout CalcParseState
+    _ state: inout CalcParseState,
+    _ store: WebCore.CSSCalc.CSSCalcSwiftFlatStore?
 ) -> CalcParseAttempt {
     let end = cursor.tokenCount()
     return withTemporaryAllocation(of: CalcFlatNode.self, capacity: capacity) { out -> CalcParseAttempt in
@@ -7605,8 +7590,77 @@ private func calcParseAttempt(
             attempt.emitRefused = true
             return attempt
         }
+
+        // THE STORE, filled in ONE crossing (P7c slice C1). `takeNodes` is
+        // `__counted_by(nodeCount)` plus `noescape`, which is what makes the whole buffer cross as a
+        // single `Span` with no `unsafe` marker; either annotation alone gives an
+        // `UnsafeBufferPointer` or a pointer and a count as two arguments, and NEITHER failure names
+        // the missing annotation (`calcflatstore/run.sh` arms W1 and W2).
+        //
+        // Read off `tree.nodes` rather than `out`, because `tree` holds `out`'s storage for the
+        // duration and reading `out` again here is a second overlapping access the exclusivity
+        // checker rejects.
+        //
+        // ONE `Vector` malloc per stored tree. The `Child` tree beside it is one `makeUniqueRef<Op>`
+        // plus one `Children` vector PER OPERATOR node, so once a consumer reads the flat arm this is
+        // strictly fewer; until then it is additive and is booked that way.
+        if let store {
+            let stored = store.takeNodes(tree.nodes.span.extracting(0..<tree.count), UInt32(parsed.index))
+            // The crossing is ASSERTED, not trusted. A `takeNodes` that stored a different number of
+            // nodes than were handed to it is a boundary defect, and reporting it as a refusal makes
+            // the negative control -- poison `takeNodes` -- fail the differential instead of
+            // producing a quietly truncated tree.
+            if stored != tree.count {
+                attempt.emitRefused = true
+                return attempt
+            }
+        }
+
         attempt.type = parsed.type
         return attempt
+    }
+}
+
+/// Rebuild a `CSSCalc::Child` from a stored flat tree, reading it back one node at a time BY VALUE.
+///
+/// WHAT THIS IS FOR, AND WHY IT IS NOT A THROWAWAY. Two things at once:
+///
+///  * It is the only thing that can VALIDATE slice C1. A store nothing reads is a change no test can
+///    fail -- `takeNodes` could store nothing, or half the tree, or the wrong root, and every
+///    existing differential would still pass, because they all compare the `Child` the emit built
+///    directly. Reading the store back and emitting from THAT makes the whole crossing observable:
+///    the 1,639-expression corpus and the curated cases now compare a tree that went through
+///    `takeNodes` and 40 bytes of `nodeAt` per node against one that did not. Poisoning either
+///    entry point fails them.
+///  * It is the materialising fallback slice C2 needs, so that a consumer which has not yet been
+///    ported can keep reading `Child` off a `Value` that stores the flat form. The charter's gate on
+///    P7c is that a consumer either moves to Swift or keeps reading `Child`; this is the second
+///    half of that sentence, and it is written in Swift rather than C++ for exactly that reason.
+///
+/// THE READ IS PER ELEMENT BY VALUE, which is `CSSCalcSwiftParseCursor::tokenAt`'s shape at 40 bytes
+/// instead of 24, and it is what keeps the island at `unsafe` = 0: Swift cannot RECEIVE a
+/// bounds-carrying view from C++ at all (rdar://186723514, filings 27), so no `Span` of the store's
+/// buffer can cross. The nodes are copied into the same kind of stack buffer the parse already uses,
+/// and the existing `emitParsedRoot` runs over it unchanged -- no second emit, no second
+/// representation, no C++ rewritten against the flat form.
+@_expose(Cxx)
+public func cssCalcSwiftEmitFromStore(
+    _ store: WebCore.CSSCalc.CSSCalcSwiftFlatStore,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> Bool {
+    let count = Int(store.nodeCount())
+    let root = store.rootIndex()
+    guard count > 0, root != CalcFlatNode.noNode, Int(root) < count else {
+        return false
+    }
+    return withTemporaryAllocation(of: CalcFlatNode.self, capacity: count) { out -> Bool in
+        var i: UInt32 = 0
+        while i < UInt32(count) {
+            out.append(store.nodeAt(i))
+            i &+= 1
+        }
+        let tree = CalcFlatTree(storage: out.mutableSpan, count: count)
+        return tree.emitParsedRoot(Int(root), into: &builder)
     }
 }
 
