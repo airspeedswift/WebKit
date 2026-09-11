@@ -27,6 +27,7 @@
 
 #include "AnchorPositionEvaluator.h"
 #include "CSSCalcOperator.h"
+#include "CSSCalcSwiftTypes.h"
 #include "CSSCalcSymbolTable.h"
 #include "CSSCalcTree+Serialization.h"
 #include "CSSCalcTree+Simplification.h"
@@ -111,8 +112,9 @@ struct TypedChild {
 //
 // This is the parser's only call into the C++ simplifier, so a build with
 // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN off needs just this one guard. In that build the node is
-// returned unsimplified and the whole-tree `copyAndSimplify` at the end of `parseAndSimplify`
-// simplifies it instead.
+// returned unsimplified and the whole-tree `copyAndSimplify` at the end of `parseAndSimplify` and of
+// `parseAndSimplifyCalcSum` simplifies it instead. Both entry points need that tail: a new one
+// without it returns a tree folded by nothing in such a build.
 template<typename Op> static Child makeSimplifiedChild(Op&& op, Type type, ParserState& state)
 {
 #if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
@@ -205,7 +207,7 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     return result;
 }
 
-std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange& tokens, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions)
+std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange& tokens, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, ParseSimplification parseSimplification)
 {
     ParserState state {
         .propertyParserState = propertyParserState,
@@ -220,12 +222,21 @@ std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange& tokens, CSS::Pr
     if (!root->type.matches(parserOptions.category))
         return std::nullopt;
 
-    return Tree {
+    auto result = Tree {
         .root = WTF::move(root->child),
         .type = root->type,
         .stage = CSSCalc::Stage::Specified,
         .requiresConversionData = state.requiresConversionData,
     };
+
+    // The same terminal call `parseAndSimplify` makes, and needed for the same reason: the eager
+    // per-operation fold in `makeSimplifiedChild` is compiled out when the C++ simplifier is, so
+    // without this the tree reaches the caller folded by nothing. A no-op under the default
+    // `Eager`, which has already folded every operation on the way up.
+    if (parseSimplification == ParseSimplification::Terminal)
+        return copyAndSimplify(result, simplificationOptions);
+
+    return result;
 }
 
 bool isCalcFunction(CSSValueID functionId)
@@ -1631,6 +1642,95 @@ std::optional<TypedChild> parseCalcDimension(const CSSParserToken& token, Parser
         return TypedChild { copyAndSimplify(WTF::move(child), *simplificationOptions), type };
 #endif
     return TypedChild { WTF::move(child), type };
+}
+
+
+// MARK: - Swift parser token boundary
+
+// The Swift-visible stand-in must be the size of the real member, or the two languages hold
+// different views of one live object with no diagnostic. Only this translation unit can see
+// `CSSParserTokenRange`, so the assertion lives here rather than beside the declaration.
+static_assert(sizeof(CSSCalcSwiftParseCursor) == sizeof(const CSSParserTokenRange*));
+
+// The block types cross the boundary as a raw byte and Swift's `calcFindBlockEnd` compares against
+// these values literally, so the numbering is pinned one enumerator per line. Renumbering fails the
+// build rather than silently changing which token closes a block.
+static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == 0);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == 1);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
+
+// `id` and `functionId` cross as raw `CSSValueID` values, and "absent" has to be a value Swift can
+// test. `CSSParserToken::id()`/`functionId()` already return `CSSValueInvalid` for a token of the
+// wrong type, and that is 0, so the boundary needs no separate presence flag.
+static_assert(static_cast<uint16_t>(CSSValueInvalid) == 0);
+
+// The alternative `makeNumeric` would build for `unit`, answered by CALLING `makeNumeric` rather
+// than by re-deriving its seventy-case table -- the same argument `CSSCalcSwiftNumericResult::kind`
+// already carries. Every numeric alternative is an inline variant member, so this allocates
+// nothing, and the grammar calls it once per dimension leaf actually built rather than once per
+// token walked past.
+uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
+{
+    return static_cast<uint8_t>(swiftNodeInfo(makeNumeric(0, static_cast<CSSUnitType>(unit))).kind);
+}
+
+bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept
+{
+    return conversionToCanonicalUnitRequiresConversionData(static_cast<CSSUnitType>(unit));
+}
+
+CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
+{
+    auto constant = lookupConstantNumber(static_cast<CSSValueID>(id));
+    if (!constant)
+        return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = false };
+    // Always a `Number` with an empty `Type` -- `lookupConstantNumber` builds exactly that.
+    return {
+        .value = constant->first.value,
+        .unitType = static_cast<uint16_t>(CSSUnitType::Number),
+        .resolved = true,
+        .alternative = CSSCalcSwiftAlternative::Number,
+        .substituteFallback = false,
+    };
+}
+
+// The Swift grammar's depth limit must be the C++ one, or the two arms disagree about which deeply
+// nested expressions parse -- a divergence no corpus of ordinary CSS would surface.
+// The Swift parser's depth limit must match the C++ one, or the two disagree about which deeply
+// nested expressions parse.
+static_assert(maxExpressionDepth == 100);
+
+uint32_t CSSCalcSwiftParseCursor::tokenCount() const noexcept
+{
+    return static_cast<uint32_t>(m_range.size());
+}
+
+CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcept
+{
+    // Past the end this is the EOF token, which is what `CSSParserTokenRange::peek` returns and
+    // what the C++ grammar relies on, so the Swift parser needs no bounds pre-check to behave
+    // identically.
+    auto& token = m_range.peek(index);
+    auto type = token.type();
+
+    // THE TWO GUARDS ARE LOAD-BEARING, not defensive style. `CSSParserToken::numericValue()` and
+    // `delimiter()` each ASSERT on a token of the wrong type (CSSParserToken.cpp:487, :467), and
+    // this boundary reads every field of every token unconditionally -- so an unguarded version
+    // compiles, passes every release test, and fires on the first whitespace token in any
+    // assertions build. The other four accessors are total: `id()`/`functionId()` return
+    // `CSSValueInvalid` for the wrong type, `unitType()` and `getBlockType()` are plain bitfield
+    // reads.
+    bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
+
+    return {
+        .numericValue = isNumeric ? token.numericValue() : 0,
+        .id = static_cast<uint16_t>(token.id()),
+        .functionId = static_cast<uint16_t>(token.functionId()),
+        .delimiter = type == DelimiterToken ? token.delimiter() : u'\0',
+        .unit = token.unitType(),
+        .type = type,
+        .blockType = static_cast<uint8_t>(token.getBlockType()),
+    };
 }
 
 } // namespace CSSCalc

@@ -91,7 +91,7 @@ static constexpr ParseSimplification defaultParseSimplification = ParseSimplific
 std::optional<Tree> parseAndSimplify(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification);
 
 // Parses and simplifies a bare `<calc-sum>`, one that is not wrapped in a math function.
-std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&);
+std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification);
 
 // Returns whether the provided `CSSValueID` is one of the functions that should be parsed as a `calc()`.
 bool NODELETE isCalcFunction(CSSValueID function);

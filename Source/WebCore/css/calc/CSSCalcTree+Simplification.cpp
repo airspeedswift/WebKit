@@ -1842,23 +1842,26 @@ template<Leaf Op> static auto copyAndSimplifyChildren(const Op& op, const Simpli
     return op;
 }
 
-// ONE walk over an operation's tuple slots, parameterised by what each slot becomes.
+// One walk over an operation's tuple slots, parameterised by what each slot becomes.
 //
 // Two callers want the same walk and differ only in the per-slot answer: `copyAndSimplifyChildren`
 // below maps each slot through `copyAndSimplify`, and `CSSCalcSwiftBuilder::rebuildFrom` takes each
-// slot off the Swift island's operand cursor through `rebuildSlot`. Written once, so the one thing
-// that is genuinely per-operation -- `Anchor` and `AnchorSize` declaring `tuple_size` 0 while
-// holding three slots each (CSSCalcTree.h:1317, "FIXME (webkit.org/b/280798): make Anchor and
-// AnchorSize tuple-like") -- is stated once instead of in both walks. When that FIXME is fixed the
-// two branches delete themselves and nothing else moves.
+// slot off the Swift operand cursor through `rebuildSlot`. Written once, so that the one genuinely
+// per-operation fact -- `Anchor` and `AnchorSize` declare `tuple_size` 0 while holding three slots
+// each (FIXME: webkit.org/b/280798, make Anchor and AnchorSize tuple-like) -- is stated once rather
+// than in both walks. Fixing that FIXME deletes the two branches and nothing else.
 //
-// `side` is COPIED, not mapped: `simplify` is not applied to the `<anchor-side>` subtree, because
+// `side` is copied, not mapped: `simplify` is not applied to the `<anchor-side>` subtree, because
 // doing so would fold `anchor(--a calc(25% + 25%))` to `anchor(--a 50%)`, which this file does not
 // do. `elementName` and `dimension` are not subtrees at all.
 //
-// `fallback` IS mapped, and the asymmetry is why it goes through `anchorSlotKeepingPrefix`: because
-// the side is copied its one-child `Sum` survives, and because the fallback is simplified its own
-// has to be restored. See that function for what the wrapper means and for the measurement.
+// `fallback` is mapped, and goes through `anchorSlotKeepingPrefix` because of that asymmetry: the
+// copied side keeps its one-child `Sum`, while the simplified fallback's has to be restored.
+//
+// `NOESCAPE` is an unchecked assertion, and it holds by inspection: `mapSlot` appears here in call
+// position only, three times, and is never stored, returned, bound to a reference or captured. Both
+// callers pass a `[&]` lambda that is a temporary in the call expression. This is C++-internal, not
+// part of the Swift boundary, so no Swift-side safety claim rests on it.
 template<typename Op, typename MapSlot> static Op rebuildChildren(const IndirectNode<Op>& root, NOESCAPE MapSlot&& mapSlot)
 {
     // `Random::Sharing` is a `<random-key>`, not a `<calc-sum>`: the one tuple slot in any
@@ -2126,6 +2129,43 @@ static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, 
     }
     cursor.weights.shrink(cursor.weightBase);
     return items;
+}
+
+CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot) noexcept
+{
+    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot };
+    CSSCalcSwiftBuilder builder { operands, options };
+    auto cursor = CSSCalcSwiftParseCursor { innerRange };
+
+    auto result = cssCalcParseSwift(cursor, builder, parseOptions);
+
+    if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Parsed)) {
+        // A failed or declined descent can leave partial operands behind; drop them rather than
+        // letting the stack's destructor be the only thing that notices.
+        builder.clearOperands();
+        return result;
+    }
+
+    // The same contract the simplification entry checks, and for the same reason: a boundary that
+    // came apart must be a fallback to the C++ arm, not a tree built from whatever was left on the
+    // stack. `finishRoot` should already have taken the slot, so a non-null one here means the
+    // descent finished while leaving the caller's placeholder in place.
+    if (operands.rootSlot || !operands.value.isEmpty()) {
+        builder.clearOperands();
+        result.outcome = static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Declined);
+        result.declineReason = static_cast<uint8_t>(CSSCalcSwiftParseDeclineReason::ContractViolation);
+    }
+    return result;
+}
+
+bool CSSCalcSwiftBuilder::finishRoot() noexcept
+{
+    if (!m_operands->rootSlot || m_operands->value.size() != 1)
+        return false;
+    *m_operands->rootSlot = WTF::move(m_operands->value.last());
+    m_operands->value.removeLast();
+    m_operands->rootSlot = nullptr;
+    return true;
 }
 
 bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot) noexcept

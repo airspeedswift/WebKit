@@ -37,6 +37,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <WebCore/CSSCalcType.h>
+#include <WebCore/CSSParserTokenBits.h>
+#include <WebCore/CSSUnitType.h>
 #include <WebCore/PlatformExportMacros.h>
 #include <wtf/SwiftBridging.h>
 
@@ -45,6 +47,8 @@ class StringBuilder;
 }
 
 namespace WebCore {
+
+class CSSParserTokenRange;
 
 namespace CSS {
 struct SerializationContext;
@@ -274,6 +278,31 @@ WEBCORE_EXPORT uint32_t swiftSerializationChildIndex(const Child&, uint32_t inde
 // is better here: the sink lives on the C++ stack for exactly one `serializationForCSS` call, so a
 // refcounted sink would cost a heap allocation per call on a path `cssText` and getComputedStyle
 // reach, and "immortal" would be a claim that is not true.
+//
+// WHY THE `SWIFT_SAFE` CLAIM HOLDS, which is a separate question from the paragraph above and is the
+// one that matters. `SWIFT_SAFE` is `swift_attr("safe")`: an UNCHECKED assertion that this type
+// safely encapsulates its unsafe constituents. Nothing verifies it -- and WebCore's Swift is built
+// with `-strict-memory-safety` and `-Werror StrictMemorySafety`, so without the annotation the two
+// raw pointer members below would make the whole type unsafe to Swift and every use of it would need
+// an `unsafe` marker. Two of the island's zero `unsafe` markers rest on this line and on the
+// matching one on `CSSCalcSwiftBuilder`, so the claim is stated rather than left implicit:
+//
+//   * The referents outlive every use. The sink is constructed at exactly one site --
+//     `trySerializeWithSwift` (CSSCalcTree+Serialization.cpp) -- from that function's own
+//     `StringBuilder&` parameter and from `options.serializationContext`, both of which the caller
+//     of `serializationForCSS` owns; it is passed straight to `cssCalcSerializeSwift` in the next
+//     statement and destroyed at the end of that scope. `[[clang::lifetimebound]]` on both
+//     constructor parameters is what makes a temporary at that site a clang diagnostic rather than a
+//     silent dangle, so the one-site claim is enforced for any site added later.
+//   * Swift does not extend either pointer's reach, and this is the bullet that needs checking
+//     rather than asserting: the struct imports as an ordinary copyable value, so a copy COULD carry
+//     `m_builder` into a stored property. None does. Every one of the thirteen Swift signatures that
+//     names this type (`CSSCalcSerializationSwift.swift`) takes it `inout`, no Swift type declares a
+//     stored property of it, and no escaping closure captures it -- an `inout` argument cannot be
+//     captured by one in any case. So every copy of `m_builder` is a parameter whose lifetime nests
+//     inside the C++ call that supplied it.
+//   * The output is disjoint from the input, so the `inout` costs nothing in exclusivity terms: the
+//     `StringBuilder` being appended to is not reachable from the `Child` tree being read.
 struct SWIFT_SAFE CSSCalcSwiftSink {
     CSSCalcSwiftSink(WTF::StringBuilder& builder [[clang::lifetimebound]], const CSS::SerializationContext& context [[clang::lifetimebound]]) noexcept
         : m_builder(&builder)
@@ -381,6 +410,31 @@ struct CSSCalcSwiftSimplificationOptions {
 // finished subtree; a parent then says how many operands it consumes and gets one back, which is
 // what lets `rebuildFrom` be generic and keeps `~Escapable` out of the picture -- no Swift
 // container ever holds a `Child`, because the container is the C++ stack.
+//
+// WHY THE `SWIFT_SAFE` CLAIM HOLDS. As on `CSSCalcSwiftSink` (see the longer note there for what
+// `swift_attr("safe")` is and why an unchecked assertion is load-bearing here), the annotation is an
+// UNCHECKED claim that the two raw pointer members below are safely encapsulated, and the island's
+// `unsafe` count of zero rests on it. What makes it true:
+//
+//   * The referents outlive every use. Six construction sites, all in
+//     CSSCalcTree+Simplification.cpp: the production one is `trySimplifyWithSwift`, over that
+//     function's `CSSCalcSwiftOperandStack&` parameter -- storage owned by `swiftSimplifiedRoot`'s
+//     frame, which is also the frame holding the root slot the walk writes into -- and its
+//     `const SimplificationOptions&`. The other five are `calcbench`'s probe entries, each over a
+//     stack local declared immediately above. In all six the builder is destroyed in the same scope
+//     that built it, before the referents go away. `[[clang::lifetimebound]]` on both constructor
+//     parameters keeps a temporary at any future site a clang diagnostic rather than a dangle.
+//   * Swift does not extend either pointer's reach, and the check is less trivial than the sink's
+//     because this type is NOT only passed `inout`: the `simplifyX` family takes it by value as an
+//     `Optional`, so copies of `m_operands` do exist. They are all parameters. No Swift type declares
+//     a stored property of this type (grep for one: there is none), no escaping closure captures it,
+//     and the by-value copies only travel further down the same recursion, so every copy's lifetime
+//     nests inside the one C++ call.
+//   * The `inout` builder is held across borrows of the input tree, which relies on EXCLUSIVITY and
+//     is worth stating because it is the one non-obvious part: `simplify` borrows the original
+//     `Child` while mutating the builder. That is sound by input/output disjointness -- the operand
+//     stack and root slot are freshly constructed C++ storage, not reachable from the input tree --
+//     so the two accesses can never overlap, whatever order the optimizer picks.
 struct SWIFT_SAFE CSSCalcSwiftBuilder {
     CSSCalcSwiftBuilder(CSSCalcSwiftOperandStack& operands [[clang::lifetimebound]], const SimplificationOptions& options [[clang::lifetimebound]]) noexcept
         : m_operands(&operands)
@@ -545,6 +599,22 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     //
     // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
     // that this header stays self-contained and does not pull in wtf/Vector.h.
+    // Move the single remaining operand into the root slot.
+    //
+    // WHY THE PARSER NEEDS THIS AND THE SIMPLIFIER DOES NOT. The simplifier walks a tree it already
+    // has, so it knows which node is the root before it builds it and passes `isRoot` -- which
+    // constructs straight into the root slot and moves nothing. A recursive-descent parser does not
+    // know: whether the first `<calc-product>` is the whole expression or the first operand of a
+    // sum is only settled after it has been parsed and pushed. Deciding by lookahead would mean
+    // scanning for a top-level `+` at every nesting level before descending.
+    //
+    // Costs one `Child` move per parse -- an out-of-line 41-alternative variant move, ~42
+    // instructions, measured on the `RebuildCursor::take()` arm. Once per whole parse, not per
+    // node, and it goes away if the grammar ever builds into the flat form and emits in one pass.
+    // Returns false if the stack does not hold exactly one operand, which is a boundary contract
+    // violation rather than a parse outcome.
+    WEBCORE_EXPORT bool finishRoot() noexcept;
+
     WEBCORE_EXPORT void clearOperands() noexcept;
 #endif
 
@@ -555,7 +625,7 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
 
     // `canonicalize`'s `tryMakeCanonical`, for the font-, viewport- and container-relative lengths,
     // which need `CSSToLengthConversionData`. The membership set exists exactly once, here: the
-    // `switch` in Swift names the units it decides itself and this upcall is its `default` arm.
+    // `switch` in Swift names the units it decides itself and this upcall is its `default` case.
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const noexcept;
 
     // The only place `Style::BuilderState` reaches this boundary. Covers `sibling-count()`,
@@ -598,6 +668,183 @@ struct CSSCalcSwiftSimplificationResult {
     // one alternative to blame".
     uint8_t declineAlternative;
 };
+
+// MARK: - The Swift calc PARSE path's token boundary (P7b stage C)
+
+// One CSS token, in the form the calc grammar needs and nothing more.
+//
+// WHY A PURPOSE-BUILT POD RATHER THAN `CSSParserTokenBits`, WHICH IS ALREADY `SWIFT_SAFE` AND
+// ALREADY IMPORTED. Its value slot is a union that, once `CSSSwiftTokenSink::takeChunk` has
+// resolved it, holds a LIVE `const void*` into the stylesheet text. `CSSParserTokenBits`'s own
+// `SWIFT_SAFE` is honest today precisely because on the tokenizer's path that slot holds a parked
+// integer for exactly as long as Swift can see it (CSSParserTokenBits.h). Handing the calc parser a
+// *resolved* one would make that assertion false in a new way and silently, so this carries no
+// pointer at all: `id` and `functionId` are resolved on the C++ side, which is where
+// `cssValueKeywordID` already runs, so Swift never needs a token's text and the parse never touches
+// the stylesheet buffer.
+//
+// THE FIELD SET IS EXHAUSTIVE, NOT A SKETCH. It is every accessor `CSSCalcTree+Parser.cpp` reads off
+// a token, enumerated from the source rather than assumed:
+//   `type()` (dispatch, and the whitespace look-behind at :1410), `unitType()` (:1608, where
+//   `Unknown` is the reject signal), `numericValue()` (:1594, :1602, :1613), `id()` (:1571, :1584),
+//   `functionId()` (:170, :916, :1529) and `delimiter()` (:1406).
+// `numericValueType()` is deliberately ABSENT -- no calc grammar rule reads integer-ness. If one
+// ever does, this struct has seven spare bytes.
+//
+// `delimiter` IS 16 BITS AND THAT IS LOAD-BEARING. `CSSParserToken::delimiter()` returns `char16_t`
+// (CSSParserToken.h:92) and the design sketch this came from said `uint8_t`. Truncating would make
+// U+012B compare equal to '+' (0x2B), i.e. accept `calc(1px ī 2px)` as a sum -- a silently WRONG
+// stylesheet rather than a decline, which is the class of defect an imported-enum mirror already
+// produced once on this island.
+//
+// `id`/`functionId` are the raw values of `CSSValueID`, not the enum: `CSSValueKeywords.h` is
+// generated and would defeat this header's self-containment (see the file comment). Swift compares
+// them against values it obtains FROM C++, never against a transcribed list -- transcribing the
+// enumerator table is the thing that must not happen here.
+struct CSSCalcSwiftToken {
+    // Meaningful for NumberToken, PercentageToken and DimensionToken.
+    double numericValue;
+    // `CSSValueID` raw value. Non-zero only for IdentToken.
+    uint16_t id;
+    // `CSSValueID` raw value. Non-zero only for FunctionToken.
+    uint16_t functionId;
+    // `CSSParserToken::delimiter()`. Meaningful only for DelimiterToken.
+    char16_t delimiter;
+    // `CSSUnitType::Unknown` is what `parseCalcDimension` rejects on, so it crosses as itself.
+    CSSUnitType unit;
+    CSSParserTokenType type;
+    // `CSSParserToken::BlockType`, so Swift can compute block extents itself and `consumeBlock`
+    // needs no crossing. Pinned one enumerator per line in CSSCalcTree+Parser.cpp rather than
+    // trusted, exactly as the tokenizer boundary pins its token numbering.
+    uint8_t blockType;
+};
+static_assert(sizeof(CSSCalcSwiftToken) == 24);
+static_assert(alignof(CSSCalcSwiftToken) == 8);
+
+// A read-only cursor over the tokens of one `calc()`. Swift reads one token at a time by value,
+// because it cannot receive a bounds-carrying view at all (rdar://186723514).
+//
+// `SWIFT_SAFE` is an unchecked assertion over the `std::span` inside `CSSParserTokenRange`. It holds
+// because the cursor is constructed on the C++ stack immediately before the single Swift call that
+// takes it and destroyed when that call returns, it crosses `noescape`, and the token vector is
+// complete before any property parser runs.
+struct SWIFT_SAFE CSSCalcSwiftParseCursor {
+    // Whitespace tokens are not filtered out, because the grammar's look-behind is `tokenAt(i - 1)`.
+    uint32_t tokenCount() const noexcept;
+
+    // Out of range yields a token whose `type` is `EOFToken`, matching what
+    // `CSSParserTokenRange::peek` does past the end, so Swift needs no bounds pre-check to mirror the
+    // C++ grammar's behaviour.
+    CSSCalcSwiftToken tokenAt(uint32_t index) const noexcept;
+
+#if !defined(__swift__)
+    explicit CSSCalcSwiftParseCursor(const CSSParserTokenRange& range)
+        : m_range(range)
+    {
+    }
+
+private:
+    const CSSParserTokenRange& m_range;
+#else
+    // Same-size stand-in, so that the importer never walks CSSParserTokenRange and drags
+    // CSSTokenizer.h into this header. The branch that can see the real type asserts the size,
+    // because a placeholder that disagreed would let the two languages hold different views of one
+    // live object with no diagnostic.
+    const void* m_rangeStandIn;
+#endif
+};
+
+// What the parse needs from `ParserState` and `ParserOptions`, flattened. Deliberately small:
+// stage D covers `<calc-sum>`, `<calc-product>`, `<calc-value>`, the numeric leaves, the five
+// keyword constants and parenthesised blocks, and declines everything else -- so the symbol table,
+// the tree-counting context and the math-function set do not cross yet.
+struct CSSCalcSwiftParseOptions {
+    // The enum itself, not its raw value. `CSSCalcSwiftSimplificationOptions` carries a `uint8_t`
+    // and Swift reconstructs it with `CSS::Category(rawValue:)` behind a `guard let` -- but
+    // `init?(rawValue:)` on an IMPORTED C++ enum NEVER FAILS (interop notes 92), so that guard is
+    // vacuous and the reconstruction is pure ceremony. Carrying the type removes both.
+    CSS::Category category;
+    // `PropertyParserState::absoluteLengthUnitsOnly`: a unit needing conversion data is a parse
+    // failure rather than a decline when this is set, exactly as `parseCalcDimension` has it.
+    bool absoluteLengthUnitsOnly;
+    // Whether `ParserOptions::allowedSymbols` has anything in it.
+    //
+    // LOAD-BEARING, not informational. `parseCalcKeyword` checks the symbol table BEFORE the five
+    // constants, so an id present in both resolves as a symbol on the C++ side and would resolve
+    // as a constant here. Stage D does not carry the symbol table, so with a non-empty table every
+    // `IdentToken` is declined -- the conservative side, since a decline runs the C++ arm and a
+    // wrong constant would be a wrong stylesheet.
+    bool hasAllowedSymbols;
+};
+
+// `Failed` and `Declined` must not share a channel: a failure means the input is not a valid
+// `calc()` and the C++ path would also have returned `std::nullopt`, so the caller must not retry.
+enum class CSSCalcSwiftParseOutcome : uint8_t {
+    Parsed,
+    Failed,
+    Declined,
+};
+
+// Which uncovered construct caused a decline. Appended to, never inserted into, because the
+// differential harness mirrors these numbers by hand.
+enum class CSSCalcSwiftParseDeclineReason : uint8_t {
+    None,
+    // A math function: `min`, `max`, `clamp`, `round`, the trig set, and the rest. Stage E.
+    MathFunction,
+    // An `IdentToken` while `ParserOptions::allowedSymbols` is non-empty. Stage F.
+    Symbol,
+    // `sibling-count()` / `sibling-index()`. Stage F.
+    TreeCounting,
+    // More tokens than the grammar's fixed cursor budget.
+    TooManyTokens,
+    // A construction refused: the boundary's own contract came apart, rather than the input being
+    // uncovered. Carried as a decline so a production parse falls back to C++ instead of dropping a
+    // declaration the C++ would have parsed, and named separately so it stays distinguishable from
+    // an uncovered input. No input should produce it, and the differential reports the reason, so a
+    // case that does is visible there.
+    ContractViolation,
+};
+
+struct alignas(8) CSSCalcSwiftParseResult {
+    Type type;
+    // A `CSSCalcSwiftParseOutcome`.
+    uint8_t outcome;
+    // A `CSSCalcSwiftParseDeclineReason`.
+    uint8_t declineReason;
+    bool requiresConversionData;
+};
+static_assert(sizeof(CSSCalcSwiftParseResult) == 16);
+static_assert(alignof(CSSCalcSwiftParseResult) == 8);
+
+// The alternative `makeNumeric` would build for `unit`.
+//
+// C++ answers this, and that is the point: `makeNumeric` maps unit to alternative through a
+// seventy-case table, and reproducing the choice in Swift would duplicate it -- the same argument
+// `CSSCalcSwiftNumericResult::kind` already carries in this file. Called once per dimension leaf
+// actually built, NOT once per token, so it costs nothing on the tokens the grammar walks past.
+// Returns a `CSSCalcSwiftNodeKind`.
+WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
+
+// `conversionToCanonicalUnitRequiresConversionData(unit)`. Same argument: a unit predicate whose
+// table belongs to C++.
+WEBCORE_EXPORT bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept;
+
+// `lookupConstantNumber(id)`: the five `<calc-keyword>` constants. `resolved` false means the
+// identifier is not one of them. Same argument again -- the table is C++'s, and it is keyed on
+// `CSSValueID`, which this header deliberately does not import.
+WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept;
+
+// Drives the Swift grammar over `innerRange` -- the tokens INSIDE a `calc()`, which is what
+// `consumeFunction` leaves -- and constructs the parsed tree into `outRoot`.
+//
+// Lives beside the operand stack rather than at the call site because `CSSCalcSwiftOperandStack` is
+// only forward-declared in this header (it holds a `WTF::Vector<Child>`, and this header must stay
+// self-contained), so no other translation unit can build one. That is also the production shape:
+// when the parse path is gated on, `parseAndSimplify` calls exactly this.
+//
+// Returns `Parsed` only when the whole range was consumed AND the boundary contract held -- the
+// root slot taken and the operand stack empty. Anything else leaves `outRoot` untouched.
+WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const SimplificationOptions&, Child& outRoot) noexcept;
 
 } // namespace CSSCalc
 } // namespace WebCore
