@@ -2442,6 +2442,17 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return children;
     };
 
+    // The single-`Child` operations, as one body: the alternative selects the variant member and
+    // nothing else varies. See the stage E2 arms below for why this is a lambda rather than eleven
+    // copies of `Negate`'s three lines.
+    auto finishOneChild = [&]<typename Op>() -> bool {
+        static_assert(std::tuple_size_v<Op> == 1 && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<0, Op>>, Child>,
+            "buildOperation's one-Child arm fills exactly one Child slot; an operation shaped differently must not reach it.");
+        if (childCount != 1)
+            return false;
+        return finish(Op { WTF::move(stack[base]) });
+    };
+
     switch (alternative) {
     case CSSCalcSwiftAlternative::Sum:
         return finish(Sum { .children = takeChildren() });
@@ -2460,6 +2471,36 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         if (childCount != 1)
             return false;
         return finish(Invert { WTF::move(stack[base]) });
+
+    // The ten unary math functions, plus the `Deg2Rad` wrapper the grammar inserts around an
+    // <angle> argument to sin/cos/tan (P7b stage E2).
+    //
+    // WHY ANY OF THIS IS C++. Swift cannot construct a `CSSCalc::Child`: a `@frozen public struct`
+    // exports as non-trivially-copyable and non-default-constructible, and no Swift container
+    // accepts a `~Escapable` element (toolchain filings register section 55). So the mapping from
+    // an alternative to the variant member it names can only be spelled where the variant is
+    // declared, and eleven of those names are what stage E2 costs. This WIDENS an entry that
+    // already exists rather than adding a boundary -- nothing new crosses, and the Swift arm calls
+    // exactly the entry it already called for `Negate`.
+    //
+    // GENERATED, NOT TRANSCRIBED. Every one of them has `Negate`'s and `Invert`'s slot shape -- one
+    // `Child` and nothing else -- so the arity check and the construction are a single templated
+    // lambda and the case labels come from the list the boundary header already owns. The
+    // `static_assert` is what makes "same slot shape" a checked claim rather than an asserted one,
+    // and it is `rebuildSlot`'s own rule in miniature (`:1893`-`:1896`): an operation shaped
+    // differently must FAIL TO COMPILE here rather than be silently filled from one operand. It is
+    // not a `requires`, for the reason given there -- a `requires` drops the unhandled shape
+    // through to some other overload.
+    //
+    // THE SIX ARMS ABOVE ARE NOT REROUTED THROUGH IT. That is deliberate: the refuted 2026-09-08
+    // widening's +7.78 % was attributed in the disassembly to `RebuildCursor::take()`'s by-value
+    // `Child` return and to an outlined generic dispatch, both incurred because it moved the
+    // EXISTING alternatives onto new machinery. This arm is purely additive.
+#define CSS_CALC_SWIFT_BUILD_ONE_CHILD(name) \
+    case CSSCalcSwiftAlternative::name: \
+        return finishOneChild.operator()<name>();
+    CSS_CALC_SWIFT_FOR_EACH_UNARY_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_ONE_CHILD)
+#undef CSS_CALC_SWIFT_BUILD_ONE_CHILD
 
     default:
         // Outside the set this entry serves. A contract violation of the caller's own scope rather

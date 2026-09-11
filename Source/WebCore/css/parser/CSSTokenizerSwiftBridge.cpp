@@ -2531,19 +2531,23 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     if (cppRange.atEnd())
         return result;
 
-    // Plain `calc()` / `-webkit-calc()`, or a top-level math function the grammar builds -- which
-    // since stage E1 is `min()` and `max()`. `parseAndSimplify` accepts any `isCalcFunction` at the
-    // top, so `width: min(1px, 2px)` is a top-level `Min` and was skipped by this differential
-    // entirely until now. Anything else would be asking the grammar to decline, which the corpus
-    // does separately.
+    // EVERY CALC FUNCTION IS APPLICABLE, which is the predicate `parseAndSimplify` itself uses
+    // (`CSSCalcTree+Parser.cpp:171`-`:175`) and therefore the one a production caller of the Swift
+    // entry would face.
     //
-    // Naming the four ids here is safe in a way it was not for one day: the alternative used to
-    // reach Swift down a channel of its own, so a harness-local list could agree with the corpus
-    // while that channel was broken. `functionId` now crosses RAW and is mixed into the token
-    // checksum by both sides, so this list and the grammar's are checked against each other by
-    // `webCoreCSSCalcCompareParseTokens` rather than merely written to match.
+    // IT USED TO BE A HAND-KEPT LIST OF THE COVERED FUNCTIONS, and widening it is what found a real
+    // defect rather than merely enlarging the denominator: for a top-level function the grammar did
+    // not cover, `calcParseAttempt` fell through to `<calc-sum>` over the range INSIDE the function
+    // and reported PARSED, handing back the argument where the C++ builds the operation over it.
+    // 74 corpus lines and two curated cases. A list that tracks the grammar's coverage can never see
+    // that class of bug, because it only ever asks about inputs the grammar claims.
+    //
+    // The denominator therefore MOVES in this round, deliberately and in one step: 1352 applicable
+    // corpus lines become 1497. Both the before and the after column below are measured on built
+    // arms over the same predicate, so the comparison is like for like; a figure quoted against
+    // 1352, or against stage E1's 1260, is against a superseded denominator.
     auto functionId = cppRange.peek().functionId();
-    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc && functionId != CSSValueMin && functionId != CSSValueMax)
+    if (!CSSCalc::isCalcFunction(functionId))
         return result;
     result.applicable = true;
 

@@ -306,6 +306,28 @@ enum class CSSCalcSwiftAlternative : uint8_t {
 static constexpr uint8_t numberOfCSSCalcSwiftAlternatives = 0 CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_COUNT_ALTERNATIVE);
 #undef CSS_CALC_SWIFT_COUNT_ALTERNATIVE
 
+// The math functions whose only slot is one `Child`: the ten one-argument functions of
+// <calc-value>, plus the `Deg2Rad` wrapper the parser inserts around an <angle> argument to
+// sin/cos/tan, which has no syntax of its own and can only ever appear inside those three.
+//
+// A LIST RATHER THAN ELEVEN TRANSCRIBED SWITCH ARMS, because every consumer of it does the same
+// thing to each name and the slot shape is what they have in common: `buildOperation` fills the
+// one slot from the one operand, and the arity check and the construction are written once. Adding
+// a twelfth of the same shape is one line here and none anywhere else, and one of a DIFFERENT shape
+// fails to compile at `buildOperation`'s `static_assert` rather than being silently filled.
+//
+// `Negate` and `Invert` have this slot shape too and are deliberately NOT in the list: they are
+// arithmetic rather than math functions, they were served before stage E2, and the widening that
+// rerouted already-served alternatives onto new machinery is the one that measured +7.78 %.
+//
+// Grouped by the type rule the grammar applies to each -- trig, arc-trig, then the four that share
+// no rule with a neighbour -- because that is the only other axis anything reads them along.
+#define CSS_CALC_SWIFT_FOR_EACH_UNARY_MATH_FUNCTION(macro) \
+    macro(Deg2Rad) \
+    macro(Sin) macro(Cos) macro(Tan) \
+    macro(Asin) macro(Acos) macro(Atan) \
+    macro(Sqrt) macro(Exp) macro(Abs) macro(Sign)
+
 // Which non-tree argument of an operation node an `appendOperationArgument` upcall should write.
 //
 // Declared in Swift as `CSSCalcSwiftOperationPart` and reaching C++ through

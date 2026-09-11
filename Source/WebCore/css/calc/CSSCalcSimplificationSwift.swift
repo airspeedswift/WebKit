@@ -589,6 +589,54 @@ private extension CalcType {
         // 3.
         return base
     }
+
+    // MARK: `validateType`, as the three predicates the math functions actually ask for
+    //
+    // `TypeMatcher<M...>::matchesAny` (`CSSCalcType.h:290`-`:361`) is a template whose whole body
+    // is `if constexpr`: `computeCheck<match>()` is decided at compile time for each of the seven
+    // base types, so the run-time content of an instantiation is seven comparisons and, when
+    // `Match::Number` is one of the arguments, no `foundMatch` test at all. Instantiated by hand
+    // here, once per policy, which is what a template argument list is. There is no run-time
+    // `AllowedTypes` value in this port and no switch on one -- `Op::input` is a compile-time
+    // constant on the C++ side too, and `validateType<AllowedTypes::Any>` is `return true`, which
+    // is why `abs()` and `sign()` ask nothing below.
+    //
+    // Every one of the three is called with the C++'s `{ .allowsPercentHint = true }`, which is the
+    // only matching context any math function uses (`CSSCalcType.h:388`, `:390`), so the
+    // `percentHint` half of `Type::matchesAny` (`:369`-`:372`) is skipped rather than omitted.
+
+    /// `matchesAny<Match::Number>({ .allowsPercentHint = true })`.
+    ///
+    /// `Number` is not a base type, so `computeCheck` answers `MustBeZero` for all seven lanes, and
+    /// `containsMatch<Number>()` then makes the `foundMatch` test unconditionally true. Seven zeros.
+    @inline(always)
+    var matchesNumber: Bool {
+        return length == 0 && angle == 0 && time == 0 && frequency == 0
+            && resolution == 0 && flex == 0 && percent == 0
+    }
+
+    /// `matchesAny<Match::Number, Match::Angle>({ .allowsPercentHint = true })`.
+    ///
+    /// Two match arguments, so `Angle` is `MustBeOneOrZero` rather than `MustBeOne`, and `Number`
+    /// again waives `foundMatch`. A bare `<number>` and a bare `<angle>` both pass; `1deg * 1deg`
+    /// (angle exponent 2) does not.
+    @inline(always)
+    var matchesNumberOrAngle: Bool {
+        return (angle == 0 || angle == 1) && length == 0 && time == 0 && frequency == 0
+            && resolution == 0 && flex == 0 && percent == 0
+    }
+
+    /// `matchesAny<Match::Angle>({ .allowsPercentHint = true })`, the `Deg2Rad` condition at
+    /// `CSSCalcTree+Parser.cpp:312`.
+    ///
+    /// ONE match argument, so `Angle` is `MustBeOne` and `foundMatch` is NOT waived -- which is
+    /// exactly what separates this from `matchesNumberOrAngle`: `sin(0.5)` matches that and not
+    /// this, and gets no `Deg2Rad` wrapper.
+    @inline(always)
+    var matchesAngle: Bool {
+        return angle == 1 && length == 0 && time == 0 && frequency == 0
+            && resolution == 0 && flex == 0 && percent == 0
+    }
 }
 
 /// `Type::multiply` through the selected arm.
@@ -3513,11 +3561,77 @@ fileprivate extension CalcFlatTree {
                 break
 
             default:
-                return false
+                // EVERY MATH FUNCTION, behind ONE call and behind `default`, which is
+                // `simplifyNode`'s shape and is measured rather than tidy: naming them here would
+                // take this switch from ten case values to twenty-one, and the thirty-first label on
+                // `simplifyNode`'s switch cost 6.7 retired instructions per simplification on a
+                // single-node tree that executes none of it (filings register section 51 -- LLVM
+                // merges the case clusters, peels the widest, and then declines a jump table below
+                // AArch64's ten-entry minimum). The hot switch names what a real page's CSS holds.
+                guard simplifyParsedFunction(i, options) else {
+                    return false
+                }
             }
             i += 1
         }
         return !declined
+    }
+
+    /// The math-function folds a PARSED tree can hold, behind one out-of-line call.
+    ///
+    /// `false` is "the grammar produced an alternative this pass does not fold", which declines the
+    /// tree -- the same answer `simplifyParsed`'s `default` used to give directly. It is a REFUSAL
+    /// and not a no-op: leaving an unfolded node in place would hand `emitParsed` a node whose
+    /// `origin` names nothing.
+    ///
+    /// NONE OF THESE FOLDS READS THE ORIGINAL TREE, which is what makes them reachable from a parsed
+    /// tree at all -- `simplifyColdNode`'s other arms (`CalcMix`, the sibling functions, the anchor
+    /// functions, `Random`) all take a `borrowing Child` and step through it, and there is no
+    /// original at parse time. They are also, one for one, the same calls `simplifyColdNode` makes,
+    /// not second copies of them.
+    ///
+    /// `@inline(never)` for `simplifyColdNode`'s reason: `simplifyParsed` pays this frame per node,
+    /// and no expression a page actually contains reaches it.
+    @inline(never)
+    private mutating func simplifyParsedFunction(_ i: Int, _ options: CalcSimplification) -> Bool {
+        switch nodes[i].alternative {
+        case .Deg2Rad:
+            simplifyDeg2Rad(i)
+
+        case .Sin:
+            simplifyNumberToNumber(i, CalcExecutor.sin)
+
+        case .Cos:
+            simplifyNumberToNumber(i, CalcExecutor.cos)
+
+        case .Tan:
+            simplifyNumberToNumber(i, CalcExecutor.tan)
+
+        case .Asin:
+            simplifyArcTrig(i, CalcExecutor.asin)
+
+        case .Acos:
+            simplifyArcTrig(i, CalcExecutor.acos)
+
+        case .Atan:
+            simplifyArcTrig(i, CalcExecutor.atan)
+
+        case .Sqrt:
+            simplifySqrt(i)
+
+        case .Exp:
+            simplifyNumberToNumber(i, CalcExecutor.exp)
+
+        case .Abs:
+            simplifyAbs(i, options)
+
+        case .Sign:
+            simplifySign(i, options)
+
+        default:
+            return false
+        }
+        return true
     }
 
     /// Replace node `i` with node `j`, keeping `i`'s place in its parent's list.
@@ -5860,8 +5974,9 @@ private enum CalcParsedEmitCoverage {
     }
 
     /// The operations `buildOperation` constructs from operands alone: the two `Children`-slotted
-    /// arithmetic nodes, the two `Children`-slotted comparison functions, and the two whose only
-    /// slot is one `Child`.
+    /// arithmetic nodes, the two `Children`-slotted comparison functions, and the eleven whose only
+    /// slot is one `Child` -- `Negate`, `Invert`, and stage E2's ten unary math functions with the
+    /// `Deg2Rad` wrapper that goes inside three of them.
     static var operationMask: UInt64 {
         return CalcFlatCoverage.bit(.Sum)
             | CalcFlatCoverage.bit(.Product)
@@ -5869,6 +5984,17 @@ private enum CalcParsedEmitCoverage {
             | CalcFlatCoverage.bit(.Max)
             | CalcFlatCoverage.bit(.Negate)
             | CalcFlatCoverage.bit(.Invert)
+            | CalcFlatCoverage.bit(.Deg2Rad)
+            | CalcFlatCoverage.bit(.Sin)
+            | CalcFlatCoverage.bit(.Cos)
+            | CalcFlatCoverage.bit(.Tan)
+            | CalcFlatCoverage.bit(.Asin)
+            | CalcFlatCoverage.bit(.Acos)
+            | CalcFlatCoverage.bit(.Atan)
+            | CalcFlatCoverage.bit(.Sqrt)
+            | CalcFlatCoverage.bit(.Exp)
+            | CalcFlatCoverage.bit(.Abs)
+            | CalcFlatCoverage.bit(.Sign)
     }
 }
 
@@ -5928,9 +6054,11 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
 /// COVERED: `<number>`, `<percentage>`, `<dimension>` (canonical and non-canonical), the five
 /// `<calc-keyword>` constants, `+`/`-`/`*`/`/` with both whitespace-adjacency rules, parenthesised
 /// blocks and nested `calc()` (stage D2), `min()` and `max()` at any depth INCLUDING the top level
-/// (stage E1), and the type algebra that goes with them. DECLINED, each with its own reason so the
-/// coverage number stays attributable: the other twenty-two math functions (stages E2-E5), symbols
-/// and tree-counting (stage F).
+/// (stage E1), the ten one-argument math functions -- `sin()` `cos()` `tan()` `asin()` `acos()`
+/// `atan()` `sqrt()` `exp()` `abs()` `sign()` -- with the parse-time `Deg2Rad` insertion the first
+/// three need (stage E2), and the type algebra that goes with them. DECLINED, each with its own
+/// reason so the coverage number stays attributable: the other twelve math functions (stages
+/// E3-E5), symbols and tree-counting (stage F).
 ///
 /// A DECLINE AND A FAILURE ARE DIFFERENT OUTCOMES and share no channel. `calc(1px +2px)` is a
 /// FAILURE -- the C++ arm rejects it too, so retrying would re-derive the same rejection and a
@@ -6312,8 +6440,9 @@ private func calcParseBlock(
     if !isPlainCalc {
         // A math function the grammar covers: `parseCalcFunction` dispatches on the id and reaches
         // the same `<calc-sum>` recursion the plain-calc arm does, one level down.
-        if let functionAlternative = calcParseFunctionAlternative(token.functionId) {
-            return calcParseFunctionBlock(cursor, &index, end, depth, &out, options, &state, functionAlternative)
+        if let function = calcParseFunctionAlternative(token.functionId) {
+            return calcParseFunctionBlock(cursor, &index, end, depth, &out, options, &state,
+                function.alternative, function.arguments)
         }
         if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
             state.declined = true
@@ -6342,10 +6471,25 @@ private func calcParseBlock(
     return innerParsed
 }
 
-// MARK: The math functions (P7b stage E1: `min()` and `max()`)
+// MARK: The math functions (P7b stages E1 and E2)
 
-/// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `CSSValueID` names, or nil for a function
-/// this grammar does not cover.
+/// Which `consume*Arguments` helper `parseCalcFunction` runs for a covered function -- i.e. the
+/// function's ARGUMENT GRAMMAR, which is the only thing that differs between the families this
+/// grammar serves.
+///
+/// Carried alongside the alternative rather than derived from it, so the id switch below answers
+/// both halves in one pass. Deriving it would be a second switch over the same twelve labels on a
+/// path that already runs one.
+private enum CalcFunctionArguments: UInt8 {
+    /// `<calc-sum>#`, at least one, comma separated -- `consumeOneOrMoreArguments`
+    /// (`CSSCalcTree+Parser.cpp:321`).
+    case oneOrMore
+    /// Exactly one `<calc-sum>` -- `consumeExactlyOneArgument` (`:280`).
+    case exactlyOne
+}
+
+/// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `CSSValueID` names, and how its arguments
+/// parse, or nil for a function this grammar does not cover.
 ///
 /// `WebCore.CSSValueMin` IS THE REAL ENUMERATOR, not a transcribed constant -- the thing this
 /// boundary must never do. It reads it because `WebCore_Private.modulemap` lists CSSValueKeywords.h
@@ -6355,21 +6499,37 @@ private func calcParseBlock(
 /// IMPORTED C++ enum `init?(rawValue:)` NEVER FAILS (interop notes 92), so the `guard let` that
 /// spelling invites is vacuous and an unknown id would become an alternative the emit then hands to
 /// `buildOperation`. Same shape as `calcNumericAlternativeForLeafKind` above.
+///
+/// THE ORDER OF THE LABELS IS `parseCalcFunction`'S (`CSSCalcTree+Parser.cpp:1205`-`:1387`), so the
+/// two can be read side by side and a missing family is visible as a gap rather than having to be
+/// counted. The twenty-two the C++ serves and this does not are stages E3-E5, F and G.
 @inline(always)
-private func calcParseFunctionAlternative(_ functionId: UInt16) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
+private func calcParseFunctionAlternative(_ functionId: UInt16)
+    -> (alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative, arguments: CalcFunctionArguments)? {
     switch functionId {
-    case WebCore.CSSValueMin.rawValue: return .Min
-    case WebCore.CSSValueMax.rawValue: return .Max
+    case WebCore.CSSValueMin.rawValue: return (.Min, .oneOrMore)
+    case WebCore.CSSValueMax.rawValue: return (.Max, .oneOrMore)
+    case WebCore.CSSValueSin.rawValue: return (.Sin, .exactlyOne)
+    case WebCore.CSSValueCos.rawValue: return (.Cos, .exactlyOne)
+    case WebCore.CSSValueTan.rawValue: return (.Tan, .exactlyOne)
+    case WebCore.CSSValueAsin.rawValue: return (.Asin, .exactlyOne)
+    case WebCore.CSSValueAcos.rawValue: return (.Acos, .exactlyOne)
+    case WebCore.CSSValueAtan.rawValue: return (.Atan, .exactlyOne)
+    case WebCore.CSSValueSqrt.rawValue: return (.Sqrt, .exactlyOne)
+    case WebCore.CSSValueExp.rawValue: return (.Exp, .exactlyOne)
+    case WebCore.CSSValueAbs.rawValue: return (.Abs, .exactlyOne)
+    case WebCore.CSSValueSign.rawValue: return (.Sign, .exactlyOne)
     default: return nil
     }
 }
 
-/// `<min()>` / `<max()>` as a nested `<calc-value>`: find the block, parse its arguments, step past.
+/// A covered math function as a nested `<calc-value>`: find the block, parse its arguments, step past.
 ///
 /// The plain-calc arm next door and this one differ only in what they run over the inner range --
-/// `<calc-sum>` there, `<calc-sum>#` here -- which is exactly how `parseCalcFunction` is shaped.
-/// Both enter the inner range at `depth + 1`, matching `parseCalcValue`'s
-/// `parseCalcFunction(innerRange, *functionId, depth + 1, state)` (`CSSCalcTree+Parser.cpp:1541`).
+/// `<calc-sum>` there, one of the two argument grammars here -- which is exactly how
+/// `parseCalcFunction` is shaped. Both enter the inner range at `depth + 1`, matching
+/// `parseCalcValue`'s `parseCalcFunction(innerRange, *functionId, depth + 1, state)`
+/// (`CSSCalcTree+Parser.cpp:1541`).
 @inline(never)
 private func calcParseFunctionBlock(
     _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
@@ -6379,21 +6539,119 @@ private func calcParseFunctionBlock(
     _ out: inout OutputSpan<CalcFlatNode>,
     _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
-    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
+    _ arguments: CalcFunctionArguments
 ) -> CalcParsed? {
     guard let blockEnd = calcFindBlockEnd(cursor, &state, index, end) else { return nil }
 
     var inner = index + 1
-    guard let parsed = calcParseArgumentList(
-        cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative) else { return nil }
-    // `if (!innerRange.atEnd()) return nullopt`. The list loop runs to `blockEnd` by construction, so
-    // this cannot fail today; it is kept because the C++ states it and a future arity-limited family
-    // will be able to stop early.
+    let argumentsParsed: CalcParsed?
+    switch arguments {
+    case .oneOrMore:
+        argumentsParsed = calcParseArgumentList(
+            cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+    case .exactlyOne:
+        argumentsParsed = calcParseUnaryFunction(
+            cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+    }
+    guard let parsed = argumentsParsed else { return nil }
+    // `if (!innerRange.atEnd()) return nullopt`. Vacuous for `<calc-sum>#`, whose loop runs to
+    // `blockEnd` by construction, and LOAD-BEARING for the one-argument families: it is what makes
+    // `abs(1px, 2px)` and `sin(1 2)` failures rather than silently accepted one-argument calls.
     if inner != blockEnd { return nil }
 
     index = blockEnd + 1
     calcSkipWhitespace(cursor, &index, end, &state)
     return parsed
+}
+
+/// `consumeExactlyOneArgument<Op>` (`CSSCalcTree+Parser.cpp:280`-`:319`): one `<calc-sum>`, its type
+/// checked against `Op::input`, the node's type `transformType<Op::output>` of it, and -- for the
+/// three trigonometric functions given an `<angle>` -- a `Deg2Rad` wrapper around the argument.
+///
+/// NO OPERAND CONTAINER, the same as `calcParseArgumentList`: the argument is already in the flat
+/// buffer and the node names it by index, so there is no `Array` for `swift_bridgeObjectRelease` to
+/// reach.
+///
+/// THE TYPE RULE IS ONE SWITCH, and the five arms are the five distinct `(Op::input, Op::output)`
+/// pairs among the ten -- not ten arms, and not a run-time `AllowedTypes`/`OutputTransform` value
+/// threaded through a policy parameter, which would turn a compile-time fact into a dispatch. They
+/// read, in the header's order (`CSSCalcTree.h:625`-`:830`): trig `NumberOrAngle -> Number`, arc-trig
+/// `Number -> Angle`, `sqrt`/`exp` `Number -> Number`, `abs` `Any -> None`, `sign` `Any -> Number`.
+///
+/// `validateType<AllowedTypes::Any>` is `return true` (`CSSCalcType.h:385`-`:386`), which is why
+/// `abs` and `sign` test nothing -- an omission that would otherwise look like one.
+private func calcParseUnaryFunction(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard let argument = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    // The operand the operation node will name. It is the argument itself unless the `Deg2Rad`
+    // wrapper goes in, and the wrapper is appended BEFORE the operation so the buffer stays
+    // post-order: every child at a lower index than its parent.
+    var operand = argument.index
+    let outputType: CalcType
+
+    switch alternative {
+    case .Sin, .Cos, .Tan:
+        guard argument.type.matchesNumberOrAngle,
+            let transformed = CalcType.makeNumber().madeConsistent(with: argument.type) else { return nil }
+        outputType = transformed
+
+        // `CSSCalcTree+Parser.cpp:311`-`:316`. Two things a transcription gets wrong and both are
+        // silent: the condition is on the argument's TYPE matching `<angle>` exactly -- so
+        // `sin(0.5)` gets no wrapper and `sin(30deg)` does -- and the node carries `Type { }`, the
+        // EMPTY type, not the angle's. The oracle compares the stored `Type`, so the second one
+        // fails every angle-argument case and is invisible to serialization.
+        //
+        // `makeSimplifiedChild` rather than `makeChild` on the C++ side folds this eagerly, but
+        // only when `state.simplificationOptions` is set, i.e. under `ParseSimplification::Eager`.
+        // Production is `Terminal` and so is this grammar: the wrapper is built unfolded and the
+        // whole-tree pass collapses it.
+        if argument.type.matchesAngle {
+            guard let converted = calcParseAppendOperation(
+                &out, .Deg2Rad, argument.index, 1, CalcType()) else { return nil }
+            operand = converted
+        }
+
+    case .Asin, .Acos, .Atan:
+        guard argument.type.matchesNumber,
+            let transformed = CalcType.makeAngle().madeConsistent(with: argument.type) else { return nil }
+        outputType = transformed
+
+    case .Sqrt, .Exp:
+        guard argument.type.matchesNumber,
+            let transformed = CalcType.makeNumber().madeConsistent(with: argument.type) else { return nil }
+        outputType = transformed
+
+    case .Sign:
+        guard let transformed = CalcType.makeNumber().madeConsistent(with: argument.type) else { return nil }
+        outputType = transformed
+
+    case .Abs:
+        outputType = argument.type
+
+    default:
+        // Not one of the ten. Unreachable, because the only caller reaches here through
+        // `calcParseFunctionAlternative`'s `.exactlyOne` arm -- and a REFUSAL rather than a guess,
+        // for `calcNumericAlternativeForLeafKind`'s reason: an alternative built with the wrong
+        // type rule is a wrong tree, where a decline is merely the C++ arm running.
+        return nil
+    }
+
+    guard let me = calcParseAppendOperation(&out, alternative, operand, 1, outputType) else { return nil }
+    return CalcParsed(index: me, type: outputType)
 }
 
 /// `consumeOneOrMoreArguments<Op>` (`CSSCalcTree+Parser.cpp:321`-`:376`): `<calc-sum>#`, at least
@@ -6699,18 +6957,43 @@ private func calcParseAttempt(
         calcSkipWhitespace(cursor, &index, end, &state)
 
         // THE TOP-LEVEL FUNCTION, which `parseAndSimplify` reads before it hands the inner range
-        // over: `calc()` and `-webkit-calc()` have a bare `<calc-sum>` body, and `min()`/`max()`
-        // have an argument list. Both at depth 0, matching `parseCalcFunction(tokens, function, 0,
-        // state)` (`CSSCalcTree+Parser.cpp:194`) -- this is NOT the block arm's `depth + 1`, and
-        // routing it there instead is the divergence only a 100-deep expression would show.
+        // over: `calc()` and `-webkit-calc()` have a bare `<calc-sum>` body, and every other covered
+        // math function has one of the two argument grammars. All at depth 0, matching
+        // `parseCalcFunction(tokens, function, 0, state)` (`CSSCalcTree+Parser.cpp:194`) -- this is
+        // NOT the block arm's `depth + 1`, and routing it there instead is the divergence only a
+        // 100-deep expression would show.
         //
         // Spelled as an `if`/`else` rather than `Optional.map`, because the branches take `out` and
         // `state` `inout` and a closure cannot capture an `OutputSpan`.
         let descent: CalcParsed?
         if let rootFunction = calcParseFunctionAlternative(options.rootFunctionId) {
-            descent = calcParseArgumentList(cursor, &index, end, 0, &out, options, &state, rootFunction)
-        } else {
+            switch rootFunction.arguments {
+            case .oneOrMore:
+                descent = calcParseArgumentList(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+            case .exactlyOne:
+                descent = calcParseUnaryFunction(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+            }
+        } else if options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
+            || options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {
             descent = calcParseSum(cursor, &index, end, 0, &out, options, &state)
+        } else {
+            // A TOP-LEVEL MATH FUNCTION THIS GRAMMAR DOES NOT COVER, WHICH IS A DECLINE AND USED TO
+            // BE A WRONG TREE. `parseAndSimplify` accepts any `isCalcFunction` at the top
+            // (`CSSCalcTree+Parser.cpp:171`-`:175`) and hands this entry the range INSIDE it, so
+            // for `hypot(3px, 4px)` the range is `3px, 4px`; falling through to `<calc-sum>` parsed
+            // `3px`, stopped at the comma, and -- for a one-argument form such as
+            // `atan(e - 2.7182818284590452354)` -- ran to the end and reported PARSED, handing the
+            // caller the ARGUMENT where the C++ builds an `Atan` over it.
+            //
+            // Found by widening the differential's applicability predicate to every calc function,
+            // not by reading: 74 corpus lines and two curated cases. It was never web-visible --
+            // every caller of `cssCalcSwiftParseIntoChild` is inside
+            // `ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)` today -- but it is exactly the shape that becomes
+            // a wrong computed value on the day this entry gets a production caller, and the
+            // fall-through was correct only for `calc()` and `-webkit-calc()`.
+            state.declined = true
+            state.declineReason = .MathFunction
+            descent = nil
         }
 
         guard let parsed = descent else {
