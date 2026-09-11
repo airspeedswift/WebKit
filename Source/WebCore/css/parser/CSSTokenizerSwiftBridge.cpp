@@ -1758,13 +1758,29 @@ struct CSSCalcParseComparison {
     // They must be equal.
     uint8_t cursorFirstTokenType;
     uint8_t rangeFirstTokenType;
-    //   `emRequiresConversionData` -- the unit predicate on a unit that certainly needs conversion
-    //   data (`em`). Must be true; a false here means the predicate is mis-wired, not that the
-    //   grammar forgot to set the flag.
+    // The unit predicate on a unit that certainly needs conversion data. Must be true; a false
+    // here means the predicate is mis-wired, not that the grammar forgot to set the flag.
     bool emRequiresConversionData;
-    //   `functionFlagsSelfTest` -- the two FunctionToken bits, on `calc(`, `min(` and a non-math
-    //   function. Must be true.
+    // The two FunctionToken bits, on `calc(`, `min(` and a non-math function. Must be true.
     bool functionFlagsSelfTest;
+    // The fused path: `fusedOutcome` is the Swift path's outcome with simplification on, the
+    // production `ParseSimplification::Terminal` shape, and `fusedTreesAgree` compares that tree
+    // against the C++ path's Terminal tree. Meaningful only when both parsed, which
+    // `cppSimplifiedParsed` and `fusedOutcome` report separately so that "neither produced a tree"
+    // cannot read as agreement.
+    uint8_t fusedOutcome;
+    bool cppSimplifiedParsed;
+    bool fusedTreesAgree;
+    // Whether the oracle can decide this case at all, which is a property of the input and not of
+    // either path: `Child::operator==` compares leaf doubles with `==`, so a tree holding a NaN leaf
+    // is not equal to itself and `treesAgree`/`fusedTreesAgree` are then false however identical
+    // the two trees are. Computed by comparing the C++ path's tree against itself, which is exact
+    // where a text scan for `NaN` is not: `calc(100px * 0 / 0)` names no NaN and produces one.
+    //
+    // Not a licence to ignore the case: a run must report the blind set and its size separately, so
+    // that a real defect hiding inside it is visible as growth.
+    bool cppSelfEqual;
+    bool cppTerminalSelfEqual;
     // 0 = the input is not a `calc()` this entry can drive, so the case is SKIPPED rather than
     // passed -- a skipped case must never read as agreement.
     bool applicable;
@@ -2185,10 +2201,13 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     if (cppRange.atEnd())
         return result;
 
-    // Only plain `calc()` / `-webkit-calc()`: stage D covers no other function, and driving it with
-    // one would be asking it to decline, which the corpus does separately.
+    // Every calc function is applicable, which is the predicate `parseAndSimplify` itself uses
+    // (`CSSCalcTree+Parser.cpp:171`-`:175`) and therefore the one a production caller would face.
+    // A list tracking the Swift grammar's coverage instead would only ever ask about inputs the
+    // grammar claims, and so could not see a top-level function it does not cover falling through
+    // to `<calc-sum>` over the range inside the function and reporting a parse.
     auto functionId = cppRange.peek().functionId();
-    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc)
+    if (!CSSCalc::isCalcFunction(functionId))
         return result;
     result.applicable = true;
 
@@ -2241,14 +2260,19 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     auto swiftRange = cppRange;
     auto innerRange = CSSPropertyParserHelpers::consumeFunction(swiftRange);
 
-    // The operand stack is only complete inside CSSCalcTree+Simplification.cpp, so the driver lives
-    // there; this is also the shape `parseAndSimplify` will call when the parse path is gated on.
+    // The operand stack is only complete inside CSSCalcTree+Simplification.cpp, so the driver
+    // lives there; this is also the shape `parseAndSimplify` calls when the parse path is gated on.
+    //
+    // `simplify` false, which is what keeps this comparing like with like: the C++ path above ran at
+    // `ParseSimplification::None`. Comparing two simplified trees would also be weaker than this,
+    // because a wrong operand order and a commutative fold cancel.
     CSSCalc::Child root = CSSCalc::Number { .value = 0 };
     auto swiftResult = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, CSSCalc::CSSCalcSwiftParseOptions {
         .category = category,
         .absoluteLengthUnitsOnly = false,
         .hasAllowedSymbols = withSymbols,
-    }, simplificationOptions, root);
+        .rootFunctionId = static_cast<uint16_t>(functionId),
+    }, simplificationOptions, root, false);
 
     result.swiftOutcome = swiftResult.outcome;
     result.declineReason = swiftResult.declineReason;
@@ -2298,8 +2322,51 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     }
     if (result.cppParsed) {
         result.cppRequiresConversionData = cppTree->requiresConversionData;
+        result.cppSelfEqual = cppTree->root == CSSCalc::copy(cppTree->root);
         result.treesAgree = cppTree->root == root && cppTree->type == swiftResult.type;
         result.conversionDataAgrees = cppTree->requiresConversionData == swiftResult.requiresConversionData;
+    }
+
+    // THE SECOND COMPARISON, AND IT IS THE ONE C0 EXISTS FOR: the fused arm against production.
+    //
+    // Everything above compares an UNSIMPLIFIED Swift tree against `ParseSimplification::None`,
+    // which validates the grammar and nothing else. Production is `Terminal`
+    // (`CSSCalcTree+Parser.h`'s `defaultParseSimplification`), where the C++ arm parses into a
+    // `Child` and `copyAndSimplify` then flattens it into `CalcFlatNode`s and emits it again, and
+    // the fused Swift arm parses straight into those nodes, simplifies in place and emits once.
+    // Without this the in-Swift simplification of a PARSER-BUILT tree -- a forward pass over
+    // post-order nodes, where the flatten path runs a reverse pass over pre-order ones -- would be
+    // validated by nothing at all.
+    //
+    // BOTH ARE NEEDED, and neither subsumes the other. The unsimplified comparison catches what a
+    // fold would hide: `Sum{2px, 1px}` and `Sum{1px, 2px}` are different trees that simplify to the
+    // same `3px`. The simplified comparison catches what the grammar alone cannot see, which is the
+    // whole middle pass.
+    //
+    // AXES. This comparison varies exactly what the one above varies -- leaf kinds, operators,
+    // whitespace rules, precedence, nesting, constants, conversion-data units, invalid input and
+    // the `allowedSymbols` axis -- and holds fixed exactly what it holds fixed: Latin-1 input, no
+    // conversion data, `absoluteLengthUnitsOnly` false, and `allowZeroValueLengthRemovalFromSum`
+    // false. That last one is a real hole in BOTH arms and it is stated rather than papered over:
+    // it is the flag `simplifySum`'s zero-length removal is behind, so no case here reaches it.
+    {
+        auto cppTerminalRange = cppRange;
+        auto cppTerminal = CSSCalc::parseAndSimplify(cppTerminalRange, parserState, makeParserOptions(category), simplificationOptions, CSSCalc::ParseSimplification::Terminal);
+        result.cppSimplifiedParsed = cppTerminal && cppTerminalRange.atEnd();
+        result.cppTerminalSelfEqual = result.cppSimplifiedParsed && cppTerminal->root == CSSCalc::copy(cppTerminal->root);
+
+        auto fusedRange = cppRange;
+        auto fusedInner = CSSPropertyParserHelpers::consumeFunction(fusedRange);
+        CSSCalc::Child fusedRoot = CSSCalc::Number { .value = 0 };
+        auto fusedResult = CSSCalc::cssCalcSwiftParseIntoChild(fusedInner, CSSCalc::CSSCalcSwiftParseOptions {
+            .category = category,
+            .absoluteLengthUnitsOnly = false,
+            .hasAllowedSymbols = withSymbols,
+            .rootFunctionId = static_cast<uint16_t>(functionId),
+        }, simplificationOptions, fusedRoot, true);
+        result.fusedOutcome = fusedResult.outcome;
+        if (result.cppSimplifiedParsed && fusedResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
+            result.fusedTreesAgree = cppTerminal->root == fusedRoot && cppTerminal->type == fusedResult.type;
     }
     return result;
 }
@@ -2329,8 +2396,10 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
             *outCovered = 0;
         return 0;
     }
+    // Plain `calc()`, or a top-level math function the grammar builds -- `min()`/`max()` since
+    // stage E1. Same list as the differential next door, and checked the same way.
     auto functionId = baseRange.peek().functionId();
-    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc) {
+    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc && functionId != CSSValueMin && functionId != CSSValueMax) {
         if (outCovered)
             *outCovered = 0;
         return 0;
@@ -2362,33 +2431,70 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
     auto category = *accepted;
     auto parserOptions = CSSCalc::ParserOptions { .category = category, .range = WebCore::CSS::All, .allowedSymbols = { }, .propertyOptions = { } };
     auto simplificationOptions = CSSCalc::SimplificationOptions { .category = category, .range = WebCore::CSS::All, .conversionData = std::nullopt, .symbolTable = { }, .allowZeroValueLengthRemovalFromSum = false };
-    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false };
+    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .rootFunctionId = static_cast<uint16_t>(functionId) };
 
     // Coverage is decided by running the Swift arm ONCE, before timing.
     {
         auto probeRange = baseRange;
         auto innerRange = CSSPropertyParserHelpers::consumeFunction(probeRange);
         CSSCalc::Child probeRoot = CSSCalc::Number { .value = 0 };
-        auto probe = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, probeRoot);
+        auto probe = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, probeRoot, arm == 3);
         if (outCovered)
             *outCovered = probe.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) ? 1 : 0;
-        if (probe.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) && arm == 1)
+        if (probe.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) && arm != 0 && arm != 2)
             return 0;
     }
 
+    // FIVE ARMS, AND THE PAIRING IS THE WHOLE POINT. Quoting the wrong pair is how this measurement
+    // goes wrong, so each is named with what it can and cannot see.
+    //
+    //   0  C++ `ParseSimplification::None`     -- the C++ grammar alone.
+    //   1  Swift, `simplify` false             -- the Swift grammar alone.
+    //   2  C++ `ParseSimplification::Terminal` -- PRODUCTION. Parses into a `Child`, then
+    //                                             `copyAndSimplify` flattens it into `CalcFlatNode`s
+    //                                             and emits it again.
+    //   3  Swift FUSED                         -- parses into `CalcFlatNode`s, simplifies in place,
+    //                                             emits once. One conversion.
+    //   4  Swift stage D + `copyAndSimplify`   -- the shape the fusion REPLACED: the Swift grammar
+    //                                             builds a `Child` per node and the island then
+    //                                             flattens it back and emits again. Three
+    //                                             conversions.
+    //
+    // 0/1 is the grammar. 2/3 is Swift against production. **4/3 is what fusing is worth**, and it
+    // is the only pair that isolates it, because both arms use the same Swift grammar and the same
+    // Swift simplification and differ only in how many times the tree changes representation.
+    // 0/1 cannot see it at all: with simplification off, the flat form is pure overhead, since the
+    // pass it exists to feed is switched off.
     uint64_t fold = 0;
     for (uint32_t i = 0; i < iterations; ++i) {
-        if (!arm) {
+        if (arm == 0 || arm == 2) {
             auto range = baseRange;
-            auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, CSSCalc::ParseSimplification::None);
+            auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions,
+                arm == 0 ? CSSCalc::ParseSimplification::None : CSSCalc::ParseSimplification::Terminal);
             if (!tree)
                 return 0;
             fold = fold * 1000003 + static_cast<uint64_t>(tree->root.index());
+        } else if (arm == 4) {
+            auto range = baseRange;
+            auto innerRange = CSSPropertyParserHelpers::consumeFunction(range);
+            CSSCalc::Child root = CSSCalc::Number { .value = 0 };
+            auto result = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, root, false);
+            if (result.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
+                return 0;
+            // Exactly what `parseAndSimplify` does at `ParseSimplification::Terminal` with the
+            // Swift grammar gated on.
+            auto simplified = CSSCalc::copyAndSimplify(CSSCalc::Tree {
+                .root = WTF::move(root),
+                .type = result.type,
+                .stage = CSSCalc::Stage::Specified,
+                .requiresConversionData = result.requiresConversionData,
+            }, simplificationOptions);
+            fold = fold * 1000003 + static_cast<uint64_t>(simplified.root.index());
         } else {
             auto range = baseRange;
             auto innerRange = CSSPropertyParserHelpers::consumeFunction(range);
             CSSCalc::Child root = CSSCalc::Number { .value = 0 };
-            auto result = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, root);
+            auto result = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, root, arm == 3);
             if (result.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
                 return 0;
             fold = fold * 1000003 + static_cast<uint64_t>(root.index());

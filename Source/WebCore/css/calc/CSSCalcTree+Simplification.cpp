@@ -2131,13 +2131,32 @@ static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, 
     return items;
 }
 
-CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot) noexcept
+// The `SimplificationOptions` fields Swift reads, as a POD.
+//
+// One definition rather than one per entry point: the whole-tree simplification and the fused
+// parse both convert the same six fields.
+static CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const SimplificationOptions& options)
+{
+    return CSSCalcSwiftSimplificationOptions {
+        .rangeMinimum = options.range.min,
+        .rangeMaximum = options.range.max,
+        .category = static_cast<uint8_t>(options.category),
+        .allowZeroValueLengthRemovalFromSum = options.allowZeroValueLengthRemovalFromSum,
+        .hasConversionData = options.conversionData.has_value(),
+        // Derived here, not in Swift: it is an eleven-case switch over `CSS::Category` whose whole
+        // content is "is it one of these two", and deriving it in Swift would duplicate the
+        // category table there.
+        .percentageResolveToDimension = percentageResolveToDimension(options),
+    };
+}
+
+CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot, bool simplify) noexcept
 {
     CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot };
     CSSCalcSwiftBuilder builder { operands, options };
     auto cursor = CSSCalcSwiftParseCursor { innerRange };
 
-    auto result = cssCalcParseSwift(cursor, builder, parseOptions);
+    auto result = cssCalcParseSwift(cursor, builder, parseOptions, swiftSimplificationOptions(options), simplify);
 
     if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Parsed)) {
         // A failed or declined descent can leave partial operands behind; drop them rather than
@@ -2147,25 +2166,17 @@ CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& in
     }
 
     // The same contract the simplification entry checks, and for the same reason: a boundary that
-    // came apart must be a fallback to the C++ arm, not a tree built from whatever was left on the
-    // stack. `finishRoot` should already have taken the slot, so a non-null one here means the
-    // descent finished while leaving the caller's placeholder in place.
+    // came apart must fall back to the C++ path rather than build a tree from whatever was left on
+    // the stack. The emit constructs the root straight into the slot, so a non-null slot here means
+    // the descent finished while leaving the caller's placeholder in place. Reported as a decline
+    // carrying `ContractViolation`, because `Failed` would tell the caller not to retry and so drop
+    // a declaration the C++ descent would have parsed.
     if (operands.rootSlot || !operands.value.isEmpty()) {
         builder.clearOperands();
         result.outcome = static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Declined);
         result.declineReason = static_cast<uint8_t>(CSSCalcSwiftParseDeclineReason::ContractViolation);
     }
     return result;
-}
-
-bool CSSCalcSwiftBuilder::finishRoot() noexcept
-{
-    if (!m_operands->rootSlot || m_operands->value.size() != 1)
-        return false;
-    *m_operands->rootSlot = WTF::move(m_operands->value.last());
-    m_operands->value.removeLast();
-    m_operands->rootSlot = nullptr;
-    return true;
 }
 
 bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot) noexcept
@@ -2328,7 +2339,7 @@ void CSSCalcSwiftBuilder::clearOperands() noexcept
     m_operands->value.shrink(0);
 }
 
-bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot) noexcept
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot, uint8_t noneMask) noexcept
 {
     auto& stack = m_operands->value;
     if (!childCount || childCount > stack.size())
@@ -2360,6 +2371,50 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return children;
     };
 
+    // The single-`Child` operations, as one body: the alternative selects the variant member and
+    // nothing else varies.
+    auto finishOneChild = [&]<typename Op>() -> bool {
+        static_assert(std::tuple_size_v<Op> == 1 && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<0, Op>>, Child>,
+            "buildOperation's one-Child arm fills exactly one Child slot; an operation shaped differently must not reach it.");
+        if (childCount != 1)
+            return false;
+        return finish(Op { WTF::move(stack[base]) });
+    };
+
+    // `Child a; std::optional<Child> b`: `round()`'s four strategies and `log()`.
+    //
+    // The presence of the second slot is the operand count and nothing else, which is why this
+    // needs no boundary argument where `clamp()` needs two bits. Two operands fill both slots, one
+    // fills the first and leaves `std::nullopt`, and there is no third state;
+    // `rebuildSlot(const std::optional<Child>&)` states the same rule for the rebuild direction.
+    // The arity check is therefore `<= 2`, and `>= 1` is the entry point's own precondition.
+    auto finishOptionalSecond = [&]<typename Op>() -> bool {
+        static_assert(std::tuple_size_v<Op> == 2 && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<0, Op>>, Child>
+            && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<1, Op>>, std::optional<Child>>,
+            "buildOperation's optional-second arm fills one Child and one std::optional<Child>; an operation shaped differently must not reach it.");
+        if (childCount > 2)
+            return false;
+        return finish(Op { WTF::move(stack[base]),
+            childCount == 2 ? std::optional<Child> { WTF::move(stack[base + 1]) } : std::optional<Child> { } });
+    };
+
+    // A fixed number of plain `Child` slots, two or three: `mod`, `rem`, `atan2`, `pow` and
+    // `progress()`'s two alternatives.
+    //
+    // One body for both arities, driven by `std::tuple_size_v<Op>` rather than by two hand-written
+    // shapes, so an operation with a new arity of `Child`s costs no code here. Braced-init evaluates
+    // left to right, so slot order is operand order, the same guarantee `rebuildChildren`'s
+    // `WTF::apply` relies on.
+    auto finishFixedArity = [&]<typename Op>() -> bool {
+        if (childCount != std::tuple_size_v<Op>)
+            return false;
+        return [&]<size_t... I>(std::index_sequence<I...>) {
+            static_assert((std::is_same_v<std::remove_cvref_t<std::tuple_element_t<I, Op>>, Child> && ...),
+                "buildOperation's fixed-arity arm fills N plain Child slots; an operation shaped differently must not reach it.");
+            return finish(Op { WTF::move(stack[base + I])... });
+        }(std::make_index_sequence<std::tuple_size_v<Op>> { });
+    };
+
     switch (alternative) {
     case CSSCalcSwiftAlternative::Sum:
         return finish(Sum { .children = takeChildren() });
@@ -2369,6 +2424,10 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return finish(Min { .children = takeChildren() });
     case CSSCalcSwiftAlternative::Max:
         return finish(Max { .children = takeChildren() });
+    // `hypot` is `Children`-slotted like the four above and shares `min`/`max`'s type rule exactly,
+    // so it joins them here and the Swift side reuses `calcParseArgumentList` unchanged.
+    case CSSCalcSwiftAlternative::Hypot:
+        return finish(Hypot { .children = takeChildren() });
 
     case CSSCalcSwiftAlternative::Negate:
         if (childCount != 1)
@@ -2378,6 +2437,63 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         if (childCount != 1)
             return false;
         return finish(Invert { WTF::move(stack[base]) });
+
+    // The ten unary math functions, plus the `Deg2Rad` wrapper the parser inserts around an
+    // <angle> argument to sin/cos/tan.
+    //
+    // The construction has to be in C++: Swift cannot build a `CSSCalc::Child`, since a
+    // `@frozen public struct` exports as non-trivially-copyable and non-default-constructible and
+    // no Swift container accepts a `~Escapable` element. So the mapping from an alternative to the
+    // variant member it names can only be spelled where the variant is declared.
+    //
+    // The case labels expand from the list the boundary header owns, and every one of these
+    // operations has `Negate`'s slot shape, one `Child` and nothing else, so the arity check and
+    // the construction are a single templated lambda. The `static_assert` makes "same slot shape" a
+    // checked claim: an operation shaped differently fails to compile here rather than being
+    // silently filled from one operand. Not a `requires`, which would drop the unhandled shape
+    // through to another overload instead.
+#define CSS_CALC_SWIFT_BUILD_ONE_CHILD(name) \
+    case CSSCalcSwiftAlternative::name: \
+        return finishOneChild.operator()<name>();
+    CSS_CALC_SWIFT_FOR_EACH_UNARY_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_ONE_CHILD)
+#undef CSS_CALC_SWIFT_BUILD_ONE_CHILD
+
+#define CSS_CALC_SWIFT_BUILD_OPTIONAL_SECOND(name) \
+    case CSSCalcSwiftAlternative::name: \
+        return finishOptionalSecond.operator()<name>();
+    CSS_CALC_SWIFT_FOR_EACH_OPTIONAL_SECOND_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_OPTIONAL_SECOND)
+#undef CSS_CALC_SWIFT_BUILD_OPTIONAL_SECOND
+
+#define CSS_CALC_SWIFT_BUILD_FIXED_ARITY(name) \
+    case CSSCalcSwiftAlternative::name: \
+        return finishFixedArity.operator()<name>();
+    CSS_CALC_SWIFT_FOR_EACH_FIXED_ARITY_MATH_FUNCTION(CSS_CALC_SWIFT_BUILD_FIXED_ARITY)
+#undef CSS_CALC_SWIFT_BUILD_FIXED_ARITY
+
+    // `clamp()`, the one alternative the Swift parser reaches whose slots cannot be filled from
+    // the operand stack alone.
+    //
+    // Two of the three slots are `ChildOrNone`, so a bound is either a subtree or the keyword, and
+    // a keyword is not pushed -- the same asymmetry `rebuildSlot(const ChildOrNone&)` above has.
+    // `clamp(none, V, M)` and `clamp(M, V, none)` therefore arrive indistinguishable by count, both
+    // with two operands, and `noneMask` carries the two bits that tell them apart. A sentinel
+    // operand would instead cost a `makeUniqueRef` allocation per `none`, built only to be
+    // discarded.
+    //
+    // The arity check is the mask's own rather than a fixed 3, since an absent bound is an absent
+    // operand: the contract is `childCount + popcount(noneMask) == 3`. Checked before any slot is
+    // taken, because getting it wrong is a read past the top of the stack.
+    case CSSCalcSwiftAlternative::Clamp: {
+        if (childCount + (noneMask & 1) + ((noneMask >> 1) & 1) != 3)
+            return false;
+        size_t next = base;
+        auto bound = [&](uint8_t bit) -> ChildOrNone {
+            return (noneMask & bit) ? ChildOrNone { CSS::Keyword::None { } } : ChildOrNone { WTF::move(stack[next++]) };
+        };
+        auto minimum = bound(1);
+        auto value = WTF::move(stack[next++]);
+        return finish(Clamp { WTF::move(minimum), WTF::move(value), bound(2) });
+    }
 
     default:
         // Outside the set this entry point serves: a contract violation rather than an input it
@@ -2891,17 +3007,7 @@ static bool trySimplifyWithSwift(const Tree& tree, const SimplificationOptions& 
 {
     CSSCalcSwiftBuilder builder { operands, options };
 
-    auto swiftOptions = CSSCalcSwiftSimplificationOptions {
-        .rangeMinimum = options.range.min,
-        .rangeMaximum = options.range.max,
-        .category = static_cast<uint8_t>(options.category),
-        .allowZeroValueLengthRemovalFromSum = options.allowZeroValueLengthRemovalFromSum,
-        .hasConversionData = options.conversionData.has_value(),
-        // Derived here, not in Swift: it is an eleven-case switch over `CSS::Category` whose whole
-        // content is "is it one of these two", and deriving it in Swift would duplicate the
-        // category table there.
-        .percentageResolveToDimension = percentageResolveToDimension(options),
-    };
+    auto swiftOptions = swiftSimplificationOptions(options);
 
     auto result = cssCalcSimplifySwift(tree.root, builder, swiftOptions);
 

@@ -1719,6 +1719,8 @@ static uint8_t cssCalcSwiftUnitFlagsFor(CSSUnitType unit) noexcept
     return conversionToCanonicalUnitRequiresConversionData(unit) ? cssCalcSwiftTokenUnitNeedsConversionData : 0;
 }
 
+// The cheap `FunctionToken` predicates, one bit each, in one pass: `tokenAt` runs once per token,
+// so this is one call rather than three.
 static uint8_t cssCalcSwiftFunctionFlagsFor(CSSValueID functionId) noexcept
 {
     uint8_t flags = 0;

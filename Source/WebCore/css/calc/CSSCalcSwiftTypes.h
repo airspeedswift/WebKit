@@ -178,6 +178,24 @@ enum class CSSCalcSwiftAlternative : uint8_t {
 static constexpr uint8_t numberOfCSSCalcSwiftAlternatives = 0 CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_COUNT_ALTERNATIVE);
 #undef CSS_CALC_SWIFT_COUNT_ALTERNATIVE
 
+// The operations grouped by slot shape, so that `buildOperation` and `rebuildFrom` serve each group
+// with one spelling.
+#define CSS_CALC_SWIFT_FOR_EACH_UNARY_MATH_FUNCTION(macro) \
+    macro(Deg2Rad) \
+    macro(Sin) macro(Cos) macro(Tan) \
+    macro(Asin) macro(Acos) macro(Atan) \
+    macro(Sqrt) macro(Exp) macro(Abs) macro(Sign)
+
+// One `Child` and one `std::optional<Child>`, whose two states are separated by the operand count.
+#define CSS_CALC_SWIFT_FOR_EACH_OPTIONAL_SECOND_MATH_FUNCTION(macro) \
+    macro(RoundNearest) macro(RoundUp) macro(RoundDown) macro(RoundToZero) \
+    macro(Log)
+
+// A fixed number of plain `Child`s, which the variant declaration already states.
+#define CSS_CALC_SWIFT_FOR_EACH_FIXED_ARITY_MATH_FUNCTION(macro) \
+    macro(Mod) macro(Rem) macro(Atan2) macro(Pow) \
+    macro(Progress) macro(ProgressNoClamp)
+
 // Everything the four operation kinds need that is neither a child subtree nor text. Each field is
 // meaningful only for the kinds that carry it, and the rest are inert rather than indeterminate.
 struct CSSCalcSwiftOperationInfo {
@@ -584,29 +602,19 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // operands is a contract violation and returns false without touching the stack. Widening the
     // set is a case each, and it is why `Children` never has to reach Swift: this is the only
     // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false) noexcept;
-
-    // Move the single remaining operand into the root slot.
     //
-    // WHY THE PARSER NEEDS THIS AND THE SIMPLIFIER DOES NOT. The simplifier walks a tree it already
-    // has, so it knows which node is the root before it builds it and passes `isRoot` -- which
-    // constructs straight into the root slot and moves nothing. A recursive-descent parser does not
-    // know: whether the first `<calc-product>` is the whole expression or the first operand of a
-    // sum is only settled after it has been parsed and pushed. Deciding by lookahead would mean
-    // scanning for a top-level `+` at every nesting level before descending.
+    // `noneMask` IS THE ONLY NEW INFORMATION `clamp()` NEEDS, and it is a defaulted trailing
+    // parameter rather than a second entry. Bit 0 set means the MINIMUM bound is the keyword
+    // `none`, bit 1 the MAXIMUM; every other bit is ignored. Operand COUNT cannot carry it --
+    // `clamp(none, V, M)` and `clamp(M, V, none)` both push two operands -- and a sentinel operand
+    // would be a `makeUniqueRef` allocation built only to be discarded, which the allocation bar
+    // refuses. The reading direction has the same asymmetry and answers it the same way, with two
+    // dedicated `CSSCalcSwiftNodeKind`s (`ClampWithNoneMinimum`/`ClampWithNoneMaximum` above);
+    // `rebuildFrom` needs neither, because it reads none-ness off the original node it is given.
     //
-    // Costs one `Child` move per parse -- an out-of-line 41-alternative variant move, ~42
-    // instructions, measured on the `RebuildCursor::take()` arm. Once per whole parse, not per
-    // node, and it goes away if the grammar ever builds into the flat form and emits in one pass.
-    // Returns false if the stack does not hold exactly one operand, which is a boundary contract
-    // violation rather than a parse outcome.
-    //
-    // NOT BEHIND `ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)`, and it was, which broke the shipping build.
-    // The grammar that calls it is production -- `138c8b38c1c9` moved it out of that gate for
-    // exactly this reason -- and so is its C++ driver `cssCalcSwiftParseIntoChild`, whose own
-    // declaration below says `parseAndSimplify` calls it when the parse path is gated on. Two
-    // symbols were left behind by that move; this is one of them.
-    WEBCORE_EXPORT bool finishRoot() noexcept;
+    // Defaulted and LAST, after `isRoot`, so that the two Swift call sites that pass `isRoot`
+    // positionally are unchanged: a parameter inserted before it would rewrite them for nothing.
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false, uint8_t noneMask = 0) noexcept;
 
     // Drop every operand.
     //
@@ -622,6 +630,14 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     //
     // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
     // that this header stays self-contained and does not pull in wtf/Vector.h.
+    //
+    // THERE USED TO BE A `finishRoot()` BESIDE THIS, and it is gone rather than moved. It moved the
+    // single remaining operand into the root slot, because a recursive-descent parser does not know
+    // which node is the root until the descent is over -- one `Child` move per parse, an
+    // out-of-line 41-alternative variant move at ~42 instructions. Its own comment said it "goes
+    // away if the grammar ever builds into the flat form and emits in one pass", which is what the
+    // grammar now does: `emitParsed` walks a finished flat tree, so it knows the root before it
+    // builds it and passes `isRoot` like every other construction here.
     WEBCORE_EXPORT void clearOperands() noexcept;
 
     // `simplify(Symbol&)` in full: `makeNumeric(options.symbolTable.get(id)->value, unit)`. The unit
@@ -675,46 +691,20 @@ struct CSSCalcSwiftSimplificationResult {
     uint8_t declineAlternative;
 };
 
-// MARK: - The Swift calc PARSE path's token boundary (P7b stage C)
+// MARK: - The Swift calc parse path's token boundary
 
-// One CSS token, in the form the calc grammar needs and nothing more.
-//
-// WHY A PURPOSE-BUILT POD RATHER THAN `CSSParserTokenBits`, WHICH IS ALREADY `SWIFT_SAFE` AND
-// ALREADY IMPORTED. Its value slot is a union that, once `CSSSwiftTokenSink::takeChunk` has
-// resolved it, holds a LIVE `const void*` into the stylesheet text. `CSSParserTokenBits`'s own
-// `SWIFT_SAFE` is honest today precisely because on the tokenizer's path that slot holds a parked
-// integer for exactly as long as Swift can see it (CSSParserTokenBits.h). Handing the calc parser a
-// *resolved* one would make that assertion false in a new way and silently, so this carries no
-// pointer at all: `id` and `functionId` are resolved on the C++ side, which is where
-// `cssValueKeywordID` already runs, so Swift never needs a token's text and the parse never touches
-// the stylesheet buffer.
-//
-// THE FIELD SET IS EXHAUSTIVE, NOT A SKETCH. It is every accessor `CSSCalcTree+Parser.cpp` reads off
-// a token, enumerated from the source rather than assumed:
-//   `type()` (dispatch, and the whitespace look-behind at :1410), `unitType()` (:1608, where
-//   `Unknown` is the reject signal), `numericValue()` (:1594, :1602, :1613), `id()` (:1571, :1584),
-//   `functionId()` (:170, :916, :1529) and `delimiter()` (:1406).
-// `numericValueType()` is deliberately ABSENT -- no calc grammar rule reads integer-ness. If one
-// ever does, this struct has seven spare bytes.
-//
-// `delimiter` IS 16 BITS AND THAT IS LOAD-BEARING. `CSSParserToken::delimiter()` returns `char16_t`
-// (CSSParserToken.h:92) and the design sketch this came from said `uint8_t`. Truncating would make
-// U+012B compare equal to '+' (0x2B), i.e. accept `calc(1px ī 2px)` as a sum -- a silently WRONG
-// stylesheet rather than a decline, which is the class of defect an imported-enum mirror already
-// produced once on this island.
-//
-// `id`/`functionId` are the raw values of `CSSValueID`, not the enum: `CSSValueKeywords.h` is
-// generated and would defeat this header's self-containment (see the file comment). Swift compares
-// them against values it obtains FROM C++, never against a transcribed list -- transcribing the
-// enumerator table is the thing that must not happen here.
+// One CSS token, in the form the calc grammar needs and nothing more. It carries no pointer, unlike
+// `CSSParserTokenBits`, whose value slot holds a live `const void*` into the stylesheet text once
+// `CSSSwiftTokenSink::takeChunk` has resolved it.
 struct CSSCalcSwiftToken {
-    // Meaningful for NumberToken, PercentageToken and DimensionToken.
     double numericValue;
-    // `CSSValueID` raw value. Non-zero only for IdentToken.
+    // `CSSValueID` raw values rather than the enum, because CSSValueKeywords.h is generated and
+    // including it would defeat this header's self-containment. Swift compares them against values it
+    // obtains from C++, never against a transcribed list.
     uint16_t id;
-    // `CSSValueID` raw value. Non-zero only for FunctionToken.
     uint16_t functionId;
-    // `CSSParserToken::delimiter()`. Meaningful only for DelimiterToken.
+    // 16 bits because that is what `CSSParserToken::delimiter()` returns: truncating to 8 would make
+    // U+012B compare equal to '+' and accept `calc(1px ī 2px)` as a sum.
     char16_t delimiter;
     // `CSSUnitType::Unknown` is what `parseCalcDimension` rejects on, so it crosses as itself.
     CSSUnitType unit;
@@ -796,6 +786,19 @@ struct CSSCalcSwiftParseOptions {
     // `IdentToken` is declined -- the conservative side, since a decline runs the C++ arm and a
     // wrong constant would be a wrong stylesheet.
     bool hasAllowedSymbols;
+
+    // The TOP-LEVEL function's `CSSValueID` raw value: `CSSValueCalc`, `CSSValueWebkitCalc`, or
+    // whichever math function the grammar covers. The caller has it already -- it is the
+    // `functionId` it tested with `isCalcFunction` -- so this is a copy of a value C++ read, not a
+    // second classification of it.
+    //
+    // `parseAndSimplify` accepts ANY `isCalcFunction` at the top (`CSSCalcTree+Parser.cpp:171`), so
+    // `width: min(1px, 2px)` is a top-level `Min`, but this entry is handed the range INSIDE the
+    // function and so cannot see which one it was. Carried here rather than by handing Swift the
+    // OUTER range, because routing the top level through the block arm would enter its arguments at
+    // depth 1 where the C++ enters them at 0 (`parseCalcFunction(tokens, function, 0, state)`) -- a
+    // divergence only a 100-deep expression can see and no ordinary corpus contains.
+    uint16_t rootFunctionId;
 };
 
 // `Failed` and `Declined` must not share a channel: a failure means the input is not a valid
@@ -849,16 +852,27 @@ WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
 WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept;
 
 // Drives the Swift grammar over `innerRange` -- the tokens INSIDE a `calc()`, which is what
-// `consumeFunction` leaves -- and constructs the parsed tree into `outRoot`.
+// `consumeFunction` leaves -- simplifies the result, and constructs it into `outRoot`.
 //
 // Lives beside the operand stack rather than at the call site because `CSSCalcSwiftOperandStack` is
 // only forward-declared in this header (it holds a `WTF::Vector<Child>`, and this header must stay
 // self-contained), so no other translation unit can build one. That is also the production shape:
 // when the parse path is gated on, `parseAndSimplify` calls exactly this.
 //
+// PARSE AND SIMPLIFICATION ARE ONE PASS. The grammar writes the island's own `CalcFlatNode` form,
+// the island's existing per-alternative simplification runs over it in place, and a `CSSCalc::Child`
+// is materialised once at the end. That is one per-node representation conversion where the shape
+// this replaced had three: the grammar built a `Child` per node, and `ParseSimplification::Terminal`
+// then flattened it back into `CalcFlatNode`s and emitted it again.
+//
+// `simplify` false skips the middle pass, matching `ParseSimplification::None`. It exists for the
+// grammar differential, which must compare an UNSIMPLIFIED tree -- against a simplified one a parse
+// defect and a commutative fold can cancel, since `Sum{2px, 1px}` and `Sum{1px, 2px}` agree after
+// folding. Production is `Terminal`, which is this parameter's default.
+//
 // Returns `Parsed` only when the whole range was consumed AND the boundary contract held -- the
 // root slot taken and the operand stack empty. Anything else leaves `outRoot` untouched.
-WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const SimplificationOptions&, Child& outRoot) noexcept;
+WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const SimplificationOptions&, Child& outRoot, bool simplify = true) noexcept;
 
 } // namespace CSSCalc
 } // namespace WebCore
