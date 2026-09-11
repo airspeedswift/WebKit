@@ -1985,6 +1985,7 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char*, size_t, bool, uint32_t, uint32_t*);
 // ENTRY 14. See the definition; it is the only band in the rig that includes the parser.
 WEBCORE_EXPORT uint64_t webCoreCSSCalcParseBench(const char*, size_t, unsigned parseSimplification, uint32_t iterations, uint32_t* outParsed, uint32_t* outNodeCount, uint32_t* outCategory);
+WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char*, size_t, uint64_t* outCpp, uint64_t* outSwift, uint32_t* outTokenCount);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
@@ -2375,6 +2376,60 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseBench(const char* text, size_t length
         fold = fold * 1000003 + static_cast<uint64_t>(parsed.tree->type.percent);
     }
     return fold;
+}
+
+// The Stage C token boundary's differential: does Swift see every token, in order, with every
+// field intact?
+//
+// Both sides fold the same seven fields of the same tokens into the same FNV-style hash, but they
+// READ THEM DIFFERENTLY, and that is the whole point. C++ reads `CSSParserToken`'s accessors
+// directly; Swift reads the 24-byte `CSSCalcSwiftToken` POD through `CSSCalcSwiftParseCursor`. A
+// boundary that dropped a field, truncated one, or reordered the tokens produces a different hash.
+// A SHARED implementation would agree with itself and prove nothing -- so the duplication of the
+// two ASSERT-avoiding guards below is deliberate, not an oversight.
+//
+// The loop runs to `count` INCLUSIVE, so the EOF-past-the-end behaviour both sides rely on is part
+// of what is compared rather than an untested assumption.
+//
+// Axes. VARIED: token type, unit, numeric value, ident and function IDs, delimiter, block type and
+// token order -- whatever the corpus text produces. HELD FIXED: the input is Latin-1, and nothing
+// here sweeps 16-bit input or nesting beyond what the corpus contains.
+WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t length, uint64_t* outCpp, uint64_t* outSwift, uint32_t* outTokenCount)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    CSSTokenizer tokenizer(source);
+    auto range = tokenizer.tokenRange();
+
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    auto mix = [&](uint64_t value) { hash = (hash ^ value) * 0x100000001b3ULL; };
+
+    auto count = static_cast<uint32_t>(range.size());
+    for (uint32_t i = 0; i <= count; ++i) {
+        auto& token = range.peek(i);
+        auto type = token.type();
+        bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
+        double numericValue = isNumeric ? token.numericValue() : 0;
+        // Bit pattern, not the value: it is what distinguishes -0.0 from 0.0 and makes two NaNs
+        // with different payloads compare unequal, both of which the Swift side folds the same way.
+        mix(std::bit_cast<uint64_t>(numericValue));
+        mix(static_cast<uint64_t>(token.id()));
+        mix(static_cast<uint64_t>(token.functionId()));
+        mix(static_cast<uint64_t>(type == DelimiterToken ? token.delimiter() : u'\0'));
+        mix(static_cast<uint64_t>(token.unitType()));
+        mix(static_cast<uint64_t>(type));
+        mix(static_cast<uint64_t>(token.getBlockType()));
+    }
+
+    auto cursor = CSSCalc::CSSCalcSwiftParseCursor { range };
+    uint64_t swiftHash = WebCore::cssCalcParseTokenChecksumSwift(cursor);
+
+    if (outCpp)
+        *outCpp = hash;
+    if (outSwift)
+        *outSwift = swiftHash;
+    if (outTokenCount)
+        *outTokenCount = count;
+    return hash == swiftHash;
 }
 
 WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplification(const char* text, size_t length, const CSSCalcSimplificationOptionsSpec* spec, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)

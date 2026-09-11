@@ -27,6 +27,7 @@
 
 #include "AnchorPositionEvaluator.h"
 #include "CSSCalcOperator.h"
+#include "CSSCalcSwiftTypes.h"
 #include "CSSCalcSymbolTable.h"
 #include "CSSCalcTree+Serialization.h"
 #include "CSSCalcTree+Simplification.h"
@@ -1628,6 +1629,60 @@ std::optional<TypedChild> parseCalcDimension(const CSSParserToken& token, Parser
         return TypedChild { copyAndSimplify(WTF::move(child), *simplificationOptions), type };
 #endif
     return TypedChild { WTF::move(child), type };
+}
+
+
+// MARK: - The Swift parse path's token boundary (P7b stage C)
+
+// The Swift-visible stand-in must be the size of the real member, or the two languages hold
+// different views of one live object with no diagnostic. Only this branch can see
+// `CSSParserTokenRange`, which is why the assert is here and not beside the declaration.
+static_assert(sizeof(CSSCalcSwiftParseCursor) == sizeof(const CSSParserTokenRange*));
+
+// The block types cross as a raw byte, so they are pinned one enumerator per line rather than
+// trusted. Inserting one is an ordinary WebCore change whose author has no reason to know that a
+// Swift grammar reads the numbering -- the same failure the tokenizer boundary's token-type
+// static_asserts exist to prevent.
+static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == 0);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == 1);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
+
+// `id` and `functionId` cross as raw `CSSValueID` values, and "absent" has to be a value Swift can
+// test. `CSSParserToken::id()`/`functionId()` already return `CSSValueInvalid` for a token of the
+// wrong type, and that is 0, so the boundary needs no separate presence flag.
+static_assert(static_cast<uint16_t>(CSSValueInvalid) == 0);
+
+uint32_t CSSCalcSwiftParseCursor::tokenCount() const noexcept
+{
+    return static_cast<uint32_t>(m_range.size());
+}
+
+CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcept
+{
+    // Past the end this is the EOF token, which is what `CSSParserTokenRange::peek` returns and
+    // what the C++ grammar relies on, so the Swift grammar needs no bounds pre-check to behave
+    // identically.
+    auto& token = m_range.peek(index);
+    auto type = token.type();
+
+    // THE TWO GUARDS ARE LOAD-BEARING, not defensive style. `CSSParserToken::numericValue()` and
+    // `delimiter()` each ASSERT on a token of the wrong type (CSSParserToken.cpp:487, :467), and
+    // this boundary reads every field of every token unconditionally -- so an unguarded version
+    // compiles, passes every release test, and fires on the first whitespace token in any
+    // assertions build. The other four accessors are total: `id()`/`functionId()` return
+    // `CSSValueInvalid` for the wrong type, `unitType()` and `getBlockType()` are plain bitfield
+    // reads.
+    bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
+
+    return {
+        .numericValue = isNumeric ? token.numericValue() : 0,
+        .id = static_cast<uint16_t>(token.id()),
+        .functionId = static_cast<uint16_t>(token.functionId()),
+        .delimiter = type == DelimiterToken ? token.delimiter() : u'\0',
+        .unit = token.unitType(),
+        .type = type,
+        .blockType = static_cast<uint8_t>(token.getBlockType()),
+    };
 }
 
 } // namespace CSSCalc

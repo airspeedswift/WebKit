@@ -83,6 +83,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <WebCore/CSSCalcType.h>
+#include <WebCore/CSSParserTokenBits.h>
+#include <WebCore/CSSUnitType.h>
 #include <WebCore/PlatformExportMacros.h>
 #include <wtf/SwiftBridging.h>
 
@@ -93,6 +95,11 @@ class StringBuilder;
 }
 
 namespace WebCore {
+
+// Forward declaration only, for the same reason as StringBuilder above: the parse cursor holds a
+// reference to one and Swift never sees its definition, which is what keeps CSSTokenizer.h and its
+// includes out of this header.
+class CSSParserTokenRange;
 
 namespace CSS {
 struct SerializationContext;
@@ -1111,6 +1118,116 @@ struct CSSCalcSwiftSimplificationResult {
     // Free in bytes: 8 + 4 + 1 + 1 = 14 in a 16-byte struct, so it rides in existing padding and
     // the result still comes back in registers.
     uint8_t declineAlternative;
+};
+
+// MARK: - The Swift calc PARSE path's token boundary (P7b stage C)
+
+// One CSS token, in the form the calc grammar needs and nothing more.
+//
+// WHY A PURPOSE-BUILT POD RATHER THAN `CSSParserTokenBits`, WHICH IS ALREADY `SWIFT_SAFE` AND
+// ALREADY IMPORTED. Its value slot is a union that, once `CSSSwiftTokenSink::takeChunk` has
+// resolved it, holds a LIVE `const void*` into the stylesheet text. `CSSParserTokenBits`'s own
+// `SWIFT_SAFE` is honest today precisely because on the tokenizer's path that slot holds a parked
+// integer for exactly as long as Swift can see it (CSSParserTokenBits.h). Handing the calc parser a
+// *resolved* one would make that assertion false in a new way and silently, so this carries no
+// pointer at all: `id` and `functionId` are resolved on the C++ side, which is where
+// `cssValueKeywordID` already runs, so Swift never needs a token's text and the parse never touches
+// the stylesheet buffer.
+//
+// THE FIELD SET IS EXHAUSTIVE, NOT A SKETCH. It is every accessor `CSSCalcTree+Parser.cpp` reads off
+// a token, enumerated from the source rather than assumed:
+//   `type()` (dispatch, and the whitespace look-behind at :1410), `unitType()` (:1608, where
+//   `Unknown` is the reject signal), `numericValue()` (:1594, :1602, :1613), `id()` (:1571, :1584),
+//   `functionId()` (:170, :916, :1529) and `delimiter()` (:1406).
+// `numericValueType()` is deliberately ABSENT -- no calc grammar rule reads integer-ness. If one
+// ever does, this struct has seven spare bytes.
+//
+// `delimiter` IS 16 BITS AND THAT IS LOAD-BEARING. `CSSParserToken::delimiter()` returns `char16_t`
+// (CSSParserToken.h:92) and the design sketch this came from said `uint8_t`. Truncating would make
+// U+012B compare equal to '+' (0x2B), i.e. accept `calc(1px ī 2px)` as a sum -- a silently WRONG
+// stylesheet rather than a decline, which is the class of defect an imported-enum mirror already
+// produced once on this island.
+//
+// `id`/`functionId` are the raw values of `CSSValueID`, not the enum: `CSSValueKeywords.h` is
+// generated and would defeat this header's self-containment (see the file comment). Swift compares
+// them against values it obtains FROM C++, never against a transcribed list -- transcribing the
+// enumerator table is the thing that must not happen here.
+struct CSSCalcSwiftToken {
+    // Meaningful for NumberToken, PercentageToken and DimensionToken.
+    double numericValue;
+    // `CSSValueID` raw value. Non-zero only for IdentToken.
+    uint16_t id;
+    // `CSSValueID` raw value. Non-zero only for FunctionToken.
+    uint16_t functionId;
+    // `CSSParserToken::delimiter()`. Meaningful only for DelimiterToken.
+    char16_t delimiter;
+    // `CSSUnitType::Unknown` is what `parseCalcDimension` rejects on, so it crosses as itself.
+    CSSUnitType unit;
+    CSSParserTokenType type;
+    // `CSSParserToken::BlockType`, so Swift can compute block extents itself and `consumeBlock`
+    // needs no crossing. Pinned one enumerator per line in CSSCalcTree+Parser.cpp rather than
+    // trusted, exactly as the tokenizer boundary pins its token numbering.
+    uint8_t blockType;
+};
+static_assert(sizeof(CSSCalcSwiftToken) == 24);
+static_assert(alignof(CSSCalcSwiftToken) == 8);
+
+// A read-only cursor over the tokens of one `calc()`, for the Swift grammar.
+//
+// SHAPE, AND WHY IT IS THIS ONE. Swift reads one token at a time, BY VALUE, through `tokenAt`.
+// It does not receive a buffer and it is not handed one to fill, because both were measured and
+// rejected (`~/src/webkit-swift-ports/calctokenspan/`): Swift cannot RECEIVE a bounds-carrying view
+// at all -- ten crossing shapes enumerated, only the two Swift-as-caller ones work -- and the
+// buffer-filling alternative costs 24 bytes of copy plus 24 of zero-fill per token, against a C++
+// parser that copies nothing whatever (`CSSParserTokenRange` IS a span over the tokenizer's own
+// vector). A by-value 24-byte return crosses no pointer, needs no capacity policy, and has no
+// "too many tokens" decline to get wrong.
+//
+// WHY THE `SWIFT_SAFE` CLAIM HOLDS. As on `CSSCalcSwiftSink` above, this is `swift_attr("safe")`:
+// an UNCHECKED assertion that the type safely encapsulates its unsafe constituent, here the
+// `std::span` inside `CSSParserTokenRange`. Nothing verifies it, and it is REQUIRED rather than
+// stylistic -- measured, not assumed: a receiver holding a span member makes every use of it unsafe
+// to Swift, and it defeats even `operator[]`, which is otherwise one of only two reference-return
+// spellings that import safely. The claim, stated so it can be checked:
+//
+//   * The referent outlives every use. The cursor is constructed on the C++ stack immediately
+//     before the single Swift call that takes it, from a `CSSParserTokenRange` the caller of
+//     `parseAndSimplify` owns, and it is destroyed when that call returns. No stored property and
+//     no escaping closure can hold it: it crosses `noescape`.
+//   * Nothing mutates the token vector for the duration. The range is a view over
+//     `CSSTokenizer::m_tokens`, which is complete before any property parser runs.
+//   * The cursor is `const` throughout and hands out only values, so no aliasing question arises
+//     on the Swift side.
+//
+// A future toolchain change removes the need for the annotation entirely: it is the second
+// direction of rdar://186723514 (`__counted_by` synthesising a safe view for a RETURN or an
+// out-parameter, not only for a parameter). Filings register 27 carries the ask and its acceptance
+// criterion; when it lands, this becomes a span crossing and the assertion goes.
+struct SWIFT_SAFE CSSCalcSwiftParseCursor {
+    // How many tokens the range holds. Swift's whitespace look-behind is `tokenAt(i - 1)`, which
+    // is why whitespace tokens are NOT filtered out here.
+    uint32_t tokenCount() const noexcept;
+
+    // The token at `index`, by value. Out of range yields a token whose `type` is `EOFToken`,
+    // matching what `CSSParserTokenRange::peek` does past the end, so Swift needs no bounds
+    // pre-check to mirror the C++ grammar's behaviour.
+    CSSCalcSwiftToken tokenAt(uint32_t index) const noexcept;
+
+#if !defined(__swift__)
+    explicit CSSCalcSwiftParseCursor(const CSSParserTokenRange& range)
+        : m_range(range)
+    {
+    }
+
+private:
+    const CSSParserTokenRange& m_range;
+#else
+    // Same-size stand-in, so the importer never walks CSSParserTokenRange -- which would drag
+    // CSSTokenizer.h and its includes into this deliberately self-contained header. The branch that
+    // can see the real type asserts the size, because a `void*` placeholder that disagreed would
+    // let the two languages hold different views of one live object with no diagnostic.
+    const void* m_rangeStandIn;
+#endif
 };
 
 } // namespace CSSCalc

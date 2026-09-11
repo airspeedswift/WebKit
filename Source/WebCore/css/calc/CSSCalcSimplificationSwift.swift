@@ -6176,4 +6176,47 @@ public func cssCalcTypeAlgebraDifferential(_ which: UInt32) -> UInt64 {
     }
 }
 
+// MARK: - The parse path's token boundary (P7b stage C), differential only
+
+/// Reads every token of one `calc()` through the Stage C boundary and folds it into a checksum.
+///
+/// This exists to prove the boundary before a grammar is written on it, and it is the whole of
+/// stage C's Swift side. `CSSCalcSwiftParseCursor` imports with **zero `unsafe` markers**, which is
+/// the property the design turns on: the cursor is `SWIFT_SAFE`, and every token crosses BY VALUE
+/// as a 24-byte POD carrying no pointer.
+///
+/// The fold is order-dependent and mixes every field, so a boundary that dropped a field, truncated
+/// one, or returned tokens in the wrong order produces a different checksum. The C++ side computes
+/// the same fold straight off the `CSSParserTokenRange`, so the two disagree if and only if the
+/// boundary is wrong -- and the axes it varies are the token TYPES and the field VALUES, which is
+/// what a corpus of real `calc()` text sweeps.
+///
+/// Reading past the end is deliberate in the caller, not guarded here: `tokenAt` yields an EOF
+/// token past the end exactly as `CSSParserTokenRange::peek` does, and the differential checks that
+/// too rather than stopping at `tokenCount`.
+@_expose(Cxx)
+public func cssCalcParseTokenChecksumSwift(_ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor) -> UInt64 {
+    var hash: UInt64 = 0xcbf29ce484222325
+
+    @inline(always)
+    func mix(_ value: UInt64) {
+        hash = (hash ^ value) &* 0x100000001b3
+    }
+
+    // One past the count, so the EOF-past-the-end behaviour is part of what is compared.
+    let count = cursor.tokenCount()
+    for i in 0...count {
+        let token = cursor.tokenAt(i)
+        mix(token.numericValue.bitPattern)
+        mix(UInt64(token.id))
+        mix(UInt64(token.functionId))
+        mix(UInt64(token.delimiter))
+        mix(UInt64(token.unit.rawValue))
+        mix(UInt64(token.type.rawValue))
+        mix(UInt64(token.blockType))
+    }
+    return hash
+}
+
+
 #endif
