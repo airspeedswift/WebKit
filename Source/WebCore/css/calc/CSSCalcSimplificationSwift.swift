@@ -5754,6 +5754,41 @@ private struct CalcParseState {
     var declineReason = WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None
     /// Set when the grammar hit something it does not cover, as opposed to invalid input.
     var declined = false
+
+    /// A ONE-TOKEN CACHE, and it is not a micro-optimisation: `tokenAt` is an out-of-line call
+    /// across the language boundary returning a 24-byte POD, and it cannot be inlined, because
+    /// defining it in the header would mean naming `CSSParserTokenRange` there and this header is
+    /// deliberately self-contained.
+    ///
+    /// The descent reads the same index several times over. For `calc(1px + 2px)` -- five tokens --
+    /// the sequence of indices requested is 0, 0, 1, 2, 2, 2, 1, 3, 3, 4, 4: eleven crossings for
+    /// five tokens, because the whitespace skip, the product loop, the sum loop and the
+    /// look-BEHIND each ask about a token a caller has already fetched. One entry collapses that to
+    /// six, the one repeat it cannot serve being the look-behind at `index - 1` after `index` has
+    /// been cached.
+    ///
+    /// It lives here rather than in a parameter of its own because this struct is already threaded
+    /// through the whole descent, and it holds an INDEX and a VALUE -- never the cursor -- so
+    /// `CSSCalcSwiftParseCursor`'s `SWIFT_SAFE` claim, which says no stored property holds it,
+    /// stays true as written.
+    var cachedIndex: UInt32 = .max
+    var cachedToken = WebCore.CSSCalc.CSSCalcSwiftToken()
+}
+
+/// The cached read. `UInt32.max` is the empty sentinel: a token count that large is not reachable --
+/// `CSSParserTokenRange` is a span over the tokenizer's own vector and 4 billion tokens is 96 GB of
+/// them -- so it cannot collide with a real index.
+@inline(always)
+private func calcToken(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ state: inout CalcParseState,
+    _ index: UInt32
+) -> WebCore.CSSCalc.CSSCalcSwiftToken {
+    if state.cachedIndex != index {
+        state.cachedToken = cursor.tokenAt(index)
+        state.cachedIndex = index
+    }
+    return state.cachedToken
 }
 
 @inline(always)
@@ -5765,9 +5800,10 @@ private func calcTokenIsWhitespace(_ type: WebCore.CSSParserTokenType) -> Bool {
 private func calcSkipWhitespace(
     _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
     _ index: inout UInt32,
-    _ end: UInt32
+    _ end: UInt32,
+    _ state: inout CalcParseState
 ) {
-    while index < end && calcTokenIsWhitespace(cursor.tokenAt(index).type) {
+    while index < end && calcTokenIsWhitespace(calcToken(cursor, &state, index).type) {
         index += 1
     }
 }
@@ -5785,7 +5821,7 @@ private func calcParseValue(
     if depth > calcMaxExpressionDepth { return nil }
     if index >= end { return nil }
 
-    let token = cursor.tokenAt(index)
+    let token = calcToken(cursor, &state, index)
 
     // The two uncovered block shapes, declined rather than failed: `parseCalcValue`'s `findBlock`
     // accepts a `LeftParenthesisToken` as a nested `calc()` and any `isCalcFunction` id as itself.
@@ -5799,7 +5835,7 @@ private func calcParseValue(
 
     // `tokens.consumeIncludingWhitespace()`: take this token, then skip the whitespace after it.
     index += 1
-    calcSkipWhitespace(cursor, &index, end)
+    calcSkipWhitespace(cursor, &index, end, &state)
 
     switch token.type {
     case WebCore.NumberToken:
@@ -5891,11 +5927,11 @@ private func calcParseProduct(
     var childCount: UInt32 = 0
 
     while index < end {
-        let token = cursor.tokenAt(index)
+        let token = calcToken(cursor, &state, index)
         let op = token.type == WebCore.DelimiterToken ? token.delimiter : 0
         if op != 0x2A && op != 0x2F { break }  // '*' and '/'
         index += 1
-        calcSkipWhitespace(cursor, &index, end)
+        calcSkipWhitespace(cursor, &index, end, &state)
 
         guard let nextType = calcParseValue(cursor, &index, end, depth, &builder, options, &state) else { return nil }
 
@@ -5936,7 +5972,7 @@ private func calcParseSum(
     var childCount: UInt32 = 0
 
     while index < end {
-        let token = cursor.tokenAt(index)
+        let token = calcToken(cursor, &state, index)
         let op = token.type == WebCore.DelimiterToken ? token.delimiter : 0
         if op != 0x2B && op != 0x2D { break }  // '+' and '-'
 
@@ -5945,12 +5981,12 @@ private func calcParseSum(
         // the operator in the whole range -- an index subtraction here, and the reason whitespace
         // tokens are not filtered out of the cursor.
         if index == 0 { return nil }
-        if !calcTokenIsWhitespace(cursor.tokenAt(index - 1).type) { return nil }
+        if !calcTokenIsWhitespace(calcToken(cursor, &state, index - 1).type) { return nil }
 
         index += 1
         // `calc(1px +2px)` is invalid: the operator must be FOLLOWED by whitespace.
-        if index >= end || !calcTokenIsWhitespace(cursor.tokenAt(index).type) { return nil }
-        calcSkipWhitespace(cursor, &index, end)
+        if index >= end || !calcTokenIsWhitespace(calcToken(cursor, &state, index).type) { return nil }
+        calcSkipWhitespace(cursor, &index, end, &state)
 
         guard let nextType = calcParseProduct(cursor, &index, end, depth, &builder, options, &state) else { return nil }
 
@@ -5985,7 +6021,7 @@ public func cssCalcParseSwift(
     var index: UInt32 = 0
     let end = cursor.tokenCount()
 
-    calcSkipWhitespace(cursor, &index, end)
+    calcSkipWhitespace(cursor, &index, end, &state)
 
     guard let type = calcParseSum(cursor, &index, end, 0, &builder, options, &state) else {
         result.outcome = UInt8(state.declined
@@ -5997,7 +6033,7 @@ public func cssCalcParseSwift(
 
     // `parseCalcFunction` requires the inner range to be exhausted -- extraneous tokens are a
     // failure, not a decline.
-    calcSkipWhitespace(cursor, &index, end)
+    calcSkipWhitespace(cursor, &index, end, &state)
     if index != end {
         result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Failed.rawValue)
         return result
