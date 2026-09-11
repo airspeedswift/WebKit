@@ -943,6 +943,22 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     //
     // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
     // that this header stays self-contained and does not pull in wtf/Vector.h.
+    // Move the single remaining operand into the root slot.
+    //
+    // WHY THE PARSER NEEDS THIS AND THE SIMPLIFIER DOES NOT. The simplifier walks a tree it already
+    // has, so it knows which node is the root before it builds it and passes `isRoot` -- which
+    // constructs straight into the root slot and moves nothing. A recursive-descent parser does not
+    // know: whether the first `<calc-product>` is the whole expression or the first operand of a
+    // sum is only settled after it has been parsed and pushed. Deciding by lookahead would mean
+    // scanning for a top-level `+` at every nesting level before descending.
+    //
+    // Costs one `Child` move per parse -- an out-of-line 41-alternative variant move, ~42
+    // instructions, measured on the `RebuildCursor::take()` arm. Once per whole parse, not per
+    // node, and it goes away if the grammar ever builds into the flat form and emits in one pass.
+    // Returns false if the stack does not hold exactly one operand, which is a boundary contract
+    // violation rather than a parse outcome.
+    WEBCORE_EXPORT bool finishRoot() noexcept;
+
     WEBCORE_EXPORT void clearOperands() noexcept;
 #endif
 
@@ -1229,6 +1245,102 @@ private:
     const void* m_rangeStandIn;
 #endif
 };
+
+// What the parse needs from `ParserState` and `ParserOptions`, flattened. Deliberately small:
+// stage D covers `<calc-sum>`, `<calc-product>`, `<calc-value>`, the numeric leaves, the five
+// keyword constants and parenthesised blocks, and declines everything else -- so the symbol table,
+// the tree-counting context and the math-function set do not cross yet.
+struct CSSCalcSwiftParseOptions {
+    // The enum itself, not its raw value. `CSSCalcSwiftSimplificationOptions` carries a `uint8_t`
+    // and Swift reconstructs it with `CSS::Category(rawValue:)` behind a `guard let` -- but
+    // `init?(rawValue:)` on an IMPORTED C++ enum NEVER FAILS (interop notes 92), so that guard is
+    // vacuous and the reconstruction is pure ceremony. Carrying the type removes both.
+    CSS::Category category;
+    // `PropertyParserState::absoluteLengthUnitsOnly`: a unit needing conversion data is a parse
+    // failure rather than a decline when this is set, exactly as `parseCalcDimension` has it.
+    bool absoluteLengthUnitsOnly;
+    // Whether `ParserOptions::allowedSymbols` has anything in it.
+    //
+    // LOAD-BEARING, not informational. `parseCalcKeyword` checks the symbol table BEFORE the five
+    // constants, so an id present in both resolves as a symbol on the C++ side and would resolve
+    // as a constant here. Stage D does not carry the symbol table, so with a non-empty table every
+    // `IdentToken` is declined -- the conservative side, since a decline runs the C++ arm and a
+    // wrong constant would be a wrong stylesheet.
+    bool hasAllowedSymbols;
+};
+
+// Why the parse stopped, when it did.
+//
+// A decline and a FAILURE are different outcomes and must not share a channel: a failure means the
+// input is not a valid `calc()` and the C++ arm would also have returned `std::nullopt`, so the
+// caller must NOT retry; a decline means this grammar does not cover the input yet and the C++ arm
+// must run. Collapsing them would make the fallback either miss real parses or re-parse garbage,
+// and would make the decline count meaningless as a coverage number.
+enum class CSSCalcSwiftParseOutcome : uint8_t {
+    Parsed,
+    // The input is invalid. The C++ arm agrees; do not retry.
+    Failed,
+    // Not covered by this grammar yet. Retry with the C++ arm.
+    Declined,
+};
+
+// Which uncovered construct caused a decline. An unattributed decline is one nobody can close,
+// which is the argument for the field -- the same argument `CSSCalcSwiftSimplificationResult`'s
+// `declineAlternative` already carries.
+enum class CSSCalcSwiftParseDeclineReason : uint8_t {
+    None,
+    // A math function: `min`, `max`, `clamp`, `round`, the trig set, and the rest. Stage E.
+    MathFunction,
+    // An `IdentToken` while `ParserOptions::allowedSymbols` is non-empty. Stage F.
+    Symbol,
+    // `sibling-count()` / `sibling-index()`. Stage F.
+    TreeCounting,
+    // More tokens than the grammar's fixed cursor budget.
+    TooManyTokens,
+};
+
+struct alignas(8) CSSCalcSwiftParseResult {
+    // The tree's `Type`, computed by the Swift type algebra rather than recomputed by C++.
+    Type type;
+    // A `CSSCalcSwiftParseOutcome`.
+    uint8_t outcome;
+    // A `CSSCalcSwiftParseDeclineReason`.
+    uint8_t declineReason;
+    // Whether any leaf's unit needs conversion data, which `ParserState` records for the caller.
+    bool requiresConversionData;
+};
+static_assert(sizeof(CSSCalcSwiftParseResult) == 16);
+static_assert(alignof(CSSCalcSwiftParseResult) == 8);
+
+// The alternative `makeNumeric` would build for `unit`.
+//
+// C++ answers this, and that is the point: `makeNumeric` maps unit to alternative through a
+// seventy-case table, and reproducing the choice in Swift would duplicate it -- the same argument
+// `CSSCalcSwiftNumericResult::kind` already carries in this file. Called once per dimension leaf
+// actually built, NOT once per token, so it costs nothing on the tokens the grammar walks past.
+// Returns a `CSSCalcSwiftNodeKind`.
+WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
+
+// `conversionToCanonicalUnitRequiresConversionData(unit)`. Same argument: a unit predicate whose
+// table belongs to C++.
+WEBCORE_EXPORT bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept;
+
+// `lookupConstantNumber(id)`: the five `<calc-keyword>` constants. `resolved` false means the
+// identifier is not one of them. Same argument again -- the table is C++'s, and it is keyed on
+// `CSSValueID`, which this header deliberately does not import.
+WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept;
+
+// Drives the Swift grammar over `innerRange` -- the tokens INSIDE a `calc()`, which is what
+// `consumeFunction` leaves -- and constructs the parsed tree into `outRoot`.
+//
+// Lives beside the operand stack rather than at the call site because `CSSCalcSwiftOperandStack` is
+// only forward-declared in this header (it holds a `WTF::Vector<Child>`, and this header must stay
+// self-contained), so no other translation unit can build one. That is also the production shape:
+// when the parse path is gated on, `parseAndSimplify` calls exactly this.
+//
+// Returns `Parsed` only when the whole range was consumed AND the boundary contract held -- the
+// root slot taken and the operand stack empty. Anything else leaves `outRoot` untouched.
+WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const SimplificationOptions&, Child& outRoot) noexcept;
 
 } // namespace CSSCalc
 } // namespace WebCore

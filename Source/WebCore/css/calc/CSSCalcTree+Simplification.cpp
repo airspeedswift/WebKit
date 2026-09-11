@@ -2179,6 +2179,42 @@ static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, 
     return items;
 }
 
+CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot) noexcept
+{
+    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot };
+    CSSCalcSwiftBuilder builder { operands, options };
+    auto cursor = CSSCalcSwiftParseCursor { innerRange };
+
+    auto result = cssCalcParseSwift(cursor, builder, parseOptions);
+
+    if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Parsed)) {
+        // A failed or declined descent can leave partial operands behind; drop them rather than
+        // letting the stack's destructor be the only thing that notices.
+        builder.clearOperands();
+        return result;
+    }
+
+    // The same contract the simplification entry checks, and for the same reason: a boundary that
+    // came apart must be a fallback to the C++ arm, not a tree built from whatever was left on the
+    // stack. `finishRoot` should already have taken the slot, so a non-null one here means the
+    // descent finished while leaving the caller's placeholder in place.
+    if (operands.rootSlot || !operands.value.isEmpty()) {
+        builder.clearOperands();
+        result.outcome = static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Failed);
+    }
+    return result;
+}
+
+bool CSSCalcSwiftBuilder::finishRoot() noexcept
+{
+    if (!m_operands->rootSlot || m_operands->value.size() != 1)
+        return false;
+    *m_operands->rootSlot = WTF::move(m_operands->value.last());
+    m_operands->value.removeLast();
+    m_operands->rootSlot = nullptr;
+    return true;
+}
+
 bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot) noexcept
 {
     // `constructAndAppend`, not `append(makeChild(...))`, wherever the alternative is named here.

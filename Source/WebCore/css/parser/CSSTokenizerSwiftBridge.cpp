@@ -56,6 +56,7 @@
 #include "CSSParserToken.h"
 #include "CSSParserTokenRange.h"
 #include "CSSCalcSwiftTypes.h"
+#include "CSSPropertyParserConsumer+Primitives.h"
 #include "CSSCalcSymbolTable.h"
 #include "CSSCalcSymbolsAllowed.h"
 #include "CSSCalcTree+Copy.h"
@@ -1985,7 +1986,41 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcConstructedShapeCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationBench(const char*, size_t, bool, uint32_t, uint32_t*);
 // ENTRY 14. See the definition; it is the only band in the rig that includes the parser.
 WEBCORE_EXPORT uint64_t webCoreCSSCalcParseBench(const char*, size_t, unsigned parseSimplification, uint32_t iterations, uint32_t* outParsed, uint32_t* outNodeCount, uint32_t* outCategory);
+struct CSSCalcParseComparison {
+    // A `CSSCalcSwiftParseOutcome`.
+    uint8_t swiftOutcome;
+    // A `CSSCalcSwiftParseDeclineReason`.
+    uint8_t declineReason;
+    // Whether the C++ arm produced a tree at all.
+    bool cppParsed;
+    // Whether the two trees are equal. Meaningful only when the Swift arm parsed AND `cppParsed`.
+    bool treesAgree;
+    // Whether `requiresConversionData` matched. It reaches the caller on the TREE and feeds the
+    // caller's own conversion-data decision, so a disagreement is a real divergence even when the
+    // trees match. Both raw values are reported too: "they differ" is not a diagnosis.
+    bool conversionDataAgrees;
+    bool cppRequiresConversionData;
+    bool swiftRequiresConversionData;
+    // Which category the C++ arm accepted the input at, and which the Swift arm was driven at.
+    uint8_t category;
+    // BOUNDARY SELF-TESTS, kept permanently rather than as throwaway debug. Each is a fixed-input
+    // probe of one thing the grammar reads through the boundary, so a wiring fault shows up as a
+    // named failure instead of as a mysterious wrong outcome.
+    //   `firstTokenType` -- what the cursor reports for token 0 of the inner range, against what
+    //   the range itself says. They must be equal.
+    uint8_t cursorFirstTokenType;
+    uint8_t rangeFirstTokenType;
+    //   `emRequiresConversionData` -- the unit predicate on a unit that certainly needs conversion
+    //   data (`em`). Must be true; a false here means the predicate is mis-wired, not that the
+    //   grammar forgot to set the flag.
+    bool emRequiresConversionData;
+    // 0 = the input is not a `calc()` this entry can drive, so the case is SKIPPED rather than
+    // passed -- a skipped case must never read as agreement.
+    bool applicable;
+};
+
 WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char*, size_t, uint64_t* outCpp, uint64_t* outSwift, uint32_t* outTokenCount);
+WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char*, size_t, bool withSymbols);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
@@ -2430,6 +2465,121 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t le
     if (outTokenCount)
         *outTokenCount = count;
     return hash == swiftHash;
+}
+
+// The stage D grammar's differential: does the Swift `<calc-sum>` grammar build the SAME TREE the
+// C++ parser builds, for the inputs it claims to cover?
+//
+// The C++ arm runs at `ParseSimplification::None`, because the Swift grammar does not simplify --
+// comparing against `Terminal` would compare a simplified tree with an unsimplified one and every
+// case would "fail" for a reason that is not a defect.
+//
+// Trees are compared by VALUE with `Child::operator==`, which compares the stored `Type` and walks
+// the children. Not by serialization: `Product{6px, 4px}` and its simplified form serialize the
+// same, and 57 corpus cases already carry exactly that class of divergence.
+//
+// `withSymbols` selects whether `ParserOptions::allowedSymbols` is populated. It is an AXIS, not a
+// convenience: with a non-empty table the Swift grammar declines every `IdentToken` on purpose
+// (the C++ checks the symbol table before the five constants, so an id in both would resolve
+// differently), and the constants path is only reachable with the table empty. A run that only
+// used one value of this flag would leave one of those two behaviours untested.
+
+WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* text, size_t length, bool withSymbols)
+{
+    CSSCalcParseComparison result { };
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    CSSTokenizer tokenizer(source);
+    auto cppRange = tokenizer.tokenRange();
+    if (cppRange.atEnd())
+        return result;
+
+    // Only plain `calc()` / `-webkit-calc()`: stage D covers no other function, and driving it with
+    // one would be asking it to decline, which the corpus does separately.
+    auto functionId = cppRange.peek().functionId();
+    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc)
+        return result;
+    result.applicable = true;
+
+    // THE CATEGORY IS SWEPT, NOT FIXED, and getting this wrong is what a first run of this
+    // differential actually did: pinning it to `Length` made the C++ arm reject `calc(1)`,
+    // `calc(2 * 3)`, `calc(1deg + 1rad)` and every constant -- sixteen cases that read as "Swift
+    // parsed, C++ did not" and were entirely an artefact of the harness. `parseCalcExpression`
+    // tries each category until one accepts; the Swift arm is then driven at THAT category, so the
+    // two arms are asked the same question.
+    auto parserState = WebCore::CSS::PropertyParserState {
+        .context = calcParserContext(),
+        .currentRule = StyleRuleType::Style,
+        .currentProperty = CSSPropertyWidth,
+    };
+    auto makeParserOptions = [&](WebCore::CSS::Category category) {
+        return CSSCalc::ParserOptions {
+            .category = category,
+            .range = WebCore::CSS::All,
+            .allowedSymbols = withSymbols ? calcAllowedSymbols() : CSSCalcSymbolsAllowed { },
+            .propertyOptions = { },
+        };
+    };
+    auto makeSimplificationOptions = [&](WebCore::CSS::Category category) {
+        return CSSCalc::SimplificationOptions {
+            .category = category,
+            .range = WebCore::CSS::All,
+            .conversionData = std::nullopt,
+            .symbolTable = { },
+            .allowZeroValueLengthRemovalFromSum = false,
+        };
+    };
+
+    // The C++ arm, UNSIMPLIFIED, at the first category that accepts. Its own copy of the range,
+    // because a parse consumes one.
+    std::optional<CSSCalc::Tree> cppTree;
+    auto category = calcCategories[0];
+    for (auto candidate : calcCategories) {
+        auto cppParseRange = cppRange;
+        auto tree = CSSCalc::parseAndSimplify(cppParseRange, parserState, makeParserOptions(candidate), makeSimplificationOptions(candidate), CSSCalc::ParseSimplification::None);
+        if (tree && cppParseRange.atEnd()) {
+            cppTree = WTF::move(tree);
+            category = candidate;
+            break;
+        }
+    }
+    result.cppParsed = cppTree.has_value();
+    result.category = static_cast<uint8_t>(category);
+    auto simplificationOptions = makeSimplificationOptions(category);
+
+    // The Swift arm, over the tokens INSIDE the function, which is what `consumeFunction` leaves
+    // and therefore what `parseCalcFunction` sees.
+    auto swiftRange = cppRange;
+    auto innerRange = CSSPropertyParserHelpers::consumeFunction(swiftRange);
+
+    // The operand stack is only complete inside CSSCalcTree+Simplification.cpp, so the driver lives
+    // there; this is also the shape `parseAndSimplify` will call when the parse path is gated on.
+    CSSCalc::Child root = CSSCalc::Number { .value = 0 };
+    auto swiftResult = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, CSSCalc::CSSCalcSwiftParseOptions {
+        .category = category,
+        .absoluteLengthUnitsOnly = false,
+        .hasAllowedSymbols = withSymbols,
+    }, simplificationOptions, root);
+
+    result.swiftOutcome = swiftResult.outcome;
+    result.declineReason = swiftResult.declineReason;
+
+    if (swiftResult.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
+        return result;
+
+    result.swiftRequiresConversionData = swiftResult.requiresConversionData;
+    result.emRequiresConversionData = CSSCalc::cssCalcSwiftUnitRequiresConversionData(static_cast<uint16_t>(CSSUnitType::Em));
+    {
+        auto probeCursor = CSSCalc::CSSCalcSwiftParseCursor { innerRange };
+        result.cursorFirstTokenType = probeCursor.tokenCount() ? static_cast<uint8_t>(probeCursor.tokenAt(0).type) : 0xFF;
+        result.rangeFirstTokenType = innerRange.atEnd() ? 0xFF : static_cast<uint8_t>(innerRange.peek().type());
+    }
+    if (result.cppParsed) {
+        result.cppRequiresConversionData = cppTree->requiresConversionData;
+        result.treesAgree = cppTree->root == root && cppTree->type == swiftResult.type;
+        result.conversionDataAgrees = cppTree->requiresConversionData == swiftResult.requiresConversionData;
+    }
+    return result;
 }
 
 WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplification(const char* text, size_t length, const CSSCalcSimplificationOptionsSpec* spec, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)

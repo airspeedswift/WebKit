@@ -1652,6 +1652,40 @@ static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
 // wrong type, and that is 0, so the boundary needs no separate presence flag.
 static_assert(static_cast<uint16_t>(CSSValueInvalid) == 0);
 
+// The alternative `makeNumeric` would build for `unit`, answered by CALLING `makeNumeric` rather
+// than by re-deriving its seventy-case table -- the same argument `CSSCalcSwiftNumericResult::kind`
+// already carries. Every numeric alternative is an inline variant member, so this allocates
+// nothing, and the grammar calls it once per dimension leaf actually built rather than once per
+// token walked past.
+uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
+{
+    return static_cast<uint8_t>(swiftNodeInfo(makeNumeric(0, static_cast<CSSUnitType>(unit))).kind);
+}
+
+bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept
+{
+    return conversionToCanonicalUnitRequiresConversionData(static_cast<CSSUnitType>(unit));
+}
+
+CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
+{
+    auto constant = lookupConstantNumber(static_cast<CSSValueID>(id));
+    if (!constant)
+        return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = false };
+    // Always a `Number` with an empty `Type` -- `lookupConstantNumber` builds exactly that.
+    return {
+        .value = constant->first.value,
+        .unitType = static_cast<uint16_t>(CSSUnitType::Number),
+        .resolved = true,
+        .alternative = CSSCalcSwiftAlternative::Number,
+        .substituteFallback = false,
+    };
+}
+
+// The Swift grammar's depth limit must be the C++ one, or the two arms disagree about which deeply
+// nested expressions parse -- a divergence no corpus of ordinary CSS would surface.
+static_assert(maxExpressionDepth == 100);
+
 uint32_t CSSCalcSwiftParseCursor::tokenCount() const noexcept
 {
     return static_cast<uint32_t>(m_range.size());

@@ -6219,4 +6219,298 @@ public func cssCalcParseTokenChecksumSwift(_ cursor: WebCore.CSSCalc.CSSCalcSwif
 }
 
 
+// MARK: - The calc grammar in Swift (P7b stage D)
+
+/// `<calc-sum>` over `<calc-product>` over `<calc-value>`, for the leaf grammar.
+///
+/// COVERED: `<number>`, `<percentage>`, `<dimension>` (canonical and non-canonical), the five
+/// `<calc-keyword>` constants, `+`/`-`/`*`/`/` with both whitespace-adjacency rules, and the type
+/// algebra that goes with them. DECLINED, each with its own reason so the coverage number stays
+/// attributable: nested functions and parenthesised blocks (stage D2), math functions (stage E),
+/// symbols and tree-counting (stage F).
+///
+/// A DECLINE AND A FAILURE ARE DIFFERENT OUTCOMES and share no channel. `calc(1px +2px)` is a
+/// FAILURE -- the C++ arm rejects it too, so retrying would re-derive the same rejection and a
+/// caller that treated it as a decline would parse garbage twice. `calc(min(1px, 2px))` is a
+/// DECLINE -- this grammar does not cover it yet and the C++ arm must run. Collapsing them makes
+/// the decline count meaningless as a coverage number, which is the one number this stage exists
+/// to move.
+///
+/// Nothing here holds the cursor in a stored property: it is passed down the recursion by value,
+/// which is what keeps `CSSCalcSwiftParseCursor`'s `SWIFT_SAFE` claim -- "no stored property and no
+/// escaping closure holds it" -- true as written.
+
+/// The C++ parser's `maxExpressionDepth`, pinned on the C++ side by a `static_assert` so the two
+/// arms cannot disagree about which deeply nested expressions parse.
+private let calcMaxExpressionDepth: Int32 = 100
+
+/// Mutable state threaded through the descent. Separate from the return value because both a
+/// success and a decline can have set `requiresConversionData` on the way.
+private struct CalcParseState {
+    var requiresConversionData = false
+    var declineReason = WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None
+    /// Set when the grammar hit something it does not cover, as opposed to invalid input.
+    var declined = false
+}
+
+@inline(always)
+private func calcTokenIsWhitespace(_ type: WebCore.CSSParserTokenType) -> Bool {
+    // `CSSTokenizer::isWhitespace` (CSSTokenizer.cpp:449-:452), which is these two and nothing else.
+    type == WebCore.NonNewlineWhitespaceToken || type == WebCore.NewlineToken
+}
+
+private func calcSkipWhitespace(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32
+) {
+    while index < end && calcTokenIsWhitespace(cursor.tokenAt(index).type) {
+        index += 1
+    }
+}
+
+/// `<calc-value>` minus the block arm: a single leaf token.
+private func calcParseValue(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState
+) -> CalcType? {
+    if depth > calcMaxExpressionDepth { return nil }
+    if index >= end { return nil }
+
+    let token = cursor.tokenAt(index)
+
+    // The two uncovered block shapes, declined rather than failed: `parseCalcValue`'s `findBlock`
+    // accepts a `LeftParenthesisToken` as a nested `calc()` and any `isCalcFunction` id as itself.
+    // Both are real CSS this grammar will cover later, so treating them as invalid input would be
+    // wrong in the one direction that produces a wrong stylesheet.
+    if token.type == WebCore.LeftParenthesisToken || token.type == WebCore.FunctionToken {
+        state.declined = true
+        state.declineReason = token.type == WebCore.FunctionToken ? .MathFunction : .MathFunction
+        return nil
+    }
+
+    // `tokens.consumeIncludingWhitespace()`: take this token, then skip the whitespace after it.
+    index += 1
+    calcSkipWhitespace(cursor, &index, end)
+
+    switch token.type {
+    case WebCore.NumberToken:
+        // `parseCalcNumber`: a `Number` leaf and an empty `Type`.
+        guard builder.pushLeaf(WebCore.CSSCalc.CSSCalcSwiftLeaf(
+            value: token.numericValue,
+            unitType: UInt16(WebCore.CSSUnitType.Number.rawValue),
+            kind: UInt8(WebCore.CSSCalc.CSSCalcSwiftNodeKind.Number.rawValue),
+            percentHint: 0), false) else { return nil }
+        return CalcType()
+
+    case WebCore.PercentageToken:
+        // `parseCalcPercentage`: the hint comes from the category, not from the token.
+        let hint = CalcType.determinePercentHint(options.category)
+        guard builder.pushLeaf(WebCore.CSSCalc.CSSCalcSwiftLeaf(
+            value: token.numericValue,
+            unitType: UInt16(WebCore.CSSUnitType.Percentage.rawValue),
+            kind: UInt8(WebCore.CSSCalc.CSSCalcSwiftNodeKind.Percentage.rawValue),
+            percentHint: percentHintRawValue(hint)), false) else { return nil }
+        // `getType(const Percentage&)` (CSSCalcTree.cpp:428-:434) is `{ .percent = 1 }` and then
+        // `applyPercentHint` if the hint is set -- which MOVES the percent exponent into the
+        // hinted dimension rather than merely recording it, so setting `percentHint` directly
+        // would be a different type.
+        var percentType = CalcType()
+        percentType.percent = 1
+        if let unwrapped = percentHintFromRawValue(percentHintRawValue(hint)) {
+            percentType = percentType.withPercentHintApplied(unwrapped)
+        }
+        return percentType
+
+    case WebCore.DimensionToken:
+        // `parseCalcDimension`: `CSSUnitType::Unknown` is the reject, and it is a FAILURE -- the
+        // C++ arm returns nullopt for it too.
+        if token.unit == WebCore.CSSUnitType.Unknown { return nil }
+        if WebCore.CSSCalc.cssCalcSwiftUnitRequiresConversionData(UInt16(token.unit.rawValue)) {
+            // `absoluteLengthUnitsOnly` makes this invalid input, not a decline.
+            if options.absoluteLengthUnitsOnly { return nil }
+            state.requiresConversionData = true
+        }
+        // Which alternative `makeNumeric` builds is C++'s seventy-case table, asked once here
+        // rather than reproduced.
+        let kind = WebCore.CSSCalc.cssCalcSwiftLeafKindForUnit(UInt16(token.unit.rawValue))
+        guard builder.pushLeaf(WebCore.CSSCalc.CSSCalcSwiftLeaf(
+            value: token.numericValue,
+            unitType: UInt16(token.unit.rawValue),
+            kind: kind,
+            percentHint: 0), false) else { return nil }
+        return CalcType.determineType(token.unit)
+
+    case WebCore.IdentToken:
+        // `parseCalcKeyword`. The symbol-table arm is stage F, and it must be checked FIRST on the
+        // C++ side, so an ident that is not a constant is a decline rather than a failure: with a
+        // non-empty `allowedSymbols` the C++ arm might still resolve it.
+        let constant = WebCore.CSSCalc.cssCalcSwiftLookupConstantNumber(UInt16(token.id))
+        if options.hasAllowedSymbols || !constant.resolved {
+            state.declined = true
+            state.declineReason = .Symbol
+            return nil
+        }
+        guard builder.pushLeaf(WebCore.CSSCalc.CSSCalcSwiftLeaf(
+            value: constant.value,
+            unitType: UInt16(WebCore.CSSUnitType.Number.rawValue),
+            kind: UInt8(WebCore.CSSCalc.CSSCalcSwiftNodeKind.Number.rawValue),
+            percentHint: 0), false) else { return nil }
+        return CalcType()
+
+    default:
+        return nil
+    }
+}
+
+/// `<calc-product> = <calc-value> [ [ '*' | '/' ] <calc-value> ]*`
+private func calcParseProduct(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState
+) -> CalcType? {
+    if depth > calcMaxExpressionDepth { return nil }
+
+    guard var productType = calcParseValue(cursor, &index, end, depth, &builder, options, &state) else { return nil }
+
+    // Counts operands pushed for THIS product, so `buildOperation` gets the child count the C++
+    // arm's `children` vector would have had. Stays 0 while no operator has been seen, which is
+    // the case where C++ returns `firstValue` and builds no `Product` at all.
+    var childCount: UInt32 = 0
+
+    while index < end {
+        let token = cursor.tokenAt(index)
+        let op = token.type == WebCore.DelimiterToken ? token.delimiter : 0
+        if op != 0x2A && op != 0x2F { break }  // '*' and '/'
+        index += 1
+        calcSkipWhitespace(cursor, &index, end)
+
+        guard let nextType = calcParseValue(cursor, &index, end, depth, &builder, options, &state) else { return nil }
+
+        var operandType = nextType
+        if op == 0x2F {
+            // `Invert` wraps the operand that follows the '/', before it joins the product.
+            operandType = nextType.inverted()
+            guard builder.buildOperation(.Invert, 1, operandType, false) else { return nil }
+        }
+
+        if childCount == 0 { childCount = 1 }
+        guard let merged = productType.multiplied(by: operandType) else { return nil }
+        productType = merged
+        childCount += 1
+    }
+
+    if childCount == 0 { return productType }
+    guard builder.buildOperation(.Product, childCount, productType, false) else { return nil }
+    return productType
+}
+
+/// `<calc-sum> = <calc-product> [ [ '+' | '-' ] <calc-product> ]*`
+private func calcParseSum(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState
+) -> CalcType? {
+    if depth > calcMaxExpressionDepth { return nil }
+
+    // The look-BEHIND below indexes one before the current token, so the sum's own start is where
+    // that index is measured from -- exactly what `originalTokens` is on the C++ side.
+    guard var sumType = calcParseProduct(cursor, &index, end, depth, &builder, options, &state) else { return nil }
+
+    var childCount: UInt32 = 0
+
+    while index < end {
+        let token = cursor.tokenAt(index)
+        let op = token.type == WebCore.DelimiterToken ? token.delimiter : 0
+        if op != 0x2B && op != 0x2D { break }  // '+' and '-'
+
+        // `calc(1px+ 2px)` is invalid: the operator must be PRECEDED by whitespace. The C++ reads
+        // `originalTokens[tokens.begin() - originalTokens.data() - 1]`, which is the token before
+        // the operator in the whole range -- an index subtraction here, and the reason whitespace
+        // tokens are not filtered out of the cursor.
+        if index == 0 { return nil }
+        if !calcTokenIsWhitespace(cursor.tokenAt(index - 1).type) { return nil }
+
+        index += 1
+        // `calc(1px +2px)` is invalid: the operator must be FOLLOWED by whitespace.
+        if index >= end || !calcTokenIsWhitespace(cursor.tokenAt(index).type) { return nil }
+        calcSkipWhitespace(cursor, &index, end)
+
+        guard let nextType = calcParseProduct(cursor, &index, end, depth, &builder, options, &state) else { return nil }
+
+        if op == 0x2D {
+            // `Negate` keeps its operand's type unchanged.
+            guard builder.buildOperation(.Negate, 1, nextType, false) else { return nil }
+        }
+
+        if childCount == 0 { childCount = 1 }
+        guard let merged = sumType.added(to: nextType) else { return nil }
+        sumType = merged
+        childCount += 1
+    }
+
+    if childCount == 0 { return sumType }
+    guard builder.buildOperation(.Sum, childCount, sumType, false) else { return nil }
+    return sumType
+}
+
+/// The stage D entry point: parse the token range INSIDE a `calc()` into the operand stack.
+///
+/// The caller has already consumed the `calc(` and the matching `)`, exactly as
+/// `parseAndSimplify`'s `consumeFunction` does, so this sees `<calc-sum>` and nothing else.
+@_expose(Cxx)
+public func cssCalcParseSwift(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions
+) -> WebCore.CSSCalc.CSSCalcSwiftParseResult {
+    var result = WebCore.CSSCalc.CSSCalcSwiftParseResult()
+    var state = CalcParseState()
+    var index: UInt32 = 0
+    let end = cursor.tokenCount()
+
+    calcSkipWhitespace(cursor, &index, end)
+
+    guard let type = calcParseSum(cursor, &index, end, 0, &builder, options, &state) else {
+        result.outcome = UInt8(state.declined
+            ? WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue
+            : WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Failed.rawValue)
+        result.declineReason = UInt8(state.declineReason.rawValue)
+        return result
+    }
+
+    // `parseCalcFunction` requires the inner range to be exhausted -- extraneous tokens are a
+    // failure, not a decline.
+    calcSkipWhitespace(cursor, &index, end)
+    if index != end {
+        result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Failed.rawValue)
+        return result
+    }
+
+    // The root is only knowable once the descent is done; see `finishRoot`'s comment.
+    guard builder.finishRoot() else {
+        result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Failed.rawValue)
+        return result
+    }
+
+    result.type = type
+    result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Parsed.rawValue)
+    result.requiresConversionData = state.requiresConversionData
+    return result
+}
+
+
 #endif
