@@ -2386,12 +2386,12 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount
     return true;
 }
 
-#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+// Not gated: `cssCalcSwiftParseIntoChild` above calls this on its failure and contract-violation
+// paths, and that entry is production. See the declaration's comment.
 void CSSCalcSwiftBuilder::clearOperands() noexcept
 {
     m_operands->value.shrink(0);
 }
-#endif
 
 bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot) noexcept
 {
