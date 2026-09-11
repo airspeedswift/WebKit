@@ -5870,18 +5870,17 @@ private func calcParseValue(
         // `parseCalcDimension`: `CSSUnitType::Unknown` is the reject, and it is a FAILURE -- the
         // C++ arm returns nullopt for it too.
         if token.unit == WebCore.CSSUnitType.Unknown { return nil }
-        if WebCore.CSSCalc.cssCalcSwiftUnitRequiresConversionData(UInt16(token.unit.rawValue)) {
+        // Both unit answers rode over in the token's padding, so neither is a crossing: which
+        // alternative `makeNumeric` builds, and whether the unit needs conversion data.
+        if token.unitFlags & WebCore.CSSCalc.cssCalcSwiftTokenUnitNeedsConversionData != 0 {
             // `absoluteLengthUnitsOnly` makes this invalid input, not a decline.
             if options.absoluteLengthUnitsOnly { return nil }
             state.requiresConversionData = true
         }
-        // Which alternative `makeNumeric` builds is C++'s seventy-case table, asked once here
-        // rather than reproduced.
-        let kind = WebCore.CSSCalc.cssCalcSwiftLeafKindForUnit(UInt16(token.unit.rawValue))
         guard builder.pushLeaf(WebCore.CSSCalc.CSSCalcSwiftLeaf(
             value: token.numericValue,
             unitType: UInt16(token.unit.rawValue),
-            kind: kind,
+            kind: WebCore.CSSCalc.cssCalcSwiftLeafKindForUnit(UInt16(token.unit.rawValue)),
             percentHint: 0), false) else { return nil }
         return CalcType.determineType(token.unit)
 

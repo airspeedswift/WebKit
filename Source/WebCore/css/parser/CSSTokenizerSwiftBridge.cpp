@@ -2569,7 +2569,18 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         return result;
 
     result.swiftRequiresConversionData = swiftResult.requiresConversionData;
-    result.emRequiresConversionData = CSSCalc::cssCalcSwiftUnitRequiresConversionData(static_cast<uint16_t>(CSSUnitType::Em));
+    // Self-test through the REAL path rather than through a predicate: tokenize `1em`, read token 0
+    // off a cursor, and check the conversion-data bit the grammar actually reads. Stronger than the
+    // old direct call, because it also proves the bit survives the crossing in the token's padding.
+    {
+        String emSource { "calc(1em)"_span8 };
+        CSSTokenizer emTokenizer(emSource);
+        auto emRange = emTokenizer.tokenRange();
+        auto emInner = CSSPropertyParserHelpers::consumeFunction(emRange);
+        auto emCursor = CSSCalc::CSSCalcSwiftParseCursor { emInner };
+        result.emRequiresConversionData = emCursor.tokenCount()
+            && (emCursor.tokenAt(0).unitFlags & CSSCalc::cssCalcSwiftTokenUnitNeedsConversionData);
+    }
     {
         auto probeCursor = CSSCalc::CSSCalcSwiftParseCursor { innerRange };
         result.cursorFirstTokenType = probeCursor.tokenCount() ? static_cast<uint8_t>(probeCursor.tokenAt(0).type) : 0xFF;

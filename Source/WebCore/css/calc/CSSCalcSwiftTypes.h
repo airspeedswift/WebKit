@@ -1184,7 +1184,26 @@ struct CSSCalcSwiftToken {
     // needs no crossing. Pinned one enumerator per line in CSSCalcTree+Parser.cpp rather than
     // trusted, exactly as the tokenizer boundary pins its token numbering.
     uint8_t blockType;
+
+    // ONE ANSWER THAT RIDES IN THE PADDING, so the grammar asks for it for free rather than making
+    // a crossing. It is a function of `unit` alone and was a separate exported C++ call made once
+    // per dimension leaf built; the struct had seven spare bytes, so carrying it here deletes a
+    // boundary entry point instead of adding one.
+    //
+    // `makeNumeric`'s answer (which alternative a unit builds) deliberately does NOT ride here, and
+    // that is measured, not stylistic: filling it in `tokenAt` cost 403 instructions on the
+    // eight-term band, because `tokenAt` runs once per TOKEN while the answer is needed once per
+    // dimension LEAF, and `makeNumeric` constructs and destroys a `Child`. It stays a crossing.
+    //
+    // Filled ONLY for a `DimensionToken` -- they are meaningless otherwise, and computing them for
+    // every whitespace token and operator would be the trade the other way round.
+    //
+    // Bit 0: `conversionToCanonicalUnitRequiresConversionData(unit)`. A bitfield rather than a
+    // `bool` so a second unit predicate costs no more bytes.
+    uint8_t unitFlags;
 };
+// `CSSCalcSwiftTokenUnitNeedsConversionData` -- bit 0 of `unitFlags`.
+static constexpr uint8_t cssCalcSwiftTokenUnitNeedsConversionData = 1 << 0;
 static_assert(sizeof(CSSCalcSwiftToken) == 24);
 static_assert(alignof(CSSCalcSwiftToken) == 8);
 
@@ -1312,18 +1331,11 @@ struct alignas(8) CSSCalcSwiftParseResult {
 static_assert(sizeof(CSSCalcSwiftParseResult) == 16);
 static_assert(alignof(CSSCalcSwiftParseResult) == 8);
 
-// The alternative `makeNumeric` would build for `unit`.
-//
-// C++ answers this, and that is the point: `makeNumeric` maps unit to alternative through a
-// seventy-case table, and reproducing the choice in Swift would duplicate it -- the same argument
-// `CSSCalcSwiftNumericResult::kind` already carries in this file. Called once per dimension leaf
-// actually built, NOT once per token, so it costs nothing on the tokens the grammar walks past.
-// Returns a `CSSCalcSwiftNodeKind`.
-WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
 
-// `conversionToCanonicalUnitRequiresConversionData(unit)`. Same argument: a unit predicate whose
-// table belongs to C++.
-WEBCORE_EXPORT bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept;
+// The alternative `makeNumeric` would build for `unit`, a `CSSCalcSwiftNodeKind`. C++ answers it
+// because `makeNumeric` owns the seventy-case unit table. Called once per dimension leaf actually
+// built -- see the note on `unitFlags` for why it is not carried in the token.
+WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
 
 // `lookupConstantNumber(id)`: the five `<calc-keyword>` constants. `resolved` false means the
 // identifier is not one of them. Same argument again -- the table is C++'s, and it is keyed on

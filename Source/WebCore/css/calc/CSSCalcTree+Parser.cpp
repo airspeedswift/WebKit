@@ -1685,11 +1685,6 @@ uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
     return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Operation);
 }
 
-bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept
-{
-    return conversionToCanonicalUnitRequiresConversionData(static_cast<CSSUnitType>(unit));
-}
-
 CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
 {
     auto constant = lookupConstantNumber(static_cast<CSSValueID>(id));
@@ -1707,6 +1702,19 @@ CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
 
 // The Swift grammar's depth limit must be the C++ one, or the two arms disagree about which deeply
 // nested expressions parse -- a divergence no corpus of ordinary CSS would surface.
+// Which alternative `makeNumeric` builds for `unit`, and whether the unit needs conversion data.
+// Static so it is not a boundary entry point: both answers ride in `CSSCalcSwiftToken`'s padding
+// now, so the grammar never calls this.
+// NARROW VERSION, and the wide one is refuted. Filling `leafKind` here too -- i.e. calling
+// `makeNumeric` from `tokenAt` -- measured WORSE by 403 instructions on the eight-term band and
+// +0.037 on the mean, because `tokenAt` runs once per TOKEN and `makeNumeric` constructs and
+// destroys a `Child`, so a per-leaf cost became a per-token-read one. Only the cheap answer rides
+// here: `conversionToCanonicalUnitRequiresConversionData` is a plain switch over the unit.
+static uint8_t cssCalcSwiftUnitFlagsFor(CSSUnitType unit) noexcept
+{
+    return conversionToCanonicalUnitRequiresConversionData(unit) ? cssCalcSwiftTokenUnitNeedsConversionData : 0;
+}
+
 static_assert(maxExpressionDepth == 100);
 
 uint32_t CSSCalcSwiftParseCursor::tokenCount() const noexcept
@@ -1731,6 +1739,10 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
     // reads.
     bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
 
+    // Filled only for a DimensionToken: `makeNumeric` is not free, and running it for every
+    // whitespace token and operator would cost more than the two crossings this saves.
+    uint8_t unitFlags = type == DimensionToken ? cssCalcSwiftUnitFlagsFor(token.unitType()) : 0;
+
     return {
         .numericValue = isNumeric ? token.numericValue() : 0,
         .id = static_cast<uint16_t>(token.id()),
@@ -1739,6 +1751,7 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
         .unit = token.unitType(),
         .type = type,
         .blockType = static_cast<uint8_t>(token.getBlockType()),
+        .unitFlags = unitFlags,
     };
 }
 
