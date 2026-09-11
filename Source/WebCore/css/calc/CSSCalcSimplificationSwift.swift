@@ -5808,7 +5808,38 @@ private func calcSkipWhitespace(
     }
 }
 
-/// `<calc-value>` minus the block arm: a single leaf token.
+/// The index of the `BlockEnd` matching the `BlockStart` at `start`, or nil if the range ends first.
+///
+/// Swift computes block extents itself -- that is what `blockType` is in the token for. `nil` cannot
+/// happen for a range the tokenizer produced, since it balances blocks and auto-closes an
+/// unterminated one, but it is a parse failure rather than a precondition: a cursor is built from a
+/// caller's range and this function does not get to assume where it came from.
+private func calcFindBlockEnd(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ state: inout CalcParseState,
+    _ start: UInt32,
+    _ end: UInt32
+) -> UInt32? {
+    var depth = 0
+    var i = start
+    while i < end {
+        let blockType = calcToken(cursor, &state, i).blockType
+        if blockType == calcBlockStart {
+            depth += 1
+        } else if blockType == calcBlockEnd {
+            depth -= 1
+            if depth == 0 { return i }
+        }
+        i += 1
+    }
+    return nil
+}
+
+/// `CSSParserToken::BlockType`, pinned on the C++ side one enumerator per line.
+private let calcBlockStart: UInt8 = 1
+private let calcBlockEnd: UInt8 = 2
+
+/// `<calc-value>` = `<number>` | `<dimension>` | `<percentage>` | `<calc-keyword>` | `( <calc-sum> )`.
 private func calcParseValue(
     _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
     _ index: inout UInt32,
@@ -5823,14 +5854,13 @@ private func calcParseValue(
 
     let token = calcToken(cursor, &state, index)
 
-    // The two uncovered block shapes, declined rather than failed: `parseCalcValue`'s `findBlock`
-    // accepts a `LeftParenthesisToken` as a nested `calc()` and any `isCalcFunction` id as itself.
-    // Both are real CSS this grammar will cover later, so treating them as invalid input would be
-    // wrong in the one direction that produces a wrong stylesheet.
-    if token.type == WebCore.LeftParenthesisToken || token.type == WebCore.FunctionToken {
-        state.declined = true
-        state.declineReason = token.type == WebCore.FunctionToken ? .MathFunction : .MathFunction
-        return nil
+    // `parseCalcValue`'s `findBlock`: a `LeftParenthesisToken` is a nested `<calc-sum>`, and so is a
+    // `calc()` / `-webkit-calc()` function. Any OTHER math function is real CSS this grammar does
+    // not cover yet, so it declines; a function block that is not a math function at all is a parse
+    // FAILURE, which is what the C++ does with it -- `findBlock` returns nothing and the value
+    // switch below has no `FunctionToken` arm.
+    if token.blockType == calcBlockStart {
+        return calcParseBlock(cursor, &index, end, depth, &builder, options, &state, token)
     }
 
     // `tokens.consumeIncludingWhitespace()`: take this token, then skip the whitespace after it.
@@ -5872,7 +5902,7 @@ private func calcParseValue(
         if token.unit == WebCore.CSSUnitType.Unknown { return nil }
         // Both unit answers rode over in the token's padding, so neither is a crossing: which
         // alternative `makeNumeric` builds, and whether the unit needs conversion data.
-        if token.unitFlags & WebCore.CSSCalc.cssCalcSwiftTokenUnitNeedsConversionData != 0 {
+        if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenUnitNeedsConversionData != 0 {
             // `absoluteLengthUnitsOnly` makes this invalid input, not a decline.
             if options.absoluteLengthUnitsOnly { return nil }
             state.requiresConversionData = true
@@ -5904,6 +5934,65 @@ private func calcParseValue(
     default:
         return nil
     }
+}
+
+/// The block arm of `<calc-value>`, deliberately OUT OF LINE.
+///
+/// `@inline(never)` keeps `calcParseValue` small, and it is worth **only -2 instructions on a
+/// single-leaf parse and -13 on the eight-term band** -- which is the honest finding, because the
+/// first version of this comment claimed the arm's size was the cost and that is REFUTED.
+///
+/// Covering blocks costs **+43 on a single-leaf parse and +226 on the eight-term band** whatever is
+/// done with the arm, and the reason is structural: the block arm calls `calcParseSum`, so the
+/// descent stops being a DAG -- sum, product, value -- and becomes a CYCLE, which no amount of
+/// moving code between functions removes. Before blocks the whole descent could inline into one
+/// function; it cannot now. The C++ parser has the same cycle and always did, which is why its
+/// column does not move.
+///
+/// So this attribute is kept for the -2/-13 and for saying where the cold path is, NOT as the fix
+/// for the +43. The +43 is the price of the coverage.
+@inline(never)
+private func calcParseBlock(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState,
+    _ token: WebCore.CSSCalc.CSSCalcSwiftToken
+) -> CalcType? {
+    // `parseCalcValue`'s `findBlock`: a `LeftParenthesisToken` is a nested `<calc-sum>`, and so is a
+    // `calc()` / `-webkit-calc()` function. Any OTHER math function is real CSS this grammar does
+    // not cover yet, so it declines; a function block that is not a math function at all is a parse
+    // FAILURE, which is what the C++ does with it -- `findBlock` returns nothing and the value
+    // switch has no `FunctionToken` arm.
+    let isPlainCalc = token.type == WebCore.LeftParenthesisToken
+        || token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsPlainCalcFunction != 0
+    if !isPlainCalc {
+        if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
+            state.declined = true
+            state.declineReason = .MathFunction
+        }
+        return nil
+    }
+
+    guard let blockEnd = calcFindBlockEnd(cursor, &state, index, end) else { return nil }
+
+    // `consumeBlock` hands the inner range EXCLUDING the brackets, and `parseCalcFunction` reaches
+    // `parseCalcSum` at `depth + 1`.
+    var inner = index + 1
+    calcSkipWhitespace(cursor, &inner, blockEnd, &state)
+    guard let innerType = calcParseSum(cursor, &inner, blockEnd, depth + 1, &builder, options, &state) else { return nil }
+    // `if (!innerRange.atEnd()) return nullopt` -- extraneous tokens inside the block are a failure,
+    // not a decline.
+    calcSkipWhitespace(cursor, &inner, blockEnd, &state)
+    if inner != blockEnd { return nil }
+
+    // Past the `BlockEnd`, then `tokens.consumeWhitespace()`.
+    index = blockEnd + 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return innerType
 }
 
 /// `<calc-product> = <calc-value> [ [ '*' | '/' ] <calc-value> ]*`
@@ -6542,6 +6631,12 @@ public func cssCalcParseTokenChecksumSwift(_ cursor: WebCore.CSSCalc.CSSCalcSwif
         mix(UInt64(token.unit.rawValue))
         mix(UInt64(token.type.rawValue))
         mix(UInt64(token.blockType))
+        // Folded so the field crosses under test at all. NOTE, stated rather than implied: a
+        // field-sensitivity PAIR cannot isolate `flags`, because it is a pure function of `unit`
+        // and `functionId`, which are folded above -- two inputs differing in `flags` necessarily
+        // differ in one of those too. The direct checks in `webCoreCSSCalcCompareParse`'s
+        // self-tests are what cover it.
+        mix(UInt64(token.flags))
     }
     return hash
 }

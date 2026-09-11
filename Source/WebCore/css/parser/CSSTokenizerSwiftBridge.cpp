@@ -2014,6 +2014,9 @@ struct CSSCalcParseComparison {
     //   data (`em`). Must be true; a false here means the predicate is mis-wired, not that the
     //   grammar forgot to set the flag.
     bool emRequiresConversionData;
+    //   `functionFlagsSelfTest` -- the two FunctionToken bits, on `calc(`, `min(` and a non-math
+    //   function. Must be true.
+    bool functionFlagsSelfTest;
     // 0 = the input is not a `calc()` this entry can drive, so the case is SKIPPED rather than
     // passed -- a skipped case must never read as agreement.
     bool applicable;
@@ -2454,6 +2457,21 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t le
         mix(static_cast<uint64_t>(token.unitType()));
         mix(static_cast<uint64_t>(type));
         mix(static_cast<uint64_t>(token.getBlockType()));
+        // `flags` is DERIVED INDEPENDENTLY here rather than read from the POD -- that is the point
+        // of an oracle. It checks that `tokenAt` filled the bits from the same predicates, which a
+        // field-sensitivity pair cannot do: `flags` is a pure function of `unit`/`functionId`, both
+        // folded above, so two inputs differing in `flags` necessarily differ in one of those too.
+        uint8_t expectedFlags = 0;
+        if (type == DimensionToken)
+            expectedFlags = conversionToCanonicalUnitRequiresConversionData(token.unitType()) ? CSSCalc::cssCalcSwiftTokenUnitNeedsConversionData : 0;
+        else if (type == FunctionToken) {
+            auto id = token.functionId();
+            if (CSSCalc::isCalcFunction(id))
+                expectedFlags |= CSSCalc::cssCalcSwiftTokenIsCalcFunction;
+            if (id == CSSValueCalc || id == CSSValueWebkitCalc)
+                expectedFlags |= CSSCalc::cssCalcSwiftTokenIsPlainCalcFunction;
+        }
+        mix(static_cast<uint64_t>(expectedFlags));
     }
 
     auto cursor = CSSCalc::CSSCalcSwiftParseCursor { range };
@@ -2579,7 +2597,30 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         auto emInner = CSSPropertyParserHelpers::consumeFunction(emRange);
         auto emCursor = CSSCalc::CSSCalcSwiftParseCursor { emInner };
         result.emRequiresConversionData = emCursor.tokenCount()
-            && (emCursor.tokenAt(0).unitFlags & CSSCalc::cssCalcSwiftTokenUnitNeedsConversionData);
+            && (emCursor.tokenAt(0).flags & CSSCalc::cssCalcSwiftTokenUnitNeedsConversionData);
+    }
+
+    // The two FUNCTION bits, checked directly for the same reason: `flags` is a pure function of
+    // `unit`/`functionId`, both of which the token checksum already folds, so a checksum pair can
+    // never isolate a dropped `flags` field. `min(` must be a calc function and NOT plain calc;
+    // `calc(` must be both; a non-math function must be neither.
+    {
+        auto probeFlags = [](ASCIILiteral text) -> uint8_t {
+            String source { text };
+            CSSTokenizer t(source);
+            auto range = t.tokenRange();
+            auto cursor = CSSCalc::CSSCalcSwiftParseCursor { range };
+            return cursor.tokenCount() ? cursor.tokenAt(0).flags : 0;
+        };
+        auto calcFlags = probeFlags("calc(1px)"_s);
+        auto minFlags = probeFlags("min(1px, 2px)"_s);
+        auto otherFlags = probeFlags("translate(1px)"_s);
+        result.functionFlagsSelfTest =
+            (calcFlags & CSSCalc::cssCalcSwiftTokenIsCalcFunction)
+            && (calcFlags & CSSCalc::cssCalcSwiftTokenIsPlainCalcFunction)
+            && (minFlags & CSSCalc::cssCalcSwiftTokenIsCalcFunction)
+            && !(minFlags & CSSCalc::cssCalcSwiftTokenIsPlainCalcFunction)
+            && !otherFlags;
     }
     {
         auto probeCursor = CSSCalc::CSSCalcSwiftParseCursor { innerRange };

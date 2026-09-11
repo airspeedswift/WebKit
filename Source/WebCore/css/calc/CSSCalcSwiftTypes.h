@@ -1198,12 +1198,23 @@ struct CSSCalcSwiftToken {
     // Filled ONLY for a `DimensionToken` -- they are meaningless otherwise, and computing them for
     // every whitespace token and operator would be the trade the other way round.
     //
-    // Bit 0: `conversionToCanonicalUnitRequiresConversionData(unit)`. A bitfield rather than a
-    // `bool` so a second unit predicate costs no more bytes.
-    uint8_t unitFlags;
+    // Three cheap predicates, one bit each. All are pure functions of a field already in this
+    // struct, so none of them is new information crossing -- what they buy is that the grammar does
+    // not make a call to ask. Each is a plain switch on the C++ side; the expensive answer
+    // (`makeNumeric`'s) deliberately stays a crossing, see the note above.
+    uint8_t flags;
 };
-// `CSSCalcSwiftTokenUnitNeedsConversionData` -- bit 0 of `unitFlags`.
+// Bit 0, for a DimensionToken: `conversionToCanonicalUnitRequiresConversionData(unit)`.
 static constexpr uint8_t cssCalcSwiftTokenUnitNeedsConversionData = 1 << 0;
+// Bit 1, for a FunctionToken: `isCalcFunction(functionId)` -- any of the math functions, `calc()`
+// included. The grammar declines these rather than failing, because they are real CSS it does not
+// cover yet.
+static constexpr uint8_t cssCalcSwiftTokenIsCalcFunction = 1 << 1;
+// Bit 2, for a FunctionToken: the function is `calc()` or `-webkit-calc()` specifically, which
+// `parseCalcFunction` routes straight to `<calc-sum>`. A calc function WITHOUT this bit is a
+// decline; a function block with neither bit is a parse FAILURE, which is what the C++ arm does
+// with it -- `findBlock` returns nothing and the value switch has no `FunctionToken` arm.
+static constexpr uint8_t cssCalcSwiftTokenIsPlainCalcFunction = 1 << 2;
 static_assert(sizeof(CSSCalcSwiftToken) == 24);
 static_assert(alignof(CSSCalcSwiftToken) == 8);
 

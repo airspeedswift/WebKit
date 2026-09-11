@@ -1646,6 +1646,9 @@ static_assert(sizeof(CSSCalcSwiftParseCursor) == sizeof(const CSSParserTokenRang
 static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == 0);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == 1);
 static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
+// Swift's `calcFindBlockEnd` compares against these two values literally, so the asserts above are
+// what keep the two sides in step; a renumbering fails the build rather than silently changing
+// which token closes a block.
 
 // `id` and `functionId` cross as raw `CSSValueID` values, and "absent" has to be a value Swift can
 // test. `CSSParserToken::id()`/`functionId()` already return `CSSValueInvalid` for a token of the
@@ -1715,6 +1718,16 @@ static uint8_t cssCalcSwiftUnitFlagsFor(CSSUnitType unit) noexcept
     return conversionToCanonicalUnitRequiresConversionData(unit) ? cssCalcSwiftTokenUnitNeedsConversionData : 0;
 }
 
+static uint8_t cssCalcSwiftFunctionFlagsFor(CSSValueID functionId) noexcept
+{
+    uint8_t flags = 0;
+    if (isCalcFunction(functionId))
+        flags |= cssCalcSwiftTokenIsCalcFunction;
+    if (functionId == CSSValueCalc || functionId == CSSValueWebkitCalc)
+        flags |= cssCalcSwiftTokenIsPlainCalcFunction;
+    return flags;
+}
+
 static_assert(maxExpressionDepth == 100);
 
 uint32_t CSSCalcSwiftParseCursor::tokenCount() const noexcept
@@ -1741,7 +1754,11 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
 
     // Filled only for a DimensionToken: `makeNumeric` is not free, and running it for every
     // whitespace token and operator would cost more than the two crossings this saves.
-    uint8_t unitFlags = type == DimensionToken ? cssCalcSwiftUnitFlagsFor(token.unitType()) : 0;
+    uint8_t flags = 0;
+    if (type == DimensionToken)
+        flags = cssCalcSwiftUnitFlagsFor(token.unitType());
+    else if (type == FunctionToken)
+        flags = cssCalcSwiftFunctionFlagsFor(token.functionId());
 
     return {
         .numericValue = isNumeric ? token.numericValue() : 0,
@@ -1751,7 +1768,7 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
         .unit = token.unitType(),
         .type = type,
         .blockType = static_cast<uint8_t>(token.getBlockType()),
-        .unitFlags = unitFlags,
+        .flags = flags,
     };
 }
 
