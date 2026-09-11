@@ -3497,6 +3497,12 @@ fileprivate extension CalcFlatTree {
             case .Product:
                 simplifyProduct(i, options)
 
+            case .Min:
+                simplifyMinMax(i, options, false)
+
+            case .Max:
+                simplifyMinMax(i, options, true)
+
             case .NonCanonicalDimension:
                 simplifyNonCanonicalDimension(i, options, builder)
 
@@ -5771,7 +5777,7 @@ fileprivate extension CalcFlatTree {
     ///
     /// THE ROUTE SET IS SMALLER, NOT DIFFERENT. `emit` above has three ways out -- `pushLeaf`,
     /// `buildOperation`, and a deep copy from the original for the payloads a fixed-size node cannot
-    /// carry. A parsed tree holds only the four numeric leaves and the four operations
+    /// carry. A parsed tree holds only the four numeric leaves and the six operations
     /// `buildOperation` serves, so the third route has nothing to serve and its absence is a REFUSAL
     /// rather than an omission: anything else declines the tree to the C++ arm instead of building
     /// a node from an `origin` field that names nothing.
@@ -5791,7 +5797,7 @@ fileprivate extension CalcFlatTree {
             }
             return builder.pushLeaf(leaf.boundaryLeaf, isRoot)
 
-        case .Sum, .Product, .Negate, .Invert:
+        case .Sum, .Product, .Negate, .Invert, .Min, .Max:
             break
 
         default:
@@ -5866,14 +5872,15 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
 /// `<calc-sum>` over `<calc-product>` over `<calc-value>`, for the leaf grammar.
 ///
 /// COVERED: `<number>`, `<percentage>`, `<dimension>` (canonical and non-canonical), the five
-/// `<calc-keyword>` constants, `+`/`-`/`*`/`/` with both whitespace-adjacency rules, and the type
-/// algebra that goes with them. DECLINED, each with its own reason so the coverage number stays
-/// attributable: nested functions and parenthesised blocks (stage D2), math functions (stage E),
-/// symbols and tree-counting (stage F).
+/// `<calc-keyword>` constants, `+`/`-`/`*`/`/` with both whitespace-adjacency rules, parenthesised
+/// blocks and nested `calc()` (stage D2), `min()` and `max()` at any depth INCLUDING the top level
+/// (stage E1), and the type algebra that goes with them. DECLINED, each with its own reason so the
+/// coverage number stays attributable: the other twenty-two math functions (stages E2-E5), symbols
+/// and tree-counting (stage F).
 ///
 /// A DECLINE AND A FAILURE ARE DIFFERENT OUTCOMES and share no channel. `calc(1px +2px)` is a
 /// FAILURE -- the C++ arm rejects it too, so retrying would re-derive the same rejection and a
-/// caller that treated it as a decline would parse garbage twice. `calc(min(1px, 2px))` is a
+/// caller that treated it as a decline would parse garbage twice. `calc(hypot(1px, 2px))` is a
 /// DECLINE -- this grammar does not cover it yet and the C++ arm must run. Collapsing them makes
 /// the decline count meaningless as a coverage number, which is the one number this stage exists
 /// to move.
@@ -6249,6 +6256,11 @@ private func calcParseBlock(
     let isPlainCalc = token.type == WebCore.LeftParenthesisToken
         || token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsPlainCalcFunction != 0
     if !isPlainCalc {
+        // A math function the grammar covers: `parseCalcFunction` dispatches on the id and reaches
+        // the same `<calc-sum>` recursion the plain-calc arm does, one level down.
+        if let functionAlternative = calcParseFunctionAlternative(token.functionAlternative) {
+            return calcParseFunctionBlock(cursor, &index, end, depth, &out, options, &state, functionAlternative)
+        }
         if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
             state.declined = true
             state.declineReason = .MathFunction
@@ -6274,6 +6286,118 @@ private func calcParseBlock(
     // A parenthesised group is not a node: the C++ returns the inner `<calc-sum>`'s child directly,
     // so the block contributes no slot of its own and the caller links the inner root.
     return innerParsed
+}
+
+// MARK: The math functions (P7b stage E1: `min()` and `max()`)
+
+/// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `functionAlternative` byte names, or nil for
+/// a function this grammar does not cover.
+///
+/// TOTAL AND EXPLICIT, never `CSSCalcSwiftAlternative(rawValue:)`, and that is not style: on an
+/// IMPORTED C++ enum `init?(rawValue:)` NEVER FAILS (interop notes 92), so the `guard let` that
+/// spelling invites is vacuous and an out-of-range byte would become an alternative the emit then
+/// hands to `buildOperation`. Same shape as `calcNumericAlternativeForLeafKind` above, for the same
+/// reason: the byte crosses a language boundary and is validated on arrival.
+@inline(always)
+private func calcParseFunctionAlternative(_ raw: UInt8) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
+    switch raw {
+    case WebCore.CSSCalc.CSSCalcSwiftAlternative.Min.rawValue: return .Min
+    case WebCore.CSSCalc.CSSCalcSwiftAlternative.Max.rawValue: return .Max
+    default: return nil
+    }
+}
+
+/// `<min()>` / `<max()>` as a nested `<calc-value>`: find the block, parse its arguments, step past.
+///
+/// The plain-calc arm next door and this one differ only in what they run over the inner range --
+/// `<calc-sum>` there, `<calc-sum>#` here -- which is exactly how `parseCalcFunction` is shaped.
+/// Both enter the inner range at `depth + 1`, matching `parseCalcValue`'s
+/// `parseCalcFunction(innerRange, *functionId, depth + 1, state)` (`CSSCalcTree+Parser.cpp:1541`).
+@inline(never)
+private func calcParseFunctionBlock(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    guard let blockEnd = calcFindBlockEnd(cursor, &state, index, end) else { return nil }
+
+    var inner = index + 1
+    guard let parsed = calcParseArgumentList(
+        cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative) else { return nil }
+    // `if (!innerRange.atEnd()) return nullopt`. The list loop runs to `blockEnd` by construction, so
+    // this cannot fail today; it is kept because the C++ states it and a future arity-limited family
+    // will be able to stop early.
+    if inner != blockEnd { return nil }
+
+    index = blockEnd + 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return parsed
+}
+
+/// `consumeOneOrMoreArguments<Op>` (`CSSCalcTree+Parser.cpp:321`-`:376`): `<calc-sum>#`, at least
+/// one, over the whole range it is given.
+///
+/// NOTHING HOLDS THE OPERANDS. A running `CalcType` and a `UInt32` count, exactly the idiom
+/// `calcParseProduct` and `calcParseSum` use -- the arguments are already in the flat buffer and are
+/// linked as they are parsed, so no Swift container ever holds one and there is no `Array` for
+/// `swift_bridgeObjectRelease` to reach.
+///
+/// SPECIALISED TO `Min`/`Max`'S TYPE RULE, which is `input = AllowedTypes::Any` (so `validateType`
+/// is `return true` and there is nothing to call), `merge = MergePolicy::Consistent` (so the fold is
+/// `Type::consistentType`) and `output = OutputTransform::None` (so the merged type is the node's
+/// type unchanged). The three later families with a different rule get their own arms rather than a
+/// policy parameter, which would be a run-time dispatch for a compile-time fact.
+private func calcParseArgumentList(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+
+    var mergedType = CalcType()
+    var childCount: UInt32 = 0
+    var head = CalcFlatNode.noNode
+    var tail = CalcFlatNode.noNode
+
+    while index < end {
+        calcSkipWhitespace(cursor, &index, end, &state)
+        // `requireComma && !consumeCommaIncludingWhitespace(tokens)`, spelled as "every argument
+        // after the first" rather than as a flag. `min(1px 2px)` fails here, which is what the C++
+        // does with it.
+        if childCount > 0 {
+            guard index < end, calcToken(cursor, &state, index).type == WebCore.CommaToken else { return nil }
+            index += 1
+            calcSkipWhitespace(cursor, &index, end, &state)
+        }
+
+        guard let argument = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+
+        if childCount == 0 {
+            mergedType = argument.type
+            head = argument.index
+        } else {
+            guard let merged = mergedType.consistentType(with: argument.type) else { return nil }
+            mergedType = merged
+            calcParseLink(&out, tail, argument.index)
+        }
+        tail = argument.index
+        childCount += 1
+    }
+
+    // `if (argumentCount < 1) return nullopt` -- `min()` is invalid input, not a decline.
+    if childCount == 0 { return nil }
+    guard let me = calcParseAppendOperation(&out, alternative, head, childCount, mergedType) else { return nil }
+    return CalcParsed(index: me, type: mergedType)
 }
 
 /// `<calc-product> = <calc-value> [ [ '*' | '/' ] <calc-value> ]*`
@@ -6517,7 +6641,22 @@ private func calcParseAttempt(
         var index: UInt32 = 0
         calcSkipWhitespace(cursor, &index, end, &state)
 
-        guard let parsed = calcParseSum(cursor, &index, end, 0, &out, options, &state) else {
+        // THE TOP-LEVEL FUNCTION, which `parseAndSimplify` reads before it hands the inner range
+        // over: `calc()` and `-webkit-calc()` have a bare `<calc-sum>` body, and `min()`/`max()`
+        // have an argument list. Both at depth 0, matching `parseCalcFunction(tokens, function, 0,
+        // state)` (`CSSCalcTree+Parser.cpp:194`) -- this is NOT the block arm's `depth + 1`, and
+        // routing it there instead is the divergence only a 100-deep expression would show.
+        //
+        // Spelled as an `if`/`else` rather than `Optional.map`, because the branches take `out` and
+        // `state` `inout` and a closure cannot capture an `OutputSpan`.
+        let descent: CalcParsed?
+        if let rootFunction = calcParseFunctionAlternative(options.rootAlternative) {
+            descent = calcParseArgumentList(cursor, &index, end, 0, &out, options, &state, rootFunction)
+        } else {
+            descent = calcParseSum(cursor, &index, end, 0, &out, options, &state)
+        }
+
+        guard let parsed = descent else {
             // A descent that stopped with the buffer full is an overflow rather than a rejection.
             // Tested here, once per attempt, rather than threaded back through every `nil`.
             attempt.overflowed = out.count >= out.capacity

@@ -1195,6 +1195,27 @@ struct CSSCalcSwiftToken {
     // not make a call to ask. Each is a plain switch on the C++ side; the expensive answer
     // (`makeNumeric`'s) deliberately stays a crossing, see the note above.
     uint8_t flags;
+
+    // WHICH MATH FUNCTION a `FunctionToken` names, as a `CSSCalcSwiftAlternative` raw value, or 0
+    // when it is not one the Swift grammar can build. Alternative 0 is `Number`, a LEAF, so it can
+    // never be a function and needs no separate sentinel.
+    //
+    // THIS FIELD EXISTS BECAUSE PROBE E0 FAILED, and the alternative it costs is worth naming. The
+    // ideal shape is for Swift to compare `functionId` against `CSSValueMin` directly -- C++'s own
+    // enumerator, obtained from C++, which is exactly what this header's rule above asks for. Swift
+    // CAN name the type `WebCore::CSSValueID`, but it can name NO enumerator of it, and that is a
+    // toolchain defect rather than a language limit: an incomplete `enum CSSValueID : uint16_t;`
+    // declaration in a sibling header of the same Clang module suppresses every enumerator of the
+    // complete definition, and WebCore's `Core` umbrella carries seventeen of them. Reduced to a
+    // fifteen-line reproducer with a control in `cssprobe/e0/twin/`; when it is fixed this field and
+    // the switch that fills it both go away, and Stage E's remaining families cost no C++ at all.
+    //
+    // Until then it is the cheapest honest channel, and it is a byte rather than two more `flags`
+    // bits deliberately: `flags` has five bits left and Stage E has twenty-four alternatives to
+    // name, so bits would have to be rewritten as a byte before E3. Filled by a plain switch over a
+    // field already in the token -- the shape `9638505bc93c` established -- so it is a cheap answer
+    // riding in the padding rather than a crossing.
+    uint8_t functionAlternative;
 };
 // Bit 0, for a DimensionToken: `conversionToCanonicalUnitRequiresConversionData(unit)`.
 static constexpr uint8_t cssCalcSwiftTokenUnitNeedsConversionData = 1 << 0;
@@ -1289,6 +1310,18 @@ struct CSSCalcSwiftParseOptions {
     // `IdentToken` is declined -- the conservative side, since a decline runs the C++ arm and a
     // wrong constant would be a wrong stylesheet.
     bool hasAllowedSymbols;
+
+    // The TOP-LEVEL function, as a `CSSCalcSwiftAlternative` raw value, or 0 for `calc()` and
+    // `-webkit-calc()` -- whose body is a bare `<calc-sum>`, which is what this entry took before
+    // Stage E and what alternative 0 (`Number`, a leaf) therefore stands for here.
+    //
+    // `parseAndSimplify` accepts ANY `isCalcFunction` at the top (`CSSCalcTree+Parser.cpp:171`), so
+    // `width: min(1px, 2px)` is a top-level `Min`, but this entry is handed the range INSIDE the
+    // function and so cannot see which one it was. Carried here rather than by handing Swift the
+    // OUTER range, because routing the top level through the block arm would enter its arguments at
+    // depth 1 where the C++ enters them at 0 (`parseCalcFunction(tokens, function, 0, state)`) -- a
+    // divergence only a 100-deep expression can see and no ordinary corpus contains.
+    uint8_t rootAlternative;
 };
 
 // Why the parse stopped, when it did.

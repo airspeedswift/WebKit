@@ -2025,6 +2025,16 @@ struct CSSCalcParseComparison {
     uint8_t fusedOutcome;
     bool cppSimplifiedParsed;
     bool fusedTreesAgree;
+    // WHETHER THE ORACLE CAN DECIDE THIS CASE AT ALL, which is a property of the INPUT and not of
+    // either arm. `Child::operator==` compares leaf doubles with `==`, so a tree holding a NaN leaf
+    // is not equal to itself, and `treesAgree`/`fusedTreesAgree` are then false however identical
+    // the two trees are. Reported by comparing the C++ arm's tree AGAINST ITSELF -- which is exact,
+    // where a text scan for `NaN` is not: `calc(100px * 0 / 0)` names no NaN and produces one.
+    //
+    // These are NOT a licence to ignore the case: a run must report the blind set separately and
+    // its SIZE, so that a real defect hiding inside it is visible as growth.
+    bool cppSelfEqual;
+    bool cppTerminalSelfEqual;
     // 0 = the input is not a `calc()` this entry can drive, so the case is SKIPPED rather than
     // passed -- a skipped case must never read as agreement.
     bool applicable;
@@ -2521,10 +2531,20 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     if (cppRange.atEnd())
         return result;
 
-    // Only plain `calc()` / `-webkit-calc()`: stage D covers no other function, and driving it with
-    // one would be asking it to decline, which the corpus does separately.
+    // Plain `calc()` / `-webkit-calc()`, or a top-level math function the grammar builds -- which
+    // since stage E1 is `min()` and `max()`. `parseAndSimplify` accepts any `isCalcFunction` at the
+    // top, so `width: min(1px, 2px)` is a top-level `Min` and was skipped by this differential
+    // entirely until now. Anything else would be asking the grammar to decline, which the corpus
+    // does separately.
+    //
+    // THE ROOT ALTERNATIVE IS READ OFF THE TOKEN CHANNEL THE GRAMMAR ITSELF READS, not from a second
+    // switch here: a harness-local `CSSValueMin` table could agree with the corpus while the
+    // channel the island uses was broken, which is the shape of a differential that measures
+    // nothing.
     auto functionId = cppRange.peek().functionId();
-    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc)
+    bool isPlainCalc = functionId == CSSValueCalc || functionId == CSSValueWebkitCalc;
+    uint8_t rootAlternative = CSSCalc::CSSCalcSwiftParseCursor { cppRange }.tokenAt(0).functionAlternative;
+    if (!isPlainCalc && !rootAlternative)
         return result;
     result.applicable = true;
 
@@ -2592,6 +2612,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         .category = category,
         .absoluteLengthUnitsOnly = false,
         .hasAllowedSymbols = withSymbols,
+        .rootAlternative = rootAlternative,
     }, simplificationOptions, root, false);
 
     result.swiftOutcome = swiftResult.outcome;
@@ -2643,6 +2664,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     }
     if (result.cppParsed) {
         result.cppRequiresConversionData = cppTree->requiresConversionData;
+        result.cppSelfEqual = cppTree->root == CSSCalc::copy(cppTree->root);
         result.treesAgree = cppTree->root == root && cppTree->type == swiftResult.type;
         result.conversionDataAgrees = cppTree->requiresConversionData == swiftResult.requiresConversionData;
     }
@@ -2673,6 +2695,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         auto cppTerminalRange = cppRange;
         auto cppTerminal = CSSCalc::parseAndSimplify(cppTerminalRange, parserState, makeParserOptions(category), simplificationOptions, CSSCalc::ParseSimplification::Terminal);
         result.cppSimplifiedParsed = cppTerminal && cppTerminalRange.atEnd();
+        result.cppTerminalSelfEqual = result.cppSimplifiedParsed && cppTerminal->root == CSSCalc::copy(cppTerminal->root);
 
         auto fusedRange = cppRange;
         auto fusedInner = CSSPropertyParserHelpers::consumeFunction(fusedRange);
@@ -2681,6 +2704,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .category = category,
             .absoluteLengthUnitsOnly = false,
             .hasAllowedSymbols = withSymbols,
+            .rootAlternative = rootAlternative,
         }, simplificationOptions, fusedRoot, true);
         result.fusedOutcome = fusedResult.outcome;
         if (result.cppSimplifiedParsed && fusedResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
@@ -2714,8 +2738,13 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
             *outCovered = 0;
         return 0;
     }
+    // Plain `calc()`, or a top-level math function the grammar builds -- `min()`/`max()` since
+    // stage E1. The alternative comes off the same token channel the grammar reads, so this bench
+    // cannot select a band the island would not actually cover.
     auto functionId = baseRange.peek().functionId();
-    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc) {
+    bool isPlainCalc = functionId == CSSValueCalc || functionId == CSSValueWebkitCalc;
+    uint8_t rootAlternative = CSSCalc::CSSCalcSwiftParseCursor { baseRange }.tokenAt(0).functionAlternative;
+    if (!isPlainCalc && !rootAlternative) {
         if (outCovered)
             *outCovered = 0;
         return 0;
@@ -2747,7 +2776,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
     auto category = *accepted;
     auto parserOptions = CSSCalc::ParserOptions { .category = category, .range = WebCore::CSS::All, .allowedSymbols = { }, .propertyOptions = { } };
     auto simplificationOptions = CSSCalc::SimplificationOptions { .category = category, .range = WebCore::CSS::All, .conversionData = std::nullopt, .symbolTable = { }, .allowZeroValueLengthRemovalFromSum = false };
-    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false };
+    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .rootAlternative = rootAlternative };
 
     // Coverage is decided by running the Swift arm ONCE, before timing.
     {
