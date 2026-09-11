@@ -1163,7 +1163,27 @@ struct CSSCalcSwiftSimplificationResult {
 struct CSSCalcSwiftToken {
     // Meaningful for NumberToken, PercentageToken and DimensionToken.
     double numericValue;
-    // `CSSValueID` raw value. Non-zero only for IdentToken.
+    // TWO ANSWERS IN ONE FIELD, discriminated by `type` exactly as `numericValue`, `delimiter`,
+    // `unit` and `flags` already are:
+    //   IdentToken    -- the `CSSValueID` raw value.
+    //   FunctionToken -- WHICH MATH FUNCTION it is, as a `CSSCalcSwiftAlternative` raw value, or 0
+    //                    for one the Swift grammar cannot build. Alternative 0 is `Number`, a LEAF,
+    //                    so it can never be a function and needs no separate sentinel.
+    // Zero for every other token type, which is what `CSSParserToken::id()` returns for them.
+    //
+    // SHARING THE FIELD RATHER THAN ADDING A BYTE IS MEASURED, NOT TIDINESS. A separate
+    // `uint8_t functionAlternative` fits in the struct's six spare bytes and cost SIX RETIRED
+    // INSTRUCTIONS PER TOKEN READ -- +17 on a single-leaf parse and +211 on the eight-term band,
+    // 0.711 -> 0.726 on the production pair, reproduced to three decimals across four runs of two
+    // matched-session builds with the C++ column flat to 0.1%. `tokenAt` runs once per token and
+    // returns this struct BY VALUE, so a field it did not have to write is a field it should not
+    // grow. This field is written unconditionally already.
+    //
+    // THE FUNCTION HALF IS A TOOLCHAIN WORKAROUND AND SHOULD BE DELETED. Swift can name the type
+    // `WebCore::CSSValueID` but no enumerator of it -- a sibling header's incomplete
+    // `enum CSSValueID : uint16_t;` declaration suppresses the whole enumerator list, and Core's
+    // umbrella carries seventeen of them. With that fixed the grammar compares `functionId` against
+    // `CSSValueMin` itself and this overload goes away entirely.
     uint16_t id;
     // `CSSValueID` raw value. Non-zero only for FunctionToken.
     uint16_t functionId;
@@ -1196,26 +1216,6 @@ struct CSSCalcSwiftToken {
     // (`makeNumeric`'s) deliberately stays a crossing, see the note above.
     uint8_t flags;
 
-    // WHICH MATH FUNCTION a `FunctionToken` names, as a `CSSCalcSwiftAlternative` raw value, or 0
-    // when it is not one the Swift grammar can build. Alternative 0 is `Number`, a LEAF, so it can
-    // never be a function and needs no separate sentinel.
-    //
-    // THIS FIELD EXISTS BECAUSE PROBE E0 FAILED, and the alternative it costs is worth naming. The
-    // ideal shape is for Swift to compare `functionId` against `CSSValueMin` directly -- C++'s own
-    // enumerator, obtained from C++, which is exactly what this header's rule above asks for. Swift
-    // CAN name the type `WebCore::CSSValueID`, but it can name NO enumerator of it, and that is a
-    // toolchain defect rather than a language limit: an incomplete `enum CSSValueID : uint16_t;`
-    // declaration in a sibling header of the same Clang module suppresses every enumerator of the
-    // complete definition, and WebCore's `Core` umbrella carries seventeen of them. Reduced to a
-    // fifteen-line reproducer with a control in `cssprobe/e0/twin/`; when it is fixed this field and
-    // the switch that fills it both go away, and Stage E's remaining families cost no C++ at all.
-    //
-    // Until then it is the cheapest honest channel, and it is a byte rather than two more `flags`
-    // bits deliberately: `flags` has five bits left and Stage E has twenty-four alternatives to
-    // name, so bits would have to be rewritten as a byte before E3. Filled by a plain switch over a
-    // field already in the token -- the shape `9638505bc93c` established -- so it is a cheap answer
-    // riding in the padding rather than a crossing.
-    uint8_t functionAlternative;
 };
 // Bit 0, for a DimensionToken: `conversionToCanonicalUnitRequiresConversionData(unit)`.
 static constexpr uint8_t cssCalcSwiftTokenUnitNeedsConversionData = 1 << 0;

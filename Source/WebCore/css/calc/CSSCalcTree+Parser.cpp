@@ -1718,37 +1718,35 @@ static uint8_t cssCalcSwiftUnitFlagsFor(CSSUnitType unit) noexcept
     return conversionToCanonicalUnitRequiresConversionData(unit) ? cssCalcSwiftTokenUnitNeedsConversionData : 0;
 }
 
-static uint8_t cssCalcSwiftFunctionFlagsFor(CSSValueID functionId) noexcept
-{
-    uint8_t flags = 0;
-    if (isCalcFunction(functionId))
-        flags |= cssCalcSwiftTokenIsCalcFunction;
-    if (functionId == CSSValueCalc || functionId == CSSValueWebkitCalc)
-        flags |= cssCalcSwiftTokenIsPlainCalcFunction;
-    return flags;
-}
-
-// Which `CSSCalcSwiftAlternative` a math function names, for the Swift grammar, or 0 (`Number`, a
-// leaf, so never a function) for one it does not cover yet.
+// BOTH FUNCTION ANSWERS IN ONE PASS: the flag bits in the low byte, the `CSSCalcSwiftAlternative`
+// in the high byte. One switch, one call from `tokenAt`, which runs once per TOKEN.
 //
-// THIS SWITCH IS A TOOLCHAIN WORKAROUND AND SHOULD BE DELETED. Swift can name the type
+// THE ALTERNATIVE HALF IS A TOOLCHAIN WORKAROUND AND SHOULD BE DELETED. Swift can name the type
 // `WebCore::CSSValueID` but no enumerator of it, because a sibling header's incomplete
 // `enum CSSValueID : uint16_t;` declaration suppresses the whole enumerator list -- see the note on
 // `CSSCalcSwiftToken::functionAlternative`. With that fixed the grammar compares `functionId`
-// against `CSSValueMin` itself and this function, its call site and the field all go.
-//
-// Cheap and pure, over a field already in the token, so it rides in the padding rather than being a
-// crossing -- the rule commit 9638505bc93c established.
-static uint8_t cssCalcSwiftFunctionAlternativeFor(CSSValueID functionId) noexcept
+// against `CSSValueMin` itself and the alternative byte, this half and the field all go.
+static uint16_t cssCalcSwiftFunctionAnswersFor(CSSValueID functionId) noexcept
 {
+    uint8_t flags = 0;
+    uint8_t alternative = 0;
+    if (isCalcFunction(functionId))
+        flags |= cssCalcSwiftTokenIsCalcFunction;
     switch (functionId) {
+    case CSSValueCalc:
+    case CSSValueWebkitCalc:
+        flags |= cssCalcSwiftTokenIsPlainCalcFunction;
+        break;
     case CSSValueMin:
-        return static_cast<uint8_t>(CSSCalcSwiftAlternative::Min);
+        alternative = static_cast<uint8_t>(CSSCalcSwiftAlternative::Min);
+        break;
     case CSSValueMax:
-        return static_cast<uint8_t>(CSSCalcSwiftAlternative::Max);
+        alternative = static_cast<uint8_t>(CSSCalcSwiftAlternative::Max);
+        break;
     default:
-        return 0;
+        break;
     }
+    return static_cast<uint16_t>(flags) | static_cast<uint16_t>(alternative << 8);
 }
 
 static_assert(maxExpressionDepth == 100);
@@ -1777,25 +1775,24 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
 
     // Filled only for a DimensionToken: `makeNumeric` is not free, and running it for every
     // whitespace token and operator would cost more than the two crossings this saves.
+    uint16_t functionAnswers = 0;
     uint8_t flags = 0;
-    uint8_t functionAlternative = 0;
     if (type == DimensionToken)
         flags = cssCalcSwiftUnitFlagsFor(token.unitType());
     else if (type == FunctionToken) {
-        flags = cssCalcSwiftFunctionFlagsFor(token.functionId());
-        functionAlternative = cssCalcSwiftFunctionAlternativeFor(token.functionId());
+        functionAnswers = cssCalcSwiftFunctionAnswersFor(token.functionId());
+        flags = static_cast<uint8_t>(functionAnswers);
     }
 
     return {
         .numericValue = isNumeric ? token.numericValue() : 0,
-        .id = static_cast<uint16_t>(token.id()),
+        .id = type == FunctionToken ? static_cast<uint16_t>(functionAnswers >> 8) : static_cast<uint16_t>(token.id()),
         .functionId = static_cast<uint16_t>(token.functionId()),
         .delimiter = type == DelimiterToken ? token.delimiter() : u'\0',
         .unit = token.unitType(),
         .type = type,
         .blockType = static_cast<uint8_t>(token.getBlockType()),
         .flags = flags,
-        .functionAlternative = functionAlternative,
     };
 }
 

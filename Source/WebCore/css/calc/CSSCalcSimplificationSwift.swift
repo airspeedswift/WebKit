@@ -6258,7 +6258,7 @@ private func calcParseBlock(
     if !isPlainCalc {
         // A math function the grammar covers: `parseCalcFunction` dispatches on the id and reaches
         // the same `<calc-sum>` recursion the plain-calc arm does, one level down.
-        if let functionAlternative = calcParseFunctionAlternative(token.functionAlternative) {
+        if let functionAlternative = calcParseFunctionAlternative(token.id) {
             return calcParseFunctionBlock(cursor, &index, end, depth, &out, options, &state, functionAlternative)
         }
         if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
@@ -6299,10 +6299,10 @@ private func calcParseBlock(
 /// hands to `buildOperation`. Same shape as `calcNumericAlternativeForLeafKind` above, for the same
 /// reason: the byte crosses a language boundary and is validated on arrival.
 @inline(always)
-private func calcParseFunctionAlternative(_ raw: UInt8) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
+private func calcParseFunctionAlternative(_ raw: UInt16) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
     switch raw {
-    case WebCore.CSSCalc.CSSCalcSwiftAlternative.Min.rawValue: return .Min
-    case WebCore.CSSCalc.CSSCalcSwiftAlternative.Max.rawValue: return .Max
+    case UInt16(WebCore.CSSCalc.CSSCalcSwiftAlternative.Min.rawValue): return .Min
+    case UInt16(WebCore.CSSCalc.CSSCalcSwiftAlternative.Max.rawValue): return .Max
     default: return nil
     }
 }
@@ -6650,7 +6650,7 @@ private func calcParseAttempt(
         // Spelled as an `if`/`else` rather than `Optional.map`, because the branches take `out` and
         // `state` `inout` and a closure cannot capture an `OutputSpan`.
         let descent: CalcParsed?
-        if let rootFunction = calcParseFunctionAlternative(options.rootAlternative) {
+        if let rootFunction = calcParseFunctionAlternative(UInt16(options.rootAlternative)) {
             descent = calcParseArgumentList(cursor, &index, end, 0, &out, options, &state, rootFunction)
         } else {
             descent = calcParseSum(cursor, &index, end, 0, &out, options, &state)
