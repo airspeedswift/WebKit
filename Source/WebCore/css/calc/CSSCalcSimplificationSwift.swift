@@ -5790,19 +5790,33 @@ fileprivate extension CalcFlatTree {
     func emitParsed(_ i: Int, isRoot: Bool, into builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder) -> Bool {
         let node = nodes[i]
 
-        // ONE dispatch, for the reason `emit` gives: asking `numericLeaf` and then switching again
-        // on the same byte lets the optimizer hoist the operator routing above the leaf return.
-        switch node.alternative {
-        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
+        // TWO MASK TESTS, NOT TWO COMPARE CHAINS, and the shape is `CalcFlattenReport`'s: one
+        // `lsr`/`tbz` pair against an immediate the optimizer folds, instead of a run of `cmp`s
+        // proportional to how many alternatives this route serves.
+        //
+        // The chain it replaces was measured. `emitParsed` runs ONCE PER EMITTED NODE, and stage
+        // E1's two extra labels on the operation arm cost **+12.7 retired instructions per parse**
+        // -- isolated with a built probe that dropped `.Min, .Max` from the label and recovered
+        // +18.6 to +5.9, and per-node rather than per-token by the per-band fit (~7.5 + 5.5n; on
+        // the nine-node band the probe recovered 53.1 of the 53.7 delta). A compare chain is linear
+        // in the label count, so the arm that widens coverage is the arm that pays, and the next
+        // stage takes the operation set from six alternatives to seventeen. A mask is constant in
+        // it.
+        //
+        // The same reasoning `CalcFlatCoverage.bit`'s note gives applies here and is why this is a
+        // `&<<` against a `static var`: the shift cannot overflow (41 alternatives, 41 < 64) so the
+        // masking shift is the identity, and a computed `static var` folds into the immediate where
+        // a stored `let` would be a `swift_once` atomic load on a per-node path.
+        let alternativeBit = CalcFlatCoverage.bit(node.alternative)
+
+        if alternativeBit & CalcParsedEmitCoverage.leafMask != 0 {
             guard let leaf = node.numericLeaf else {
                 return false
             }
             return builder.pushLeaf(leaf.boundaryLeaf, isRoot)
+        }
 
-        case .Sum, .Product, .Negate, .Invert, .Min, .Max:
-            break
-
-        default:
+        guard alternativeBit & CalcParsedEmitCoverage.operationMask != 0 else {
             return false
         }
 
@@ -5817,6 +5831,44 @@ fileprivate extension CalcFlatTree {
         // THE NODE'S OWN TYPE, which for a parsed node is the one the grammar's type algebra
         // computed on the way up -- the same value stage D handed to this same entry.
         return builder.buildOperation(node.alternative, pushed, node.type, isRoot)
+    }
+}
+
+/// What `emitParsed` can materialise, as two masks over the alternative index.
+///
+/// THE SET IS THE BOUNDARY'S, NOT THE GRAMMAR'S, and stating it here is what keeps the two from
+/// drifting: `leafMask` is what `CSSCalcSwiftBuilder::pushLeaf` takes and `operationMask` is
+/// exactly the switch in `CSSCalcSwiftBuilder::buildOperation`. A grammar arm that produces an
+/// alternative outside them is a boundary contract violation, and `emitParsed` reports it as
+/// `Failed` rather than as a decline -- see `CalcParseAttempt.emitRefused`.
+///
+/// Built from `CalcFlatCoverage.bit` rather than written as a hex literal, for that function's own
+/// reasons: `&<<` cannot overflow at 41 alternatives, so no branchy smart shift is emitted, and the
+/// whole `or` chain folds to one immediate at this size.
+///
+/// A computed `static var` rather than a `static let`, again for `CalcFlatCoverage.mask`'s reason: a
+/// stored global is lazily initialised behind a `swift_once` guard, which is an atomic load, and
+/// both of these are read once per emitted node.
+private enum CalcParsedEmitCoverage {
+    /// The four numeric leaves. `pushLeaf` serves all four and nothing else; the other three leaf
+    /// alternatives -- `Symbol`, `SiblingCount`, `SiblingIndex` -- are stage F and are not here.
+    static var leafMask: UInt64 {
+        return CalcFlatCoverage.bit(.Number)
+            | CalcFlatCoverage.bit(.Percentage)
+            | CalcFlatCoverage.bit(.CanonicalDimension)
+            | CalcFlatCoverage.bit(.NonCanonicalDimension)
+    }
+
+    /// The operations `buildOperation` constructs from operands alone: the two `Children`-slotted
+    /// arithmetic nodes, the two `Children`-slotted comparison functions, and the two whose only
+    /// slot is one `Child`.
+    static var operationMask: UInt64 {
+        return CalcFlatCoverage.bit(.Sum)
+            | CalcFlatCoverage.bit(.Product)
+            | CalcFlatCoverage.bit(.Min)
+            | CalcFlatCoverage.bit(.Max)
+            | CalcFlatCoverage.bit(.Negate)
+            | CalcFlatCoverage.bit(.Invert)
     }
 }
 
