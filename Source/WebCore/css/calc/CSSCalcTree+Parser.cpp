@@ -1664,19 +1664,37 @@ static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
 // wrong type, and that is 0, so the boundary needs no separate presence flag.
 static_assert(static_cast<uint16_t>(CSSValueInvalid) == 0);
 
-// The alternative `makeNumeric` would build for `unit`, answered by CALLING `makeNumeric` rather
-// than by re-deriving its seventy-case table -- the same argument `CSSCalcSwiftNumericResult::kind`
-// already carries. Every numeric alternative is an inline variant member, so this allocates
-// nothing, and the grammar calls it once per dimension leaf actually built rather than once per
-// token walked past.
+// The same 0-as-absent trick for the percent hint, which is sound only while no real hint is 0.
+// Renumbering `PercentHint` from 0 would make every `Length` hint indistinguishable from "no hint",
+// which for a length-percentage property is the common case.
+static_assert(static_cast<uint8_t>(PercentHint::Length) != 0, "CSSCalcSwiftLeaf::percentHint and CSSCalcSwiftNodeInfo::percentHint use 0 as \"no hint\"");
+
+// Which alternative `makeNumeric` builds for `unit`, answered by calling `makeNumeric` rather than
+// by duplicating its unit classification. Every numeric alternative is an inline variant member, so
+// this allocates nothing, and it is called once per dimension leaf built rather than once per token
+// walked past.
 uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
 {
-    return static_cast<uint8_t>(swiftNodeInfo(makeNumeric(0, static_cast<CSSUnitType>(unit))).kind);
-}
+    auto child = makeNumeric(0, static_cast<CSSUnitType>(unit));
 
-bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept
-{
-    return conversionToCanonicalUnitRequiresConversionData(static_cast<CSSUnitType>(unit));
+    // Asked of the variant directly rather than through `swiftNodeInfo`, whose 41-way
+    // `WTF::switchOn` is far more work than a path that can only produce four alternatives.
+    // `makeNumeric` still owns the unit classification; only how its answer is read back differs,
+    // and `pushLeaf` switches on exactly these four kinds.
+    if (WTF::holdsAlternative<Number>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Number);
+    if (WTF::holdsAlternative<Percentage>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Percentage);
+    if (WTF::holdsAlternative<CanonicalDimension>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::CanonicalDimension);
+    if (WTF::holdsAlternative<NonCanonicalDimension>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::NonCanonicalDimension);
+
+    // `makeNumeric` produces nothing else for any unit reachable here: the Swift parser rejects
+    // `CSSUnitType::Unknown` before asking, and every other non-numeric unit reaches
+    // `makeNumeric`'s own `ASSERT_NOT_REACHED`. `pushLeaf` treats a kind outside the four as a
+    // contract violation, which is the correct outcome for a unit this function cannot classify.
+    return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Operation);
 }
 
 CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
@@ -1694,8 +1712,23 @@ CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
     };
 }
 
-// The Swift grammar's depth limit must be the C++ one, or the two arms disagree about which deeply
-// nested expressions parse -- a divergence no corpus of ordinary CSS would surface.
+// Whether canonicalizing `unit` needs conversion data. Cheap enough to compute for every token
+// read, unlike the leaf kind above, which constructs a `Child`.
+static uint8_t cssCalcSwiftUnitFlagsFor(CSSUnitType unit) noexcept
+{
+    return conversionToCanonicalUnitRequiresConversionData(unit) ? cssCalcSwiftTokenUnitNeedsConversionData : 0;
+}
+
+static uint8_t cssCalcSwiftFunctionFlagsFor(CSSValueID functionId) noexcept
+{
+    uint8_t flags = 0;
+    if (isCalcFunction(functionId))
+        flags |= cssCalcSwiftTokenIsCalcFunction;
+    if (functionId == CSSValueCalc || functionId == CSSValueWebkitCalc)
+        flags |= cssCalcSwiftTokenIsPlainCalcFunction;
+    return flags;
+}
+
 // The Swift parser's depth limit must match the C++ one, or the two disagree about which deeply
 // nested expressions parse.
 static_assert(maxExpressionDepth == 100);
@@ -1713,14 +1746,19 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
     auto& token = m_range.peek(index);
     auto type = token.type();
 
-    // THE TWO GUARDS ARE LOAD-BEARING, not defensive style. `CSSParserToken::numericValue()` and
-    // `delimiter()` each ASSERT on a token of the wrong type (CSSParserToken.cpp:487, :467), and
-    // this boundary reads every field of every token unconditionally -- so an unguarded version
-    // compiles, passes every release test, and fires on the first whitespace token in any
-    // assertions build. The other four accessors are total: `id()`/`functionId()` return
-    // `CSSValueInvalid` for the wrong type, `unitType()` and `getBlockType()` are plain bitfield
-    // reads.
+    // The two guards are load-bearing: `CSSParserToken::numericValue()` and `delimiter()` each
+    // assert on a token of the wrong type, and this boundary reads every field of every token
+    // unconditionally. The other four accessors are total: `id()`/`functionId()` return
+    // `CSSValueInvalid` for the wrong type, and `unitType()`/`getBlockType()` are bitfield reads.
     bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
+
+    // Computed only for the token types that use them, rather than for every whitespace token and
+    // operator walked past.
+    uint8_t flags = 0;
+    if (type == DimensionToken)
+        flags = cssCalcSwiftUnitFlagsFor(token.unitType());
+    else if (type == FunctionToken)
+        flags = cssCalcSwiftFunctionFlagsFor(token.functionId());
 
     return {
         .numericValue = isNumeric ? token.numericValue() : 0,
@@ -1730,6 +1768,7 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
         .unit = token.unitType(),
         .type = type,
         .blockType = static_cast<uint8_t>(token.getBlockType()),
+        .flags = flags,
     };
 }
 

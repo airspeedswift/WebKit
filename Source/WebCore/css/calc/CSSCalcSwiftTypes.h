@@ -586,19 +586,6 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // place a `Vector<Child>` is assembled, and it is assembled from the operand stack.
     WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false) noexcept;
 
-#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
-    // Drop every operand.
-    //
-    // The benchmark's, and only the benchmark's -- so it is compiled out of a shipping build, and
-    // its one Swift caller (`cssCalcFlatEmitProbeSwift`) already sits behind the same guard.
-    // `copyAndSimplify` builds a fresh `CSSCalcSwiftOperandStack` per call, so nothing on a real
-    // path ever re-enters a used one. It is a member rather than a line in the benchmark because
-    // the stack reaches the timed loop only through this builder, and the loop has to be on the
-    // SWIFT side -- that is what hoists the flat tree's two buffers across iterations, and
-    // allocating them per call read 2338 retired instructions against 458 hoisted.
-    //
-    // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
-    // that this header stays self-contained and does not pull in wtf/Vector.h.
     // Move the single remaining operand into the root slot.
     //
     // WHY THE PARSER NEEDS THIS AND THE SIMPLIFIER DOES NOT. The simplifier walks a tree it already
@@ -613,10 +600,29 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // node, and it goes away if the grammar ever builds into the flat form and emits in one pass.
     // Returns false if the stack does not hold exactly one operand, which is a boundary contract
     // violation rather than a parse outcome.
+    //
+    // NOT BEHIND `ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)`, and it was, which broke the shipping build.
+    // The grammar that calls it is production -- `138c8b38c1c9` moved it out of that gate for
+    // exactly this reason -- and so is its C++ driver `cssCalcSwiftParseIntoChild`, whose own
+    // declaration below says `parseAndSimplify` calls it when the parse path is gated on. Two
+    // symbols were left behind by that move; this is one of them.
     WEBCORE_EXPORT bool finishRoot() noexcept;
 
+    // Drop every operand.
+    //
+    // Two callers and they are not the same kind: `cssCalcSwiftParseIntoChild`'s failure and
+    // contract-violation paths, which are production, and the benchmark's timed emit loop
+    // (`cssCalcFlatEmitProbeSwift`, itself behind the bridge gate). `copyAndSimplify` builds a fresh
+    // `CSSCalcSwiftOperandStack` per call, so nothing on the SIMPLIFICATION path ever re-enters a
+    // used one; the parse path does, because a descent that declines half way leaves operands
+    // behind. It is a member rather than a line in the benchmark because the stack reaches the
+    // timed loop only through this builder, and the loop has to be on the SWIFT side -- that is
+    // what hoists the flat tree's two buffers across iterations, and allocating them per call read
+    // 2338 retired instructions against 458 hoisted.
+    //
+    // Inline is not available: `CSSCalcSwiftOperandStack` is forward-declared here, deliberately, so
+    // that this header stays self-contained and does not pull in wtf/Vector.h.
     WEBCORE_EXPORT void clearOperands() noexcept;
-#endif
 
     // `simplify(Symbol&)` in full: `makeNumeric(options.symbolTable.get(id)->value, unit)`. The unit
     // crosses as well as the value, and it is the symbol node's rather than the table's; see
@@ -713,11 +719,26 @@ struct CSSCalcSwiftToken {
     // `CSSUnitType::Unknown` is what `parseCalcDimension` rejects on, so it crosses as itself.
     CSSUnitType unit;
     CSSParserTokenType type;
-    // `CSSParserToken::BlockType`, so Swift can compute block extents itself and `consumeBlock`
-    // needs no crossing. Pinned one enumerator per line in CSSCalcTree+Parser.cpp rather than
-    // trusted, exactly as the tokenizer boundary pins its token numbering.
+    // `CSSParserToken::BlockType`. Pinned one enumerator per line in CSSCalcTree+Parser.cpp.
     uint8_t blockType;
+
+    // Predicates that ride in the padding, each a pure function of a field already in this struct.
+    // `makeNumeric`'s answer deliberately does not ride here and stays `cssCalcSwiftLeafKindForUnit`:
+    // `tokenAt` runs once per token where that answer is needed once per dimension leaf, and reaching
+    // it constructs and destroys a `Child`.
+    uint8_t flags;
 };
+// Bit 0, for a DimensionToken: `conversionToCanonicalUnitRequiresConversionData(unit)`.
+static constexpr uint8_t cssCalcSwiftTokenUnitNeedsConversionData = 1 << 0;
+// Bit 1, for a FunctionToken: `isCalcFunction(functionId)` -- any of the math functions, `calc()`
+// included. The grammar declines these rather than failing, because they are real CSS it does not
+// cover yet.
+static constexpr uint8_t cssCalcSwiftTokenIsCalcFunction = 1 << 1;
+// Bit 2, for a FunctionToken: the function is `calc()` or `-webkit-calc()` specifically, which
+// `parseCalcFunction` routes straight to `<calc-sum>`. A calc function WITHOUT this bit is a
+// decline; a function block with neither bit is a parse FAILURE, which is what the C++ arm does
+// with it -- `findBlock` returns nothing and the value switch has no `FunctionToken` arm.
+static constexpr uint8_t cssCalcSwiftTokenIsPlainCalcFunction = 1 << 2;
 static_assert(sizeof(CSSCalcSwiftToken) == 24);
 static_assert(alignof(CSSCalcSwiftToken) == 8);
 
@@ -816,18 +837,11 @@ struct alignas(8) CSSCalcSwiftParseResult {
 static_assert(sizeof(CSSCalcSwiftParseResult) == 16);
 static_assert(alignof(CSSCalcSwiftParseResult) == 8);
 
-// The alternative `makeNumeric` would build for `unit`.
-//
-// C++ answers this, and that is the point: `makeNumeric` maps unit to alternative through a
-// seventy-case table, and reproducing the choice in Swift would duplicate it -- the same argument
-// `CSSCalcSwiftNumericResult::kind` already carries in this file. Called once per dimension leaf
-// actually built, NOT once per token, so it costs nothing on the tokens the grammar walks past.
-// Returns a `CSSCalcSwiftNodeKind`.
-WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
 
-// `conversionToCanonicalUnitRequiresConversionData(unit)`. Same argument: a unit predicate whose
-// table belongs to C++.
-WEBCORE_EXPORT bool cssCalcSwiftUnitRequiresConversionData(uint16_t unit) noexcept;
+// The alternative `makeNumeric` would build for `unit`, a `CSSCalcSwiftNodeKind`. C++ answers it
+// because `makeNumeric` owns the seventy-case unit table. Called once per dimension leaf actually
+// built -- see the note on `unitFlags` for why it is not carried in the token.
+WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
 
 // `lookupConstantNumber(id)`: the five `<calc-keyword>` constants. `resolved` false means the
 // identifier is not one of them. Same argument again -- the table is C++'s, and it is keyed on

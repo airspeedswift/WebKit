@@ -1762,6 +1762,9 @@ struct CSSCalcParseComparison {
     //   data (`em`). Must be true; a false here means the predicate is mis-wired, not that the
     //   grammar forgot to set the flag.
     bool emRequiresConversionData;
+    //   `functionFlagsSelfTest` -- the two FunctionToken bits, on `calc(`, `min(` and a non-math
+    //   function. Must be true.
+    bool functionFlagsSelfTest;
     // 0 = the input is not a `calc()` this entry can drive, so the case is SKIPPED rather than
     // passed -- a skipped case must never read as agreement.
     bool applicable;
@@ -1769,6 +1772,7 @@ struct CSSCalcParseComparison {
 
 WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char*, size_t, uint64_t* outCpp, uint64_t* outSwift, uint32_t* outTokenCount);
 WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char*, size_t, bool withSymbols);
+WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char*, size_t, unsigned arm, uint32_t iterations, uint32_t* outCovered);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationBuilderStateAvailable(void);
@@ -2126,6 +2130,20 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t le
         mix(static_cast<uint64_t>(token.unitType()));
         mix(static_cast<uint64_t>(type));
         mix(static_cast<uint64_t>(token.getBlockType()));
+        // `flags` is derived independently here rather than read from the POD, which checks that
+        // `tokenAt` filled the bits from the same predicates. A field-sensitivity pair cannot do
+        // that: `flags` is a pure function of `unit`/`functionId`, both folded above.
+        uint8_t expectedFlags = 0;
+        if (type == DimensionToken)
+            expectedFlags = conversionToCanonicalUnitRequiresConversionData(token.unitType()) ? CSSCalc::cssCalcSwiftTokenUnitNeedsConversionData : 0;
+        else if (type == FunctionToken) {
+            auto id = token.functionId();
+            if (CSSCalc::isCalcFunction(id))
+                expectedFlags |= CSSCalc::cssCalcSwiftTokenIsCalcFunction;
+            if (id == CSSValueCalc || id == CSSValueWebkitCalc)
+                expectedFlags |= CSSCalc::cssCalcSwiftTokenIsPlainCalcFunction;
+        }
+        mix(static_cast<uint64_t>(expectedFlags));
     }
 
     auto cursor = CSSCalc::CSSCalcSwiftParseCursor { range };
@@ -2239,7 +2257,40 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         return result;
 
     result.swiftRequiresConversionData = swiftResult.requiresConversionData;
-    result.emRequiresConversionData = CSSCalc::cssCalcSwiftUnitRequiresConversionData(static_cast<uint16_t>(CSSUnitType::Em));
+    // Self-test through the real path rather than through a predicate: tokenize `1em`, read token
+    // 0 off a cursor, and check the conversion-data bit the grammar actually reads, which also
+    // proves the bit survives the crossing in the token's padding.
+    {
+        String emSource { "calc(1em)"_span8 };
+        CSSTokenizer emTokenizer(emSource);
+        auto emRange = emTokenizer.tokenRange();
+        auto emInner = CSSPropertyParserHelpers::consumeFunction(emRange);
+        auto emCursor = CSSCalc::CSSCalcSwiftParseCursor { emInner };
+        result.emRequiresConversionData = emCursor.tokenCount()
+            && (emCursor.tokenAt(0).flags & CSSCalc::cssCalcSwiftTokenUnitNeedsConversionData);
+    }
+
+    // The two function bits, checked directly for the same reason: `flags` is a pure function of
+    // `unit`/`functionId`, both of which the token checksum folds, so a checksum pair can never
+    // isolate a dropped `flags` field.
+    {
+        auto probeFlags = [](ASCIILiteral text) -> uint8_t {
+            String source { text };
+            CSSTokenizer t(source);
+            auto range = t.tokenRange();
+            auto cursor = CSSCalc::CSSCalcSwiftParseCursor { range };
+            return cursor.tokenCount() ? cursor.tokenAt(0).flags : 0;
+        };
+        auto calcFlags = probeFlags("calc(1px)"_s);
+        auto minFlags = probeFlags("min(1px, 2px)"_s);
+        auto otherFlags = probeFlags("translate(1px)"_s);
+        result.functionFlagsSelfTest =
+            (calcFlags & CSSCalc::cssCalcSwiftTokenIsCalcFunction)
+            && (calcFlags & CSSCalc::cssCalcSwiftTokenIsPlainCalcFunction)
+            && (minFlags & CSSCalc::cssCalcSwiftTokenIsCalcFunction)
+            && !(minFlags & CSSCalc::cssCalcSwiftTokenIsPlainCalcFunction)
+            && !otherFlags;
+    }
     {
         auto probeCursor = CSSCalc::CSSCalcSwiftParseCursor { innerRange };
         result.cursorFirstTokenType = probeCursor.tokenCount() ? static_cast<uint8_t>(probeCursor.tokenAt(0).type) : 0xFF;
@@ -2251,6 +2302,99 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         result.conversionDataAgrees = cppTree->requiresConversionData == swiftResult.requiresConversionData;
     }
     return result;
+}
+
+// Times ONE parse arm over one expression: `arm` 0 is the C++ parser, 1 is the Swift grammar.
+//
+// TOKENIZATION IS OUTSIDE THE LOOP. It is identical work for both arms and it dominates -- the
+// parse-band attribution put a whole `calc()` parse at ~11,129 instructions with the tokenizer,
+// the category loop and the type check shared -- so including it would bury the term being
+// measured under a common one, exactly as `parsebench`'s header warns.
+//
+// The two arms are NOT doing identical work and the difference is stated rather than hidden: the
+// C++ arm builds a `Tree` (root plus type plus stage), the Swift arm builds the same root and
+// returns the same type without the `Tree` wrapper. What they share is the part that matters --
+// tokens in, a `CSSCalc::Child` tree out, unsimplified.
+//
+// `outCovered` reports whether the Swift grammar actually covers this expression. A band averaged
+// over expressions the Swift arm DECLINED would be timing the C++ fallback against itself, which
+// is the shape that reads as parity while measuring nothing.
+WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t length, unsigned arm, uint32_t iterations, uint32_t* outCovered)
+{
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    CSSTokenizer tokenizer(source);
+    auto baseRange = tokenizer.tokenRange();
+    if (baseRange.atEnd()) {
+        if (outCovered)
+            *outCovered = 0;
+        return 0;
+    }
+    auto functionId = baseRange.peek().functionId();
+    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc) {
+        if (outCovered)
+            *outCovered = 0;
+        return 0;
+    }
+
+    auto parserState = WebCore::CSS::PropertyParserState {
+        .context = calcParserContext(),
+        .currentRule = StyleRuleType::Style,
+        .currentProperty = CSSPropertyWidth,
+    };
+    // Find the accepting category once, outside the loop: timing the eleven-category retry loop
+    // would charge each path for every rejected parse.
+    std::optional<WebCore::CSS::Category> accepted;
+    for (auto candidate : calcCategories) {
+        auto probeRange = baseRange;
+        auto parserOptions = CSSCalc::ParserOptions { .category = candidate, .range = WebCore::CSS::All, .allowedSymbols = { }, .propertyOptions = { } };
+        auto simplificationOptions = CSSCalc::SimplificationOptions { .category = candidate, .range = WebCore::CSS::All, .conversionData = std::nullopt, .symbolTable = { }, .allowZeroValueLengthRemovalFromSum = false };
+        auto tree = CSSCalc::parseAndSimplify(probeRange, parserState, parserOptions, simplificationOptions, CSSCalc::ParseSimplification::None);
+        if (tree && probeRange.atEnd()) {
+            accepted = candidate;
+            break;
+        }
+    }
+    if (!accepted) {
+        if (outCovered)
+            *outCovered = 0;
+        return 0;
+    }
+    auto category = *accepted;
+    auto parserOptions = CSSCalc::ParserOptions { .category = category, .range = WebCore::CSS::All, .allowedSymbols = { }, .propertyOptions = { } };
+    auto simplificationOptions = CSSCalc::SimplificationOptions { .category = category, .range = WebCore::CSS::All, .conversionData = std::nullopt, .symbolTable = { }, .allowZeroValueLengthRemovalFromSum = false };
+    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false };
+
+    // Coverage is decided by running the Swift arm ONCE, before timing.
+    {
+        auto probeRange = baseRange;
+        auto innerRange = CSSPropertyParserHelpers::consumeFunction(probeRange);
+        CSSCalc::Child probeRoot = CSSCalc::Number { .value = 0 };
+        auto probe = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, probeRoot);
+        if (outCovered)
+            *outCovered = probe.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) ? 1 : 0;
+        if (probe.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) && arm == 1)
+            return 0;
+    }
+
+    uint64_t fold = 0;
+    for (uint32_t i = 0; i < iterations; ++i) {
+        if (!arm) {
+            auto range = baseRange;
+            auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, CSSCalc::ParseSimplification::None);
+            if (!tree)
+                return 0;
+            fold = fold * 1000003 + static_cast<uint64_t>(tree->root.index());
+        } else {
+            auto range = baseRange;
+            auto innerRange = CSSPropertyParserHelpers::consumeFunction(range);
+            CSSCalc::Child root = CSSCalc::Number { .value = 0 };
+            auto result = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, root);
+            if (result.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
+                return 0;
+            fold = fold * 1000003 + static_cast<uint64_t>(root.index());
+        }
+    }
+    return fold;
 }
 
 WEBCORE_EXPORT CSSCalcSimplificationComparison webCoreCSSCalcCompareSimplification(const char* text, size_t length, const CSSCalcSimplificationOptionsSpec* spec, char* cppOut, size_t cppCapacity, char* swiftOut, size_t swiftCapacity)
