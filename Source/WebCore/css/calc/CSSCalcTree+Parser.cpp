@@ -203,23 +203,25 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     // the fallback parse a suffix, and `tokens.atEnd()` would pass on a truncated tree.
     if (parser == Parser::Swift && parseSimplification != ParseSimplification::Eager) {
         Child swiftRoot = Number { .value = 0 };
-        // THE FLAT STORE THE GRAMMAR ALSO FILLS (P7c slice C1b). Created unconditionally because the
+        // THE FLAT TREE THE GRAMMAR ALSO FILLS (P7c slices C1b/C1d), in the storage the finished
+        // `Tree` will own. Declared here rather than constructed inside the `Tree` because the
         // grammar needs somewhere to put the nodes before it knows whether it will finish, and
-        // dropped again on every outcome but `Parsed` -- `Declined` falls through to the C++ descent
-        // below, which builds a tree this store does not describe.
+        // `Declined` falls through to the C++ descent below, which builds a tree these nodes do not
+        // describe.
         //
-        // WHAT IT COSTS, booked rather than buried: one TZone allocation for the store plus one
-        // `Vector` malloc inside `takeNodes` per successfully Swift-parsed `calc()`, and one
-        // `deref()` when the tree dies. Until a consumer reads the flat arm that is additive, which
-        // is what `CSSCalcSwiftTypes.h` said it would be; it is the price of the arm existing at all,
-        // and slices C2 and C4 are what collect against it.
-        auto swiftStore = CSSCalcSwiftFlatStore::create();
+        // AN EMPTY `Vector` AND A WORD, so a decline and a failure cost the allocator NOTHING -- the
+        // C1b shape they replace TZone-allocated a store object unconditionally, which is why a
+        // declining expression paid +96.8 retired instructions for a flat arm it then threw away.
+        // On the `Parsed` path the whole thing is moved into the `Tree`: three words, no allocation,
+        // no refcount.
+        CSSCalcSwiftFlatNodeVector swiftFlatNodes;
+        uint32_t swiftFlatRootIndex = cssCalcSwiftFlatNoNode;
         auto swiftResult = cssCalcSwiftParseIntoChild(tokens, CSSCalcSwiftParseOptions {
             .category = parserOptions.category,
             .absoluteLengthUnitsOnly = propertyParserState.absoluteLengthUnitsOnly,
             .hasAllowedSymbols = !parserOptions.allowedSymbols.isEmpty(),
             .rootFunctionId = static_cast<uint16_t>(function),
-        }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal, swiftStore.ptr());
+        }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal, &swiftFlatNodes, &swiftFlatRootIndex);
 
         // THREE OUTCOMES AND THEY ARE NOT INTERCHANGEABLE, which is the whole reason the boundary
         // reports an outcome rather than an optional. `Failed` means the input is invalid CSS and
@@ -241,7 +243,8 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
                 .type = swiftResult.type,
                 .stage = CSSCalc::Stage::Specified,
                 .requiresConversionData = swiftResult.requiresConversionData,
-                .swiftFlatStore = WTF::move(swiftStore),
+                .swiftFlatRootIndex = swiftFlatRootIndex,
+                .swiftFlatNodes = WTF::move(swiftFlatNodes),
             };
 
         case CSSCalcSwiftParseOutcome::Declined:
@@ -1834,53 +1837,6 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
         .blockType = static_cast<uint8_t>(token.getBlockType()),
         .flags = flags,
     };
-}
-
-// MARK: - The Swift calc STORE (P7c slice C1)
-
-WTF_MAKE_TZONE_ALLOCATED_IMPL(CSSCalcSwiftFlatStore);
-
-CSSCalcSwiftFlatStore::CSSCalcSwiftFlatStore() = default;
-CSSCalcSwiftFlatStore::~CSSCalcSwiftFlatStore() = default;
-
-Ref<CSSCalcSwiftFlatStore> CSSCalcSwiftFlatStore::create()
-{
-    return adoptRef(*new CSSCalcSwiftFlatStore);
-}
-
-size_t CSSCalcSwiftFlatStore::takeNodes(const CSSCalcSwiftFlatNode* __counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount, uint32_t rootIndex) noexcept
-{
-    // `Vector::appendRange` on an empty vector allocates exactly `nodeCount` slots: ONE malloc for
-    // the whole tree, where the `Child` form allocates one `makeUniqueRef<Op>` plus one `Children`
-    // vector per operator node. Assigning rather than appending, because a store is filled once.
-    m_nodes = Vector<CSSCalcSwiftFlatNode>(unsafeMakeSpan(nodes, nodeCount));
-    m_rootIndex = rootIndex;
-    return m_nodes.size();
-}
-
-CSSCalcSwiftFlatNode CSSCalcSwiftFlatStore::nodeAt(uint32_t index) const noexcept
-{
-    // Out of range answers a terminated node rather than trapping, matching what
-    // `CSSCalcSwiftParseCursor::tokenAt` does past the end: the caller is a Swift walk whose
-    // termination condition is the sentinel, so handing it the sentinel makes the walk stop where
-    // a bounds pre-check on the Swift side would have stopped it, and does so without Swift having
-    // to mirror a bound it cannot see.
-    if (index >= m_nodes.size()) {
-        return {
-            .value = 0,
-            .type = { },
-            .firstChild = cssCalcSwiftFlatNoNode,
-            .nextSibling = cssCalcSwiftFlatNoNode,
-            .childCount = 0,
-            .origin = cssCalcSwiftFlatNoNode,
-            .valueID = 0,
-            .unitType = 0,
-            .alternative = CSSCalcSwiftAlternative::Number,
-            .percentHint = 0,
-            .flags = 0,
-        };
-    }
-    return m_nodes[index];
 }
 
 } // namespace CSSCalc

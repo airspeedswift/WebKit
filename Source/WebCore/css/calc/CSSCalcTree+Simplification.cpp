@@ -2027,6 +2027,24 @@ struct CSSCalcSwiftOperandStack {
     // construction finds a null slot, appends to the operand stack instead of overwriting a live
     // `Child`, and the non-empty-stack half of that same check declines the tree.
     Child* rootSlot { nullptr };
+
+    // THE FLAT ARM'S DESTINATION AND SOURCE (P7c slice C1d). Null on every path that does not carry
+    // one, which is the primitive benchmarks, the differential's non-store arms and the whole
+    // simplification path.
+    //
+    // HERE RATHER THAN ON `CSSCalcSwiftBuilder`, which is where C1c's sketch put them. The builder
+    // is 16 bytes and the `simplifyX` family takes it BY VALUE as an `Optional` on a per-node path;
+    // two more pointers there would take every one of those copies from two registers to four. This
+    // struct is a stack local constructed once per parse and the builder already indirects through
+    // it, so the pointers cost three folded null stores instead. It is also forward-declared in the
+    // boundary header, so nothing here is visible to Swift and no `SWIFT_SAFE` claim changes.
+    //
+    // Two pointers rather than one because the two directions differ in constness and a `const_cast`
+    // to unify them would be a lie about which entry mutates: `flatNodesOut` is the parse's
+    // destination, `flatNodesIn` is what a rebuild reads back.
+    CSSCalcSwiftFlatNodeVector* flatNodesOut { nullptr };
+    uint32_t* flatRootIndexOut { nullptr };
+    const CSSCalcSwiftFlatNodeVector* flatNodesIn { nullptr };
 };
 
 // Where a finished node goes.
@@ -2206,24 +2224,24 @@ static CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const Simpli
 // stack holds a `WTF::Vector<Child>`, so it is only complete in this translation unit and no other
 // file can construct one. All the work is in Swift -- this is the stack, the contract check and
 // nothing else.
-bool cssCalcSwiftEmitStoreIntoChild(CSSCalcSwiftFlatStore& store, const SimplificationOptions& options, Child& outRoot) noexcept
+bool cssCalcSwiftEmitStoreIntoChild(const CSSCalcSwiftFlatNodeVector& nodes, uint32_t rootIndex, const SimplificationOptions& options, Child& outRoot) noexcept
 {
-    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot };
+    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot, .flatNodesIn = &nodes };
     CSSCalcSwiftBuilder builder { operands, options };
-    if (!cssCalcSwiftEmitFromStore(&store, builder) || operands.rootSlot || !operands.value.isEmpty()) {
+    if (!cssCalcSwiftEmitFromStore(builder, rootIndex) || operands.rootSlot || !operands.value.isEmpty()) {
         builder.clearOperands();
         return false;
     }
     return true;
 }
 
-CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot, bool simplify, CSSCalcSwiftFlatStore* store) noexcept
+CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot, bool simplify, CSSCalcSwiftFlatNodeVector* outFlatNodes, uint32_t* outFlatRootIndex) noexcept
 {
-    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot };
+    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot, .flatNodesOut = outFlatNodes, .flatRootIndexOut = outFlatRootIndex };
     CSSCalcSwiftBuilder builder { operands, options };
     auto cursor = CSSCalcSwiftParseCursor { innerRange };
 
-    auto result = cssCalcParseSwift(cursor, builder, parseOptions, swiftSimplificationOptions(options), simplify, store);
+    auto result = cssCalcParseSwift(cursor, builder, parseOptions, swiftSimplificationOptions(options), simplify);
 
     if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftParseOutcome::Parsed)) {
         // A failed or declined descent can leave partial operands behind; drop them rather than
@@ -2420,6 +2438,54 @@ bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount
 void CSSCalcSwiftBuilder::clearOperands() noexcept
 {
     m_operands->value.shrink(0);
+}
+
+size_t CSSCalcSwiftBuilder::takeFlatNodes(const CSSCalcSwiftFlatNode* __counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount, uint32_t rootIndex) noexcept
+{
+    // No destination is not a failure: the differential's non-store arms and the primitive
+    // benchmarks parse without one, and the Swift side asserts the crossing by comparing this
+    // against the node count it handed over.
+    if (!m_operands->flatNodesOut)
+        return nodeCount;
+
+    // ONE malloc for the whole tree, straight into the `Vector` the `Tree` will own, where C1b's
+    // store object took a TZone allocation as well. Assigning rather than appending, because the
+    // destination is a fresh local in `parseAndSimplify` that no earlier attempt has written to --
+    // the grammar's oversized retry starts from a clean state by construction.
+    *m_operands->flatNodesOut = CSSCalcSwiftFlatNodeVector(unsafeMakeSpan(nodes, nodeCount));
+    if (m_operands->flatRootIndexOut)
+        *m_operands->flatRootIndexOut = rootIndex;
+    return m_operands->flatNodesOut->size();
+}
+
+uint32_t CSSCalcSwiftBuilder::flatNodeCount() const noexcept
+{
+    return m_operands->flatNodesIn ? m_operands->flatNodesIn->size() : 0;
+}
+
+CSSCalcSwiftFlatNode CSSCalcSwiftBuilder::flatNodeAt(uint32_t index) const noexcept
+{
+    // Out of range answers a terminated node rather than trapping, matching what
+    // `CSSCalcSwiftParseCursor::tokenAt` does past the end: the caller is a Swift walk whose
+    // termination condition is the sentinel, so handing it the sentinel makes the walk stop where
+    // a bounds pre-check on the Swift side would have stopped it, and does so without Swift having
+    // to mirror a bound it cannot see.
+    if (!m_operands->flatNodesIn || index >= m_operands->flatNodesIn->size()) {
+        return {
+            .value = 0,
+            .type = { },
+            .firstChild = cssCalcSwiftFlatNoNode,
+            .nextSibling = cssCalcSwiftFlatNoNode,
+            .childCount = 0,
+            .origin = cssCalcSwiftFlatNoNode,
+            .valueID = 0,
+            .unitType = 0,
+            .alternative = CSSCalcSwiftAlternative::Number,
+            .percentHint = 0,
+            .flags = 0,
+        };
+    }
+    return (*m_operands->flatNodesIn)[index];
 }
 
 bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot, uint8_t noneMask) noexcept

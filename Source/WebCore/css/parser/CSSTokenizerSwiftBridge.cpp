@@ -1862,30 +1862,40 @@ WEBCORE_EXPORT bool webCoreCSSCalcParserIsSwift(void)
 // `static constexpr` DEFAULT ARGUMENTS, evaluated in the CALLER's translation unit, so only a
 // caller compiled with WebCore's own flags answers the production question at all.
 //
-// WHY IT IS NOT A SOURCE READING. `swiftFlatStore` being assigned at `CSSCalcTree+Parser.cpp` proves
+// WHY IT IS NOT A SOURCE READING. `swiftFlatNodes` being assigned at `CSSCalcTree+Parser.cpp` proves
 // nothing about a shipped binary: the assignment is on the Swift arm, which a build that missed the
 // define never reaches, and neither the framework's size nor `nm` can distinguish the two (see
 // `gateprobe.cpp`). This runs the parse and asks the resulting `CSSCalc::Value` -- the object a
 // production consumer holds -- what its tree carries.
 //
 // RETURN: 0 = `text` did not parse at any category; 1 = parsed, and the value's tree carries NO
-// store; 2 = parsed, and it carries one. All three are reachable in one binary, which is what makes
-// the probe non-vacuous without a second build: a covered expression must answer 2, an expression
-// the grammar declines must answer 1, and invalid input must answer 0. A probe that could only ever
-// answer 2 would be reporting its own corpus.
+// flat arm; 2 = parsed, and it carries one. All three are reachable in one binary, which is what
+// makes the probe non-vacuous without a second build: a covered expression must answer 2, an
+// expression the grammar declines must answer 1, and invalid input must answer 0. A probe that could
+// only ever answer 2 would be reporting its own corpus.
 //
-// `outNodeCount` is the store's node count (0 when there is none).
+// `outNodeCount` is the flat arm's node count (0 when there is none).
 //
 // `outEqualityBits` ANSWERS THE ONE THING THIS CHANGE COULD BREAK, and each bit is an assertion that
 // fails in a different direction, so no single wrong `operator==` passes them all:
-//   1  two independent production parses of `text` compare EQUAL            (the store is excluded)
-//   2  ... and their two store pointers are distinct and both non-null      (so bit 1 is not vacuous)
+//   1  two independent production parses of `text` compare EQUAL            (the flat arm is excluded)
+//   2  ... and their two flat buffers are at distinct addresses, both filled (so bit 1 is not vacuous)
 //   4  flipping `requiresConversionData` on one makes them compare UNEQUAL  (not a constant `true`)
-//   8  nulling one side's store leaves them EQUAL                           (excluded asymmetrically too)
-//  16  the store's `rootIndex` is inside its node count                     (the crossing is coherent)
+//   8  clearing one side's flat nodes leaves them EQUAL                     (excluded asymmetrically too)
+//  16  the flat arm's root index is inside its node count                   (the crossing is coherent)
 //  32  a parse of `otherText` compares UNEQUAL to `text`'s                  (`root` is still compared)
-// A defaulted `operator==` -- the hazard this slice had to dodge -- fails bits 1, 2 and 8 while
-// passing 4, 16 and 32, so the mask discriminates exactly the mistake.
+//
+// WHICH BIT CATCHES THE DEFAULTING HAZARD CHANGED AT C1d, AND IT IS NOW EXACTLY ONE. Under C1b the
+// member was a `RefPtr`, so a defaulted `operator==` folded in POINTER IDENTITY and failed bits 1, 2
+// and 8. Under C1d it is the `Vector` itself, so defaulting folds in an ELEMENT-WISE BUFFER COMPARE:
+// two independent parses of the same text build byte-identical buffers, so bit 1 would still pass
+// and only **bit 8** -- one side's flat arm cleared, the other's intact -- still fails. That is a
+// narrower discriminator than the old three, so it is stated rather than left to be rediscovered:
+// bit 8 is the load-bearing one now. BOTH halves of that were built rather than argued:
+// `arms/c1d-nc-defaulted.patch` (`= default`) does not COMPILE at all under C1d -- the flat node
+// declares no `operator==`, so `Vector.h:203` rejects it -- and `arms/c1d-nc-rootindex.patch`, a
+// hand-written operator that folds `swiftFlatRootIndex` in, reports mask **0x37 against an expected
+// 0x3f** on all five store cases with every other bit still passing.
 WEBCORE_EXPORT uint32_t webCoreCSSCalcProductionStoreProbe(const char* text, size_t length, const char* otherText, size_t otherLength, uint32_t* outNodeCount, uint32_t* outEqualityBits)
 {
     if (outNodeCount)
@@ -1903,19 +1913,19 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcProductionStoreProbe(const char* text, siz
     // returned.
     auto value = CSSCalc::Value::create(parsed.category, parsed.range, WTF::move(*parsed.tree));
     const auto& tree = value->tree();
-    if (!tree.swiftFlatStore)
+    if (tree.swiftFlatNodes.isEmpty())
         return 1;
     if (outNodeCount)
-        *outNodeCount = tree.swiftFlatStore->nodeCount();
+        *outNodeCount = tree.swiftFlatNodes.size();
 
     if (outEqualityBits) {
         uint32_t bits = 0;
-        if (tree.swiftFlatStore->rootIndex() < tree.swiftFlatStore->nodeCount())
+        if (tree.swiftFlatRootIndex < tree.swiftFlatNodes.size())
             bits |= 16;
 
         auto again = parseCalcExpression(source, CSSCalc::defaultParseSimplification, true);
-        if (again.tree && again.tree->swiftFlatStore) {
-            if (again.tree->swiftFlatStore.get() != tree.swiftFlatStore.get())
+        if (again.tree && !again.tree->swiftFlatNodes.isEmpty()) {
+            if (again.tree->swiftFlatNodes.span().data() != tree.swiftFlatNodes.span().data())
                 bits |= 2;
             if (tree == *again.tree)
                 bits |= 1;
@@ -1923,7 +1933,8 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcProductionStoreProbe(const char* text, siz
             if (!(tree == *again.tree))
                 bits |= 4;
             again.tree->requiresConversionData = !again.tree->requiresConversionData;
-            again.tree->swiftFlatStore = nullptr;
+            again.tree->swiftFlatNodes.clear();
+            again.tree->swiftFlatRootIndex = CSSCalc::cssCalcSwiftFlatNoNode;
             if (tree == *again.tree)
                 bits |= 8;
         }
@@ -2195,14 +2206,14 @@ struct CSSCalcParseComparison {
     bool fusedTreesAgree;
     // THE STORE ROUND TRIP, which is the whole of what slice C1 can be wrong about.
     //
-    // `storeNodeCount` is what `takeNodes` reported storing, and `storeTreesAgree` compares a tree
-    // rebuilt FROM THE STORE -- every node read back one at a time through `nodeAt`, 40 bytes by
+    // `storeNodeCount` is what `takeFlatNodes` reported storing, and `storeTreesAgree` compares a tree
+    // rebuilt FROM THE FLAT NODES -- every node read back one at a time through `flatNodeAt`, 40 bytes by
     // value -- against the same C++ Terminal tree `fusedTreesAgree` uses. The two are deliberately
     // not one field: a store that took no nodes at all would leave `storeTreesAgree` false, and
     // without the count there would be no way to tell that from a tree that came back wrong.
     //
     // WHY THIS FIELD EXISTS AT ALL. Without a reader, C1 is a change no test can fail --
-    // `takeNodes` could store nothing, half the tree, or the wrong root index, and every
+    // `takeFlatNodes` could store nothing, half the tree, or the wrong root index, and every
     // differential in this file would still pass, because they all compare the `Child` the emit
     // built directly and never look at the store. That is the vacuous-check shape, and this is what
     // removes it.
@@ -2930,7 +2941,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             result.fusedTreesAgree = cppTerminal->root == fusedRoot && cppTerminal->type == fusedResult.type;
 
         // THE STORE ROUND TRIP (P7c slice C1). A third parse, this one asking the grammar to also
-        // fill a `CSSCalcSwiftFlatStore`, then rebuilding a `Child` from the store alone and
+        // fill the flat-node `Vector` a `Tree` owns, then rebuilding a `Child` from those nodes alone and
         // comparing THAT against the same C++ Terminal tree.
         //
         // A separate parse rather than reusing `fusedResult`, so that the arm above keeps measuring
@@ -2943,21 +2954,22 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         // `allowZeroValueLengthRemovalFromSum`
         // false -- the same hole the fused comparison states. What it DOES vary that nothing else
         // does is node count, from 1 to whatever the corpus's deepest expression flattens to, and
-        // that is the axis `takeNodes` and `nodeAt` are indexed on.
+        // that is the axis `takeFlatNodes` and `flatNodeAt` are indexed on.
         auto storeRange = cppRange;
         auto storeInner = CSSPropertyParserHelpers::consumeFunction(storeRange);
         CSSCalc::Child storeParseRoot = CSSCalc::Number { .value = 0 };
-        auto store = CSSCalc::CSSCalcSwiftFlatStore::create();
+        CSSCalc::CSSCalcSwiftFlatNodeVector storeNodes;
+        uint32_t storeRootIndex = CSSCalc::cssCalcSwiftFlatNoNode;
         auto storeResult = CSSCalc::cssCalcSwiftParseIntoChild(storeInner, CSSCalc::CSSCalcSwiftParseOptions {
             .category = category,
             .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
             .rootFunctionId = static_cast<uint16_t>(functionId),
-        }, simplificationOptions, storeParseRoot, true, store.ptr());
-        result.storeNodeCount = store->nodeCount();
+        }, simplificationOptions, storeParseRoot, true, &storeNodes, &storeRootIndex);
+        result.storeNodeCount = storeNodes.size();
         if (result.cppSimplifiedParsed && storeResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed)) {
             CSSCalc::Child rebuiltRoot = CSSCalc::Number { .value = 0 };
-            if (CSSCalc::cssCalcSwiftEmitStoreIntoChild(store.get(), simplificationOptions, rebuiltRoot))
+            if (CSSCalc::cssCalcSwiftEmitStoreIntoChild(storeNodes, storeRootIndex, simplificationOptions, rebuiltRoot))
                 result.storeTreesAgree = cppTerminal->root == rebuiltRoot;
         }
     }

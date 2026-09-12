@@ -786,6 +786,75 @@ struct CSSCalcSwiftSimplificationOptions {
     bool percentageResolveToDimension;
 };
 
+// MARK: - The Swift calc FLAT TREE (P7c slices C1/C1d)
+
+// One node of the flat tree, in the form Swift builds and reads.
+//
+// WHY THIS IS DECLARED IN C++, WHICH REVERSES A POSITION THIS ISLAND HELD AND STATED. The Swift
+// declaration's own comment argued the case for staying in Swift -- "C++ owning the shape of a
+// structure only Swift builds, a size static_assert to keep the two in step, and a boundary type
+// that grows a field every time the simplifier learns an alternative" -- and it was right for the
+// boundary it was written about, which was an `emitFlatTree` upcall taking a span of these. It does
+// not survive the STORAGE question, and the difference is not a change of taste:
+//
+//   * Toolchain filings 55, verified with a seven-arm reproducer: `PrintAsClang` exports even a
+//     `@frozen`, `BitwiseCopyable` Swift struct as a NON-trivially-copyable, non-default-
+//     constructible C++ class that routes copies through the value witness table. Such a type
+//     cannot be a `WTF::Vector` element, and the store is a `WTF::Vector`. This is a hard
+//     unavailability, not a preference, and it is filed with an acceptance criterion.
+//   * The two C++ PRODUCERS of a calc tree -- `Style::Calculation::toCSS`
+//     (`StyleCalculationTree+Conversion.cpp:155`) and `CSSNumericValue::toCalcTreeNode` (a pure
+//     virtual with ten overrides) -- must eventually be able to construct nodes. A type only Swift
+//     can name cannot serve them.
+//
+// The `static_assert` the old comment counted as a cost is now the thing that PREVENTS a class of
+// silent defect rather than tracking one: filings 57 records that an `@_expose(Cxx)` Swift function
+// returning a struct whose size leaves a tail of 3, 5, 6 or 7 bytes after the first eight silently
+// zeroes that tail, found in production on this island. 40 is outside that range; the assert is
+// what makes a later field addition that re-enters it a build failure instead of a wrong stylesheet.
+//
+// FIELD ORDER IS THE SWIFT DECLARATION'S, so the layout is unchanged and no conversion exists at
+// any point. There is now exactly one declaration of this shape, which is strictly fewer than the
+// two the old comment was guarding against.
+struct alignas(8) CSSCalcSwiftFlatNode {
+    // The numeric payload of a leaf. Meaningless for an operation.
+    double value;
+    // The node's own `Type`, carried rather than recomputed -- a node whose children simplified but
+    // whose kind did not change keeps its type, which is what `copyAndSimplify` does.
+    Type type;
+    // The first child's index, or `cssCalcSwiftFlatNoNode`.
+    uint32_t firstChild;
+    // The next sibling in the parent's list, or `cssCalcSwiftFlatNoNode`.
+    uint32_t nextSibling;
+    // How many children the list holds.
+    uint32_t childCount;
+    // The pre-order index this node had when an EXISTING tree was flattened, naming the original
+    // `CSSCalc::Child` it came from. Meaningless on the parse path, which has no original.
+    uint32_t origin;
+    uint16_t valueID;
+    uint8_t unitType;
+    CSSCalcSwiftAlternative alternative;
+    uint8_t percentHint;
+    // `CalcFlatNodeFlags` in the Swift file: clampNoneMinimum, clampNoneMaximum,
+    // anchorSideIsSubtree, insideAnchorSide.
+    uint8_t flags;
+};
+static_assert(sizeof(CSSCalcSwiftFlatNode) == 40);
+static_assert(alignof(CSSCalcSwiftFlatNode) == 8);
+static_assert(std::is_trivially_copyable_v<CSSCalcSwiftFlatNode>);
+
+// The end-of-list sentinel and the "no such node" answer. `UInt32.max` cannot collide with a real
+// index: a `Child` is 24 bytes, so a tree of 2^32 nodes would need 96 GB.
+static constexpr uint32_t cssCalcSwiftFlatNoNode = UINT32_MAX;
+
+// The storage a `Tree` owns its flat form in, named once so that the parse's local, the boundary
+// signatures and `Tree`'s member cannot drift apart -- and so that an inline capacity is a
+// one-line experiment rather than a six-file one. Zero today: C1c measured inline capacity in the
+// heap-allocated store it replaces at -85.5 instructions for +150 persistent bytes per calc value,
+// and C1d's own saving is larger and free, so the trade is re-measured against THIS baseline before
+// any capacity is taken (`cssprobe/notes/calc-c1d-results-0912.md`).
+using CSSCalcSwiftFlatNodeVector = Vector<CSSCalcSwiftFlatNode>;
+
 // Where the simplification output goes: the construction sink.
 //
 // Modelled on `CSSCalcSwiftSink` above: a `SWIFT_SAFE` value struct taken `inout` (the builder
@@ -1009,6 +1078,40 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // grammar now does: `emitParsed` walks a finished flat tree, so it knows the root before it
     // builds it and passes `isRoot` like every other construction here.
     WEBCORE_EXPORT void clearOperands() noexcept;
+
+    // THE FLAT ARM, WRITE SIDE: one crossing per tree, straight into the `Vector` the finished
+    // `Tree` will own (P7c slice C1d). There is no store OBJECT any more -- `CSSCalcSwiftFlatStore`
+    // was a refcounted, TZone-allocated class, and every instruction of the two allocator round
+    // trips it cost (136.2 of 379.1 per parse, measured in situ) went with it.
+    //
+    // `__counted_by` PLUS `noescape` is what makes this import as a single
+    // `Span<CSSCalcSwiftFlatNode>` with no `unsafe` marker; either annotation alone gives an
+    // `UnsafeBufferPointer` or a pointer and a count as two arguments, and NEITHER failure names the
+    // missing annotation (`calcflatstore/run.sh` arms W1 and W2).
+    //
+    // WHY THE DESTINATION IS NOT A MEMBER OF THIS STRUCT, which is where C1c's sketch put it. This
+    // type is 16 bytes and the `simplifyX` family takes it BY VALUE as an `Optional` on a per-node
+    // path; two more pointers here would take every one of those copies from two registers to four.
+    // It goes on `CSSCalcSwiftOperandStack` instead -- the object this already indirects through,
+    // constructed once per parse, forward-declared so Swift never sees inside it. No new pointer
+    // member on a `SWIFT_SAFE` type, so the assertion at the top of this struct is unchanged rather
+    // than re-argued.
+    //
+    // Returns the number of nodes stored, so Swift can assert the crossing rather than trust it. A
+    // caller that asked for NO flat arm -- the differential's non-store arms and the primitive
+    // benchmarks -- gets `nodeCount` back unchanged, because "there was nowhere to put it" is not a
+    // boundary failure and must not read as one.
+    WEBCORE_EXPORT size_t takeFlatNodes(const CSSCalcSwiftFlatNode* __counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount, uint32_t rootIndex) noexcept;
+
+    // THE FLAT ARM, READ SIDE: per element by value, which is `CSSCalcSwiftParseCursor::tokenAt`'s
+    // shape at 40 bytes instead of 24. No pointer and no view crosses, so there is no capacity
+    // policy to get wrong and no bounds pre-check for Swift to mirror -- Swift cannot RECEIVE a
+    // bounds-carrying view at all (rdar://186723514, filings 27).
+    //
+    // Out of range yields a zeroed node whose `firstChild` is the no-node sentinel, so a walk that
+    // runs off the end terminates rather than reading adjacent memory.
+    WEBCORE_EXPORT uint32_t flatNodeCount() const noexcept;
+    WEBCORE_EXPORT CSSCalcSwiftFlatNode flatNodeAt(uint32_t index) const noexcept;
 
     // `simplify(Symbol&)` (CSSCalcTree+Simplification.cpp:516-524) in full --
     // `makeNumeric(options.symbolTable.get(id)->value, unit)`.
@@ -1426,8 +1529,6 @@ WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
 // `CSSValueID`, which this header deliberately does not import.
 WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept;
 
-class CSSCalcSwiftFlatStore;
-
 // Drives the Swift grammar over `innerRange` -- the tokens INSIDE a `calc()`, which is what
 // `consumeFunction` leaves -- simplifies the result, and constructs it into `outRoot`.
 //
@@ -1450,10 +1551,10 @@ class CSSCalcSwiftFlatStore;
 // Returns `Parsed` only when the whole range was consumed AND the boundary contract held -- the
 // root slot taken and the operand stack empty. Anything else leaves `outRoot` untouched.
 //
-// `store`, when non-null, also receives the flat tree the grammar built, in ONE crossing (P7c slice
-// C1). Null is the production shape today: nothing reads the flat arm until slice C2, so filling it
-// would be work with no consumer.
-WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const SimplificationOptions&, Child& outRoot, bool simplify = true, CSSCalcSwiftFlatStore* store = nullptr) noexcept;
+// `outFlatNodes`/`outFlatRootIndex`, when non-null, also receive the flat tree the grammar built, in
+// ONE crossing (P7c slices C1/C1d) -- the `Vector` a `Tree` owns by value, filled directly, with no
+// intervening store object. Null is the shape the differential's non-store arms take.
+WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const SimplificationOptions&, Child& outRoot, bool simplify = true, CSSCalcSwiftFlatNodeVector* outFlatNodes = nullptr, uint32_t* outFlatRootIndex = nullptr) noexcept;
 
 // Rebuild a `Child` from a stored flat tree (P7c slice C1), reading it back one node at a time by
 // value. Two uses, and the second is why it is production rather than test code: it is the only
@@ -1461,138 +1562,7 @@ WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParse
 // fallback a consumer keeps until it moves to Swift -- the charter's gate on P7c being that a
 // consumer either moves to Swift or keeps reading `Child`, never gets rewritten in C++ against the
 // flat form. False leaves `outRoot` untouched.
-WEBCORE_EXPORT bool cssCalcSwiftEmitStoreIntoChild(CSSCalcSwiftFlatStore&, const SimplificationOptions&, Child& outRoot) noexcept;
-
-// MARK: - The Swift calc STORE (P7c slice C1)
-
-// One node of the flat tree, in the form Swift builds and reads.
-//
-// WHY THIS IS DECLARED IN C++, WHICH REVERSES A POSITION THIS ISLAND HELD AND STATED. The Swift
-// declaration's own comment argued the case for staying in Swift -- "C++ owning the shape of a
-// structure only Swift builds, a size static_assert to keep the two in step, and a boundary type
-// that grows a field every time the simplifier learns an alternative" -- and it was right for the
-// boundary it was written about, which was an `emitFlatTree` upcall taking a span of these. It does
-// not survive the STORAGE question, and the difference is not a change of taste:
-//
-//   * Toolchain filings 55, verified with a seven-arm reproducer: `PrintAsClang` exports even a
-//     `@frozen`, `BitwiseCopyable` Swift struct as a NON-trivially-copyable, non-default-
-//     constructible C++ class that routes copies through the value witness table. Such a type
-//     cannot be a `WTF::Vector` element, and the store is a `WTF::Vector`. This is a hard
-//     unavailability, not a preference, and it is filed with an acceptance criterion.
-//   * The two C++ PRODUCERS of a calc tree -- `Style::Calculation::toCSS`
-//     (`StyleCalculationTree+Conversion.cpp:155`) and `CSSNumericValue::toCalcTreeNode` (a pure
-//     virtual with ten overrides) -- must eventually be able to construct nodes. A type only Swift
-//     can name cannot serve them.
-//
-// The `static_assert` the old comment counted as a cost is now the thing that PREVENTS a class of
-// silent defect rather than tracking one: filings 57 records that an `@_expose(Cxx)` Swift function
-// returning a struct whose size leaves a tail of 3, 5, 6 or 7 bytes after the first eight silently
-// zeroes that tail, found in production on this island. 40 is outside that range; the assert is
-// what makes a later field addition that re-enters it a build failure instead of a wrong stylesheet.
-//
-// FIELD ORDER IS THE SWIFT DECLARATION'S, so the layout is unchanged and no conversion exists at
-// any point. There is now exactly one declaration of this shape, which is strictly fewer than the
-// two the old comment was guarding against.
-struct alignas(8) CSSCalcSwiftFlatNode {
-    // The numeric payload of a leaf. Meaningless for an operation.
-    double value;
-    // The node's own `Type`, carried rather than recomputed -- a node whose children simplified but
-    // whose kind did not change keeps its type, which is what `copyAndSimplify` does.
-    Type type;
-    // The first child's index, or `cssCalcSwiftFlatNoNode`.
-    uint32_t firstChild;
-    // The next sibling in the parent's list, or `cssCalcSwiftFlatNoNode`.
-    uint32_t nextSibling;
-    // How many children the list holds.
-    uint32_t childCount;
-    // The pre-order index this node had when an EXISTING tree was flattened, naming the original
-    // `CSSCalc::Child` it came from. Meaningless on the parse path, which has no original.
-    uint32_t origin;
-    uint16_t valueID;
-    uint8_t unitType;
-    CSSCalcSwiftAlternative alternative;
-    uint8_t percentHint;
-    // `CalcFlatNodeFlags` in the Swift file: clampNoneMinimum, clampNoneMaximum,
-    // anchorSideIsSubtree, insideAnchorSide.
-    uint8_t flags;
-};
-static_assert(sizeof(CSSCalcSwiftFlatNode) == 40);
-static_assert(alignof(CSSCalcSwiftFlatNode) == 8);
-static_assert(std::is_trivially_copyable_v<CSSCalcSwiftFlatNode>);
-
-// The end-of-list sentinel and the "no such node" answer. `UInt32.max` cannot collide with a real
-// index: a `Child` is 24 bytes, so a tree of 2^32 nodes would need 96 GB.
-static constexpr uint32_t cssCalcSwiftFlatNoNode = UINT32_MAX;
-
-// The owned flat tree: a Swift-built calc tree that outlives the parse call.
-//
-// WHY C++ OWNS THE BYTES. Three constraints bind at once and together they eliminate every
-// Swift-side answer. The tree outlives the call (`CSSCalcValue.h:64`), so the parse's
-// `withTemporaryAllocation` stack buffer cannot be the owner. A `Swift.Array` per calc() is barred
-// by the ARC bar, and it is priced rather than assumed: a per-simplification heap buffer measured
-// 617 retired instructions, more than the whole pass. `UniqueArray`/`RigidArray` are macOS 27+
-// (filings 40), so there is no back-deployable Swift-owned growable container. So: C++ owns a
-// `Vector`, Swift fills it in ONE crossing and reads it back per element BY VALUE.
-//
-// WHY THIS IS A REFERENCE TYPE AND NOT A `SWIFT_SAFE` STRUCT, which is the only interesting design
-// decision here. A receiver holding a pointer poisons every call on it -- measured, not assumed,
-// and it defeats even `operator[]`. The two in-tree ways out are `SWIFT_SAFE`, which is
-// `swift_attr("safe")`, an UNCHECKED assertion that nothing verifies, and an imported reference
-// type, where Swift never sees the layout so there is nothing to walk. The island carries three
-// unchecked assertions and a fourth was refused. `SWIFT_SHARED_REFERENCE` costs none: this class is
-// genuinely refcounted, and Swift's own retain/release calls ENFORCE the lifetime claim rather than
-// taking it on trust.
-//
-// The cost of that choice, measured rather than argued (probe `~/src/webkit-swift-ports/
-// calcflatstore/`, 12 arms, SIL at -Onone and -O): one `ref()`/`deref()` pair per Swift ENTRY
-// POINT, not per node -- the per-node read loop's body carries zero refcount operations, the
-// retain sits in the entry block and the releases on the exit paths. Two non-atomic increments per
-// whole-tree crossing. `CSSSwiftTokenSink` already pays exactly this in tree.
-//
-// ALLOCATION. One `Vector` malloc per stored tree, against one `makeUniqueRef<Op>` PER OPERATOR
-// node today (`CSSCalcTree.h:990`) plus a `Children` vector each. Until a consumer reads the flat
-// arm this is additive rather than a saving, and it is booked that way.
-class CSSCalcSwiftFlatStore final : public RefCounted<CSSCalcSwiftFlatStore> {
-    WTF_MAKE_TZONE_ALLOCATED_EXPORT(CSSCalcSwiftFlatStore, WEBCORE_EXPORT);
-public:
-    WEBCORE_EXPORT static Ref<CSSCalcSwiftFlatStore> create();
-    WEBCORE_EXPORT ~CSSCalcSwiftFlatStore();
-
-    // WRITE, one crossing per tree. `__counted_by` PLUS `noescape` is what makes this import as a
-    // single `inout MutableSpan<CSSCalcSwiftFlatNode>` with no `unsafe` marker; either annotation
-    // alone gives an `UnsafeMutableBufferPointer` or a pointer+count pair, and NEITHER failure
-    // names the missing annotation. Both negative controls are in the probe.
-    //
-    // Returns the number of nodes stored, so Swift can assert the crossing rather than trust it.
-    WEBCORE_EXPORT size_t takeNodes(const CSSCalcSwiftFlatNode* __counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount, uint32_t rootIndex) noexcept;
-
-    // READ, per element by value. This is `CSSCalcSwiftParseCursor::tokenAt`'s shape at 40 bytes
-    // instead of 24: no pointer and no view crosses, so there is no capacity policy to get wrong
-    // and no bounds pre-check for Swift to mirror. Out of range yields a zeroed node whose
-    // `firstChild` is the no-node sentinel, so a walk that runs off the end terminates rather than
-    // reading adjacent memory.
-    WEBCORE_EXPORT CSSCalcSwiftFlatNode nodeAt(uint32_t index) const noexcept;
-
-    uint32_t nodeCount() const noexcept { return m_nodes.size(); }
-    uint32_t rootIndex() const noexcept { return m_rootIndex; }
-
-#ifdef __swift__
-    // Filings 32 / rdar://186742610: `SWIFT_SHARED_REFERENCE`'s name lookup drops a base the
-    // importer made non-copyable and takes its members with it, so `ref`/`deref` inherited from
-    // `RefCounted` are invisible and the diagnostic -- "cannot find retain function '.ref'" --
-    // names the function rather than the base. Re-checked at this toolchain by
-    // `calcflatstore/run.sh` arm R3, which still reproduces it. Same interim as
-    // `CSSTokenizerSwiftTypes.h:135`.
-    void ref() const { RefCounted<CSSCalcSwiftFlatStore>::ref(); }
-    void deref() const { RefCounted<CSSCalcSwiftFlatStore>::deref(); }
-#endif
-
-private:
-    CSSCalcSwiftFlatStore();
-
-    Vector<CSSCalcSwiftFlatNode> m_nodes;
-    uint32_t m_rootIndex { cssCalcSwiftFlatNoNode };
-} SWIFT_SHARED_REFERENCE(.ref, .deref);
+WEBCORE_EXPORT bool cssCalcSwiftEmitStoreIntoChild(const CSSCalcSwiftFlatNodeVector&, uint32_t rootIndex, const SimplificationOptions&, Child& outRoot) noexcept;
 
 } // namespace CSSCalc
 } // namespace WebCore

@@ -33,7 +33,6 @@
 #include <WebCore/CSSPrimitiveNumericRange.h>
 #include <WebCore/CSSUnits.h>
 #include <WebCore/CSSValueKeywords.h>
-#include <wtf/RefPtr.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
@@ -381,31 +380,93 @@ struct Tree {
     // `requiresConversionData` is used both to both indicate whether eager evaluation of the tree (at parse time) is possible or not and to trigger a warning in `UnevaluatedCalcBase::evaluateDeprecated` that the evaluation results will be incorrect.
     bool requiresConversionData = false;
 
-    // THE SAME TREE IN THE FLAT FORM THE SWIFT GRAMMAR BUILDS, when there is one (P7c slice C1b).
+    // THE SAME TREE IN THE FLAT FORM THE SWIFT GRAMMAR BUILDS, when there is one (P7c slices
+    // C1b/C1d).
     //
     // Not a second tree and not a cache: `CSSCalcTree+Parser.cpp`'s Swift arm fills it from the very
     // nodes it then emits `root` from, in the same call, so the two are the same tree in two
-    // representations. Null on a C++-parsed tree, on a tree the Swift grammar declined, and on every
-    // tree `copy` or `copyAndSimplify` produces -- those build a fresh `root` and a store describing
-    // the tree they were given would describe a different one, which is worse than absent. A
-    // consumer therefore reads this as "is a flat form available", never as "is this a Swift tree".
+    // representations. Empty on a C++-parsed tree, on a tree the Swift grammar declined, and on every
+    // tree `copy` or `copyAndSimplify` produces -- those build a fresh `root` and a flat form
+    // describing the tree they were given would describe a different one, which is worse than
+    // absent. A consumer therefore reads this as "is a flat form available", never as "is this a
+    // Swift tree".
     //
-    // A `RefPtr`, not the `Vector` itself, because the buffer is filled from Swift and a receiver
-    // holding a pointer poisons every call on it; `CSSCalcSwiftFlatStore` is imported as a
-    // `SWIFT_SHARED_REFERENCE` for exactly that reason (see its declaration). It costs no refcount
-    // traffic here: `Tree` is MOVE-ONLY -- `Child` declares a move constructor and no copy, so the
-    // implicit copy is deleted and `CSSCalcTree+Copy.h` exists because of it -- so the only
-    // operations a `Tree` can perform on this member are a move and a destroy.
-    RefPtr<CSSCalcSwiftFlatStore> swiftFlatStore { };
+    // THE `Vector` ITSELF, not a `RefPtr` to a class holding one, which is the whole of slice C1d.
+    // C1b routed it through `CSSCalcSwiftFlatStore`, a refcounted TZone-allocated class, on the
+    // ground that a Swift-visible receiver holding a pointer poisons every call on it. That ground
+    // was real and the conclusion did not follow: the receiver Swift calls is
+    // `CSSCalcSwiftBuilder`, which already crosses, already carries raw pointers and already holds
+    // the `SWIFT_SAFE` assertion those pointers need, so the write can be addressed to it and the
+    // destination can be anything C++ likes. The object it removes cost a measured 136.2 retired
+    // instructions per Swift-parsed `calc()` in `tzoneAllocateNonCompact`/`tzoneFree` plus the
+    // `RefPtr` plumbing, against a crossing measured at 9.4.
+    //
+    // WHY C++ OWNS THE BYTES AT ALL, carried over from that class's declaration because it is the
+    // reason there is no Swift-side answer: the tree outlives the parse call
+    // (`CSSCalcValue.h:64`), so the grammar's `withTemporaryAllocation` stack buffer cannot be the
+    // owner; a `Swift.Array` per `calc()` is barred by the ARC bar and is priced rather than assumed
+    // (a per-simplification heap buffer measured 617 retired instructions, more than the whole
+    // pass); and `UniqueArray`/`RigidArray` are macOS 27+ (filings 40), so there is no
+    // back-deployable Swift-owned growable container. Swift fills this in ONE crossing and reads it
+    // back per element BY VALUE.
+    //
+    // Costs no refcount traffic and never did: `Tree` is MOVE-ONLY -- `Child` declares a move
+    // constructor and no copy, so the implicit copy is deleted and `CSSCalcTree+Copy.h` exists
+    // because of it -- so the only operations a `Tree` can perform on this member are a move and a
+    // destroy, and both are now three words rather than an atomic decrement and a possible free.
+    //
+    // WHAT IT COSTS, BOOKED RATHER THAN NETTED, because it falls on a path that never fills one.
+    // `Tree` is what BOTH parse arms build, so a `Tree` carrying a non-trivially-movable member is
+    // dearer to move and destroy even when the member is empty: the C++ descent measures **+79.5
+    // retired instructions per parse** (+1.55 % of 5139) against the `RefPtr` it replaces, on a
+    // corpus where the Swift arm saves 98.0. Not `sizeof` -- that was hypothesised and REFUTED by
+    // two built arms, one 8 bytes smaller (recovers 4.1) and one 320 bytes larger (costs 19.7); see
+    // `cssprobe/notes/calc-c1d-results-0912.md` §3.4, which leaves counting the `Tree` moves in
+    // `parseAndSimplify`'s disassembly as the named next step.
 
-    // WRITTEN OUT RATHER THAN `= default`, and the one member it leaves out is `swiftFlatStore`.
-    // Defaulting it would silently fold POINTER IDENTITY into tree equality: two trees built from
-    // the same input by the same parser would compare unequal because they hold different store
-    // objects, and a tree would compare unequal to its own `copy`. The flat store is an alternative
-    // REPRESENTATION of the four members above, so it carries no information they do not; trees
-    // equal on `root`, `type`, `stage` and `requiresConversionData` are equal whether or not one of
-    // them also happens to carry a flat buffer. This operator is therefore the same predicate the
-    // defaulted one was before the member existed, which is why C1b is behaviour-identical.
+    // Which node of `swiftFlatNodes` is the root. `cssCalcSwiftFlatNoNode` when there is no flat
+    // form; it is NOT implicitly 0, because the parse grammar numbers nodes in the order it finishes
+    // them and the root finishes last.
+    //
+    // DECLARED BEFORE THE `Vector`, AND THE ORDER IS LOAD-BEARING rather than stylistic: here it
+    // lands in the padding after `requiresConversionData` and `sizeof(Tree)` is 56; declared after
+    // the `Vector` it starts a new 8-byte slot and `sizeof(Tree)` is 64. Measured with a `sizeof`
+    // probe compiled under the build's own flags, and worth 4.1 instructions per C++ parse and 2.9
+    // per Swift one for zero source lines. `CSSCalcTree+Parser.cpp`'s designated initializer must
+    // follow this order; `-Wreorder-init-list` is an error in this build, so it cannot silently
+    // drift.
+    uint32_t swiftFlatRootIndex { cssCalcSwiftFlatNoNode };
+
+    CSSCalcSwiftFlatNodeVector swiftFlatNodes { };
+
+    // WRITTEN OUT RATHER THAN `= default`, and the members it leaves out are the two flat-arm ones.
+    // Defaulting it would fold the FLAT BUFFER'S CONTENTS into tree equality -- element-wise over
+    // 40-byte nodes, since `Vector::operator==` compares sizes then elements. Under C1b the same
+    // defaulting folded in POINTER IDENTITY, which is a different wrong answer and arguably a milder
+    // one: identity at least fails visibly on the first comparison, where a buffer compare succeeds
+    // most of the time and then disagrees with `root` on exactly the cases where one side carries a
+    // flat form and the other does not, or where two flat forms of the same tree differ in `origin`
+    // (meaningless on the parse path) or in node ORDER. It would also make the operator O(n) on a
+    // predicate that is O(1) today for every C++-parsed tree.
+    //
+    // AND SINCE C1d IT IS A BUILD ERROR, which is better than a policed comment and is why this note
+    // now reads as history rather than as a warning. `= default` was BUILT as a negative control and
+    // the build FAILED: `CSSCalcSwiftFlatNode` declares no `operator==`, so `Vector.h:203` reports
+    // *"invalid operands to binary expression"*. Under C1b the same control compiled and had to be
+    // caught at runtime. Do not "fix" that by giving the flat node an `operator==`; its absence is
+    // what makes the hazard unrepresentable.
+    //
+    // The hazard that IS still expressible is a hand-written operator that folds a flat-arm member
+    // in, and that one is caught by `storeprobe` equality bit 8 -- also built as a control
+    // (`arms/c1d-nc-rootindex.patch`, which adds `&& swiftFlatRootIndex == other.swiftFlatRootIndex`
+    // and makes all five store cases report mask 0x37 against an expected 0x3f, with every other bit
+    // still passing).
+    //
+    // The flat form is an alternative REPRESENTATION of the four members above, so it carries no
+    // information they do not; trees equal on `root`, `type`, `stage` and `requiresConversionData`
+    // are equal whether or not one of them also happens to carry a flat buffer. This operator is
+    // therefore the same predicate the defaulted one was before either member existed, which is why
+    // C1b and C1d are both behaviour-identical.
     bool operator==(const Tree& other) const { return root == other.root && type == other.type && stage == other.stage && requiresConversionData == other.requiresConversionData; }
 };
 
