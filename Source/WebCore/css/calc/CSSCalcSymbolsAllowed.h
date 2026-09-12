@@ -46,6 +46,12 @@ public:
     std::optional<CSSUnitType> NODELETE get(CSSValueID) const;
     bool NODELETE contains(CSSValueID) const;
 
+    // Whether there is any symbol at all. The Swift grammar does not carry the symbol table, so it
+    // declines every `IdentToken` when this is false -- see `CSSCalcSwiftParseOptions`
+    // `hasAllowedSymbols`. Counted as island glue (gluecount.py's `calcsimplify` list names this
+    // file for this line and no other).
+    bool isEmpty() const { return m_table.isEmpty(); }
+
 private:
     // FIXME: A HashMap here is not ideal, as these tables are always constant expressions
     // and always quite small (currently always 4, but in the future will include one that

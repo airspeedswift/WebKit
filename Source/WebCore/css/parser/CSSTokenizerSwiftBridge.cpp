@@ -263,7 +263,12 @@ ParsedCalc parseCalcExpressionAtCategory(const String& source, WebCore::CSS::Cat
         .allowZeroValueLengthRemovalFromSum = false,
     };
 
-    auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification);
+    // `Parser::Cpp` NAMED, on every `parseAndSimplify` call in this file. This function is the
+    // reference arm of three differentials, and `defaultParser` moves with
+    // WK_USE_SWIFT_CSS_CALC_PARSER: taking the default here would make a build with that flag
+    // compare the Swift grammar against itself and report 0 mismatches over 2,061 cases while
+    // measuring nothing. Same rule, and the same reason, as `Serializer::Cpp` and `Simplifier::Cpp`.
+    auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification, CSSCalc::Parser::Cpp);
     // A trailing token means the expression was only partly consumed, which is not a parse.
     if (tree && range.atEnd())
         return { WTF::move(tree), category, WebCore::CSS::All };
@@ -1600,6 +1605,7 @@ WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization
 WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerializationStaged(const char*, size_t, unsigned, double, double, char*, size_t, char*, size_t);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcRoundTrip(const char*, size_t, unsigned, char*, size_t, char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void);
+WEBCORE_EXPORT bool webCoreCSSCalcParserIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSCalcSetForceDecline(bool);
 WEBCORE_EXPORT unsigned webCoreCSSCalcDeclineCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSwiftCallCount(void);
@@ -1826,6 +1832,14 @@ WEBCORE_EXPORT bool webCoreCSSCalcSerializeRepeat(const char* text, size_t lengt
 WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void)
 {
     return CSSCalc::defaultSerializer == CSSCalc::Serializer::Swift;
+}
+
+// Whether WK_USE_SWIFT_CSS_CALC_PARSER=YES took effect, read the same way and for the same reason:
+// an ignored build flag must not be able to masquerade as a pass, and every other call in this file
+// names `Parser::Cpp` explicitly, so nothing else in the harness would notice either way.
+WEBCORE_EXPORT bool webCoreCSSCalcParserIsSwift(void)
+{
+    return CSSCalc::defaultParser == CSSCalc::Parser::Swift;
 }
 
 // Forces the Swift path to decline every tree, so the C++ fall-through runs even with the gate on.
@@ -2659,7 +2673,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     auto category = calcCategories[0];
     for (auto candidate : calcCategories) {
         auto cppParseRange = cppRange;
-        auto tree = CSSCalc::parseAndSimplify(cppParseRange, parserState, makeParserOptions(candidate), makeSimplificationOptions(candidate), CSSCalc::ParseSimplification::None);
+        auto tree = CSSCalc::parseAndSimplify(cppParseRange, parserState, makeParserOptions(candidate), makeSimplificationOptions(candidate), CSSCalc::ParseSimplification::None, CSSCalc::Parser::Cpp);
         if (tree && cppParseRange.atEnd()) {
             cppTree = WTF::move(tree);
             category = candidate;
@@ -2769,7 +2783,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     // it is the flag `simplifySum`'s zero-length removal is behind, so no case here reaches it.
     {
         auto cppTerminalRange = cppRange;
-        auto cppTerminal = CSSCalc::parseAndSimplify(cppTerminalRange, parserState, makeParserOptions(category), simplificationOptions, CSSCalc::ParseSimplification::Terminal);
+        auto cppTerminal = CSSCalc::parseAndSimplify(cppTerminalRange, parserState, makeParserOptions(category), simplificationOptions, CSSCalc::ParseSimplification::Terminal, CSSCalc::Parser::Cpp);
         result.cppSimplifiedParsed = cppTerminal && cppTerminalRange.atEnd();
         result.cppTerminalSelfEqual = result.cppSimplifiedParsed && cppTerminal->root == CSSCalc::copy(cppTerminal->root);
 
@@ -2866,7 +2880,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
         auto probeRange = baseRange;
         auto parserOptions = CSSCalc::ParserOptions { .category = candidate, .range = WebCore::CSS::All, .allowedSymbols = { }, .propertyOptions = { } };
         auto simplificationOptions = CSSCalc::SimplificationOptions { .category = candidate, .range = WebCore::CSS::All, .conversionData = std::nullopt, .symbolTable = { }, .allowZeroValueLengthRemovalFromSum = false };
-        auto tree = CSSCalc::parseAndSimplify(probeRange, parserState, parserOptions, simplificationOptions, CSSCalc::ParseSimplification::None);
+        auto tree = CSSCalc::parseAndSimplify(probeRange, parserState, parserOptions, simplificationOptions, CSSCalc::ParseSimplification::None, CSSCalc::Parser::Cpp);
         if (tree && probeRange.atEnd()) {
             accepted = candidate;
             break;
@@ -2919,7 +2933,8 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
         if (arm == 0 || arm == 2) {
             auto range = baseRange;
             auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions,
-                arm == 0 ? CSSCalc::ParseSimplification::None : CSSCalc::ParseSimplification::Terminal);
+                arm == 0 ? CSSCalc::ParseSimplification::None : CSSCalc::ParseSimplification::Terminal,
+                CSSCalc::Parser::Cpp);
             if (!tree)
                 return 0;
             fold = fold * 1000003 + static_cast<uint64_t>(tree->root.index());

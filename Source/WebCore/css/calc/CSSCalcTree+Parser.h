@@ -107,8 +107,43 @@ struct ParserOptions {
 enum class ParseSimplification : uint8_t { Eager, Terminal, None };
 static constexpr ParseSimplification defaultParseSimplification = ParseSimplification::Terminal;
 
+// MARK: Parser selection
+
+// WHICH implementation parses. Shaped exactly like `CSSCalc::Simplifier`, `CSSCalc::Serializer`
+// and `CSSTokenizer::Scanner`: both arms compiled in, the choice made at compile time, C++ kept as
+// the fallback because keeping it is the schedule and because the Swift grammar declines what it
+// does not cover.
+//
+// A PARAMETER, not just a `#if` inside `parseAndSimplify`, and that is load-bearing rather than
+// symmetric. The validation bridge's reference arm IS `parseAndSimplify`; with a compile-time-only
+// gate, a build that selected Swift would make the differential compare the Swift grammar against
+// itself and report 0 mismatches over 2,061 cases while measuring nothing. Naming the arm is what
+// stops an ignored -- or an honoured -- build flag from masquerading as a pass.
+enum class Parser : bool { Cpp, Swift };
+
+// `defined() &&` rather than a `#if !defined / #define 0` prologue, for the reason
+// `defaultSimplifier` gives: the flag is only ever defined as 1, by WK_USE_SWIFT_CSS_CALC_PARSER=YES.
+//
+// THE DEFAULT-ARGUMENT HAZARD IS REAL HERE AND IS CHECKED, NOT ASSUMED. The note above says a
+// `static constexpr` used as a default argument is evaluated in the CALLER's translation unit, so
+// every target that calls `parseAndSimplify` must be built with the same value or the arms silently
+// disagree -- `CombinedURLFilters::defaultBuilder`, which left ten content-extension tests on the
+// old arm and would have reported a false pass. This header is a PROJECT header, not a Private one
+// (no `in Headers` entry in WebCore.xcodeproj), so it cannot be included outside the WebCore target,
+// and its six includers -- CSSUnevaluatedCalc.cpp, CSSPropertyParserConsumer+Background.cpp,
+// SizesAttributeParser.cpp, CSSNumericValue.cpp, CSSTokenizerSwiftBridge.cpp and this file's own
+// .cpp -- are all WebCore TUs, which take the define from one place, WebCore.xcconfig's
+// GCC_PREPROCESSOR_DEFINITIONS. If this header ever becomes Private, that argument stops holding
+// and the arm has to be passed explicitly at every call.
+static constexpr Parser defaultParser =
+#if defined(USE_SWIFT_CSS_CALC_PARSER) && USE_SWIFT_CSS_CALC_PARSER
+    Parser::Swift;
+#else
+    Parser::Cpp;
+#endif
+
 // Parses and simplifies the provided `CSSParserTokenRange` into a CSSCalc::Tree. Returns `std::nullopt` on failure.
-std::optional<Tree> parseAndSimplify(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification);
+std::optional<Tree> parseAndSimplify(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification, Parser = defaultParser);
 
 // Returns whether the provided `CSSValueID` is one of the functions that should be parsed as a `calc()`.
 bool NODELETE isCalcFunction(CSSValueID function);

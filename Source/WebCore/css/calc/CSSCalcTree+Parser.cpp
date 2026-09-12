@@ -166,7 +166,7 @@ static std::optional<TypedChild> parseCalcNumber(const CSSParserToken&, ParserSt
 static std::optional<TypedChild> parseCalcPercentage(const CSSParserToken&, ParserState&);
 static std::optional<TypedChild> parseCalcDimension(const CSSParserToken&, ParserState&);
 
-std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, ParseSimplification parseSimplification)
+std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, ParseSimplification parseSimplification, Parser parser)
 {
     auto function = range.peek().functionId();
     if (!isCalcFunction(function))
@@ -190,6 +190,52 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     // and `consumeAnchor`'s `percentageState` shows the parser already runs this way.
     if (parseSimplification != ParseSimplification::Eager)
         state.simplificationOptions = nullptr;
+
+    // The Swift grammar first, on the two schedules it serves. The gate is the `parser` PARAMETER
+    // rather than a `#if` here; CSSCalcTree+Parser.h says why, and the reason is that the bridge's
+    // reference arm is this function. `Eager` is excluded because `Eager`
+    // IS the C++ per-operation simplifier, which the fused Swift entry does not have and is not
+    // trying to reproduce; `defaultParseSimplification` is `Terminal` and all three production
+    // callers take the default, so the excluded arm is reached by the differential only.
+    //
+    // `tokens` is passed by CONST reference and is not consumed, which is what makes a decline free:
+    // the C++ descent below starts from the same first token. An out-of-band advance here would make
+    // the fallback parse a suffix, and `tokens.atEnd()` would pass on a truncated tree.
+    if (parser == Parser::Swift && parseSimplification != ParseSimplification::Eager) {
+        Child swiftRoot = Number { .value = 0 };
+        auto swiftResult = cssCalcSwiftParseIntoChild(tokens, CSSCalcSwiftParseOptions {
+            .category = parserOptions.category,
+            .absoluteLengthUnitsOnly = propertyParserState.absoluteLengthUnitsOnly,
+            .hasAllowedSymbols = !parserOptions.allowedSymbols.isEmpty(),
+            .rootFunctionId = static_cast<uint16_t>(function),
+        }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal);
+
+        // THREE OUTCOMES AND THEY ARE NOT INTERCHANGEABLE, which is the whole reason the boundary
+        // reports an outcome rather than an optional. `Failed` means the input is invalid CSS and
+        // the C++ arm agrees, so re-parsing it would burn a second descent to reach the same
+        // `nullopt`; `Declined` means the grammar does not cover the input, and returning `nullopt`
+        // for one of those would DROP A VALID DECLARATION. Collapsing them either way is a bug, in
+        // one direction silent and in the other merely slow.
+        switch (static_cast<CSSCalcSwiftParseOutcome>(swiftResult.outcome)) {
+        case CSSCalcSwiftParseOutcome::Failed:
+            return std::nullopt;
+
+        case CSSCalcSwiftParseOutcome::Parsed:
+            // The same type check the C++ arm does below, against the type the Swift algebra
+            // computed rather than one recomputed here.
+            if (!swiftResult.type.matches(parserOptions.category))
+                return std::nullopt;
+            return Tree {
+                .root = WTF::move(swiftRoot),
+                .type = swiftResult.type,
+                .stage = CSSCalc::Stage::Specified,
+                .requiresConversionData = swiftResult.requiresConversionData,
+            };
+
+        case CSSCalcSwiftParseOutcome::Declined:
+            break;
+        }
+    }
 
     auto root = parseCalcFunction(tokens, function, 0, state);
 
