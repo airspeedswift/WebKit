@@ -151,7 +151,7 @@ static std::optional<TypedChild> parseCalcNumber(const CSSParserToken&, ParserSt
 static std::optional<TypedChild> parseCalcPercentage(const CSSParserToken&, ParserState&);
 static std::optional<TypedChild> parseCalcDimension(const CSSParserToken&, ParserState&);
 
-std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, ParseSimplification parseSimplification)
+std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, ParseSimplification parseSimplification, Parser parser)
 {
     auto function = range.peek().functionId();
     if (!isCalcFunction(function))
@@ -173,6 +173,68 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     // whole of `Terminal` and `None` on the way in, and no site needs to know which mode it is in.
     if (parseSimplification != ParseSimplification::Eager)
         state.simplificationOptions = nullptr;
+
+    // Try the Swift parser first. It is selected by the `parser` parameter rather than by a `#if`;
+    // see CSSCalcTree+Parser.h. `Eager` is excluded because eager simplification is the C++
+    // per-operation simplifier, which the Swift parser does not implement.
+    //
+    // `tokens` is passed by const reference and is not consumed, so when the Swift parser hands the
+    // input back the C++ descent below starts from the same first token. Advancing the range here
+    // would make the fallback parse a suffix, and `tokens.atEnd()` would then accept a truncated
+    // tree.
+    if (parser == Parser::Swift && parseSimplification != ParseSimplification::Eager) {
+        Child swiftRoot = Number { .value = 0 };
+        // Storage for the flat node array the Swift parser also fills, declared here rather than
+        // inside the `Tree` because the parser needs somewhere to put nodes before it knows whether
+        // it will finish; if it hands the input back, the C++ descent below builds a tree these
+        // nodes do not describe. An empty `Vector` and a word, so handing back or failing allocates
+        // nothing, and on success the storage is moved into the `Tree`.
+        //
+        // Only the differential reads the flat form, so only it asks for the fill. Passing null
+        // skips it at `CSSCalcSwiftBuilder::reportFlat`'s first branch, which is what keeps a
+        // shipping parse from allocating a node array nothing goes on to read.
+        CSSCalcSwiftFlatNodeVector swiftFlatNodes;
+        uint32_t swiftFlatRootIndex = cssCalcSwiftFlatNoNode;
+#if ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE)
+        auto* swiftFlatNodesOut = &swiftFlatNodes;
+        auto* swiftFlatRootIndexOut = &swiftFlatRootIndex;
+#else
+        CSSCalcSwiftFlatNodeVector* swiftFlatNodesOut = nullptr;
+        uint32_t* swiftFlatRootIndexOut = nullptr;
+#endif
+        auto swiftResult = cssCalcSwiftParseIntoChild(tokens, CSSCalcSwiftParseOptions {
+            .category = parserOptions.category,
+            .absoluteLengthUnitsOnly = propertyParserState.absoluteLengthUnitsOnly,
+            .hasAllowedSymbols = !parserOptions.allowedSymbols.isEmpty(),
+            .rootFunctionId = static_cast<uint16_t>(function),
+        }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal, swiftFlatNodesOut, swiftFlatRootIndexOut);
+
+        // The three outcomes are not interchangeable, which is why the boundary reports an outcome
+        // rather than an optional. `Failed` means the input is invalid CSS, so a C++ descent would
+        // only reach the same `nullopt`; `Declined` means the Swift parser does not cover the
+        // input, and returning `nullopt` for one of those would drop a valid declaration.
+        switch (static_cast<CSSCalcSwiftParseOutcome>(swiftResult.outcome)) {
+        case CSSCalcSwiftParseOutcome::Failed:
+            return std::nullopt;
+
+        case CSSCalcSwiftParseOutcome::Parsed:
+            // The same type check the C++ path performs below, against the type the Swift parser
+            // computed rather than one recomputed here.
+            if (!swiftResult.type.matches(parserOptions.category))
+                return std::nullopt;
+            return Tree {
+                .root = WTF::move(swiftRoot),
+                .type = swiftResult.type,
+                .stage = CSSCalc::Stage::Specified,
+                .requiresConversionData = swiftResult.requiresConversionData,
+                .swiftFlatRootIndex = swiftFlatRootIndex,
+                .swiftFlatNodes = WTF::move(swiftFlatNodes),
+            };
+
+        case CSSCalcSwiftParseOutcome::Declined:
+            break;
+        }
+    }
 
     auto root = parseCalcFunction(tokens, function, 0, state);
 
@@ -1772,53 +1834,6 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
         .blockType = static_cast<uint8_t>(token.getBlockType()),
         .flags = flags,
     };
-}
-
-// MARK: - The Swift calc STORE (P7c slice C1)
-
-WTF_MAKE_TZONE_ALLOCATED_IMPL(CSSCalcSwiftFlatStore);
-
-CSSCalcSwiftFlatStore::CSSCalcSwiftFlatStore() = default;
-CSSCalcSwiftFlatStore::~CSSCalcSwiftFlatStore() = default;
-
-Ref<CSSCalcSwiftFlatStore> CSSCalcSwiftFlatStore::create()
-{
-    return adoptRef(*new CSSCalcSwiftFlatStore);
-}
-
-size_t CSSCalcSwiftFlatStore::takeNodes(const CSSCalcSwiftFlatNode* __counted_by(nodeCount) nodes __attribute__((noescape)), size_t nodeCount, uint32_t rootIndex) noexcept
-{
-    // `Vector::appendRange` on an empty vector allocates exactly `nodeCount` slots: ONE malloc for
-    // the whole tree, where the `Child` form allocates one `makeUniqueRef<Op>` plus one `Children`
-    // vector per operator node. Assigning rather than appending, because a store is filled once.
-    m_nodes = Vector<CSSCalcSwiftFlatNode>(unsafeMakeSpan(nodes, nodeCount));
-    m_rootIndex = rootIndex;
-    return m_nodes.size();
-}
-
-CSSCalcSwiftFlatNode CSSCalcSwiftFlatStore::nodeAt(uint32_t index) const noexcept
-{
-    // Out of range answers a terminated node rather than trapping, matching what
-    // `CSSCalcSwiftParseCursor::tokenAt` does past the end: the caller is a Swift walk whose
-    // termination condition is the sentinel, so handing it the sentinel makes the walk stop where
-    // a bounds pre-check on the Swift side would have stopped it, and does so without Swift having
-    // to mirror a bound it cannot see.
-    if (index >= m_nodes.size()) {
-        return {
-            .value = 0,
-            .type = { },
-            .firstChild = cssCalcSwiftFlatNoNode,
-            .nextSibling = cssCalcSwiftFlatNoNode,
-            .childCount = 0,
-            .origin = cssCalcSwiftFlatNoNode,
-            .valueID = 0,
-            .unitType = 0,
-            .alternative = CSSCalcSwiftAlternative::Number,
-            .percentHint = 0,
-            .flags = 0,
-        };
-    }
-    return m_nodes[index];
 }
 
 } // namespace CSSCalc

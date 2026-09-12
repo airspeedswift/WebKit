@@ -5669,14 +5669,13 @@ public func cssCalcParseSwift(
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
     _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ simplificationOptions: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
-    _ simplify: Bool,
-    _ store: WebCore.CSSCalc.CSSCalcSwiftFlatStore?
+    _ simplify: Bool
 ) -> WebCore.CSSCalc.CSSCalcSwiftParseResult {
     var result = WebCore.CSSCalc.CSSCalcSwiftParseResult()
     var state = CalcParseState()
 
     var attempt = calcParseAttempt(cursor, &builder, options, simplificationOptions, simplify,
-        calcFlatStackCapacity, &state, store)
+        calcFlatStackCapacity, &state)
 
     // A tree too big for the fixed stack buffer, retried at a size that cannot overflow. Nothing has
     // been observed on the first attempt -- the buffer is scratch, and a descent that overflowed
@@ -5685,7 +5684,7 @@ public func cssCalcParseSwift(
     if attempt.overflowed {
         state = CalcParseState()
         attempt = calcParseAttempt(cursor, &builder, options, simplificationOptions, simplify,
-            calcParseNodeUpperBound(cursor.tokenCount()), &state, store)
+            calcParseNodeUpperBound(cursor.tokenCount()), &state)
     }
 
     guard let type = attempt.type else {
@@ -5722,8 +5721,7 @@ private func calcParseAttempt(
     _ simplificationOptions: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
     _ simplify: Bool,
     _ capacity: Int,
-    _ state: inout CalcParseState,
-    _ store: WebCore.CSSCalc.CSSCalcSwiftFlatStore?
+    _ state: inout CalcParseState
 ) -> CalcParseAttempt {
     let end = cursor.tokenCount()
     return withTemporaryAllocation(of: CalcFlatNode.self, capacity: capacity) { out -> CalcParseAttempt in
@@ -5806,29 +5804,14 @@ private func calcParseAttempt(
             return attempt
         }
 
-        // THE STORE, filled in ONE crossing (P7c slice C1). `takeNodes` is
-        // `__counted_by(nodeCount)` plus `noescape`, which is what makes the whole buffer cross as a
-        // single `Span` with no `unsafe` marker; either annotation alone gives an
-        // `UnsafeBufferPointer` or a pointer and a count as two arguments, and NEITHER failure names
-        // the missing annotation (`calcflatstore/run.sh` arms W1 and W2).
-        //
-        // Read off `tree.nodes` rather than `out`, because `tree` holds `out`'s storage for the
-        // duration and reading `out` again here is a second overlapping access the exclusivity
-        // checker rejects.
-        //
-        // ONE `Vector` malloc per stored tree. The `Child` tree beside it is one `makeUniqueRef<Op>`
-        // plus one `Children` vector PER OPERATOR node, so once a consumer reads the flat arm this is
-        // strictly fewer; until then it is additive and is booked that way.
-        if let store {
-            let stored = store.takeNodes(tree.nodes.span.extracting(0..<tree.count), UInt32(parsed.index))
-            // The crossing is ASSERTED, not trusted. A `takeNodes` that stored a different number of
-            // nodes than were handed to it is a boundary defect, and reporting it as a refusal makes
-            // the negative control -- poison `takeNodes` -- fail the differential instead of
-            // producing a quietly truncated tree.
-            if stored != tree.count {
-                attempt.emitRefused = true
-                return attempt
-            }
+        let stored = builder.takeFlatNodes(tree.nodes.span.extracting(0..<tree.count), UInt32(parsed.index))
+        // The crossing is asserted, not trusted. A `takeFlatNodes` that stored a different number of
+        // nodes than were handed to it is a boundary defect, and reporting it as a refusal makes
+        // the negative control -- poison `takeFlatNodes` -- fail the differential instead of
+        // producing a quietly truncated tree.
+        if stored != tree.count {
+            attempt.emitRefused = true
+            return attempt
         }
 
         attempt.type = parsed.type
@@ -5836,46 +5819,39 @@ private func calcParseAttempt(
     }
 }
 
-/// Rebuild a `CSSCalc::Child` from a stored flat tree, reading it back one node at a time BY VALUE.
+/// Rebuild a `CSSCalc::Child` from a stored flat tree, reading it back one node at a time by value.
 ///
-/// WHAT THIS IS FOR, AND WHY IT IS NOT A THROWAWAY. Two things at once:
+/// Two things at once:
 ///
-///  * It is the only thing that can VALIDATE slice C1. A store nothing reads is a change no test can
-///    fail -- `takeNodes` could store nothing, or half the tree, or the wrong root, and every
-///    existing differential would still pass, because they all compare the `Child` the emit built
-///    directly. Reading the store back and emitting from THAT makes the whole crossing observable:
-///    the 1,639-expression corpus and the curated cases now compare a tree that went through
-///    `takeNodes` and 40 bytes of `nodeAt` per node against one that did not. Poisoning either
-///    entry point fails them.
-///  * It is the materialising fallback slice C2 needs, so that a consumer which has not yet been
-///    ported can keep reading `Child` off a `Value` that stores the flat form. The charter's gate on
-///    P7c is that a consumer either moves to Swift or keeps reading `Child`; this is the second
-///    half of that sentence, and it is written in Swift rather than C++ for exactly that reason.
+///  * It is the only thing that makes the store observable. `takeFlatNodes` could store nothing, or
+///    half the tree, or the wrong root, and a differential that compares the `Child` the emit built
+///    directly would still pass. Reading the store back and emitting from that puts the whole
+///    crossing under test.
+///  * It is the materialising fallback a consumer that has not been ported needs, so it can keep
+///    reading `Child` off a `Value` that stores the flat form.
 ///
-/// THE READ IS PER ELEMENT BY VALUE, which is `CSSCalcSwiftParseCursor::tokenAt`'s shape at 40 bytes
-/// instead of 24, and it is what keeps the island at `unsafe` = 0: Swift cannot RECEIVE a
-/// bounds-carrying view from C++ at all (rdar://186723514, filings 27), so no `Span` of the store's
-/// buffer can cross. The nodes are copied into the same kind of stack buffer the parse already uses,
-/// and the existing `emitParsedRoot` runs over it unchanged -- no second emit, no second
-/// representation, no C++ rewritten against the flat form.
+/// The read is per element by value, which is `CSSCalcSwiftParseCursor::tokenAt`'s shape at 40 bytes
+/// instead of 24, and it is what keeps this file free of `unsafe`: Swift cannot receive a
+/// bounds-carrying view from C++ at all (rdar://186723514), so no `Span` of the store's buffer can
+/// cross. The nodes are copied into the same kind of stack buffer the parse already uses, and the
+/// existing `emitParsedRoot` runs over it unchanged.
 @_expose(Cxx)
 public func cssCalcSwiftEmitFromStore(
-    _ store: WebCore.CSSCalc.CSSCalcSwiftFlatStore,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ rootIndex: UInt32
 ) -> Bool {
-    let count = Int(store.nodeCount())
-    let root = store.rootIndex()
-    guard count > 0, root != CalcFlatNode.noNode, Int(root) < count else {
+    let count = Int(builder.flatNodeCount())
+    guard count > 0, rootIndex != CalcFlatNode.noNode, Int(rootIndex) < count else {
         return false
     }
     return withTemporaryAllocation(of: CalcFlatNode.self, capacity: count) { out -> Bool in
         var i: UInt32 = 0
         while i < UInt32(count) {
-            out.append(store.nodeAt(i))
+            out.append(builder.flatNodeAt(i))
             i &+= 1
         }
         let tree = CalcFlatTree(storage: out.mutableSpan, count: count)
-        return tree.emitParsedRoot(Int(root), into: &builder)
+        return tree.emitParsedRoot(Int(rootIndex), into: &builder)
     }
 }
 

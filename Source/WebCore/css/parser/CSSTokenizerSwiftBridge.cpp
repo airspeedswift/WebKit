@@ -49,6 +49,7 @@
 #include "CSSCalcTree+Serialization.h"
 #include "CSSCalcTree+Simplification.h"
 #include "CSSCalcTree.h"
+#include "CSSCalcValue.h"
 #include "CSSPrimitiveNumericCategory.h"
 #include "CSSToLengthConversionData.h"
 #include "CSSPropertyParserState.h"
@@ -175,23 +176,18 @@ struct ParsedCalc {
     WebCore::CSS::Range range { WebCore::CSS::All };
 };
 
-// Parses one expression, trying each category until one accepts it.
+// Parses one expression at one category.
 //
 // `conversionData` is deliberately `std::nullopt`, matching the production parse at
 // CSSUnevaluatedCalc.cpp:167: with no conversion data, simplification cannot fold length units
 // into canonical form, so operator nodes survive into the tree instead of collapsing to a leaf.
-// `parseSimplification` selects WHEN the parse simplifies -- see `CSSCalc::ParseSimplification`. It
-// is a parameter rather than process state on purpose: a set/clear pair around a loop that returns
-// from the middle leaves the flag set for every later case in the run, and that failure reads as a
-// corpus problem rather than an invocation one.
+// `parseSimplification` is a parameter rather than process state, because a set/clear pair around
+// a loop that returns from the middle leaves the flag set for every later case in the run.
 //
-// Split from the category loop below so that ONE category can be named directly. The Style
-// round-trip entry needs that: `Style::Calculation::toStyle` accepts `LengthPercentage` and
-// `AnglePercentage` only, and taking whichever category the search happened to settle on would
-// convert a tree parsed at `Integer` under `LengthPercentage` options -- a different
-// `Percentage::hint`, so a different tree, for a reason that has nothing to do with the conversion
-// under test.
-ParsedCalc parseCalcExpressionAtCategory(const String& source, WebCore::CSS::Category category, CSSCalc::ParseSimplification parseSimplification)
+// One category is named directly rather than searched for, because `Style::Calculation::toStyle`
+// accepts `LengthPercentage` and `AnglePercentage` only, and taking whichever category a search
+// settled on would convert a tree parsed at `Integer` under `LengthPercentage` options.
+ParsedCalc parseCalcExpressionAtCategory(const String& source, WebCore::CSS::Category category, CSSCalc::ParseSimplification parseSimplification, bool productionDefaults = false)
 {
     CSSTokenizer tokenizer(source);
     auto range = tokenizer.tokenRange();
@@ -226,17 +222,27 @@ ParsedCalc parseCalcExpressionAtCategory(const String& source, WebCore::CSS::Cat
         .allowZeroValueLengthRemovalFromSum = false,
     };
 
-    auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification);
+    // `Parser::Cpp` is named explicitly, here and on every `parseAndSimplify` call in this file:
+    // `defaultParser` moves with WK_USE_SWIFT_CSS_CALC_PARSER, so taking the default would make a
+    // build with that flag compare the Swift grammar against itself.
+    //
+    // `productionDefaults` is the one exemption, and it is spelled as an omission rather than as
+    // `Parser::Swift`, because the question it asks is whether production selects the Swift
+    // parser. Both trailing arguments are left off, so `defaultParseSimplification` and
+    // `defaultParser` are evaluated in WebCore's own translation unit.
+    auto tree = productionDefaults
+        ? CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions)
+        : CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification, CSSCalc::Parser::Cpp);
     // A trailing token means the expression was only partly consumed, which is not a parse.
     if (tree && range.atEnd())
         return { WTF::move(tree), category, WebCore::CSS::All };
     return { };
 }
 
-ParsedCalc parseCalcExpression(const String& source, CSSCalc::ParseSimplification parseSimplification = CSSCalc::ParseSimplification::Eager)
+ParsedCalc parseCalcExpression(const String& source, CSSCalc::ParseSimplification parseSimplification = CSSCalc::ParseSimplification::Eager, bool productionDefaults = false)
 {
     for (auto category : calcCategories) {
-        auto parsed = parseCalcExpressionAtCategory(source, category, parseSimplification);
+        auto parsed = parseCalcExpressionAtCategory(source, category, parseSimplification, productionDefaults);
         if (parsed.tree)
             return parsed;
     }
@@ -1405,6 +1411,7 @@ WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerialization
 WEBCORE_EXPORT CSSCalcSerializationComparison webCoreCSSCalcCompareSerializationStaged(const char*, size_t, unsigned, double, double, char*, size_t, char*, size_t);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcRoundTrip(const char*, size_t, unsigned, char*, size_t, char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void);
+WEBCORE_EXPORT bool webCoreCSSCalcParserIsSwift(void);
 WEBCORE_EXPORT void webCoreCSSCalcSetForceDecline(bool);
 WEBCORE_EXPORT unsigned webCoreCSSCalcDeclineCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSwiftCallCount(void);
@@ -1412,6 +1419,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcSerializeConstructedRoot(unsigned, unsigned, char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSerializeRepeat(const char*, size_t, unsigned, uint32_t, uint64_t*, uint32_t*, uint32_t*);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcProductionStoreProbe(const char*, size_t, const char*, size_t, uint32_t*, uint32_t*);
 
 // So that a caller can confirm its sweep reached this code rather than being elided.
 static std::atomic<uint64_t> s_calcCompareCalls;
@@ -1602,6 +1610,86 @@ WEBCORE_EXPORT bool webCoreCSSCalcSerializeRepeat(const char* text, size_t lengt
 WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void)
 {
     return CSSCalc::defaultSerializer == CSSCalc::Serializer::Swift;
+}
+
+// Whether WK_USE_SWIFT_CSS_CALC_PARSER took effect. Every other call in this file names
+// `Parser::Cpp` explicitly, so nothing else here would notice either way.
+WEBCORE_EXPORT bool webCoreCSSCalcParserIsSwift(void)
+{
+    return CSSCalc::defaultParser == CSSCalc::Parser::Swift;
+}
+
+// Whether a production calc parse, with every default taken, hands back a tree carrying the Swift
+// grammar's flat store.
+//
+// A bridge entry rather than an out-of-process probe because `CSSCalc::parseAndSimplify` is not
+// WEBCORE_EXPORT, and because its defaults are `static constexpr` default arguments, evaluated in
+// the caller's translation unit.
+//
+// Returns 0 when `text` did not parse at any category, 1 when it parsed and the tree carries no
+// flat store, and 2 when it carries one. `outNodeCount` is the store's node count.
+//
+// `outEqualityBits` covers what adding the member to `Tree` could break, each bit failing in a
+// different direction:
+//   1  two independent production parses of `text` compare equal      (the store is excluded)
+//   2  ... at distinct addresses, both filled                         (so bit 1 is not vacuous)
+//   4  flipping `requiresConversionData` on one makes them unequal    (not a constant `true`)
+//   8  clearing one side's flat nodes leaves them equal               (excluded asymmetrically)
+//  16  the store's root index is inside its node count                (the crossing is coherent)
+//  32  a parse of `otherText` compares unequal to `text`'s            (`root` is still compared)
+//
+// Bit 8 is the load-bearing one: the member is a `Vector`, so a defaulted `operator==` folds in an
+// element-wise buffer compare and two parses of the same text build identical buffers.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcProductionStoreProbe(const char* text, size_t length, const char* otherText, size_t otherLength, uint32_t* outNodeCount, uint32_t* outEqualityBits)
+{
+    if (outNodeCount)
+        *outNodeCount = 0;
+    if (outEqualityBits)
+        *outEqualityBits = 0;
+
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto parsed = parseCalcExpression(source, CSSCalc::defaultParseSimplification, true);
+    if (!parsed.tree)
+        return 0;
+
+    // Boxed exactly as `UnevaluatedCalcBase::parseBase` boxes it, and read back through
+    // `Value::tree()`, so what is reported is what a consumer sees.
+    auto value = CSSCalc::Value::create(parsed.category, parsed.range, WTF::move(*parsed.tree));
+    const auto& tree = value->tree();
+    if (tree.swiftFlatNodes.isEmpty())
+        return 1;
+    if (outNodeCount)
+        *outNodeCount = tree.swiftFlatNodes.size();
+
+    if (outEqualityBits) {
+        uint32_t bits = 0;
+        if (tree.swiftFlatRootIndex < tree.swiftFlatNodes.size())
+            bits |= 16;
+
+        auto again = parseCalcExpression(source, CSSCalc::defaultParseSimplification, true);
+        if (again.tree && !again.tree->swiftFlatNodes.isEmpty()) {
+            if (again.tree->swiftFlatNodes.span().data() != tree.swiftFlatNodes.span().data())
+                bits |= 2;
+            if (tree == *again.tree)
+                bits |= 1;
+            again.tree->requiresConversionData = !again.tree->requiresConversionData;
+            if (!(tree == *again.tree))
+                bits |= 4;
+            again.tree->requiresConversionData = !again.tree->requiresConversionData;
+            again.tree->swiftFlatNodes.clear();
+            again.tree->swiftFlatRootIndex = CSSCalc::cssCalcSwiftFlatNoNode;
+            if (tree == *again.tree)
+                bits |= 8;
+        }
+
+        String otherSource { unsafeMakeSpan(byteCast<Latin1Character>(otherText), otherLength) };
+        auto other = parseCalcExpression(otherSource, CSSCalc::defaultParseSimplification, true);
+        if (other.tree && !(tree == *other.tree))
+            bits |= 32;
+
+        *outEqualityBits = bits;
+    }
+    return 2;
 }
 
 // Forces the Swift path to decline every tree, so the C++ fall-through runs even with the gate on.
@@ -1811,19 +1899,15 @@ struct CSSCalcParseComparison {
     uint8_t fusedOutcome;
     bool cppSimplifiedParsed;
     bool fusedTreesAgree;
-    // THE STORE ROUND TRIP, which is the whole of what slice C1 can be wrong about.
-    //
-    // `storeNodeCount` is what `takeNodes` reported storing, and `storeTreesAgree` compares a tree
-    // rebuilt FROM THE STORE -- every node read back one at a time through `nodeAt`, 40 bytes by
-    // value -- against the same C++ Terminal tree `fusedTreesAgree` uses. The two are deliberately
-    // not one field: a store that took no nodes at all would leave `storeTreesAgree` false, and
+    // The store round trip. `storeNodeCount` is what `takeFlatNodes` reported storing, and
+    // `storeTreesAgree` compares a tree rebuilt from the flat nodes alone -- every node read back
+    // through `flatNodeAt` -- against the same C++ Terminal tree `fusedTreesAgree` uses. Two fields
+    // and not one: a store that took no nodes at all would leave `storeTreesAgree` false, and
     // without the count there would be no way to tell that from a tree that came back wrong.
     //
-    // WHY THIS FIELD EXISTS AT ALL. Without a reader, C1 is a change no test can fail --
-    // `takeNodes` could store nothing, half the tree, or the wrong root index, and every
-    // differential in this file would still pass, because they all compare the `Child` the emit
-    // built directly and never look at the store. That is the vacuous-check shape, and this is what
-    // removes it.
+    // Without a reader, `takeFlatNodes` could store nothing, half the tree, or the wrong root index
+    // and every differential in this file would still pass, because they all compare the `Child`
+    // the emit built directly and never look at the store.
     uint32_t storeNodeCount;
     bool storeTreesAgree;
     // Whether the oracle can decide this case at all, which is a property of the input and not of
@@ -1836,13 +1920,25 @@ struct CSSCalcParseComparison {
     // that a real defect hiding inside it is visible as growth.
     bool cppSelfEqual;
     bool cppTerminalSelfEqual;
+    // The swept parameter axes, echoed back rather than remembered by the caller. An axis the
+    // callee silently ignores produces two identical outcome vectors and reads as "the axis is not
+    // live", which is indistinguishable from a flag that never arrived, so the driver asserts these
+    // against what it asked for.
+    bool sawWithSymbols;
+    bool sawAbsoluteLengthUnitsOnly;
     // 0 = the input is not a `calc()` this entry can drive, so the case is SKIPPED rather than
     // passed -- a skipped case must never read as agreement.
     bool applicable;
 };
 
 WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char*, size_t, uint64_t* outCpp, uint64_t* outSwift, uint32_t* outTokenCount);
-WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char*, size_t, bool withSymbols);
+// A bit set rather than a series of positional `bool`s, which are the shape that gets transposed
+// silently. The bits are named in `CSSCalcCompareParseOption` below.
+enum CSSCalcCompareParseOption : uint32_t {
+    CSSCalcCompareParseWithSymbols = 1u << 0,
+    CSSCalcCompareParseAbsoluteLengthUnitsOnly = 1u << 1,
+};
+WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char*, size_t, uint32_t options);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char*, size_t, unsigned arm, uint32_t iterations, uint32_t* outCovered);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
@@ -2245,10 +2341,27 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t le
 // (the C++ checks the symbol table before the five constants, so an id in both would resolve
 // differently), and the constants path is only reachable with the table empty. A run that only
 // used one value of this flag would leave one of those two behaviours untested.
+//
+// `absoluteLengthUnitsOnly` is the SECOND such axis, added in C2q because it was pinned `false` at
+// all five bridge call sites and at every one of the differential's cases. It is not a decline and
+// it is not a fold: a unit needing conversion data becomes a parse **FAILURE**, in both arms
+// (`CSSCalcTree+Parser.cpp:1664`, `CSSCalcSimplificationSwift.swift:6448`). So the two arms have to
+// agree on WHICH units those are, and nothing tested that. It is a parameter axis, not a corpus
+// axis, which is the distinction that let a broken content-extensions island pass nine exhaustive
+// captures.
+//
+// It reaches BOTH arms from one place: `PropertyParserState::absoluteLengthUnitsOnly` for the C++
+// descent, and `CSSCalcSwiftParseOptions::absoluteLengthUnitsOnly` for the Swift one, both set from
+// the same local below. Setting only one would compare a flagged arm against an unflagged one and
+// report the flag's whole effect as a mismatch.
 
-WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* text, size_t length, bool withSymbols)
+WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* text, size_t length, uint32_t options)
 {
+    bool withSymbols = options & CSSCalcCompareParseWithSymbols;
+    bool absoluteLengthUnitsOnly = options & CSSCalcCompareParseAbsoluteLengthUnitsOnly;
     CSSCalcParseComparison result { };
+    result.sawWithSymbols = withSymbols;
+    result.sawAbsoluteLengthUnitsOnly = absoluteLengthUnitsOnly;
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
 
     CSSTokenizer tokenizer(source);
@@ -2274,6 +2387,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         .context = calcParserContext(),
         .currentRule = StyleRuleType::Style,
         .currentProperty = CSSPropertyWidth,
+        .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
     };
     auto makeParserOptions = [&](WebCore::CSS::Category category) {
         return CSSCalc::ParserOptions {
@@ -2299,7 +2413,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     auto category = calcCategories[0];
     for (auto candidate : calcCategories) {
         auto cppParseRange = cppRange;
-        auto tree = CSSCalc::parseAndSimplify(cppParseRange, parserState, makeParserOptions(candidate), makeSimplificationOptions(candidate), CSSCalc::ParseSimplification::None);
+        auto tree = CSSCalc::parseAndSimplify(cppParseRange, parserState, makeParserOptions(candidate), makeSimplificationOptions(candidate), CSSCalc::ParseSimplification::None, CSSCalc::Parser::Cpp);
         if (tree && cppParseRange.atEnd()) {
             cppTree = WTF::move(tree);
             category = candidate;
@@ -2324,7 +2438,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     CSSCalc::Child root = CSSCalc::Number { .value = 0 };
     auto swiftResult = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, CSSCalc::CSSCalcSwiftParseOptions {
         .category = category,
-        .absoluteLengthUnitsOnly = false,
+        .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
         .hasAllowedSymbols = withSymbols,
         .rootFunctionId = static_cast<uint16_t>(functionId),
     }, simplificationOptions, root, false);
@@ -2382,31 +2496,19 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         result.conversionDataAgrees = cppTree->requiresConversionData == swiftResult.requiresConversionData;
     }
 
-    // THE SECOND COMPARISON, AND IT IS THE ONE C0 EXISTS FOR: the fused arm against production.
+    // The second comparison: the fused path against production. Everything above compares an
+    // unsimplified Swift tree against `ParseSimplification::None`, which validates the grammar and
+    // nothing else. Production is `Terminal`, where the C++ path parses into a `Child` and
+    // `copyAndSimplify` flattens it into `CalcFlatNode`s and emits it again, while the fused Swift
+    // path parses straight into those nodes, simplifies in place and emits once.
     //
-    // Everything above compares an UNSIMPLIFIED Swift tree against `ParseSimplification::None`,
-    // which validates the grammar and nothing else. Production is `Terminal`
-    // (`CSSCalcTree+Parser.h`'s `defaultParseSimplification`), where the C++ arm parses into a
-    // `Child` and `copyAndSimplify` then flattens it into `CalcFlatNode`s and emits it again, and
-    // the fused Swift arm parses straight into those nodes, simplifies in place and emits once.
-    // Without this the in-Swift simplification of a PARSER-BUILT tree -- a forward pass over
-    // post-order nodes, where the flatten path runs a reverse pass over pre-order ones -- would be
-    // validated by nothing at all.
-    //
-    // BOTH ARE NEEDED, and neither subsumes the other. The unsimplified comparison catches what a
-    // fold would hide: `Sum{2px, 1px}` and `Sum{1px, 2px}` are different trees that simplify to the
-    // same `3px`. The simplified comparison catches what the grammar alone cannot see, which is the
-    // whole middle pass.
-    //
-    // AXES. This comparison varies exactly what the one above varies -- leaf kinds, operators,
-    // whitespace rules, precedence, nesting, constants, conversion-data units, invalid input and
-    // the `allowedSymbols` axis -- and holds fixed exactly what it holds fixed: Latin-1 input, no
-    // conversion data, `absoluteLengthUnitsOnly` false, and `allowZeroValueLengthRemovalFromSum`
-    // false. That last one is a real hole in BOTH arms and it is stated rather than papered over:
-    // it is the flag `simplifySum`'s zero-length removal is behind, so no case here reaches it.
+    // Neither comparison subsumes the other. The unsimplified one catches what a fold would hide:
+    // `Sum{2px, 1px}` and `Sum{1px, 2px}` are different trees that simplify to the same `3px`. The
+    // simplified one catches the middle pass, which the grammar alone cannot see. Both hold
+    // `allowZeroValueLengthRemovalFromSum` false, which is a real hole in both.
     {
         auto cppTerminalRange = cppRange;
-        auto cppTerminal = CSSCalc::parseAndSimplify(cppTerminalRange, parserState, makeParserOptions(category), simplificationOptions, CSSCalc::ParseSimplification::Terminal);
+        auto cppTerminal = CSSCalc::parseAndSimplify(cppTerminalRange, parserState, makeParserOptions(category), simplificationOptions, CSSCalc::ParseSimplification::Terminal, CSSCalc::Parser::Cpp);
         result.cppSimplifiedParsed = cppTerminal && cppTerminalRange.atEnd();
         result.cppTerminalSelfEqual = result.cppSimplifiedParsed && cppTerminal->root == CSSCalc::copy(cppTerminal->root);
 
@@ -2415,7 +2517,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         CSSCalc::Child fusedRoot = CSSCalc::Number { .value = 0 };
         auto fusedResult = CSSCalc::cssCalcSwiftParseIntoChild(fusedInner, CSSCalc::CSSCalcSwiftParseOptions {
             .category = category,
-            .absoluteLengthUnitsOnly = false,
+            .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, fusedRoot, true);
@@ -2423,55 +2525,46 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         if (result.cppSimplifiedParsed && fusedResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
             result.fusedTreesAgree = cppTerminal->root == fusedRoot && cppTerminal->type == fusedResult.type;
 
-        // THE STORE ROUND TRIP (P7c slice C1). A third parse, this one asking the grammar to also
-        // fill a `CSSCalcSwiftFlatStore`, then rebuilding a `Child` from the store alone and
-        // comparing THAT against the same C++ Terminal tree.
+        // The store round trip: a third parse, asking the grammar to also fill the flat-node
+        // `Vector` a `Tree` owns, then rebuilding a `Child` from those nodes alone and comparing
+        // that against the same C++ Terminal tree. A separate parse rather than a reuse of
+        // `fusedResult`, so that a store defect cannot move the comparison above.
         //
-        // A separate parse rather than reusing `fusedResult`, so that the arm above keeps measuring
-        // exactly what it measured before C1 and a store defect cannot move it.
-        //
-        // AXES. This adds no axis of its own: it runs over exactly the cases the fused comparison
-        // runs over, so it varies leaf kinds, operators, precedence, nesting, constants, unit
-        // classes, invalid input and the `allowedSymbols` flag, and holds fixed Latin-1 input, no
-        // conversion data, `absoluteLengthUnitsOnly` false and `allowZeroValueLengthRemovalFromSum`
-        // false -- the same hole the fused comparison states. What it DOES vary that nothing else
-        // does is node count, from 1 to whatever the corpus's deepest expression flattens to, and
-        // that is the axis `takeNodes` and `nodeAt` are indexed on.
+        // Adds no axis of its own beyond node count, from 1 to whatever the corpus's deepest
+        // expression flattens to, which is the axis `takeFlatNodes` and `flatNodeAt` are indexed
+        // on.
         auto storeRange = cppRange;
         auto storeInner = CSSPropertyParserHelpers::consumeFunction(storeRange);
         CSSCalc::Child storeParseRoot = CSSCalc::Number { .value = 0 };
-        auto store = CSSCalc::CSSCalcSwiftFlatStore::create();
+        CSSCalc::CSSCalcSwiftFlatNodeVector storeNodes;
+        uint32_t storeRootIndex = CSSCalc::cssCalcSwiftFlatNoNode;
         auto storeResult = CSSCalc::cssCalcSwiftParseIntoChild(storeInner, CSSCalc::CSSCalcSwiftParseOptions {
             .category = category,
-            .absoluteLengthUnitsOnly = false,
+            .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
             .rootFunctionId = static_cast<uint16_t>(functionId),
-        }, simplificationOptions, storeParseRoot, true, store.ptr());
-        result.storeNodeCount = store->nodeCount();
+        }, simplificationOptions, storeParseRoot, true, &storeNodes, &storeRootIndex);
+        result.storeNodeCount = storeNodes.size();
         if (result.cppSimplifiedParsed && storeResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed)) {
             CSSCalc::Child rebuiltRoot = CSSCalc::Number { .value = 0 };
-            if (CSSCalc::cssCalcSwiftEmitStoreIntoChild(store.get(), simplificationOptions, rebuiltRoot))
+            if (CSSCalc::cssCalcSwiftEmitStoreIntoChild(storeNodes, storeRootIndex, simplificationOptions, rebuiltRoot))
                 result.storeTreesAgree = cppTerminal->root == rebuiltRoot;
         }
     }
     return result;
 }
 
-// Times ONE parse arm over one expression: `arm` 0 is the C++ parser, 1 is the Swift grammar.
+// Times one parse path over one expression, selected by `arm`.
 //
-// TOKENIZATION IS OUTSIDE THE LOOP. It is identical work for both arms and it dominates -- the
-// parse-band attribution put a whole `calc()` parse at ~11,129 instructions with the tokenizer,
-// the category loop and the type check shared -- so including it would bury the term being
-// measured under a common one, exactly as `parsebench`'s header warns.
+// Tokenization is outside the loop: it is identical work for both paths and it dominates. The two
+// paths are not doing identical work, and the difference is stated rather than hidden: the C++ path
+// builds a `Tree`, and the Swift path builds the same root and returns the same type without the
+// wrapper.
 //
-// The two arms are NOT doing identical work and the difference is stated rather than hidden: the
-// C++ arm builds a `Tree` (root plus type plus stage), the Swift arm builds the same root and
-// returns the same type without the `Tree` wrapper. What they share is the part that matters --
-// tokens in, a `CSSCalc::Child` tree out, unsimplified.
-//
-// `outCovered` reports whether the Swift grammar actually covers this expression. A band averaged
-// over expressions the Swift arm DECLINED would be timing the C++ fallback against itself, which
-// is the shape that reads as parity while measuring nothing.
+// `outCovered` reports whether the Swift grammar covers this expression, since a band averaged
+// over declined expressions would be timing the C++ fallback against itself. `arm` 5 is the one
+// for which a decline is the point: on a declining expression `arm` 5 minus `arm` 2 is the
+// double-parse cost.
 WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t length, unsigned arm, uint32_t iterations, uint32_t* outCovered)
 {
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
@@ -2482,10 +2575,12 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
             *outCovered = 0;
         return 0;
     }
-    // Plain `calc()`, or a top-level math function the grammar builds -- `min()`/`max()` since
-    // stage E1. Same list as the differential next door, and checked the same way.
+    // Any math function `parseAndSimplify` accepts, not just the ones the Swift grammar covers: a
+    // narrower filter would return before either path ran for a top-level declining function such
+    // as `clamp(1px, 2em, 3px)`, which is the one shape that isolates a decline at the first
+    // token. A row's disposition is keyed on `outCovered` rather than on the return value here.
     auto functionId = baseRange.peek().functionId();
-    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc && functionId != CSSValueMin && functionId != CSSValueMax) {
+    if (!CSSCalc::isCalcFunction(functionId)) {
         if (outCovered)
             *outCovered = 0;
         return 0;
@@ -2503,7 +2598,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
         auto probeRange = baseRange;
         auto parserOptions = CSSCalc::ParserOptions { .category = candidate, .range = WebCore::CSS::All, .allowedSymbols = { }, .propertyOptions = { } };
         auto simplificationOptions = CSSCalc::SimplificationOptions { .category = candidate, .range = WebCore::CSS::All, .conversionData = std::nullopt, .symbolTable = { }, .allowZeroValueLengthRemovalFromSum = false };
-        auto tree = CSSCalc::parseAndSimplify(probeRange, parserState, parserOptions, simplificationOptions, CSSCalc::ParseSimplification::None);
+        auto tree = CSSCalc::parseAndSimplify(probeRange, parserState, parserOptions, simplificationOptions, CSSCalc::ParseSimplification::None, CSSCalc::Parser::Cpp);
         if (tree && probeRange.atEnd()) {
             accepted = candidate;
             break;
@@ -2527,36 +2622,33 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
         auto probe = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, probeRoot, arm == 3);
         if (outCovered)
             *outCovered = probe.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) ? 1 : 0;
-        if (probe.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) && arm != 0 && arm != 2)
+        if (probe.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) && arm != 0 && arm != 2 && arm != 5)
             return 0;
     }
 
-    // FIVE ARMS, AND THE PAIRING IS THE WHOLE POINT. Quoting the wrong pair is how this measurement
-    // goes wrong, so each is named with what it can and cannot see.
+    // The six values of `arm`, and the pairing a reader has to get right:
     //
     //   0  C++ `ParseSimplification::None`     -- the C++ grammar alone.
     //   1  Swift, `simplify` false             -- the Swift grammar alone.
-    //   2  C++ `ParseSimplification::Terminal` -- PRODUCTION. Parses into a `Child`, then
-    //                                             `copyAndSimplify` flattens it into `CalcFlatNode`s
-    //                                             and emits it again.
-    //   3  Swift FUSED                         -- parses into `CalcFlatNode`s, simplifies in place,
-    //                                             emits once. One conversion.
-    //   4  Swift stage D + `copyAndSimplify`   -- the shape the fusion REPLACED: the Swift grammar
-    //                                             builds a `Child` per node and the island then
-    //                                             flattens it back and emits again. Three
-    //                                             conversions.
+    //   2  C++ `ParseSimplification::Terminal` -- production today: parses into a `Child`, which
+    //                                             `copyAndSimplify` then flattens into
+    //                                             `CalcFlatNode`s and emits again.
+    //   3  Swift fused                         -- parses into `CalcFlatNode`s, simplifies in
+    //                                             place, emits once.
+    //   4  Swift grammar + `copyAndSimplify`   -- the unfused shape: three conversions.
+    //   5  `Parser::Swift`, `Terminal`         -- production with the parse gate on, so on a
+    //                                             decline it runs the whole C++ descent as well.
     //
-    // 0/1 is the grammar. 2/3 is Swift against production. **4/3 is what fusing is worth**, and it
-    // is the only pair that isolates it, because both arms use the same Swift grammar and the same
-    // Swift simplification and differ only in how many times the tree changes representation.
-    // 0/1 cannot see it at all: with simplification off, the flat form is pure overhead, since the
-    // pass it exists to feed is switched off.
+    // 4/3 is what fusing is worth and the only pair that isolates it. 2/5 is the shipping pair and
+    // the only one whose meaning depends on coverage: on a covered expression it is what turning
+    // the gate on costs, and on a declined one it is the double-parse cost.
     uint64_t fold = 0;
     for (uint32_t i = 0; i < iterations; ++i) {
-        if (arm == 0 || arm == 2) {
+        if (arm == 0 || arm == 2 || arm == 5) {
             auto range = baseRange;
             auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions,
-                arm == 0 ? CSSCalc::ParseSimplification::None : CSSCalc::ParseSimplification::Terminal);
+                arm == 0 ? CSSCalc::ParseSimplification::None : CSSCalc::ParseSimplification::Terminal,
+                arm == 5 ? CSSCalc::Parser::Swift : CSSCalc::Parser::Cpp);
             if (!tree)
                 return 0;
             fold = fold * 1000003 + static_cast<uint64_t>(tree->root.index());

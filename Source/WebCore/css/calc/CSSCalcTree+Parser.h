@@ -87,8 +87,35 @@ struct ParserOptions {
 enum class ParseSimplification : uint8_t { Eager, Terminal, None };
 static constexpr ParseSimplification defaultParseSimplification = ParseSimplification::Terminal;
 
+// MARK: Parser selection
+
+// Which implementation parses. Shaped like `CSSCalc::Simplifier`, `CSSCalc::Serializer` and
+// `CSSTokenizer::Scanner`: both implementations compiled in, the choice made at compile time, with
+// C++ as the fallback for input the Swift parser does not cover.
+//
+// A parameter rather than a `#if` inside `parseAndSimplify`, because the validation bridge's
+// reference implementation is `parseAndSimplify` itself: with a compile-time-only selector, a build
+// that selected Swift would have the bridge compare the Swift parser against itself and report no
+// mismatches while testing nothing.
+enum class Parser : bool { Cpp, Swift };
+
+// `defined() &&` rather than a `#if !defined / #define 0` prologue, for the same reason as
+// `defaultSimplifier`: the flag is only ever defined as 1, by WK_USE_SWIFT_CSS_CALC_PARSER=YES.
+//
+// As above, this is a default argument evaluated in the caller's translation unit, so every target
+// that calls `parseAndSimplify` must see the same value. This is a project header rather than a
+// private one, so all of its includers are WebCore translation units and take the define from one
+// place, WebCore.xcconfig's GCC_PREPROCESSOR_DEFINITIONS. If it ever becomes a private header, the
+// parser has to be passed explicitly at every call.
+static constexpr Parser defaultParser =
+#if defined(USE_SWIFT_CSS_CALC_PARSER) && USE_SWIFT_CSS_CALC_PARSER
+    Parser::Swift;
+#else
+    Parser::Cpp;
+#endif
+
 // Parses and simplifies the provided `CSSParserTokenRange` into a CSSCalc::Tree. Returns `std::nullopt` on failure.
-std::optional<Tree> parseAndSimplify(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification);
+std::optional<Tree> parseAndSimplify(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification, Parser = defaultParser);
 
 // Parses and simplifies a bare `<calc-sum>`, one that is not wrapped in a math function.
 std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&, ParseSimplification = defaultParseSimplification);
