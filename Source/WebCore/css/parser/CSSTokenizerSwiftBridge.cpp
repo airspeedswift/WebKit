@@ -1606,6 +1606,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcSwiftCallCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcSerializeConstructedRoot(unsigned, unsigned, char*, size_t);
+WEBCORE_EXPORT bool webCoreCSSCalcSerializeRepeat(const char*, size_t, unsigned, uint32_t, uint64_t*, uint32_t*, uint32_t*);
 
 // How many times WebCore was actually asked to compare, so a caller can confirm its sweep really
 // reached this code rather than being elided or miscounted.
@@ -1761,6 +1762,63 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcRoundTrip(const char* text, size_t length,
     copyOutSerialization(secondText, secondOut, secondCapacity);
 
     return firstText == secondText ? 0 : 3;
+}
+
+// A SERIALIZATION-ONLY band. Parses ONCE, outside the loop, then serializes `iterations` times.
+//
+// `webCoreCSSCalcRoundTrip` above cannot answer this question. It parses twice and serializes twice
+// per call and the parse dominates, so `serbench` had to recover the signal by differencing the two
+// serializer kinds inside one binary. That prices only the DIFFERENCE between the arms and can
+// report neither arm's absolute per-node cost, which is what a per-band figure has to be.
+//
+// Here the caller times TWO iteration counts and takes the SLOPE, so the parse, the `dlsym` call,
+// the `String` construction and the tree teardown cancel exactly and what is left is one
+// serialization. The slope is also the self-test the charter asks for: 2x iterations must give 2x
+// instructions, and if it does not, either the loop was folded or the counter window was partial.
+//
+// `outAccumulated` is what stops the loop being hoisted. `serializationForCSS` allocates a `String`
+// per iteration so it is not readonly and cannot legally be folded, but accumulating the result
+// makes that independent of the optimiser's view rather than dependent on it.
+//
+// `outDeclines` is not optional bookkeeping. A decline runs the C++ serializer under the Swift
+// kind, so a declining band measures the C++ serializer twice and reads as parity -- the invisible
+// decline of CLAUDE.md, exactly. The caller must refuse the band rather than report it.
+//
+// NOT SUBTRACTED, and it must be stated wherever the absolute Swift figure is quoted: with
+// ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE) on, `trySerializeWithSwiftIsland` pays four relaxed atomic
+// stores AND one extra `swiftNodeInfo(tree.root)` crossing per call, on the SWIFT arm only
+// (CSSCalcTree+Serialization.cpp, the `s_lastRootKind` store). That is instrumentation, it is
+// per-CALL and not per-node, so it biases the absolute Swift column upward and leaves the marginal
+// per-node slope across a ladder untouched.
+WEBCORE_EXPORT bool webCoreCSSCalcSerializeRepeat(const char* text, size_t length, unsigned serializerKind, uint32_t iterations, uint64_t* outAccumulated, uint32_t* outDeclines, uint32_t* outNodeCount)
+{
+    auto serializer = serializerKind ? CSSCalc::Serializer::Swift : CSSCalc::Serializer::Cpp;
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    auto parsed = parseCalcExpression(source);
+    if (!parsed.tree)
+        return false;
+
+    auto options = CSSCalc::SerializationOptions {
+        .range = parsed.range,
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+    uint64_t accumulated = 0;
+    for (uint32_t i = 0; i < iterations; ++i)
+        accumulated += CSSCalc::serializationForCSS(*parsed.tree, options, serializer).length();
+
+    if (outAccumulated)
+        *outAccumulated = accumulated;
+    if (outDeclines)
+        *outDeclines = CSSCalc::webCoreCSSCalcSerializationDeclineCount() - declinesBefore;
+    // The Swift walk's own node count, so a band can report the tree size it is dividing by rather
+    // than the caller inferring it from the expression text. Zero under the C++ kind, which never
+    // enters the island and therefore never sets it.
+    if (outNodeCount)
+        *outNodeCount = serializerKind ? CSSCalc::webCoreCSSCalcSerializationLastNodeCount() : 0;
+    return true;
 }
 
 // The compile-time default, so a build that ignored WK_USE_SWIFT_CSS_CALC_SERIALIZATION cannot pass
