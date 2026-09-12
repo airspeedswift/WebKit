@@ -64,6 +64,7 @@
 #include "CSSCalcTree+Serialization.h"
 #include "CSSCalcTree+Simplification.h"
 #include "CSSCalcTree.h"
+#include "CSSCalcValue.h"
 #include "CSSPrimitiveNumericCategory.h"
 #include "CSSToLengthConversionData.h"
 #include "CSSPropertyParserState.h"
@@ -225,7 +226,7 @@ struct ParsedCalc {
 // convert a tree parsed at `Integer` under `LengthPercentage` options -- a different
 // `Percentage::hint`, so a different tree, for a reason that has nothing to do with the conversion
 // under test.
-ParsedCalc parseCalcExpressionAtCategory(const String& source, WebCore::CSS::Category category, CSSCalc::ParseSimplification parseSimplification)
+ParsedCalc parseCalcExpressionAtCategory(const String& source, WebCore::CSS::Category category, CSSCalc::ParseSimplification parseSimplification, bool productionDefaults = false)
 {
     CSSTokenizer tokenizer(source);
     auto range = tokenizer.tokenRange();
@@ -268,17 +269,26 @@ ParsedCalc parseCalcExpressionAtCategory(const String& source, WebCore::CSS::Cat
     // WK_USE_SWIFT_CSS_CALC_PARSER: taking the default here would make a build with that flag
     // compare the Swift grammar against itself and report 0 mismatches over 2,061 cases while
     // measuring nothing. Same rule, and the same reason, as `Serializer::Cpp` and `Simplifier::Cpp`.
-    auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification, CSSCalc::Parser::Cpp);
+    //
+    // `productionDefaults` IS THE ONE EXEMPTION AND IT IS SPELLED AS AN OMISSION, not as
+    // `Parser::Swift`. The store probe's question is "does a parse that takes every default carry a
+    // flat store", so naming the arm would answer a different question: it would prove the code path
+    // works while saying nothing about whether production selects it. Both trailing arguments are
+    // left off, so `defaultParseSimplification` and `defaultParser` are evaluated here, in WebCore's
+    // own translation unit, exactly as they are at `CSSUnevaluatedCalc.cpp:167`.
+    auto tree = productionDefaults
+        ? CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions)
+        : CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions, parseSimplification, CSSCalc::Parser::Cpp);
     // A trailing token means the expression was only partly consumed, which is not a parse.
     if (tree && range.atEnd())
         return { WTF::move(tree), category, WebCore::CSS::All };
     return { };
 }
 
-ParsedCalc parseCalcExpression(const String& source, CSSCalc::ParseSimplification parseSimplification = CSSCalc::ParseSimplification::Eager)
+ParsedCalc parseCalcExpression(const String& source, CSSCalc::ParseSimplification parseSimplification = CSSCalc::ParseSimplification::Eager, bool productionDefaults = false)
 {
     for (auto category : calcCategories) {
-        auto parsed = parseCalcExpressionAtCategory(source, category, parseSimplification);
+        auto parsed = parseCalcExpressionAtCategory(source, category, parseSimplification, productionDefaults);
         if (parsed.tree)
             return parsed;
     }
@@ -1613,6 +1623,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcSerializeConstructedRoot(unsigned, unsigned, char*, size_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSerializeRepeat(const char*, size_t, unsigned, uint32_t, uint64_t*, uint32_t*, uint32_t*);
+WEBCORE_EXPORT uint32_t webCoreCSSCalcProductionStoreProbe(const char*, size_t, const char*, size_t, uint32_t*, uint32_t*);
 
 // How many times WebCore was actually asked to compare, so a caller can confirm its sweep really
 // reached this code rather than being elided or miscounted.
@@ -1840,6 +1851,91 @@ WEBCORE_EXPORT bool webCoreCSSCalcSerializationIsSwift(void)
 WEBCORE_EXPORT bool webCoreCSSCalcParserIsSwift(void)
 {
     return CSSCalc::defaultParser == CSSCalc::Parser::Swift;
+}
+
+// Whether a PRODUCTION calc parse -- every default taken -- hands back a tree carrying the Swift
+// grammar's flat store, and whether `Tree::operator==` still means what it meant before the store
+// was a member (P7c slice C1b).
+//
+// WHY THIS IS A BRIDGE ENTRY AND NOT AN OUT-OF-PROCESS PROBE. `CSSCalc::parseAndSimplify` is not
+// WEBCORE_EXPORT, so nothing outside WebCore can take its defaults; and the defaults are
+// `static constexpr` DEFAULT ARGUMENTS, evaluated in the CALLER's translation unit, so only a
+// caller compiled with WebCore's own flags answers the production question at all.
+//
+// WHY IT IS NOT A SOURCE READING. `swiftFlatStore` being assigned at `CSSCalcTree+Parser.cpp` proves
+// nothing about a shipped binary: the assignment is on the Swift arm, which a build that missed the
+// define never reaches, and neither the framework's size nor `nm` can distinguish the two (see
+// `gateprobe.cpp`). This runs the parse and asks the resulting `CSSCalc::Value` -- the object a
+// production consumer holds -- what its tree carries.
+//
+// RETURN: 0 = `text` did not parse at any category; 1 = parsed, and the value's tree carries NO
+// store; 2 = parsed, and it carries one. All three are reachable in one binary, which is what makes
+// the probe non-vacuous without a second build: a covered expression must answer 2, an expression
+// the grammar declines must answer 1, and invalid input must answer 0. A probe that could only ever
+// answer 2 would be reporting its own corpus.
+//
+// `outNodeCount` is the store's node count (0 when there is none).
+//
+// `outEqualityBits` ANSWERS THE ONE THING THIS CHANGE COULD BREAK, and each bit is an assertion that
+// fails in a different direction, so no single wrong `operator==` passes them all:
+//   1  two independent production parses of `text` compare EQUAL            (the store is excluded)
+//   2  ... and their two store pointers are distinct and both non-null      (so bit 1 is not vacuous)
+//   4  flipping `requiresConversionData` on one makes them compare UNEQUAL  (not a constant `true`)
+//   8  nulling one side's store leaves them EQUAL                           (excluded asymmetrically too)
+//  16  the store's `rootIndex` is inside its node count                     (the crossing is coherent)
+//  32  a parse of `otherText` compares UNEQUAL to `text`'s                  (`root` is still compared)
+// A defaulted `operator==` -- the hazard this slice had to dodge -- fails bits 1, 2 and 8 while
+// passing 4, 16 and 32, so the mask discriminates exactly the mistake.
+WEBCORE_EXPORT uint32_t webCoreCSSCalcProductionStoreProbe(const char* text, size_t length, const char* otherText, size_t otherLength, uint32_t* outNodeCount, uint32_t* outEqualityBits)
+{
+    if (outNodeCount)
+        *outNodeCount = 0;
+    if (outEqualityBits)
+        *outEqualityBits = 0;
+
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+    auto parsed = parseCalcExpression(source, CSSCalc::defaultParseSimplification, true);
+    if (!parsed.tree)
+        return 0;
+
+    // Boxed exactly as `UnevaluatedCalcBase::parseBase` boxes it, and read back through
+    // `Value::tree()`, so what is reported is what a consumer sees rather than what the parser
+    // returned.
+    auto value = CSSCalc::Value::create(parsed.category, parsed.range, WTF::move(*parsed.tree));
+    const auto& tree = value->tree();
+    if (!tree.swiftFlatStore)
+        return 1;
+    if (outNodeCount)
+        *outNodeCount = tree.swiftFlatStore->nodeCount();
+
+    if (outEqualityBits) {
+        uint32_t bits = 0;
+        if (tree.swiftFlatStore->rootIndex() < tree.swiftFlatStore->nodeCount())
+            bits |= 16;
+
+        auto again = parseCalcExpression(source, CSSCalc::defaultParseSimplification, true);
+        if (again.tree && again.tree->swiftFlatStore) {
+            if (again.tree->swiftFlatStore.get() != tree.swiftFlatStore.get())
+                bits |= 2;
+            if (tree == *again.tree)
+                bits |= 1;
+            again.tree->requiresConversionData = !again.tree->requiresConversionData;
+            if (!(tree == *again.tree))
+                bits |= 4;
+            again.tree->requiresConversionData = !again.tree->requiresConversionData;
+            again.tree->swiftFlatStore = nullptr;
+            if (tree == *again.tree)
+                bits |= 8;
+        }
+
+        String otherSource { unsafeMakeSpan(byteCast<Latin1Character>(otherText), otherLength) };
+        auto other = parseCalcExpression(otherSource, CSSCalc::defaultParseSimplification, true);
+        if (other.tree && !(tree == *other.tree))
+            bits |= 32;
+
+        *outEqualityBits = bits;
+    }
+    return 2;
 }
 
 // Forces the Swift path to decline every tree, so the C++ fall-through runs even with the gate on.

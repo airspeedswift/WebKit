@@ -203,12 +203,23 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     // the fallback parse a suffix, and `tokens.atEnd()` would pass on a truncated tree.
     if (parser == Parser::Swift && parseSimplification != ParseSimplification::Eager) {
         Child swiftRoot = Number { .value = 0 };
+        // THE FLAT STORE THE GRAMMAR ALSO FILLS (P7c slice C1b). Created unconditionally because the
+        // grammar needs somewhere to put the nodes before it knows whether it will finish, and
+        // dropped again on every outcome but `Parsed` -- `Declined` falls through to the C++ descent
+        // below, which builds a tree this store does not describe.
+        //
+        // WHAT IT COSTS, booked rather than buried: one TZone allocation for the store plus one
+        // `Vector` malloc inside `takeNodes` per successfully Swift-parsed `calc()`, and one
+        // `deref()` when the tree dies. Until a consumer reads the flat arm that is additive, which
+        // is what `CSSCalcSwiftTypes.h` said it would be; it is the price of the arm existing at all,
+        // and slices C2 and C4 are what collect against it.
+        auto swiftStore = CSSCalcSwiftFlatStore::create();
         auto swiftResult = cssCalcSwiftParseIntoChild(tokens, CSSCalcSwiftParseOptions {
             .category = parserOptions.category,
             .absoluteLengthUnitsOnly = propertyParserState.absoluteLengthUnitsOnly,
             .hasAllowedSymbols = !parserOptions.allowedSymbols.isEmpty(),
             .rootFunctionId = static_cast<uint16_t>(function),
-        }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal);
+        }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal, swiftStore.ptr());
 
         // THREE OUTCOMES AND THEY ARE NOT INTERCHANGEABLE, which is the whole reason the boundary
         // reports an outcome rather than an optional. `Failed` means the input is invalid CSS and
@@ -230,6 +241,7 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
                 .type = swiftResult.type,
                 .stage = CSSCalc::Stage::Specified,
                 .requiresConversionData = swiftResult.requiresConversionData,
+                .swiftFlatStore = WTF::move(swiftStore),
             };
 
         case CSSCalcSwiftParseOutcome::Declined:

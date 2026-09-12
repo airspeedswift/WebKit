@@ -33,6 +33,7 @@
 #include <WebCore/CSSPrimitiveNumericRange.h>
 #include <WebCore/CSSUnits.h>
 #include <WebCore/CSSValueKeywords.h>
+#include <wtf/RefPtr.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
@@ -380,7 +381,32 @@ struct Tree {
     // `requiresConversionData` is used both to both indicate whether eager evaluation of the tree (at parse time) is possible or not and to trigger a warning in `UnevaluatedCalcBase::evaluateDeprecated` that the evaluation results will be incorrect.
     bool requiresConversionData = false;
 
-    bool operator==(const Tree&) const = default;
+    // THE SAME TREE IN THE FLAT FORM THE SWIFT GRAMMAR BUILDS, when there is one (P7c slice C1b).
+    //
+    // Not a second tree and not a cache: `CSSCalcTree+Parser.cpp`'s Swift arm fills it from the very
+    // nodes it then emits `root` from, in the same call, so the two are the same tree in two
+    // representations. Null on a C++-parsed tree, on a tree the Swift grammar declined, and on every
+    // tree `copy` or `copyAndSimplify` produces -- those build a fresh `root` and a store describing
+    // the tree they were given would describe a different one, which is worse than absent. A
+    // consumer therefore reads this as "is a flat form available", never as "is this a Swift tree".
+    //
+    // A `RefPtr`, not the `Vector` itself, because the buffer is filled from Swift and a receiver
+    // holding a pointer poisons every call on it; `CSSCalcSwiftFlatStore` is imported as a
+    // `SWIFT_SHARED_REFERENCE` for exactly that reason (see its declaration). It costs no refcount
+    // traffic here: `Tree` is MOVE-ONLY -- `Child` declares a move constructor and no copy, so the
+    // implicit copy is deleted and `CSSCalcTree+Copy.h` exists because of it -- so the only
+    // operations a `Tree` can perform on this member are a move and a destroy.
+    RefPtr<CSSCalcSwiftFlatStore> swiftFlatStore { };
+
+    // WRITTEN OUT RATHER THAN `= default`, and the one member it leaves out is `swiftFlatStore`.
+    // Defaulting it would silently fold POINTER IDENTITY into tree equality: two trees built from
+    // the same input by the same parser would compare unequal because they hold different store
+    // objects, and a tree would compare unequal to its own `copy`. The flat store is an alternative
+    // REPRESENTATION of the four members above, so it carries no information they do not; trees
+    // equal on `root`, `type`, `stage` and `requiresConversionData` are equal whether or not one of
+    // them also happens to carry a flat buffer. This operator is therefore the same predicate the
+    // defaulted one was before the member existed, which is why C1b is behaviour-identical.
+    bool operator==(const Tree& other) const { return root == other.root && type == other.type && stage == other.stage && requiresConversionData == other.requiresConversionData; }
 };
 
 struct Sum {
