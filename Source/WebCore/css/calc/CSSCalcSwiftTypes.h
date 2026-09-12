@@ -527,24 +527,11 @@ WEBCORE_EXPORT CSSCalcSwiftNodeInfo swiftNodeInfo(const Child&) noexcept;
 WEBCORE_EXPORT CSSCalcSwiftOperationInfo swiftOperationInfo(const Child&) noexcept;
 WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child&, uint32_t index) noexcept;
 
-// The TREE-ORDER index of `node`'s `index`th child IN SERIALIZATION ORDER, or `node.childCount()`
-// for an out-of-range request.
-//
-// For `Sum` and `Product` serialization order is not tree order: css-values-4 steps 6 and 7 both
-// begin "Sort root's children", and the key is `sortPriority`, a 60-case unit order generated with
-// `__COUNTER__` (CSSCalcTree+Serialization.cpp:146). That generated table must not be transcribed
-// into Swift, so C++ keeps the sort. Every other kind is the identity, because no other kind sorts.
-//
-// A permutation ENTRY, not a child: a `const Child&` return would import as `UnsafePointer`, so the
-// sorted child cannot be handed over as a reference at all. Handing back the INDEX instead lets
-// Swift take the borrow through `Child::operator[]`, which is the route the simplification island
-// already uses everywhere -- so no permutation buffer crosses and this boundary owns no storage.
-//
-// Linear per access, and for `Sum` and `Product` it re-sorts per access, so a full walk is
-// quadratic in the child count. Deliberate and priced rather than assumed: a calc expression's
-// child lists are a handful of nodes (the widest in the whole WPT css-values corpus is single
-// digits), and the alternative is a buffer this boundary would have to own.
-WEBCORE_EXPORT uint32_t swiftSerializationChildIndex(const Child&, uint32_t index) noexcept;
+// There is deliberately NO child-order entry point here. Serialization order differs from tree
+// order only for `Sum` and `Product`, and CSSCalcSerializationSwift.swift's `sortPriority` computes
+// it from the `unitType` `swiftNodeInfo` already reports. The entry point that used to answer it
+// regenerated the whole permutation per access, which measured as the entire width-dependent
+// serialization gap; see notes/calc-c2-serialization-band-and-refutation-0911.md.
 
 // Where the serialization output goes.
 //

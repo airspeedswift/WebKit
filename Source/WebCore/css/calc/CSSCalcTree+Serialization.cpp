@@ -50,10 +50,12 @@ namespace CSSCalc {
 // compiling it out and letting the compiler name what still needs it. See
 // CSSCalcTree+Serialization.h for the guard and WebCore.xcconfig for the build setting.
 //
-// The sorting block below is deliberately outside all three regions: `sortPriority` and
-// `generateSortedChildrenMap` are called from `swiftSerializationChildIndex`, and with the
-// regions removed that becomes their only caller (the serializer's own uses, at :655 and :710, are
-// both inside region 2). So this code stays needed even once the rest of the serializer is gone.
+// The sorting block below USED to sit outside all three regions, because the Swift island reached
+// `sortPriority` through `swiftSerializationChildIndex`. That entry point is gone -- Swift computes
+// the child order from `swiftNodeInfo(child).unitType` and its own `sortPriority` -- so the sort
+// has no caller outside region 2 any more and is inside it here. That moves 107 lines from
+// "C++ the island needs" to DELETABLE; `deletable.py` reads these guards and this build mode is
+// what validates the count.
 #if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 
 struct SerializationState {
@@ -131,8 +133,6 @@ static void serializeCalculationTree(StringBuilder&, const IndirectNode<Invert>&
 static void serializeCalculationTree(StringBuilder&, const IndirectNode<Deg2Rad>&, SerializationState&);
 template<Numeric Op> void serializeCalculationTree(StringBuilder&, const Op&, SerializationState&);
 template<typename Op> static void serializeCalculationTree(StringBuilder&, const IndirectNode<Op>&, SerializationState&);
-
-#endif // CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 
 // MARK: Sorting
 
@@ -273,8 +273,9 @@ static Vector<ChildRepresentation, 16> generateSortedChildrenMap(const Children&
     return sortedChildrenMap;
 }
 
-// Region 2 of 3: the serializer proper, css-values-4 steps 1 to 7 for every node kind.
-#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
+// Region 2 of 3 continues here: the serializer proper, css-values-4 steps 1 to 7 for every node
+// kind. It is one region with the sorting block above rather than two, because nothing outside it
+// calls the sort any more.
 
 // MARK: Math Function
 // https://drafts.csswg.org/css-values-4/#serialize-a-math-function
@@ -1123,47 +1124,6 @@ CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node) noexcept
     // Every other kind: this is not called for them, and an all-inert record is what would come
     // back if it ever were.
     return out;
-}
-
-// The tree-order index of `node`'s `index`th child in the order the serializer must visit them,
-// or `node.childCount()` when there is no such child.
-//
-// For `Sum` and `Product` that is the SORTED order: css-values-4 steps 6 and 7 both begin "Sort
-// root's children", keyed by `sortPriority` above, a 60-case unit order generated with
-// `__COUNTER__`. That generated table stays in C++, so this file answers in sorted order and only
-// ever names a position; every other kind answers in tree order, since no other kind sorts.
-//
-// An INDEX rather than the child, so Swift reaches the child through `Child::operator[]` -- the
-// same checked borrow the simplification island already uses -- and no cursor type, no reference
-// return and no permutation buffer crosses. `Child::operator[]` is what `childNodeAt` answers for a
-// `Sum` too (`+Traversal.h`'s `Children` slot is `&children[index]`), so naming a position into the
-// `Children` here and subscripting the `Child` there reach the same element. An out-of-range answer
-// is `childCount()`, which `Child::operator[]`'s own `RELEASE_ASSERT` stops on: the two disagreeing
-// means the tree changed under a borrow, and stopping is better than a wrong serialization.
-//
-// `generateSortedChildrenMap` runs per access rather than once per node, making an n-child Sum
-// O(n^2 log n). Left unoptimized because real calc trees are a handful of nodes; caching it would
-// need this boundary to own a buffer.
-//
-// `get_if` rather than `WTF::switchOn` for the two-alternative test: `switchOn`'s generic fallback
-// lambda is instantiated once per alternative, and each copy re-entered the child walk and its own
-// `switchOn`, which measured at 10,252 instructions plus 38 leaf lambdas of ~303 each (~22 KB)
-// against 302 instructions for the equivalent `get_if` version.
-uint32_t swiftSerializationChildIndex(const Child& node, uint32_t index) noexcept
-{
-    const Children* sorts = nullptr;
-    if (auto* sum = get_if<IndirectNode<Sum>>(&node))
-        sorts = &(*sum)->children;
-    else if (auto* product = get_if<IndirectNode<Product>>(&node))
-        sorts = &(*product)->children;
-
-    if (!sorts)
-        return index < node.childCount() ? index : static_cast<uint32_t>(node.childCount());
-
-    auto sortedChildrenMap = generateSortedChildrenMap(*sorts);
-    if (index >= sortedChildrenMap.size())
-        return static_cast<uint32_t>(sorts->size());
-    return static_cast<uint32_t>(sortedChildrenMap[index].index);
 }
 
 void CSSCalcSwiftSink::appendLiteral(uint8_t literal) noexcept

@@ -3047,13 +3047,13 @@ uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t which, uint32_t ite
             sink += info.childCount + static_cast<uint32_t>(info.kind);
             break;
         }
-        case 2: {  // READ: the serialization-order child accessor, which R144 found to be O(N).
-            // This is the SERIALIZATION-order accessor, which for a `Sum` or `Product` fixture also
-            // runs `generateSortedChildrenMap`. Read this case as "the surviving child accessor",
-            // not as a number comparable with what the tree-order accessor measured before it was
-            // deleted as dead -- and not with what `childAt` measured before the handle went, since
-            // this now spells the borrow the way Swift does, through `Child::operator[]`.
-            sink += static_cast<uint32_t>(swiftNodeInfo(fixture[swiftSerializationChildIndex(fixture, 0)]).kind);
+        case 2: {  // READ: the surviving child accessor -- `Child::operator[]` plus `swiftNodeInfo`.
+            // NOT comparable with what this case measured before slice C2s. It used to route
+            // through `swiftSerializationChildIndex`, which re-sorted a `Sum`'s children on every
+            // access; that entry point is gone and Swift orders the children itself, so what is
+            // left here is the borrow alone, spelled the way Swift spells it. Also not comparable
+            // with what `childAt` measured before the handle went.
+            sink += static_cast<uint32_t>(swiftNodeInfo(fixture[0]).kind);
             break;
         }
         case 3: {  // BUILD, Swift's route: one leaf onto the operand stack, steady state.

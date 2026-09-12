@@ -2948,9 +2948,9 @@ fileprivate struct CalcFlattenReport {
 /// `firstChild` is `me + 1` rather than the index child 0 reports, and that is exact rather than an
 /// approximation: appending is pre-order, so a node's first child is always the next slot.
 ///
-/// Tree order, not serialization order: `swiftSerializationChildIndex` sorts a `Sum`'s and a
-/// `Product`'s children by unit for the serializer, which would silently permute a multi-unit sum
-/// here.
+/// Tree order, not serialization order: the serializer sorts a `Sum`'s and a `Product`'s children
+/// by unit (`CSSCalcSerializationSwift.swift`'s `sortPriority`), which would silently permute a
+/// multi-unit sum here.
 fileprivate func calcFlatten(
     _ node: borrowing WebCore.CSSCalc.Child,
     _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
