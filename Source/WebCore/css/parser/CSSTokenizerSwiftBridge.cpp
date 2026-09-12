@@ -1411,6 +1411,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcSwiftCallCount(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcHarnessCallCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcNodeKindCount(void);
 WEBCORE_EXPORT uint32_t webCoreCSSCalcSerializeConstructedRoot(unsigned, unsigned, char*, size_t);
+WEBCORE_EXPORT bool webCoreCSSCalcSerializeRepeat(const char*, size_t, unsigned, uint32_t, uint64_t*, uint32_t*, uint32_t*);
 
 // So that a caller can confirm its sweep reached this code rather than being elided.
 static std::atomic<uint64_t> s_calcCompareCalls;
@@ -1555,6 +1556,45 @@ WEBCORE_EXPORT uint32_t webCoreCSSCalcRoundTrip(const char* text, size_t length,
     copyOutSerialization(secondText, secondOut, secondCapacity);
 
     return firstText == secondText ? 0 : 3;
+}
+
+// A serialization-only band: parses once, outside the loop, then serializes `iterations` times, so
+// that a caller timing two iteration counts and taking the slope cancels the parse, the `String`
+// construction and the tree teardown exactly. `outAccumulated` is what stops the loop being
+// hoisted.
+//
+// `outDeclines` is not optional bookkeeping: a decline runs the C++ serializer under the Swift
+// kind, so a declining band measures the C++ serializer twice and reads as parity. With
+// ENABLE(CSS_TOKENIZER_SWIFT_BRIDGE) on, the Swift path also pays four relaxed atomic stores and one
+// extra `swiftNodeInfo(tree.root)` crossing per call, which is not subtracted here.
+WEBCORE_EXPORT bool webCoreCSSCalcSerializeRepeat(const char* text, size_t length, unsigned serializerKind, uint32_t iterations, uint64_t* outAccumulated, uint32_t* outDeclines, uint32_t* outNodeCount)
+{
+    auto serializer = serializerKind ? CSSCalc::Serializer::Swift : CSSCalc::Serializer::Cpp;
+    String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
+
+    auto parsed = parseCalcExpression(source);
+    if (!parsed.tree)
+        return false;
+
+    auto options = CSSCalc::SerializationOptions {
+        .range = parsed.range,
+        .serializationContext = WebCore::CSS::defaultSerializationContext(),
+    };
+
+    auto declinesBefore = CSSCalc::webCoreCSSCalcSerializationDeclineCount();
+    uint64_t accumulated = 0;
+    for (uint32_t i = 0; i < iterations; ++i)
+        accumulated += CSSCalc::serializationForCSS(*parsed.tree, options, serializer).length();
+
+    if (outAccumulated)
+        *outAccumulated = accumulated;
+    if (outDeclines)
+        *outDeclines = CSSCalc::webCoreCSSCalcSerializationDeclineCount() - declinesBefore;
+    // The Swift walk's own node count, so a band can report the tree size it divides by. Zero
+    // under the C++ kind, which never enters the Swift path and so never sets it.
+    if (outNodeCount)
+        *outNodeCount = serializerKind ? CSSCalc::webCoreCSSCalcSerializationLastNodeCount() : 0;
+    return true;
 }
 
 // The compile-time default, so that a build which ignored the flag cannot pass as one that
@@ -1771,6 +1811,21 @@ struct CSSCalcParseComparison {
     uint8_t fusedOutcome;
     bool cppSimplifiedParsed;
     bool fusedTreesAgree;
+    // THE STORE ROUND TRIP, which is the whole of what slice C1 can be wrong about.
+    //
+    // `storeNodeCount` is what `takeNodes` reported storing, and `storeTreesAgree` compares a tree
+    // rebuilt FROM THE STORE -- every node read back one at a time through `nodeAt`, 40 bytes by
+    // value -- against the same C++ Terminal tree `fusedTreesAgree` uses. The two are deliberately
+    // not one field: a store that took no nodes at all would leave `storeTreesAgree` false, and
+    // without the count there would be no way to tell that from a tree that came back wrong.
+    //
+    // WHY THIS FIELD EXISTS AT ALL. Without a reader, C1 is a change no test can fail --
+    // `takeNodes` could store nothing, half the tree, or the wrong root index, and every
+    // differential in this file would still pass, because they all compare the `Child` the emit
+    // built directly and never look at the store. That is the vacuous-check shape, and this is what
+    // removes it.
+    uint32_t storeNodeCount;
+    bool storeTreesAgree;
     // Whether the oracle can decide this case at all, which is a property of the input and not of
     // either path: `Child::operator==` compares leaf doubles with `==`, so a tree holding a NaN leaf
     // is not equal to itself and `treesAgree`/`fusedTreesAgree` are then false however identical
@@ -2367,6 +2422,37 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         result.fusedOutcome = fusedResult.outcome;
         if (result.cppSimplifiedParsed && fusedResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed))
             result.fusedTreesAgree = cppTerminal->root == fusedRoot && cppTerminal->type == fusedResult.type;
+
+        // THE STORE ROUND TRIP (P7c slice C1). A third parse, this one asking the grammar to also
+        // fill a `CSSCalcSwiftFlatStore`, then rebuilding a `Child` from the store alone and
+        // comparing THAT against the same C++ Terminal tree.
+        //
+        // A separate parse rather than reusing `fusedResult`, so that the arm above keeps measuring
+        // exactly what it measured before C1 and a store defect cannot move it.
+        //
+        // AXES. This adds no axis of its own: it runs over exactly the cases the fused comparison
+        // runs over, so it varies leaf kinds, operators, precedence, nesting, constants, unit
+        // classes, invalid input and the `allowedSymbols` flag, and holds fixed Latin-1 input, no
+        // conversion data, `absoluteLengthUnitsOnly` false and `allowZeroValueLengthRemovalFromSum`
+        // false -- the same hole the fused comparison states. What it DOES vary that nothing else
+        // does is node count, from 1 to whatever the corpus's deepest expression flattens to, and
+        // that is the axis `takeNodes` and `nodeAt` are indexed on.
+        auto storeRange = cppRange;
+        auto storeInner = CSSPropertyParserHelpers::consumeFunction(storeRange);
+        CSSCalc::Child storeParseRoot = CSSCalc::Number { .value = 0 };
+        auto store = CSSCalc::CSSCalcSwiftFlatStore::create();
+        auto storeResult = CSSCalc::cssCalcSwiftParseIntoChild(storeInner, CSSCalc::CSSCalcSwiftParseOptions {
+            .category = category,
+            .absoluteLengthUnitsOnly = false,
+            .hasAllowedSymbols = withSymbols,
+            .rootFunctionId = static_cast<uint16_t>(functionId),
+        }, simplificationOptions, storeParseRoot, true, store.ptr());
+        result.storeNodeCount = store->nodeCount();
+        if (result.cppSimplifiedParsed && storeResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed)) {
+            CSSCalc::Child rebuiltRoot = CSSCalc::Number { .value = 0 };
+            if (CSSCalc::cssCalcSwiftEmitStoreIntoChild(store.get(), simplificationOptions, rebuiltRoot))
+                result.storeTreesAgree = cppTerminal->root == rebuiltRoot;
+        }
     }
     return result;
 }
