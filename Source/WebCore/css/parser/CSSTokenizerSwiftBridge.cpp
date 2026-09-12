@@ -2122,13 +2122,27 @@ struct CSSCalcParseComparison {
     // its SIZE, so that a real defect hiding inside it is visible as growth.
     bool cppSelfEqual;
     bool cppTerminalSelfEqual;
+    // THE TWO SWEPT PARAMETER AXES, ECHOED BACK rather than remembered by the caller. A parameter
+    // axis that the callee silently ignores produces two identical outcome vectors and reads as
+    // "the axis is not live" -- indistinguishable from a flag that never arrived. The driver
+    // asserts these against what it asked for, so an ignored flag fails loudly instead of
+    // enlarging the denominator.
+    bool sawWithSymbols;
+    bool sawAbsoluteLengthUnitsOnly;
     // 0 = the input is not a `calc()` this entry can drive, so the case is SKIPPED rather than
     // passed -- a skipped case must never read as agreement.
     bool applicable;
 };
 
 WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char*, size_t, uint64_t* outCpp, uint64_t* outSwift, uint32_t* outTokenCount);
-WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char*, size_t, bool withSymbols);
+// `options` is a BIT SET, not a bool, because there are now two swept parameter axes and a second
+// positional `bool` is the shape that gets transposed silently. Bit 0 `withSymbols`, bit 1
+// `absoluteLengthUnitsOnly`. Named in `CSSCalcCompareParseOption` below.
+enum CSSCalcCompareParseOption : uint32_t {
+    CSSCalcCompareParseWithSymbols = 1u << 0,
+    CSSCalcCompareParseAbsoluteLengthUnitsOnly = 1u << 1,
+};
+WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char*, size_t, uint32_t options);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char*, size_t, unsigned arm, uint32_t iterations, uint32_t* outCovered);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
@@ -2607,10 +2621,27 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t le
 // (the C++ checks the symbol table before the five constants, so an id in both would resolve
 // differently), and the constants path is only reachable with the table empty. A run that only
 // used one value of this flag would leave one of those two behaviours untested.
+//
+// `absoluteLengthUnitsOnly` is the SECOND such axis, added in C2q because it was pinned `false` at
+// all five bridge call sites and at every one of the differential's cases. It is not a decline and
+// it is not a fold: a unit needing conversion data becomes a parse **FAILURE**, in both arms
+// (`CSSCalcTree+Parser.cpp:1664`, `CSSCalcSimplificationSwift.swift:6448`). So the two arms have to
+// agree on WHICH units those are, and nothing tested that. It is a parameter axis, not a corpus
+// axis, which is the distinction that let a broken content-extensions island pass nine exhaustive
+// captures.
+//
+// It reaches BOTH arms from one place: `PropertyParserState::absoluteLengthUnitsOnly` for the C++
+// descent, and `CSSCalcSwiftParseOptions::absoluteLengthUnitsOnly` for the Swift one, both set from
+// the same local below. Setting only one would compare a flagged arm against an unflagged one and
+// report the flag's whole effect as a mismatch.
 
-WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* text, size_t length, bool withSymbols)
+WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* text, size_t length, uint32_t options)
 {
+    bool withSymbols = options & CSSCalcCompareParseWithSymbols;
+    bool absoluteLengthUnitsOnly = options & CSSCalcCompareParseAbsoluteLengthUnitsOnly;
     CSSCalcParseComparison result { };
+    result.sawWithSymbols = withSymbols;
+    result.sawAbsoluteLengthUnitsOnly = absoluteLengthUnitsOnly;
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
 
     CSSTokenizer tokenizer(source);
@@ -2648,6 +2679,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         .context = calcParserContext(),
         .currentRule = StyleRuleType::Style,
         .currentProperty = CSSPropertyWidth,
+        .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
     };
     auto makeParserOptions = [&](WebCore::CSS::Category category) {
         return CSSCalc::ParserOptions {
@@ -2700,7 +2732,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     CSSCalc::Child root = CSSCalc::Number { .value = 0 };
     auto swiftResult = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, CSSCalc::CSSCalcSwiftParseOptions {
         .category = category,
-        .absoluteLengthUnitsOnly = false,
+        .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
         .hasAllowedSymbols = withSymbols,
         .rootFunctionId = static_cast<uint16_t>(functionId),
     }, simplificationOptions, root, false);
@@ -2778,7 +2810,8 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     // AXES. This comparison varies exactly what the one above varies -- leaf kinds, operators,
     // whitespace rules, precedence, nesting, constants, conversion-data units, invalid input and
     // the `allowedSymbols` axis -- and holds fixed exactly what it holds fixed: Latin-1 input, no
-    // conversion data, `absoluteLengthUnitsOnly` false, and `allowZeroValueLengthRemovalFromSum`
+    // conversion data, the SWEPT `absoluteLengthUnitsOnly` (both values since C2q), and
+    // `allowZeroValueLengthRemovalFromSum`
     // false. That last one is a real hole in BOTH arms and it is stated rather than papered over:
     // it is the flag `simplifySum`'s zero-length removal is behind, so no case here reaches it.
     {
@@ -2792,7 +2825,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         CSSCalc::Child fusedRoot = CSSCalc::Number { .value = 0 };
         auto fusedResult = CSSCalc::cssCalcSwiftParseIntoChild(fusedInner, CSSCalc::CSSCalcSwiftParseOptions {
             .category = category,
-            .absoluteLengthUnitsOnly = false,
+            .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, fusedRoot, true);
@@ -2810,7 +2843,8 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         // AXES. This adds no axis of its own: it runs over exactly the cases the fused comparison
         // runs over, so it varies leaf kinds, operators, precedence, nesting, constants, unit
         // classes, invalid input and the `allowedSymbols` flag, and holds fixed Latin-1 input, no
-        // conversion data, `absoluteLengthUnitsOnly` false and `allowZeroValueLengthRemovalFromSum`
+        // conversion data, the SWEPT `absoluteLengthUnitsOnly` (both values since C2q) and
+        // `allowZeroValueLengthRemovalFromSum`
         // false -- the same hole the fused comparison states. What it DOES vary that nothing else
         // does is node count, from 1 to whatever the corpus's deepest expression flattens to, and
         // that is the axis `takeNodes` and `nodeAt` are indexed on.
@@ -2820,7 +2854,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         auto store = CSSCalc::CSSCalcSwiftFlatStore::create();
         auto storeResult = CSSCalc::cssCalcSwiftParseIntoChild(storeInner, CSSCalc::CSSCalcSwiftParseOptions {
             .category = category,
-            .absoluteLengthUnitsOnly = false,
+            .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, storeParseRoot, true, store.ptr());
@@ -2849,6 +2883,14 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
 // `outCovered` reports whether the Swift grammar actually covers this expression. A band averaged
 // over expressions the Swift arm DECLINED would be timing the C++ fallback against itself, which
 // is the shape that reads as parity while measuring nothing.
+//
+// ARM 5 IS THE ONE ARM FOR WHICH A DECLINE IS THE POINT, and that inverts the rule above rather
+// than breaking it. Arm 5 is `parseAndSimplify(..., Terminal, Parser::Swift)` -- production with the
+// C2p gate ON, C++ fallback included -- so on a DECLINING expression arm5 minus arm2 is exactly the
+// double-parse cost, which is the quantity the shipping decision turns on. Arms 1/3/4 still bail on
+// a decline, because for them a declined row would time the C++ arm against itself; arm 5 must not,
+// because for IT the second descent is the measurand. `outCovered` is still reported, so the driver
+// can tell a declined row from a covered one and refuse to average the two together.
 WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t length, unsigned arm, uint32_t iterations, uint32_t* outCovered)
 {
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
@@ -2859,10 +2901,21 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
             *outCovered = 0;
         return 0;
     }
-    // Plain `calc()`, or a top-level math function the grammar builds -- `min()`/`max()` since
-    // stage E1. Same list as the differential next door, and checked the same way.
+    // ANY math function `parseAndSimplify` accepts, not just the four the Swift grammar covers.
+    //
+    // It used to be the narrow list (`calc`, `-webkit-calc`, `min`, `max`), which made a TOP-LEVEL
+    // declining function -- `clamp(1px, 2em, 3px)`, `round(1px, 2px)` -- return here before either
+    // arm ran, so the one shape that isolates "the grammar declines at the FIRST token" could not be
+    // timed at all. Arm 5's whole purpose is to time a decline, and P6 of the C2q pre-registration
+    // is a top-level-versus-nested comparison, so the narrow filter would have silently reduced that
+    // prediction to one arm of the pair.
+    //
+    // Widening it perturbs no published band, and the reason is that the DRIVER keys a row's
+    // disposition on `outCovered` rather than on this function's return value: a top-level `abs()`
+    // row was reported DECLINED before because the Swift probe declines it, and it still is. What
+    // changes is only that arms 0/2/5 now have data for such a row when the driver asks for it.
     auto functionId = baseRange.peek().functionId();
-    if (functionId != CSSValueCalc && functionId != CSSValueWebkitCalc && functionId != CSSValueMin && functionId != CSSValueMax) {
+    if (!CSSCalc::isCalcFunction(functionId)) {
         if (outCovered)
             *outCovered = 0;
         return 0;
@@ -2904,16 +2957,16 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
         auto probe = CSSCalc::cssCalcSwiftParseIntoChild(innerRange, swiftParseOptions, simplificationOptions, probeRoot, arm == 3);
         if (outCovered)
             *outCovered = probe.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) ? 1 : 0;
-        if (probe.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) && arm != 0 && arm != 2)
+        if (probe.outcome != static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed) && arm != 0 && arm != 2 && arm != 5)
             return 0;
     }
 
-    // FIVE ARMS, AND THE PAIRING IS THE WHOLE POINT. Quoting the wrong pair is how this measurement
+    // SIX ARMS, AND THE PAIRING IS THE WHOLE POINT. Quoting the wrong pair is how this measurement
     // goes wrong, so each is named with what it can and cannot see.
     //
     //   0  C++ `ParseSimplification::None`     -- the C++ grammar alone.
     //   1  Swift, `simplify` false             -- the Swift grammar alone.
-    //   2  C++ `ParseSimplification::Terminal` -- PRODUCTION. Parses into a `Child`, then
+    //   2  C++ `ParseSimplification::Terminal` -- PRODUCTION TODAY. Parses into a `Child`, then
     //                                             `copyAndSimplify` flattens it into `CalcFlatNode`s
     //                                             and emits it again.
     //   3  Swift FUSED                         -- parses into `CalcFlatNode`s, simplifies in place,
@@ -2922,19 +2975,29 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
     //                                             builds a `Child` per node and the island then
     //                                             flattens it back and emits again. Three
     //                                             conversions.
+    //   5  `Parser::Swift`, `Terminal`         -- PRODUCTION WITH THE C2p GATE ON, fallback
+    //                                             included. NOT the same arm as 3: this one is
+    //                                             `parseAndSimplify` itself, so on a decline it goes
+    //                                             on to run the whole C++ descent as well.
     //
     // 0/1 is the grammar. 2/3 is Swift against production. **4/3 is what fusing is worth**, and it
     // is the only pair that isolates it, because both arms use the same Swift grammar and the same
     // Swift simplification and differ only in how many times the tree changes representation.
     // 0/1 cannot see it at all: with simplification off, the flat form is pure overhead, since the
     // pass it exists to feed is switched off.
+    //
+    // **2/5 IS THE SHIPPING PAIR, and it is the only pair whose meaning depends on coverage.** On a
+    // COVERED expression it is what turning the gate on costs or saves; on a DECLINED one it is the
+    // double-parse cost and nothing else, because arm 5 then does arm 2's work plus a failed Swift
+    // descent. Averaging the two populations together would produce a number that is neither, which
+    // is why the driver reports them apart and refuses to fold them.
     uint64_t fold = 0;
     for (uint32_t i = 0; i < iterations; ++i) {
-        if (arm == 0 || arm == 2) {
+        if (arm == 0 || arm == 2 || arm == 5) {
             auto range = baseRange;
             auto tree = CSSCalc::parseAndSimplify(range, parserState, parserOptions, simplificationOptions,
                 arm == 0 ? CSSCalc::ParseSimplification::None : CSSCalc::ParseSimplification::Terminal,
-                CSSCalc::Parser::Cpp);
+                arm == 5 ? CSSCalc::Parser::Swift : CSSCalc::Parser::Cpp);
             if (!tree)
                 return 0;
             fold = fold * 1000003 + static_cast<uint64_t>(tree->root.index());
