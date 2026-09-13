@@ -416,13 +416,30 @@ struct Tree {
     // destroy, and both are now three words rather than an atomic decrement and a possible free.
     //
     // WHAT IT COSTS, BOOKED RATHER THAN NETTED, because it falls on a path that never fills one.
-    // `Tree` is what BOTH parse arms build, so a `Tree` carrying a non-trivially-movable member is
-    // dearer to move and destroy even when the member is empty: the C++ descent measures **+79.5
-    // retired instructions per parse** (+1.55 % of 5139) against the `RefPtr` it replaces, on a
-    // corpus where the Swift arm saves 98.0. Not `sizeof` -- that was hypothesised and REFUTED by
-    // two built arms, one 8 bytes smaller (recovers 4.1) and one 320 bytes larger (costs 19.7); see
-    // `cssprobe/notes/calc-c1d-results-0912.md` §3.4, which leaves counting the `Tree` moves in
-    // `parseAndSimplify`'s disassembly as the named next step.
+    // The C++ descent measures **+79.5 retired instructions per parse** (+1.55 % of 5139) against
+    // the `RefPtr` this replaces, on a corpus where the Swift arm saves 98.0.
+    //
+    // WHAT THAT COST ACTUALLY IS, since the first two answers written here were both wrong and the
+    // correction matters for anyone tempted to "fix" it (`cssprobe/notes/calc-perf-recovery-0912.md`
+    // §2-§4). It is NOT `sizeof` -- refuted by two arms, one 8 bytes smaller (recovers 4.1) and one
+    // 320 bytes larger (costs 19.7). And it is NOT this member's move and destroy code either, which
+    // is what this comment used to say: measured directly by a probe arm that puts a SECOND, dead
+    // `CSSCalcSwiftFlatNodeVector` on `Tree`, the whole construct/move/destroy of a `Vector` member
+    // is **+14.1 retired instructions per parse, as a pure intercept with a slope indistinguishable
+    // from zero (R² 0.03)**, and eight dead bytes of layout are **+3.9**. The +79.5, fitted against
+    // expression size over 93 corpus rows, is **+5.3 fixed plus 1.446 % of the whole descent, R²
+    // 0.943** -- a PER-NODE tax, which a fixed number of `Tree` operations per parse cannot produce.
+    //
+    // The per-node tax is an LTO inlining decision, not a property of this member: `CSSCalc::Value`'s
+    // destructor (58 -> 35 instructions) got partly inlined into `CSSCalc::Child`'s 41-alternative
+    // `mpark` DESTROY visitor (313 -> 350), whose frame went `sub sp, #0x40` -> `#0x50` and whose
+    // callee-saved set went from three register pairs to four -- one extra `stp`/`ldp` paid on every
+    // `Child` destruction, in both parse arms. Every function in the C++ descent is otherwise
+    // byte-identical between the two arms. So this is ~+18 structural and ~+62 codegen churn, it can
+    // flip either way on any future change to `~Value`, and it is not recoverable by choosing a
+    // different member type here. The falsifier, if it is ever worth one build: a `NEVER_INLINE`
+    // `CSSCalc::Value::~Value` should restore the visitor's three-pair frame and take the slope to
+    // zero.
 
     // Which node of `swiftFlatNodes` is the root. `cssCalcSwiftFlatNoNode` when there is no flat
     // form; it is NOT implicitly 0, because the parse grammar numbers nodes in the order it finishes
