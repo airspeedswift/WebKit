@@ -245,6 +245,9 @@ WK_HAVE_URL_FORMATTING_xrsimulator = YES;
 WK_HAVE_URL_FORMATTING_maccatalyst = YES;
 WK_HAVE_URL_FORMATTING_macosx = YES;
 
+// Without it, a call to a generic function in another Swift file is never specialized.
+SWIFT_COMPILATION_MODE = wholemodule;
+
 SWIFT_INSTALL_OBJC_HEADER = NO;
 // FIXME: Set `BUILD_LIBRARY_FOR_DISTRIBUTION` to `NO` when possible.
 BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
