@@ -1999,6 +1999,15 @@ struct CSSCalcSwiftOperandStack {
     CSSCalcSwiftFlatNodeVector* flatNodesOut { nullptr };
     uint32_t* flatRootIndexOut { nullptr };
     const CSSCalcSwiftFlatNodeVector* flatNodesIn { nullptr };
+
+    // The tokens being parsed, so that `buildAnchor` can turn an `<anchor-element>` token index
+    // back into a `CSS::CustomIdent`. Here for the same reason as the three pointers above.
+    //
+    // By value rather than by pointer, which removes a null check: a default-constructed
+    // `CSSParserTokenRange` is empty and `peek(i)` on it yields the EOF token, which fails
+    // `buildAnchor`'s `IdentToken` test, so every path that does not set it refuses an element name
+    // rather than dereferencing nothing.
+    CSSParserTokenRange tokens { };
 };
 
 // Where a finished node goes: the root slot when this is the root and one was provided, the top of
@@ -2164,13 +2173,12 @@ static CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const Simpli
 
 // Rebuild a `Child` from a stored flat tree, for a consumer that has not been ported yet.
 //
-// The mirror of `cssCalcSwiftParseIntoChild`, and it lives here for the same reason: the operand
-// stack holds a `WTF::Vector<Child>`, so it is only complete in this translation unit and no other
-// file can construct one. All the work is in Swift -- this is the stack, the contract check and
-// nothing else.
-bool cssCalcSwiftEmitStoreIntoChild(const CSSCalcSwiftFlatNodeVector& nodes, uint32_t rootIndex, const SimplificationOptions& options, Child& outRoot) noexcept
+// The mirror of `cssCalcSwiftParseIntoChild`, and here for the same reason: the operand stack holds
+// a `WTF::Vector<Child>`, so it is only complete in this translation unit. All the work is in
+// Swift; this is the stack and the contract check.
+bool cssCalcSwiftEmitStoreIntoChild(const CSSCalcSwiftFlatNodeVector& nodes, uint32_t rootIndex, const SimplificationOptions& options, const CSSParserTokenRange& tokens, Child& outRoot) noexcept
 {
-    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot, .flatNodesIn = &nodes };
+    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot, .flatNodesIn = &nodes, .tokens = tokens };
     CSSCalcSwiftBuilder builder { operands, options };
     if (!cssCalcSwiftEmitFromStore(builder, rootIndex) || operands.rootSlot || !operands.value.isEmpty()) {
         builder.clearOperands();
@@ -2181,7 +2189,7 @@ bool cssCalcSwiftEmitStoreIntoChild(const CSSCalcSwiftFlatNodeVector& nodes, uin
 
 CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions parseOptions, const SimplificationOptions& options, Child& outRoot, bool simplify, CSSCalcSwiftFlatNodeVector* outFlatNodes, uint32_t* outFlatRootIndex) noexcept
 {
-    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot, .flatNodesOut = outFlatNodes, .flatRootIndexOut = outFlatRootIndex };
+    CSSCalcSwiftOperandStack operands { .rootSlot = &outRoot, .flatNodesOut = outFlatNodes, .flatRootIndexOut = outFlatRootIndex, .tokens = innerRange };
     CSSCalcSwiftBuilder builder { operands, options };
     auto cursor = CSSCalcSwiftParseCursor { innerRange };
 
@@ -2264,9 +2272,22 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot) noexcept
         constructOperand(*m_operands, isRoot, makeNumeric(leaf.value, static_cast<CSSUnitType>(leaf.unitType)));
         return true;
 
+    case CSSCalcSwiftNodeKind::SiblingCount:
+        // The tree-counting functions are leaves rather than zero-argument operations, which is
+        // why they land here and never reach `buildOperation`. Both are empty structs whose
+        // `getType` is `Type { }`, so `value`, `unitType` and `percentHint` on the incoming leaf
+        // are inert and the `kind` is the whole crossing.
+        constructOperand(*m_operands, isRoot, SiblingCount { });
+        return true;
+
+    case CSSCalcSwiftNodeKind::SiblingIndex:
+        constructOperand(*m_operands, isRoot, SiblingIndex { });
+        return true;
+
     default:
-        // A kind outside the four numeric leaves is a contract violation rather than a possible input,
-        // and declines rather than building something plausible.
+        // A kind outside the four numeric leaves and the two tree-counting ones is a contract
+        // violation rather than a possible input, so this fails rather than building something
+        // plausible.
         return false;
     }
 }
@@ -2572,11 +2593,91 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return finish(Clamp { WTF::move(minimum), WTF::move(value), bound(2) });
     }
 
+    // `calc-mix()`, the second alternative the Swift parser reaches whose slots are not fillable
+    // from the operand stack alone.
+    //
+    // `CalcMix`'s one tuple slot is a `Vector<Item>`, and an `Item` is a `Child` plus an
+    // `std::optional<Weight>`. The `Child` half is an operand like any other; the weight half is
+    // not a subtree, which is what `pushCalcMixItemWeight` and its `CalcMixWeightPlan` stack are
+    // for. This consumes that stack with the same consume-the-top-`childCount` discipline
+    // `rebuildSlot(const Vector<CalcMix::Item>&)` uses, so a nested `calc-mix()` cannot take an
+    // enclosing one's plans: it pushed and consumed its own before the outer one pushed anything.
+    //
+    // `plan.replace` carries presence here where it carries provenance in `rebuildSlot`, and the
+    // two meanings are disjoint by call graph. `rebuildSlot` has an original item list to copy an
+    // unreplaced weight from, so `replace == false` there means item `origin`'s own weight. A parsed
+    // `calc-mix()` has no original, so `replace == false` here can only mean an omitted weight, and
+    // `origin` is unread. No tree reaches both readers.
+    case CSSCalcSwiftAlternative::CalcMix: {
+        auto& weights = m_operands->calcMixWeights;
+        if (weights.size() < childCount)
+            return false;
+        size_t weightBase = weights.size() - childCount;
+        Vector<CalcMix::Item> items(childCount, [&](size_t item) {
+            auto& plan = weights[weightBase + item];
+            // The same construction `simplify(CalcMix&)` uses at each of its weight assignments,
+            // so a weight built here matches one built there.
+            return CalcMix::Item { .value = WTF::move(stack[base + item]), .weight = plan.replace ? std::optional<CalcMix::Item::Weight> { CalcMix::Item::Weight { plan.weight } } : std::nullopt };
+        });
+        weights.shrink(weightBase);
+        return finish(CalcMix { WTF::move(items) });
+    }
+
     default:
         // Outside the set this entry point serves: a contract violation rather than an input it
         // could serve, so the stack is left exactly as it was found.
         return false;
     }
+}
+
+// `anchor()` and `anchor-size()`: the third and fourth alternatives whose slots are not fillable
+// from the operand stack alone, and the only two whose missing piece is a `CSS::CustomIdent`.
+//
+// The ident is re-read rather than reconstructed. `consumeUnresolvedDashedIdent` is
+// `CSS::CustomIdent { range.consumeIncludingWhitespace().value().toAtomString() }` over one token,
+// so reading that same token here gives the same bytes through the same `toAtomString()` into the
+// same `AtomStringTable`, and the two implementations cannot disagree about escapes, case or
+// atomisation. The predicate is re-checked rather than trusted: an index naming the wrong token
+// would otherwise become a silently wrong element name, and an out-of-range one is the EOF token by
+// `CSSParserTokenRange::peek`'s contract, so it fails here rather than trapping.
+//
+// The slot layout is derived rather than sent, which is why this takes no flags argument.
+// `anchorChildren` fills the `<anchor-side>` subtree first, and only when the side is a
+// `<percentage>` rather than a keyword, then the fallback, and it is the same function `childCount`
+// and `operator[]` answer from. `valueID == CSSValueInvalid` on an `Anchor` means the side is the
+// subtree, because `Anchor::side` is not optional; on an `AnchorSize` it means `dimension` is
+// absent. So the side occupies a slot only for an `Anchor` with no keyword, and the fallback is
+// whatever slot remains.
+bool CSSCalcSwiftBuilder::buildAnchor(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot, uint16_t valueID, uint32_t elementNameToken) noexcept
+{
+    auto& stack = m_operands->value;
+    uint32_t sideSlots = alternative == CSSCalcSwiftAlternative::Anchor && !valueID ? 1 : 0;
+    if (childCount > stack.size() || childCount < sideSlots || childCount > sideSlots + 1)
+        return false;
+
+    std::optional<CSS::CustomIdent> elementName;
+    if (elementNameToken != cssCalcSwiftFlatNoNode) {
+        auto& token = m_operands->tokens.peek(elementNameToken);
+        if (token.type() != IdentToken || !token.value().startsWith("--"_s))
+            return false;
+        elementName = CSS::CustomIdent { token.value().toAtomString() };
+    }
+
+    // Both slots are taken before either node is built, so the two branches below are one `shrink`
+    // and one construction rather than two of each. `side` is built unconditionally and an
+    // `AnchorSize` discards it: `sideSlots` is zero there, so the ternary takes the `CSSValueID`
+    // branch and the discarded value is a variant holding an enumerator.
+    size_t base = stack.size() - childCount;
+    auto fallback = childCount > sideSlots ? std::optional<Child> { WTF::move(stack[base + sideSlots]) } : std::nullopt;
+    AnchorSide side = sideSlots ? AnchorSide { WTF::move(stack[base]) } : AnchorSide { static_cast<CSSValueID>(valueID) };
+    stack.shrink(base);
+    if (alternative == CSSCalcSwiftAlternative::Anchor)
+        constructOperand(*m_operands, isRoot, makeIndirectNode(Anchor { .elementName = WTF::move(elementName), .side = WTF::move(side), .fallback = WTF::move(fallback) }, carriedType));
+    else
+        // `cssValueIDToAnchorSizeDimension` is `consumeAnchorSize`'s own table, shared rather than
+        // copied, so an `<anchor-size>` keyword maps identically however the tree was built.
+        constructOperand(*m_operands, isRoot, makeIndirectNode(AnchorSize { .elementName = WTF::move(elementName), .dimension = valueID ? cssValueIDToAnchorSizeDimension(static_cast<CSSValueID>(valueID)) : std::nullopt, .fallback = WTF::move(fallback) }, carriedType));
+    return true;
 }
 
 // The two shapes every `CSSCalcSwiftNumericResult` answer takes, written once instead of

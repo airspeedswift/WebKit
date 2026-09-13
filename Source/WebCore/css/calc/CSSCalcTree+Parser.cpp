@@ -206,6 +206,17 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
             .category = parserOptions.category,
             .absoluteLengthUnitsOnly = propertyParserState.absoluteLengthUnitsOnly,
             .hasAllowedSymbols = !parserOptions.allowedSymbols.isEmpty(),
+            // The tree-counting conditions, ANDed here rather than crossed as separate fields;
+            // see `CSSCalcSwiftParseOptions::treeCountingAllowed`. Not shared with the equivalent
+            // in `parseCalcFunction`, which reads them from a `ParserState` that does not exist
+            // yet at this point.
+            .treeCountingAllowed = propertyParserState.context.cssTreeCountingFunctionsEnabled
+                && (propertyParserState.currentRule == StyleRuleType::Style || propertyParserState.currentRule == StyleRuleType::Keyframe)
+                && (propertyParserState.currentProperty != CSSPropertyInvalid || propertyParserState.treeCountingFunctionsAllowed),
+            .cssCalcMixEnabled = propertyParserState.context.cssCalcMixEnabled,
+            .anchorAllowed = parserOptions.propertyOptions.anchorPolicy == AnchorPolicy::Allow,
+            .anchorSizeAllowed = parserOptions.propertyOptions.anchorSizePolicy == AnchorSizePolicy::Allow,
+            .unitlessZeroLengthAllowed = parserOptions.propertyOptions.unitlessZeroLength == UnitlessZeroQuirk::Allow,
             .rootFunctionId = static_cast<uint16_t>(function),
         }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal, swiftFlatNodesOut, swiftFlatRootIndexOut);
 
@@ -1191,7 +1202,9 @@ static std::optional<TypedChild> consumeAnchor(CSSParserTokenRange& tokens, int 
     return TypedChild { makeChild(WTF::move(anchor), type), type };
 }
 
-static std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID value)
+// Not `static`: `CSSCalcSwiftBuilder::buildAnchor` needs the same mapping when it materialises an
+// `AnchorSize` from a flat node's `valueID`. Declared in CSSCalcTree+Parser.h.
+std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID value)
 {
     switch (value) {
     case CSSValueWidth:
@@ -1823,6 +1836,10 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
         flags = cssCalcSwiftUnitFlagsFor(token.unitType());
     else if (type == FunctionToken)
         flags = cssCalcSwiftFunctionFlagsFor(token.functionId());
+    // The only thing the Swift parser needs to know about a token's text:
+    // `consumeUnresolvedDashedIdent`'s predicate, over the same token it is already reading.
+    else if (type == IdentToken && token.value().startsWith("--"_s))
+        flags = cssCalcSwiftTokenIsDashedIdent;
 
     return {
         .numericValue = isNumeric ? token.numericValue() : 0,

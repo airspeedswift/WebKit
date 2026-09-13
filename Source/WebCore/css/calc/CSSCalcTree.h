@@ -252,6 +252,23 @@ struct Child {
     alignas(nodeStorageAlignment) unsigned char storage[nodeStorageSize];
 #endif
 
+    // Deleted so that Swift cannot synthesize one. For C++ this changes nothing: the user-declared
+    // move constructor below already suppresses the implicit default constructor, so `Child()` is
+    // ill-formed either way and only the diagnostic changes.
+    //
+    // The Clang importer otherwise hands Swift a zero-argument `init()` for an imported C++ class
+    // even when the class has no default constructor, and that initializer zero-fills the backing
+    // storage: here, a `Node` variant whose alternative 0 is `Number`. It is deprecated, but the
+    // diagnostic is not in any `-Werror` group WebKit's Swift step passes, and
+    // `-strict-memory-safety` does not reject it either.
+    //
+    // What that would allow is specific. Every route that reads `CSSCalcSwiftFlatNode::origin` as a
+    // pre-order index into an original `Child` tree is reachable only from the flattening path,
+    // which holds a real `borrowing Child`; the parse path has no original, and what it writes into
+    // that field is a token index or the no-node sentinel, never an index into a `Child` tree. What
+    // keeps the two apart is that a parse-path function cannot name a `Child` at all, which stops
+    // being true if it can invent one. With this line, such a read is a build error.
+    Child() = delete;
     Child(Child&&);
     Child& operator=(Child&&);
     ~Child();
@@ -368,61 +385,31 @@ struct Tree {
     // `requiresConversionData` is used both to both indicate whether eager evaluation of the tree (at parse time) is possible or not and to trigger a warning in `UnevaluatedCalcBase::evaluateDeprecated` that the evaluation results will be incorrect.
     bool requiresConversionData = false;
 
-    // THE SAME TREE IN THE FLAT FORM THE SWIFT GRAMMAR BUILDS, when there is one (P7c slices
-    // C1b/C1d).
+    // The same tree in the flat form the Swift parser builds, when there is one.
     //
-    // Not a second tree and not a cache: `CSSCalcTree+Parser.cpp`'s Swift arm fills it from the very
-    // nodes it then emits `root` from, in the same call, so the two are the same tree in two
-    // representations. Empty on a C++-parsed tree, on a tree the Swift grammar declined, and on every
-    // tree `copy` or `copyAndSimplify` produces -- those build a fresh `root` and a flat form
-    // describing the tree they were given would describe a different one, which is worse than
-    // absent. A consumer therefore reads this as "is a flat form available", never as "is this a
-    // Swift tree".
+    // Not a second tree and not a cache: the Swift path in CSSCalcTree+Parser.cpp fills it from the
+    // very nodes it then emits `root` from, in the same call. Empty on a C++-parsed tree, on a tree
+    // the Swift parser handed back, and on every tree `copy` or `copyAndSimplify` produces, since
+    // those build a fresh `root` and a flat form describing their input would describe a different
+    // tree. A consumer reads this as whether a flat form is available, never as whether Swift built
+    // the tree.
     //
-    // THE `Vector` ITSELF, not a `RefPtr` to a class holding one, which is the whole of slice C1d.
-    // C1b routed it through `CSSCalcSwiftFlatStore`, a refcounted TZone-allocated class, on the
-    // ground that a Swift-visible receiver holding a pointer poisons every call on it. That ground
-    // was real and the conclusion did not follow: the receiver Swift calls is
-    // `CSSCalcSwiftBuilder`, which already crosses, already carries raw pointers and already holds
-    // the `SWIFT_SAFE` assertion those pointers need, so the write can be addressed to it and the
-    // destination can be anything C++ likes. The object it removes cost a measured 136.2 retired
-    // instructions per Swift-parsed `calc()` in `tzoneAllocateNonCompact`/`tzoneFree` plus the
-    // `RefPtr` plumbing, against a crossing measured at 9.4.
+    // C++ owns the bytes because the tree outlives the parse call, so the Swift parser's
+    // `withTemporaryAllocation` stack buffer cannot be the owner; a `Swift.Array` per `calc()` costs
+    // a heap buffer on a hot path; and `UniqueArray`/`RigidArray` are not back-deployable. Swift
+    // fills this in one crossing and reads it back per element by value.
     //
-    // WHY C++ OWNS THE BYTES AT ALL, carried over from that class's declaration because it is the
-    // reason there is no Swift-side answer: the tree outlives the parse call
-    // (`CSSCalcValue.h:64`), so the grammar's `withTemporaryAllocation` stack buffer cannot be the
-    // owner; a `Swift.Array` per `calc()` is barred by the ARC bar and is priced rather than assumed
-    // (a per-simplification heap buffer measured 617 retired instructions, more than the whole
-    // pass); and `UniqueArray`/`RigidArray` are macOS 27+ (filings 40), so there is no
-    // back-deployable Swift-owned growable container. Swift fills this in ONE crossing and reads it
-    // back per element BY VALUE.
-    //
-    // Costs no refcount traffic and never did: `Tree` is MOVE-ONLY -- `Child` declares a move
-    // constructor and no copy, so the implicit copy is deleted and `CSSCalcTree+Copy.h` exists
-    // because of it -- so the only operations a `Tree` can perform on this member are a move and a
-    // destroy, and both are now three words rather than an atomic decrement and a possible free.
-    //
-    // WHAT IT COSTS, BOOKED RATHER THAN NETTED, because it falls on a path that never fills one.
-    // `Tree` is what BOTH parse arms build, so a `Tree` carrying a non-trivially-movable member is
-    // dearer to move and destroy even when the member is empty: the C++ descent measures **+79.5
-    // retired instructions per parse** (+1.55 % of 5139) against the `RefPtr` it replaces, on a
-    // corpus where the Swift arm saves 98.0. Not `sizeof` -- that was hypothesised and REFUTED by
-    // two built arms, one 8 bytes smaller (recovers 4.1) and one 320 bytes larger (costs 19.7); see
-    // `cssprobe/notes/calc-c1d-results-0912.md` §3.4, which leaves counting the `Tree` moves in
-    // `parseAndSimplify`'s disassembly as the named next step.
+    // There is no refcount traffic: `Tree` is move-only, because `Child` declares a move constructor
+    // and no copy, so the only operations a `Tree` performs on this member are a move and a destroy.
 
     // Which node of `swiftFlatNodes` is the root. `cssCalcSwiftFlatNoNode` when there is no flat
-    // form; it is NOT implicitly 0, because the parse grammar numbers nodes in the order it finishes
-    // them and the root finishes last.
+    // form; not implicitly 0, because the Swift parser numbers nodes in the order it finishes them
+    // and the root finishes last.
     //
-    // DECLARED BEFORE THE `Vector`, AND THE ORDER IS LOAD-BEARING rather than stylistic: here it
-    // lands in the padding after `requiresConversionData` and `sizeof(Tree)` is 56; declared after
-    // the `Vector` it starts a new 8-byte slot and `sizeof(Tree)` is 64. Measured with a `sizeof`
-    // probe compiled under the build's own flags, and worth 4.1 instructions per C++ parse and 2.9
-    // per Swift one for zero source lines. `CSSCalcTree+Parser.cpp`'s designated initializer must
-    // follow this order; `-Wreorder-init-list` is an error in this build, so it cannot silently
-    // drift.
+    // Declared before the `Vector` so that it lands in the padding after `requiresConversionData`,
+    // which keeps `sizeof(Tree)` at 56 rather than 64. `CSSCalcTree+Parser.cpp`'s designated
+    // initializer has to follow this order, and `-Wreorder-init-list` is an error in this build, so
+    // it cannot silently drift.
     uint32_t swiftFlatRootIndex { cssCalcSwiftFlatNoNode };
 
     CSSCalcSwiftFlatNodeVector swiftFlatNodes { };
@@ -1031,6 +1018,13 @@ struct AnchorSize {
 
     bool operator==(const AnchorSize&) const = default;
 };
+
+// `<anchor-size>` as the `Style::AnchorSizeDimension` it names, or nothing. Defined in
+// CSSCalcTree+Parser.cpp beside `consumeAnchorSize`, and declared here rather than in
+// CSSCalcTree+Parser.h so that `CSSCalcSwiftBuilder::buildAnchor`, which reconstructs an
+// `AnchorSize` from a flat node carrying the keyword's `CSSValueID`, reads the same table without
+// CSSCalcTree+Simplification.cpp gaining an include.
+std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID);
 
 
 // MARK: TextStream
