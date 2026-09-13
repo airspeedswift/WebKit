@@ -6221,9 +6221,62 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
 /// arms cannot disagree about which deeply nested expressions parse.
 private let calcMaxExpressionDepth: Int32 = 100
 
+/// The parse options, in Swift's OWN representation, formed once per parse and carried on the state
+/// rather than passed by value at every level.
+///
+/// THE COST THIS REMOVES. Passing an eight-byte multi-field aggregate BY VALUE re-packs it into one
+/// register at every site, and the pack clears the spare bits of each `Bool` byte and the two
+/// padding bytes: a constant is materialised and `and`ed with the value. On the descent that is five
+/// sites -- twice in `calcParseSum`, twice in `calcParseProduct`, once in `calcParseValue` -- so it
+/// is paid per recursion LEVEL rather than per parse, which is why it presented as a slope and why
+/// `calcParseSum` and `calcParseProduct` grew for stage F1 while containing no F1 code.
+///
+/// It got dearer when F1 added `treeCountingAllowed`, because the constant moved off an AArch64
+/// bitmask immediate: `0x0000FFFF000101FF` is `mov` + `eor` in two instructions (both halves are
+/// encodable -- `0x0000FFFF0000FFFF` is a repeating 16-bit pattern), while `0x0000FFFF010101FF` is
+/// neither encodable nor reachable by any `mov`+`eor` pair and costs `mov` + `movk` + `movk`. The
+/// cliff is therefore discontinuous in the field count, and a fourth `bool` would have been free
+/// again -- which is exactly why the fix is NOT to reorder the C++ struct. That would be C++ bought
+/// for performance, and fragile: the next field added breaks it.
+///
+/// IT IS NOT A C++-INTEROP COST, and the arm that assumed it was is refuted in the tree. A
+/// field-for-field Swift struct threaded by value in place of the imported POD compiles to
+/// BYTE-IDENTICAL code -- `calcParseSum` 331 instructions with the same `mov`/`movk`/`movk` at the
+/// same addresses -- and measures +0.5 of 3439, i.e. the cross-arm floor. Swift's own `Bool` has the
+/// same seven spare bits, so its own aggregate is packed the same way. What removes the work is
+/// removing the by-value pass, which is why these live on `CalcParseState`: that struct is already
+/// threaded through every descent function as a single `inout` pointer, so the options ride along
+/// for no argument register at all and the descent carries one argument FEWER than before.
+/// Zero C++, four net lines of Swift.
+private struct CalcParseOptions {
+    let category: WebCore.CSS.Category
+    let absoluteLengthUnitsOnly: Bool
+    let hasAllowedSymbols: Bool
+    let treeCountingAllowed: Bool
+    let rootFunctionId: UInt16
+
+    @inline(always)
+    init(_ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions) {
+        self.category = options.category
+        self.absoluteLengthUnitsOnly = options.absoluteLengthUnitsOnly
+        self.hasAllowedSymbols = options.hasAllowedSymbols
+        self.treeCountingAllowed = options.treeCountingAllowed
+        self.rootFunctionId = options.rootFunctionId
+    }
+}
+
 /// Mutable state threaded through the descent. Separate from the return value because both a
 /// success and a decline can have set `requiresConversionData` on the way.
 private struct CalcParseState {
+    /// The parse options, read here rather than passed as a parameter of their own. This struct is
+    /// already threaded through every descent function as one `inout` pointer, so carrying them
+    /// costs no argument register at any level and saves the one the options used to occupy.
+    let options: CalcParseOptions
+
+    init(_ options: CalcParseOptions) {
+        self.options = options
+    }
+
     var requiresConversionData = false
     var declineReason = WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None
     /// Set when the grammar hit something it does not cover, as opposed to invalid input.
@@ -6492,7 +6545,6 @@ private func calcParseValue(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
@@ -6506,7 +6558,7 @@ private func calcParseValue(
     // FAILURE, which is what the C++ does with it -- `findBlock` returns nothing and the value
     // switch below has no `FunctionToken` arm.
     if token.blockType == calcBlockStart {
-        return calcParseBlock(cursor, &index, end, depth, &out, options, &state, token)
+        return calcParseBlock(cursor, &index, end, depth, &out, &state, token)
     }
 
     // `tokens.consumeIncludingWhitespace()`: take this token, then skip the whitespace after it.
@@ -6522,7 +6574,7 @@ private func calcParseValue(
 
     case WebCore.PercentageToken:
         // `parseCalcPercentage`: the hint comes from the category, not from the token.
-        let hint = CalcType.determinePercentHint(options.category)
+        let hint = CalcType.determinePercentHint(state.options.category)
         guard let me = calcParseAppendLeaf(&out, .Percentage, token.numericValue,
             UInt16(WebCore.CSSUnitType.Percentage.rawValue), percentHintRawValue(hint)) else { return nil }
         // `getType(const Percentage&)` (CSSCalcTree.cpp:428-:434) is `{ .percent = 1 }` and then
@@ -6544,7 +6596,7 @@ private func calcParseValue(
         // alternative `makeNumeric` builds, and whether the unit needs conversion data.
         if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenUnitNeedsConversionData != 0 {
             // `absoluteLengthUnitsOnly` makes this invalid input, not a decline.
-            if options.absoluteLengthUnitsOnly { return nil }
+            if state.options.absoluteLengthUnitsOnly { return nil }
             state.requiresConversionData = true
         }
         // The same C++ answer stage D used, read as an ALTERNATIVE rather than as a node kind.
@@ -6563,7 +6615,7 @@ private func calcParseValue(
         // C++ side, so an ident that is not a constant is a decline rather than a failure: with a
         // non-empty `allowedSymbols` the C++ arm might still resolve it.
         let constant = WebCore.CSSCalc.cssCalcSwiftLookupConstantNumber(UInt16(token.id))
-        if options.hasAllowedSymbols || !constant.resolved {
+        if state.options.hasAllowedSymbols || !constant.resolved {
             state.declined = true
             state.declineReason = .Symbol
             return nil
@@ -6614,7 +6666,6 @@ private func calcParseBlock(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
     _ token: WebCore.CSSCalc.CSSCalcSwiftToken
 ) -> CalcParsed? {
@@ -6629,7 +6680,7 @@ private func calcParseBlock(
         // A math function the grammar covers: `parseCalcFunction` dispatches on the id and reaches
         // the same `<calc-sum>` recursion the plain-calc arm does, one level down.
         if let function = calcParseFunctionAlternative(token.functionId) {
-            return calcParseFunctionBlock(cursor, &index, end, depth, &out, options, &state,
+            return calcParseFunctionBlock(cursor, &index, end, depth, &out, &state,
                 function.alternative, function.arguments)
         }
         if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
@@ -6645,7 +6696,7 @@ private func calcParseBlock(
     // `parseCalcSum` at `depth + 1`.
     var inner = index + 1
     calcSkipWhitespace(cursor, &inner, blockEnd, &state)
-    guard let innerParsed = calcParseSum(cursor, &inner, blockEnd, depth + 1, &out, options, &state) else { return nil }
+    guard let innerParsed = calcParseSum(cursor, &inner, blockEnd, depth + 1, &out, &state) else { return nil }
     // `if (!innerRange.atEnd()) return nullopt` -- extraneous tokens inside the block are a failure,
     // not a decline.
     calcSkipWhitespace(cursor, &inner, blockEnd, &state)
@@ -6803,7 +6854,6 @@ private func calcParseFunctionBlock(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
     _ arguments: CalcFunctionArguments
@@ -6815,28 +6865,28 @@ private func calcParseFunctionBlock(
     switch arguments {
     case .oneOrMore:
         argumentsParsed = calcParseArgumentList(
-            cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+            cursor, &inner, blockEnd, depth + 1, &out, &state, alternative)
     case .exactlyOne:
         argumentsParsed = calcParseUnaryFunction(
-            cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+            cursor, &inner, blockEnd, depth + 1, &out, &state, alternative)
     case .clamp:
         argumentsParsed = calcParseClamp(
-            cursor, &inner, blockEnd, depth + 1, &out, options, &state)
+            cursor, &inner, blockEnd, depth + 1, &out, &state)
     case .oneOrTwo:
         argumentsParsed = calcParseOneOrTwoArguments(
-            cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+            cursor, &inner, blockEnd, depth + 1, &out, &state, alternative)
     case .round:
         argumentsParsed = calcParseRound(
-            cursor, &inner, blockEnd, depth + 1, &out, options, &state)
+            cursor, &inner, blockEnd, depth + 1, &out, &state)
     case .exactlyTwo:
         argumentsParsed = calcParseTwoArguments(
-            cursor, &inner, blockEnd, depth + 1, &out, options, &state, alternative)
+            cursor, &inner, blockEnd, depth + 1, &out, &state, alternative)
     case .progress:
         argumentsParsed = calcParseProgress(
-            cursor, &inner, blockEnd, depth + 1, &out, options, &state)
+            cursor, &inner, blockEnd, depth + 1, &out, &state)
     case .zeroArguments:
         argumentsParsed = calcParseZeroArguments(
-            cursor, &inner, blockEnd, &out, options, &state, alternative)
+            cursor, &inner, blockEnd, &out, &state, alternative)
     }
     guard let parsed = argumentsParsed else { return nil }
     // `if (!innerRange.atEnd()) return nullopt`. Vacuous for `<calc-sum>#`, whose loop runs to
@@ -6885,11 +6935,10 @@ private func calcParseZeroArguments(
     _ index: inout UInt32,
     _ end: UInt32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
 ) -> CalcParsed? {
-    if !options.treeCountingAllowed {
+    if !state.options.treeCountingAllowed {
         return nil
     }
     if state.treeCountingResolvable {
@@ -6930,14 +6979,13 @@ private func calcParseUnaryFunction(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
 
     calcSkipWhitespace(cursor, &index, end, &state)
-    guard let argument = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let argument = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
 
     // The operand the operation node will name. It is the argument itself unless the `Deg2Rad`
@@ -7037,7 +7085,6 @@ private func calcParseSumOrNone(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState
 ) -> CalcParsed? {
     if index < end, calcToken(cursor, &state, index).id == UInt16(WebCore.CSSValueNone.rawValue) {
@@ -7046,7 +7093,7 @@ private func calcParseSumOrNone(
         calcSkipWhitespace(cursor, &index, end, &state)
         return CalcParsed(index: CalcFlatNode.noNode, type: CalcType())
     }
-    return calcParseSum(cursor, &index, end, depth, &out, options, &state)
+    return calcParseSum(cursor, &index, end, depth, &out, &state)
 }
 
 /// `consumeClamp` (`CSSCalcTree+Parser.cpp:493`-`:591`), stage E3:
@@ -7071,21 +7118,20 @@ private func calcParseClamp(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
 
-    guard let minimum = calcParseSumOrNone(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let minimum = calcParseSumOrNone(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     guard calcParseComma(cursor, &index, end, &state) else { return nil }
 
-    guard let value = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let value = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     guard calcParseComma(cursor, &index, end, &state) else { return nil }
 
-    guard let maximum = calcParseSumOrNone(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let maximum = calcParseSumOrNone(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
 
     let noneMinimum = minimum.index == CalcFlatNode.noNode
@@ -7168,7 +7214,6 @@ private func calcParseRound(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState
 ) -> CalcParsed? {
     // BEFORE THE PEEK, NOT AFTER, and the differential found this rather than a reading of it.
@@ -7188,7 +7233,7 @@ private func calcParseRound(
         guard calcParseComma(cursor, &index, end, &state) else { return nil }
         alternative = selected
     }
-    return calcParseRoundArguments(cursor, &index, end, depth, &out, options, &state, alternative)
+    return calcParseRoundArguments(cursor, &index, end, depth, &out, &state, alternative)
 }
 
 /// `consumeRoundArguments<Op>` (`CSSCalcTree+Parser.cpp:595`-`:653`): `<calc-sum>, <calc-sum>?`
@@ -7210,14 +7255,13 @@ private func calcParseRoundArguments(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
 
-    guard let a = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let a = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
 
     if index == end {
@@ -7229,7 +7273,7 @@ private func calcParseRoundArguments(
     }
 
     guard calcParseComma(cursor, &index, end, &state) else { return nil }
-    guard let b = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
 
     guard let merged = a.type.consistentType(with: b.type) else { return nil }
@@ -7257,14 +7301,13 @@ private func calcParseOneOrTwoArguments(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
 
-    guard let a = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let a = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     guard a.type.matchesNumber else { return nil }
 
@@ -7275,7 +7318,7 @@ private func calcParseOneOrTwoArguments(
     }
 
     guard calcParseComma(cursor, &index, end, &state) else { return nil }
-    guard let b = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     guard b.type.matchesNumber else { return nil }
 
@@ -7305,20 +7348,19 @@ private func calcParseTwoArguments(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
 
-    guard let a = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let a = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     // `validateType<Op::input>` on argument #1, which is `return true` for the three `Any` families.
     if alternative == .Pow && !a.type.matchesNumber { return nil }
 
     guard calcParseComma(cursor, &index, end, &state) else { return nil }
-    guard let b = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     if index != end { return nil }
     if alternative == .Pow && !b.type.matchesNumber { return nil }
@@ -7364,7 +7406,6 @@ private func calcParseProgress(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
@@ -7378,15 +7419,15 @@ private func calcParseProgress(
         alternative = .ProgressNoClamp
     }
 
-    guard let value = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let value = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     guard calcParseComma(cursor, &index, end, &state) else { return nil }
 
-    guard let start = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let start = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     guard calcParseComma(cursor, &index, end, &state) else { return nil }
 
-    guard let finish = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let finish = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
     calcSkipWhitespace(cursor, &index, end, &state)
     if index != end { return nil }
 
@@ -7421,7 +7462,6 @@ private func calcParseArgumentList(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState,
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
 ) -> CalcParsed? {
@@ -7441,7 +7481,7 @@ private func calcParseArgumentList(
             guard calcParseComma(cursor, &index, end, &state) else { return nil }
         }
 
-        guard let argument = calcParseSum(cursor, &index, end, depth, &out, options, &state) else { return nil }
+        guard let argument = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
 
         if childCount == 0 {
             mergedType = argument.type
@@ -7468,12 +7508,11 @@ private func calcParseProduct(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
 
-    guard let first = calcParseValue(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let first = calcParseValue(cursor, &index, end, depth, &out, &state) else { return nil }
     var productType = first.type
 
     // Counts operands linked into THIS product, so the node gets the child count the C++ arm's
@@ -7492,7 +7531,7 @@ private func calcParseProduct(
         index += 1
         calcSkipWhitespace(cursor, &index, end, &state)
 
-        guard let next = calcParseValue(cursor, &index, end, depth, &out, options, &state) else { return nil }
+        guard let next = calcParseValue(cursor, &index, end, depth, &out, &state) else { return nil }
 
         var operandType = next.type
         var operand = next.index
@@ -7523,14 +7562,13 @@ private func calcParseSum(
     _ end: UInt32,
     _ depth: Int32,
     _ out: inout OutputSpan<CalcFlatNode>,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ state: inout CalcParseState
 ) -> CalcParsed? {
     if depth > calcMaxExpressionDepth { return nil }
 
     // The look-BEHIND below indexes one before the current token, so the sum's own start is where
     // that index is measured from -- exactly what `originalTokens` is on the C++ side.
-    guard let first = calcParseProduct(cursor, &index, end, depth, &out, options, &state) else { return nil }
+    guard let first = calcParseProduct(cursor, &index, end, depth, &out, &state) else { return nil }
     var sumType = first.type
 
     var childCount: UInt32 = 0
@@ -7554,7 +7592,7 @@ private func calcParseSum(
         if index >= end || !calcTokenIsWhitespace(calcToken(cursor, &state, index).type) { return nil }
         calcSkipWhitespace(cursor, &index, end, &state)
 
-        guard let next = calcParseProduct(cursor, &index, end, depth, &out, options, &state) else { return nil }
+        guard let next = calcParseProduct(cursor, &index, end, depth, &out, &state) else { return nil }
 
         var operand = next.index
         if op == 0x2D {
@@ -7638,9 +7676,13 @@ public func cssCalcParseSwift(
     _ simplify: Bool
 ) -> WebCore.CSSCalc.CSSCalcSwiftParseResult {
     var result = WebCore.CSSCalc.CSSCalcSwiftParseResult()
-    var state = CalcParseState()
+    // THE ONE CROSSING OF THE OPTIONS, and the reason `CalcParseOptions` exists -- see its own note.
+    // Everything below this line, including the oversized retry, reads the Swift value off the
+    // state the descent already threads, so the descent carries one argument FEWER than before.
+    let parseOptions = CalcParseOptions(options)
+    var state = CalcParseState(parseOptions)
 
-    var attempt = calcParseAttempt(cursor, &builder, options, simplificationOptions, simplify,
+    var attempt = calcParseAttempt(cursor, &builder, simplificationOptions, simplify,
         calcFlatStackCapacity, &state)
 
     // A tree too big for the fixed stack buffer, retried at a size that cannot overflow. Nothing has
@@ -7648,8 +7690,8 @@ public func cssCalcParseSwift(
     // pushed no operand, because operands are only pushed by the emit that overflow prevents -- so
     // the retry starts from a clean state, exactly as `calcFlatSimplifyOversized` does.
     if attempt.overflowed {
-        state = CalcParseState()
-        attempt = calcParseAttempt(cursor, &builder, options, simplificationOptions, simplify,
+        state = CalcParseState(parseOptions)
+        attempt = calcParseAttempt(cursor, &builder, simplificationOptions, simplify,
             calcParseNodeUpperBound(cursor.tokenCount()), &state)
     }
 
@@ -7690,7 +7732,6 @@ public func cssCalcParseSwift(
 private func calcParseAttempt(
     _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ simplificationOptions: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
     _ simplify: Bool,
     _ capacity: Int,
@@ -7717,28 +7758,28 @@ private func calcParseAttempt(
         // Spelled as an `if`/`else` rather than `Optional.map`, because the branches take `out` and
         // `state` `inout` and a closure cannot capture an `OutputSpan`.
         let descent: CalcParsed?
-        if let rootFunction = calcParseFunctionAlternative(options.rootFunctionId) {
+        if let rootFunction = calcParseFunctionAlternative(state.options.rootFunctionId) {
             switch rootFunction.arguments {
             case .oneOrMore:
-                descent = calcParseArgumentList(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+                descent = calcParseArgumentList(cursor, &index, end, 0, &out, &state, rootFunction.alternative)
             case .exactlyOne:
-                descent = calcParseUnaryFunction(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+                descent = calcParseUnaryFunction(cursor, &index, end, 0, &out, &state, rootFunction.alternative)
             case .clamp:
-                descent = calcParseClamp(cursor, &index, end, 0, &out, options, &state)
+                descent = calcParseClamp(cursor, &index, end, 0, &out, &state)
             case .oneOrTwo:
-                descent = calcParseOneOrTwoArguments(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+                descent = calcParseOneOrTwoArguments(cursor, &index, end, 0, &out, &state, rootFunction.alternative)
             case .round:
-                descent = calcParseRound(cursor, &index, end, 0, &out, options, &state)
+                descent = calcParseRound(cursor, &index, end, 0, &out, &state)
             case .exactlyTwo:
-                descent = calcParseTwoArguments(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
+                descent = calcParseTwoArguments(cursor, &index, end, 0, &out, &state, rootFunction.alternative)
             case .progress:
-                descent = calcParseProgress(cursor, &index, end, 0, &out, options, &state)
+                descent = calcParseProgress(cursor, &index, end, 0, &out, &state)
             case .zeroArguments:
-                descent = calcParseZeroArguments(cursor, &index, end, &out, options, &state, rootFunction.alternative)
+                descent = calcParseZeroArguments(cursor, &index, end, &out, &state, rootFunction.alternative)
             }
-        } else if options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
-            || options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {
-            descent = calcParseSum(cursor, &index, end, 0, &out, options, &state)
+        } else if state.options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
+            || state.options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {
+            descent = calcParseSum(cursor, &index, end, 0, &out, &state)
         } else {
             // A TOP-LEVEL MATH FUNCTION THIS GRAMMAR DOES NOT COVER, WHICH IS A DECLINE AND USED TO
             // BE A WRONG TREE. `parseAndSimplify` accepts any `isCalcFunction` at the top
@@ -7755,7 +7796,7 @@ private func calcParseAttempt(
             // a wrong computed value on the day this entry gets a production caller, and the
             // fall-through was correct only for `calc()` and `-webkit-calc()`.
             state.declined = true
-            state.declineReason = calcParseDeclineReasonForFunction(options.rootFunctionId)
+            state.declineReason = calcParseDeclineReasonForFunction(state.options.rootFunctionId)
             descent = nil
         }
 
