@@ -255,7 +255,8 @@ MODULE_VERIFIER_SUPPORTED_LANGUAGES = objective-c++;
 MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = c++23;
 MODULE_VERIFIER_KIND = builtin;
 
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal;
+// rdar://159439903: enabled per-target until it can be broadened to all of WebKit.
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers;
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
