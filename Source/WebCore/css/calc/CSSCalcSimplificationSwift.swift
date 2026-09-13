@@ -2809,6 +2809,27 @@ fileprivate extension CalcFlatNode {
         }
         return NumericLeaf(kind: kind, value: value, unitType: UInt16(unitType), percentHint: percentHint)
     }
+
+    /// This node as `pushLeaf`'s leaf for the two TREE-COUNTING alternatives, or nil if it is
+    /// neither (stage F1).
+    ///
+    /// Separate from `numericLeaf` because these two are payload-free -- `SiblingCount` and
+    /// `SiblingIndex` are empty structs and `getType` of either is `Type { }` -- so the only field
+    /// that crosses is `kind`, and routing them through `NumericLeaf` would mean widening
+    /// `NumericKind`, which every numeric fold switches over exhaustively.
+    ///
+    /// Spelled out rather than taken from the two enums agreeing on an index, for `numericLeaf`'s
+    /// reason: `CSSCalcSwiftNodeKind` is the serializer's shape list and `CSSCalcSwiftAlternative`
+    /// is the variant index, and nothing holds them in step.
+    var treeCountingLeaf: WebCore.CSSCalc.CSSCalcSwiftLeaf? {
+        let kind: WebCore.CSSCalc.CSSCalcSwiftNodeKind
+        switch alternative {
+        case .SiblingCount: kind = .SiblingCount
+        case .SiblingIndex: kind = .SiblingIndex
+        default: return nil
+        }
+        return WebCore.CSSCalc.CSSCalcSwiftLeaf(value: 0, unitType: 0, kind: kind.rawValue, percentHint: 0)
+    }
 }
 
 // MARK: - The flat tree
@@ -3521,12 +3542,19 @@ fileprivate extension CalcFlatTree {
     ///
     /// There is no `original`, and none is needed. `simplifyNode` reaches one at four sites --
     /// `simplifySiblingFunction`, `simplifyAnchorFunction`, `simplifyRandom` and `simplifyCalcMix`,
-    /// each through `withCalcOriginalNode` -- and all four serve alternatives this grammar cannot
-    /// produce: it emits the four numeric leaves, `Sum`, `Product`, `Negate` and `Invert`, and no
-    /// fold over that set invents another. So the switch below is `simplifyNode`'s hot arm with the
-    /// cold call removed, and the `default` is a REFUSAL rather than a leave-alone: an alternative
-    /// arriving here would be a contract violation, not a coverage gap, because the only writer of
-    /// these nodes is fifty lines above.
+    /// each through `withCalcOriginalNode`.
+    ///
+    /// UNTIL STAGE F1 the reason none of them was reachable was that the grammar could produce none
+    /// of their alternatives, and that sentence is now WRONG: the grammar produces `SiblingCount`
+    /// and `SiblingIndex`. The reason that replaces it is narrower and is carried at the arm
+    /// itself -- those two get a no-op label below, and `calcParseZeroArguments` declines the whole
+    /// tree in the only configuration where `simplify(SiblingCount&)` folds anything. The other
+    /// three sites' alternatives are still unproducible (stage G).
+    ///
+    /// So the switch below is `simplifyNode`'s hot arm with the cold call removed, and the
+    /// `default` is a REFUSAL rather than a leave-alone: an alternative arriving there would be a
+    /// contract violation, not a coverage gap, because the only writer of these nodes is fifty
+    /// lines above.
     ///
     /// `Min` and `Max` are absent for the same reason, one level further out: they reach the flat
     /// tree only from `convertToMinMax`, which only `simplifyClamp` calls.
@@ -3563,6 +3591,19 @@ fileprivate extension CalcFlatTree {
 
             case .Number, .Percentage, .CanonicalDimension:
                 // The three unconditional no-ops, as `simplifyNode` names them.
+                break
+
+            case .SiblingCount, .SiblingIndex:
+                // STAGE F1, AND A NO-OP THAT IS EXACT RATHER THAN CONSERVATIVE. `simplify`'s two
+                // overloads (`+Simplification.cpp:527`-`:545`) open by requiring
+                // `options.conversionData` and a style builder state, and return `{ }` -- keep the
+                // node -- without one. `calcParseZeroArguments` has already DECLINED the whole
+                // tree when `hasConversionData` is set, so by construction this arm is only ever
+                // reached in the configuration where the C++ fold is itself a no-op.
+                //
+                // `simplifySiblingFunction`, which is what `simplifyNode` runs for these two on the
+                // FLATTENED path, is not reachable from here and could not be: it resolves through
+                // `withCalcOriginalNode`, and a parsed tree has no original.
                 break
 
             default:
@@ -5956,10 +5997,11 @@ fileprivate extension CalcFlatTree {
     ///
     /// THE ROUTE SET IS SMALLER, NOT DIFFERENT. `emit` above has three ways out -- `pushLeaf`,
     /// `buildOperation`, and a deep copy from the original for the payloads a fixed-size node cannot
-    /// carry. A parsed tree holds only the four numeric leaves and the six operations
-    /// `buildOperation` serves, so the third route has nothing to serve and its absence is a REFUSAL
-    /// rather than an omission: anything else declines the tree to the C++ arm instead of building
-    /// a node from an `origin` field that names nothing.
+    /// carry. A parsed tree holds only what `CalcParsedEmitCoverage`'s two masks name -- the four
+    /// numeric leaves, stage F1's two tree-counting ones, and the operations `buildOperation`
+    /// serves -- so the third route has nothing to serve and its absence is a REFUSAL rather than
+    /// an omission: anything else declines the tree to the C++ arm instead of building a node from
+    /// an `origin` field that names nothing.
     ///
     /// `isRoot` is a parameter rather than `i == root`, because a comparison against a stored field
     /// is not the free `cmp #0` the pre-order path gets, and the recursion already has to pass
@@ -5988,7 +6030,19 @@ fileprivate extension CalcFlatTree {
 
         if alternativeBit & CalcParsedEmitCoverage.leafMask != 0 {
             guard let leaf = node.numericLeaf else {
-                return false
+                // STAGE F1's two leaves, which are in `leafMask` but are not NUMERIC: they carry no
+                // value, no unit and no hint, so `NumericLeaf` -- whose `kind` is the four-case
+                // `NumericKind` every fold switches over -- is the wrong carrier for them and
+                // widening it would have grown a dozen exhaustive switches for two payload-free
+                // alternatives.
+                //
+                // SECOND, not first, so the numeric path keeps its single test: this branch is
+                // taken only when `numericLeaf` has already answered nil, which for an alternative
+                // inside `leafMask` means exactly these two.
+                guard let treeCounting = node.treeCountingLeaf else {
+                    return false
+                }
+                return builder.pushLeaf(treeCounting, isRoot)
             }
             return builder.pushLeaf(leaf.boundaryLeaf, isRoot)
         }
@@ -6035,13 +6089,15 @@ fileprivate extension CalcFlatTree {
 /// stored global is lazily initialised behind a `swift_once` guard, which is an atomic load, and
 /// both of these are read once per emitted node.
 private enum CalcParsedEmitCoverage {
-    /// The four numeric leaves. `pushLeaf` serves all four and nothing else; the other three leaf
-    /// alternatives -- `Symbol`, `SiblingCount`, `SiblingIndex` -- are stage F and are not here.
+    /// The four numeric leaves, plus stage F1's two tree-counting ones. `pushLeaf` serves exactly
+    /// these six; the remaining leaf alternative, `Symbol`, is stage F2 and is not here.
     static var leafMask: UInt64 {
         return CalcFlatCoverage.bit(.Number)
             | CalcFlatCoverage.bit(.Percentage)
             | CalcFlatCoverage.bit(.CanonicalDimension)
             | CalcFlatCoverage.bit(.NonCanonicalDimension)
+            | CalcFlatCoverage.bit(.SiblingCount)
+            | CalcFlatCoverage.bit(.SiblingIndex)
     }
 
     /// The operations `buildOperation` constructs from operands alone: the two `Children`-slotted
@@ -6144,9 +6200,11 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
 /// blocks and nested `calc()` (stage D2), `min()` and `max()` at any depth INCLUDING the top level
 /// (stage E1), the ten one-argument math functions -- `sin()` `cos()` `tan()` `asin()` `acos()`
 /// `atan()` `sqrt()` `exp()` `abs()` `sign()` -- with the parse-time `Deg2Rad` insertion the first
-/// three need (stage E2), and the type algebra that goes with them. DECLINED, each with its own
-/// reason so the coverage number stays attributable: the other twelve math functions (stages
-/// E3-E5), symbols and tree-counting (stage F).
+/// three need (stage E2), the type algebra that goes with them, and `sibling-count()` /
+/// `sibling-index()` behind the three-clause context gate (stage F1). DECLINED, each with its own
+/// reason so the coverage number stays attributable: symbols (stage F2), and the four alternatives
+/// whose payload a 40-byte POD node cannot hold -- `calc-mix()`, `random()`, `anchor()`,
+/// `anchor-size()` (stage G).
 ///
 /// A DECLINE AND A FAILURE ARE DIFFERENT OUTCOMES and share no channel. `calc(1px +2px)` is a
 /// FAILURE -- the C++ arm rejects it too, so retrying would re-derive the same rejection and a
@@ -6170,6 +6228,39 @@ private struct CalcParseState {
     var declineReason = WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None
     /// Set when the grammar hit something it does not cover, as opposed to invalid input.
     var declined = false
+
+    /// Whether a `sibling-count()` / `sibling-index()` leaf built HERE could be FOLDED by the C++
+    /// arm, in which case the grammar must decline rather than build it (stage F1).
+    ///
+    /// `simplify(SiblingCount&)` and `simplify(SiblingIndex&)`
+    /// (`CSSCalcTree+Simplification.cpp:527`-`:545`) resolve the node to a `Number` when
+    /// `options.conversionData` carries a style builder state with an element -- and production
+    /// parses at `ParseSimplification::Terminal`, so that fold is on the C++ arm's PARSE path, not
+    /// only on style resolution's. The island reaches the same answer through
+    /// `simplifySiblingFunction`, which goes through `withCalcOriginalNode(original,
+    /// nodes[i].origin, ...)`, and a PARSED tree has no original and never will (see
+    /// `calcParseAppendLeaf`'s note on `origin`). So a parsed tree-counting leaf cannot be folded,
+    /// and building an unfolded one where the C++ resolves it would be a divergence rather than a
+    /// conservative answer -- the one direction that loses a correct computed value.
+    ///
+    /// COSTS NO BOUNDARY FIELD AND NO UPCALL, because the fact ALREADY CROSSES:
+    /// `CSSCalcSwiftSimplificationOptions::hasConversionData` (`CSSCalcSwiftTypes.h:778`) is filled
+    /// at `CSSCalcTree+Simplification.cpp:2213` and its own comment says it exists "for the two
+    /// sibling-function upcalls". Nothing in Swift read it until this. Checking the authority
+    /// before adding a field is what kept stage F1's C++ delta at one bool.
+    ///
+    /// CONSERVATIVE ON PURPOSE. `hasConversionData` is a SUPERSET of "the fold would succeed",
+    /// which also needs a style builder state and an element. Declining on the superset costs a
+    /// C++ descent in a case no corpus and no production caller reaches --
+    /// `CSSUnevaluatedCalc::parseBase` passes `conversionData = std::nullopt`, and
+    /// `SizesAttributeParser`, which does pass one, leaves `currentProperty` at
+    /// `CSSPropertyInvalid`, so `treeCountingAllowed` is already clear there -- and asking the
+    /// finer question would mean a new upcall for it.
+    ///
+    /// On the STATE rather than on `CSSCalcSwiftParseOptions`, for the cached token's reason: this
+    /// struct is already threaded through the whole descent, so putting it on the boundary struct
+    /// would be a second C++ field for a fact the first one already carries.
+    var treeCountingResolvable = false
 
     /// A ONE-TOKEN CACHE, and it is not a micro-optimisation: `tokenAt` is an out-of-line call
     /// across the language boundary returning a 24-byte POD, and it cannot be inlined, because
@@ -6326,9 +6417,17 @@ private func calcParseAppendLeaf(
         childCount: 0,
         // NO ORIGINAL TREE EXISTS, so there is no pre-order index to name. `calcFlatten` stores the
         // node's own slot here; a parsed node stores the sentinel, because the only readers of
-        // `origin` are the four folds and two emit routes that reach back into a `CSSCalc::Child`,
-        // and every one of them serves an alternative this grammar cannot produce. `emitParsed`
-        // refuses those alternatives outright rather than trusting that they cannot arrive.
+        // `origin` are the four folds and two emit routes that reach back into a `CSSCalc::Child`.
+        //
+        // CORRECTED AT STAGE F1. The claim here used to be "and every one of them serves an
+        // alternative this grammar cannot produce", and that is no longer true: the grammar now
+        // produces `SiblingCount` and `SiblingIndex`, and `simplifySiblingFunction` IS one of the
+        // four folds. What holds instead is narrower -- no reader of `origin` is REACHED from a
+        // parsed tree. `simplifyParsed` routes the two tree-counting alternatives to a no-op arm
+        // and never to `simplifySiblingFunction`, and it may do so because `calcParseZeroArguments`
+        // has already declined the tree in the only configuration where the C++ fold would have
+        // done anything (`CalcParseState.treeCountingResolvable`). `emitParsed` refuses the
+        // alternatives it cannot build outright rather than trusting that they cannot arrive.
         origin: CalcFlatNode.noNode,
         valueID: 0,
         unitType: narrowUnit,
@@ -6535,7 +6634,7 @@ private func calcParseBlock(
         }
         if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
             state.declined = true
-            state.declineReason = .MathFunction
+            state.declineReason = calcParseDeclineReasonForFunction(token.functionId)
         }
         return nil
     }
@@ -6601,6 +6700,39 @@ private enum CalcFunctionArguments: UInt8 {
     /// The keyword takes NO COMMA after it, unlike `round()`'s strategy, and that asymmetry is in
     /// the C++ too: `consumeRound` requires one at `:663` and `consumeProgress` requires none.
     case progress
+    /// No arguments at all -- `consumeZeroArguments<Op>` (`:328`). Stage F1, and
+    /// `sibling-count()` / `sibling-index()` are its only members.
+    ///
+    /// THE ONLY ARGUMENT GRAMMAR WHOSE ARM ALSO CARRIES A GATE, and that is not a layering slip:
+    /// the gate is per FUNCTION, the two functions that have it are exactly the two members of
+    /// this case, and `calcParseZeroArguments` is therefore the one place where testing it costs
+    /// no extra dispatch. Routing it through the shared prologue instead would put a branch on
+    /// every covered function's path for a fact only these two use.
+    case zeroArguments
+}
+
+/// Which `CSSCalcSwiftParseDeclineReason` an uncovered `isCalcFunction` belongs to.
+///
+/// WHY THIS EXISTS: `CSSCalcSwiftParseDeclineReason::TreeCounting` was DECLARED and NEVER WRITTEN
+/// (`CSSCalcSwiftTypes.h:1503`), so both tree-counting functions declined as `.MathFunction` and
+/// the decline histogram could not separate stage F's share of the remaining declines from stage
+/// G's. A published "all 76 declines are `MathFunction`" was true and said less than it looked
+/// like it said, and the F/G split had to be derived by grepping the corpus text rather than read
+/// off the instrument. An unattributed decline is one nobody can close, which is the same argument
+/// the enum's own comment gives for having the field at all.
+///
+/// It runs on a DECLINE, which is already a full C++ descent away, so `@inline(never)` and a
+/// two-label switch cost nothing measurable -- unlike the per-node arms next door, where the label
+/// count is a measured cost.
+@inline(never)
+private func calcParseDeclineReasonForFunction(_ functionId: UInt16)
+    -> WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason {
+    switch functionId {
+    case WebCore.CSSValueSiblingCount.rawValue, WebCore.CSSValueSiblingIndex.rawValue:
+        return .TreeCounting
+    default:
+        return .MathFunction
+    }
 }
 
 /// Which `CSSCalcSwiftAlternative` a `FunctionToken`'s `CSSValueID` names, and how its arguments
@@ -6647,6 +6779,12 @@ private func calcParseFunctionAlternative(_ functionId: UInt16)
     case WebCore.CSSValueAtan2.rawValue: return (.Atan2, .exactlyTwo)
     case WebCore.CSSValuePow.rawValue: return (.Pow, .exactlyTwo)
     case WebCore.CSSValueProgress.rawValue: return (.Progress, .progress)
+    // Stage F1. `SiblingCount` and `SiblingIndex` are LEAVES (`CSSCalcTree.h:161`-`:181`,
+    // `isLeaf = true`), not zero-arity operations, so they leave through `pushLeaf` and never reach
+    // `buildOperation`. They are named here anyway because the DISPATCH is still by function id and
+    // this is the table that owns it; what differs is only which construction entry the arm uses.
+    case WebCore.CSSValueSiblingCount.rawValue: return (.SiblingCount, .zeroArguments)
+    case WebCore.CSSValueSiblingIndex.rawValue: return (.SiblingIndex, .zeroArguments)
     default: return nil
     }
 }
@@ -6696,6 +6834,9 @@ private func calcParseFunctionBlock(
     case .progress:
         argumentsParsed = calcParseProgress(
             cursor, &inner, blockEnd, depth + 1, &out, options, &state)
+    case .zeroArguments:
+        argumentsParsed = calcParseZeroArguments(
+            cursor, &inner, blockEnd, &out, options, &state, alternative)
     }
     guard let parsed = argumentsParsed else { return nil }
     // `if (!innerRange.atEnd()) return nullopt`. Vacuous for `<calc-sum>#`, whose loop runs to
@@ -6706,6 +6847,65 @@ private func calcParseFunctionBlock(
     index = blockEnd + 1
     calcSkipWhitespace(cursor, &index, end, &state)
     return parsed
+}
+
+/// `consumeZeroArguments<Op>` (`CSSCalcTree+Parser.cpp:328`-`:339`) plus the three gates that guard
+/// its two callers (`:1414`-`:1420`, `:1427`-`:1433`): `sibling-count()` and `sibling-index()`.
+///
+/// THREE OUTCOMES, AND COLLAPSING ANY TWO OF THEM IS A BUG. This is the place stage F1 is most
+/// likely to be got wrong, so they are written out:
+///
+///   * `treeCountingAllowed` CLEAR -> `nil` WITHOUT `declined`, i.e. **Failed**. The C++ returns
+///     `{ }` from its `case CSSValueSiblingCount:` when any gate is clear -- `std::nullopt`,
+///     invalid input -- so declining here would burn a full C++ descent to reach the same
+///     rejection, and parsing here would accept CSS the C++ rejects.
+///   * gates pass but the node could be FOLDED -> **Declined**, `.TreeCounting`. See
+///     `CalcParseState.treeCountingResolvable`: the fold needs the original `CSSCalc::Child` and a
+///     parsed tree has none.
+///   * gates pass and no fold is possible -> the leaf, unfolded, which is exactly what
+///     `copyAndSimplify` leaves behind on the C++ arm in the same conditions.
+///
+/// `state.requiresConversionData = true` is `:1421` / `:1434`, set by the C++ BEFORE it consumes
+/// the arguments and therefore set even on the paths that then fail -- which is why it is here
+/// rather than after the append. It reaches the caller on the `Tree` and feeds the caller's own
+/// conversion-data decision, so a disagreement is a real divergence even when the trees match.
+///
+/// NO `tokens.atEnd()` CHECK HERE, deliberately, and it is not an omission: both callers already
+/// make exactly that check on the range this returns into -- `calcParseFunctionBlock`'s
+/// `inner != blockEnd` and `calcParseAttempt`'s `index != end` -- and duplicating it would be a
+/// second copy of the rule rather than a second test. The whitespace skip IS here, because
+/// `consumeFunction` and `parseCalcValue`'s block arm both call `innerRange.consumeWhitespace()`
+/// before dispatching, so `sibling-count( )` is valid on the C++ arm.
+///
+/// NO NODE OF ITS OWN BEYOND THE LEAF, no operand container, and nothing allocated: one
+/// `calcParseAppendLeaf` into the buffer the descent already holds.
+@inline(never)
+private func calcParseZeroArguments(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if !options.treeCountingAllowed {
+        return nil
+    }
+    if state.treeCountingResolvable {
+        state.declined = true
+        state.declineReason = .TreeCounting
+        return nil
+    }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+    state.requiresConversionData = true
+    // `value`, `unitType` and `percentHint` are all inert for these two alternatives -- both are
+    // empty structs and `getType` of either is `Type { }` -- and `pushLeaf` reads none of them.
+    // Zero rather than a sentinel, so `UInt8(exactly:)`'s narrowing guard cannot be the thing that
+    // decides whether a tree-counting leaf is built.
+    guard let me = calcParseAppendLeaf(&out, alternative, 0, 0, 0) else { return nil }
+    return CalcParsed(index: me, type: CalcType())
 }
 
 /// `consumeExactlyOneArgument<Op>` (`CSSCalcTree+Parser.cpp:280`-`:319`): one `<calc-sum>`, its type
@@ -7497,6 +7697,11 @@ private func calcParseAttempt(
     _ state: inout CalcParseState
 ) -> CalcParseAttempt {
     let end = cursor.tokenCount()
+    // STAGE F1's decline condition, computed ONCE per attempt rather than read per node. `simplify`
+    // is part of it because the differential's unsimplified arm runs the C++ at
+    // `ParseSimplification::None`, which makes no fold on either side -- so declining there would
+    // decline a case the two arms agree on. See `CalcParseState.treeCountingResolvable`.
+    state.treeCountingResolvable = simplify && simplificationOptions.hasConversionData
     return withTemporaryAllocation(of: CalcFlatNode.self, capacity: capacity) { out -> CalcParseAttempt in
         var attempt = CalcParseAttempt()
         var index: UInt32 = 0
@@ -7528,6 +7733,8 @@ private func calcParseAttempt(
                 descent = calcParseTwoArguments(cursor, &index, end, 0, &out, options, &state, rootFunction.alternative)
             case .progress:
                 descent = calcParseProgress(cursor, &index, end, 0, &out, options, &state)
+            case .zeroArguments:
+                descent = calcParseZeroArguments(cursor, &index, end, &out, options, &state, rootFunction.alternative)
             }
         } else if options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
             || options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {
@@ -7548,7 +7755,7 @@ private func calcParseAttempt(
             // a wrong computed value on the day this entry gets a production caller, and the
             // fall-through was correct only for `calc()` and `-webkit-calc()`.
             state.declined = true
-            state.declineReason = .MathFunction
+            state.declineReason = calcParseDeclineReasonForFunction(options.rootFunctionId)
             descent = nil
         }
 

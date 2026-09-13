@@ -2332,9 +2332,26 @@ bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot) noexcept
         constructOperand(*m_operands, isRoot, makeNumeric(leaf.value, static_cast<CSSUnitType>(leaf.unitType)));
         return true;
 
+    case CSSCalcSwiftNodeKind::SiblingCount:
+        // THE TREE-COUNTING FUNCTIONS ARE LEAVES, not zero-argument operations
+        // (`CSSCalcTree.h:161`-`:181`, `static constexpr bool isLeaf = true`), which is why stage F1
+        // lands here and never reaches `buildOperation` -- whose `!childCount` guard a zero-operand
+        // alternative could not have passed anyway.
+        //
+        // NO PAYLOAD AT ALL: both are empty structs and `getType` of either is `Type { }`
+        // (`CSSCalcTree.cpp:451`-`:459`), so `value`, `unitType` and `percentHint` on the incoming
+        // leaf are inert and nothing is re-derived here. The `kind` IS the whole crossing.
+        constructOperand(*m_operands, isRoot, SiblingCount { });
+        return true;
+
+    case CSSCalcSwiftNodeKind::SiblingIndex:
+        constructOperand(*m_operands, isRoot, SiblingIndex { });
+        return true;
+
     default:
-        // A kind outside the four numeric leaves is a contract violation rather than a possible input,
-        // and declines rather than building something plausible.
+        // A kind outside the four numeric leaves and the two tree-counting ones is a contract
+        // violation rather than a possible input, and declines rather than building something
+        // plausible.
         return false;
     }
 }

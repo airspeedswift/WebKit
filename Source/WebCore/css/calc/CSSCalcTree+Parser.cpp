@@ -220,6 +220,13 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
             .category = parserOptions.category,
             .absoluteLengthUnitsOnly = propertyParserState.absoluteLengthUnitsOnly,
             .hasAllowedSymbols = !parserOptions.allowedSymbols.isEmpty(),
+            // The three tree-counting gates, ANDed here rather than crossed as three fields; see
+            // `CSSCalcSwiftParseOptions::treeCountingAllowed`. Written out rather than factored
+            // into a helper shared with `parseCalcFunction`'s two arms, because a helper would have
+            // to take `ParserState` and this is called before one exists.
+            .treeCountingAllowed = propertyParserState.context.cssTreeCountingFunctionsEnabled
+                && (propertyParserState.currentRule == StyleRuleType::Style || propertyParserState.currentRule == StyleRuleType::Keyframe)
+                && propertyParserState.currentProperty != CSSPropertyInvalid,
             .rootFunctionId = static_cast<uint16_t>(function),
         }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal, &swiftFlatNodes, &swiftFlatRootIndex);
 

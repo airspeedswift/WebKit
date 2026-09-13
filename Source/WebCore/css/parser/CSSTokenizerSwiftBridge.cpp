@@ -2239,6 +2239,27 @@ struct CSSCalcParseComparison {
     // 0 = the input is not a `calc()` this entry can drive, so the case is SKIPPED rather than
     // passed -- a skipped case must never read as agreement.
     bool applicable;
+    // THE TREE-COUNTING CONTEXT, the third and fourth swept axes (stage F1), echoed for the same
+    // reason as the two above.
+    //
+    // `parseCalcFunction`'s `sibling-count()` / `sibling-index()` arms are guarded by a conjunction
+    // of THREE facts (`CSSCalcTree+Parser.cpp:1414`-`:1420`): the context setting, a `currentRule`
+    // of `Style` or `Keyframe`, and a `currentProperty` other than `CSSPropertyInvalid`. This entry
+    // pinned the last two at `Style` / `CSSPropertyWidth` and SAID SO in its own axes paragraph, so
+    // the gate was exercised in NEITHER direction -- the shape that let nine exhaustive captures
+    // pass a catastrophically broken content-extensions island at one value of `maxNFASize`.
+    //
+    // Two bits rather than one, because the two clauses are independent and a single "context off"
+    // bit would move both at once and could not say which one an arm responded to.
+    //
+    // AFTER `applicable`, DELIBERATELY, and the ordering is load-bearing. The driver mirrors this
+    // struct field for field; appending keeps the old layout a strict PREFIX, so a driver built for
+    // this struct run against a framework built before it still reads `applicable` correctly and
+    // fails the echo assertion loudly. Inserting them above `applicable` would have corrupted
+    // exactly the field that makes the driver skip a case -- and a skipped case takes the early
+    // return before any echo is checked, which is a silent pass over an unmeasured axis.
+    bool sawRuleNotStyle;
+    bool sawPropertyInvalid;
 };
 
 WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char*, size_t, uint64_t* outCpp, uint64_t* outSwift, uint32_t* outTokenCount);
@@ -2248,6 +2269,10 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char*, size_t, uint64
 enum CSSCalcCompareParseOption : uint32_t {
     CSSCalcCompareParseWithSymbols = 1u << 0,
     CSSCalcCompareParseAbsoluteLengthUnitsOnly = 1u << 1,
+    // Stage F1's axis: the two `PropertyParserState` clauses of the tree-counting gate, each on its
+    // own bit. Set, the clause FAILS, which is what makes `sibling-count()` invalid in both arms.
+    CSSCalcCompareParseRuleNotStyle = 1u << 2,
+    CSSCalcCompareParsePropertyInvalid = 1u << 3,
 };
 WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char*, size_t, uint32_t options);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char*, size_t, unsigned arm, uint32_t iterations, uint32_t* outCovered);
@@ -2741,14 +2766,31 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t le
 // descent, and `CSSCalcSwiftParseOptions::absoluteLengthUnitsOnly` for the Swift one, both set from
 // the same local below. Setting only one would compare a flagged arm against an unflagged one and
 // report the flag's whole effect as a mismatch.
+//
+// `ruleNotStyle` and `propertyInvalid` are the THIRD and FOURTH such axes, added in stage F1 for
+// exactly the reason C2q added the second: `currentRule` and `currentProperty` were PINNED at
+// `Style` / `CSSPropertyWidth`, this file's own axes paragraph said so, and the tree-counting gate
+// (`CSSCalcTree+Parser.cpp:1414`-`:1420`) was therefore exercised in NEITHER direction. They too
+// reach both arms from one place -- `PropertyParserState` for the C++ descent, and, through
+// `parseAndSimplify`'s fill, `CSSCalcSwiftParseOptions::treeCountingAllowed` for the Swift one.
+//
+// The axis is LIVE BEFORE STAGE F1 LANDS, and on the C++ channel rather than the Swift one: before
+// F1 the grammar declines `sibling-count()` whatever the gate says, so its own outcome does not
+// move, while the C++ arm goes from parsing to rejecting. That is why the driver's liveness floor
+// is stated on `cppParsed`, and why a Swift-outcome floor would have read "not live" on the very
+// arm the axis was added to instrument.
 
 WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* text, size_t length, uint32_t options)
 {
     bool withSymbols = options & CSSCalcCompareParseWithSymbols;
     bool absoluteLengthUnitsOnly = options & CSSCalcCompareParseAbsoluteLengthUnitsOnly;
+    bool ruleNotStyle = options & CSSCalcCompareParseRuleNotStyle;
+    bool propertyInvalid = options & CSSCalcCompareParsePropertyInvalid;
     CSSCalcParseComparison result { };
     result.sawWithSymbols = withSymbols;
     result.sawAbsoluteLengthUnitsOnly = absoluteLengthUnitsOnly;
+    result.sawRuleNotStyle = ruleNotStyle;
+    result.sawPropertyInvalid = propertyInvalid;
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
 
     CSSTokenizer tokenizer(source);
@@ -2784,10 +2826,23 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
     // two arms are asked the same question.
     auto parserState = WebCore::CSS::PropertyParserState {
         .context = calcParserContext(),
-        .currentRule = StyleRuleType::Style,
-        .currentProperty = CSSPropertyWidth,
+        // THE TREE-COUNTING CONTEXT, SWEPT (stage F1). `StyleRuleType::FontFace` is neither `Style`
+        // nor `Keyframe`, so it fails the rule clause; `CSSPropertyInvalid` fails the property
+        // clause. Both are set from the SAME two locals that reach the Swift arm's
+        // `treeCountingAllowed` through `parseAndSimplify`, so the two arms are asked the same
+        // question -- setting only one would compare a gated arm against an ungated one.
+        .currentRule = ruleNotStyle ? StyleRuleType::FontFace : StyleRuleType::Style,
+        .currentProperty = propertyInvalid ? CSSPropertyInvalid : CSSPropertyWidth,
         .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
     };
+    // THE SAME CONJUNCTION `parseAndSimplify` fills `CSSCalcSwiftParseOptions::treeCountingAllowed`
+    // from, read off the SAME `parserState` the C++ arm is driven with -- so the two arms cannot be
+    // asked different questions about the gate. `calcParserContext()` sets
+    // `cssTreeCountingFunctionsEnabled` (`:179`), so the two swept clauses are the only ones that
+    // move here.
+    bool treeCountingAllowed = parserState.context.cssTreeCountingFunctionsEnabled
+        && (parserState.currentRule == StyleRuleType::Style || parserState.currentRule == StyleRuleType::Keyframe)
+        && parserState.currentProperty != CSSPropertyInvalid;
     auto makeParserOptions = [&](WebCore::CSS::Category category) {
         return CSSCalc::ParserOptions {
             .category = category,
@@ -2841,6 +2896,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         .category = category,
         .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
         .hasAllowedSymbols = withSymbols,
+        .treeCountingAllowed = treeCountingAllowed,
         .rootFunctionId = static_cast<uint16_t>(functionId),
     }, simplificationOptions, root, false);
 
@@ -2934,6 +2990,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .category = category,
             .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
+            .treeCountingAllowed = treeCountingAllowed,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, fusedRoot, true);
         result.fusedOutcome = fusedResult.outcome;
@@ -2964,6 +3021,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .category = category,
             .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
+            .treeCountingAllowed = treeCountingAllowed,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, storeParseRoot, true, &storeNodes, &storeRootIndex);
         result.storeNodeCount = storeNodes.size();
@@ -3055,7 +3113,10 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
     auto category = *accepted;
     auto parserOptions = CSSCalc::ParserOptions { .category = category, .range = WebCore::CSS::All, .allowedSymbols = { }, .propertyOptions = { } };
     auto simplificationOptions = CSSCalc::SimplificationOptions { .category = category, .range = WebCore::CSS::All, .conversionData = std::nullopt, .symbolTable = { }, .allowZeroValueLengthRemovalFromSum = false };
-    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .rootFunctionId = static_cast<uint16_t>(functionId) };
+    // `treeCountingAllowed` true: this entry's `parserState` is `Style` / `CSSPropertyWidth` and
+    // `calcParserContext()` sets the context flag, so all three C++ gates pass and the Swift arm has
+    // to be given the same answer or the two would not be timing the same parse.
+    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .treeCountingAllowed = true, .rootFunctionId = static_cast<uint16_t>(functionId) };
 
     // Coverage is decided by running the Swift arm ONCE, before timing.
     {

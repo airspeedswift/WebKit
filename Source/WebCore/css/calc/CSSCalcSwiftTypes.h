@@ -923,10 +923,11 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // operands on a stack with no root slot at all, are unchanged. A `true` with no root slot
     // provided still pushes; nothing depends on the flag being honoured.
 
-    // Build one of the four numeric leaves and push it. See `CSSCalcSwiftLeaf`.
+    // Build one of the four numeric leaves, or one of the two tree-counting ones, and push it. See
+    // `CSSCalcSwiftLeaf`.
     //
-    // Returns false for a `kind` outside the four numeric leaves, which is a contract violation
-    // rather than an input that can be met, declining rather than building something plausible.
+    // Returns false for a `kind` outside that set, which is a contract violation rather than an
+    // input that can be met, declining rather than building something plausible.
     WEBCORE_EXPORT bool pushLeaf(CSSCalcSwiftLeaf, bool isRoot = false) noexcept;
 
     // Deep-copy an input subtree and push it. Used for every node walked past without changing,
@@ -1460,6 +1461,21 @@ struct CSSCalcSwiftParseOptions {
     // `IdentToken` is declined -- the conservative side, since a decline runs the C++ arm and a
     // wrong constant would be a wrong stylesheet.
     bool hasAllowedSymbols;
+
+    // Whether `parseCalcFunction` would admit `sibling-count()` / `sibling-index()` here: the
+    // CONJUNCTION of its three gates (`CSSCalcTree+Parser.cpp:1414`-`:1420`) -- the context
+    // setting, a `currentRule` of `Style` or `Keyframe`, and a `currentProperty` other than
+    // `CSSPropertyInvalid`.
+    //
+    // ONE PRECOMPUTED BOOL, NOT THREE FIELDS AND NOT `PropertyParserState` CROSSING, and the same
+    // shape `hasAllowedSymbols` above already uses: the conjunction is a C++ fact the caller
+    // already has, so carrying it is a copy of a value rather than a second evaluation of it.
+    //
+    // CLEAR MEANS **FAILED**, NOT DECLINED, which is the one thing easy to get backwards here. With
+    // any gate clear the C++ arm returns `{ }` from its `case CSSValueSiblingCount:` -- i.e.
+    // `std::nullopt`, invalid input -- so the grammar must FAIL too. Declining instead would be
+    // merely slow; parsing instead would accept CSS the C++ rejects.
+    bool treeCountingAllowed;
 
     // The TOP-LEVEL function's `CSSValueID` raw value: `CSSValueCalc`, `CSSValueWebkitCalc`, or
     // whichever math function the grammar covers. The caller has it already -- it is the
