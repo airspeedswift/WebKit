@@ -259,6 +259,33 @@ struct Child {
     alignas(nodeStorageAlignment) unsigned char storage[nodeStorageSize];
 #endif
 
+    // DELETED SO THAT SWIFT CANNOT SYNTHESIZE ONE, and it is a no-op for C++ by construction: the
+    // user-declared move constructor below already suppresses the implicit default constructor, so
+    // `Child()` was ill-formed before this line and is ill-formed after it. Only the diagnostic
+    // changes -- "no matching constructor" becomes "call to deleted constructor".
+    //
+    // WHAT IT ACTUALLY STOPS. The Clang importer hands Swift a zero-argument `init()` for an
+    // imported C++ class even when the class has no default constructor, and that initializer
+    // ZERO-FILLS the backing storage -- here, a `Node` variant whose alternative 0 happens to be
+    // `Number`. It is deprecated, but the diagnostic is `[#DeprecatedDeclaration]`, which is in none
+    // of the five `-Werror` groups WebKit's Swift step passes (Configurations/CommonBase.xcconfig
+    // :133 and :144), and `-strict-memory-safety` -- which IS on -- does not reject it either. So
+    // `WebCore.CSSCalc.Child()` compiled clean, and a whole class of mistake compiled with it.
+    //
+    // The mistake it is here to prevent is specific. Six routes read `CSSCalcSwiftFlatNode::origin`
+    // as a pre-order index into an ORIGINAL `Child` tree, and every one of them is reachable only
+    // from the flattening path, which holds a real `borrowing Child`. The PARSE path has no original
+    // and writes `cssCalcSwiftFlatNoNode` into that field. What kept the two apart was that a
+    // parse-path function could not name a `Child` at all -- until you notice that it can invent
+    // one, at which point the guarantee is a convention rather than a rule and the compiler says
+    // nothing. With this line a parse-path `origin` read is a build error. Measured both ways in
+    // ~/src/webkit-swift-ports/cssprobe/originpath: without it the arm type-checks with one warning,
+    // with it the same arm is "cannot be constructed because it has no accessible initializers".
+    //
+    // Not `SWIFT_UNAVAILABLE` or an attribute: this is a plain C++ fact about the type, it needs no
+    // annotation to be true, and stating it in the language the constructor lives in means a future
+    // reader does not have to know about the importer to keep it correct.
+    Child() = delete;
     Child(Child&&);
     Child& operator=(Child&&);
     ~Child();
