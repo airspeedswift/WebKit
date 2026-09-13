@@ -1477,6 +1477,18 @@ struct CSSCalcSwiftParseOptions {
     // merely slow; parsing instead would accept CSS the C++ rejects.
     bool treeCountingAllowed;
 
+    // `CSSParserContext::cssCalcMixEnabled`, which is `consumeCalcMix`'s first statement
+    // (`CSSCalcTree+Parser.cpp:1013`-`:1014`) and its only gate.
+    //
+    // CLEAR MEANS **FAILED**, NOT DECLINED, for `treeCountingAllowed`'s reason one line up: the
+    // C++ returns `{ }` -- `std::nullopt`, invalid input -- so the grammar must fail too.
+    //
+    // A SECOND FIELD RATHER THAN A CONJUNCTION WITH THE ONE ABOVE, because the two gates are
+    // independent facts about different functions and ANDing them would make `calc-mix()` fail
+    // wherever `sibling-count()` is forbidden. There is no third state to save a byte for: the
+    // struct is passed by value once per parse, not per node.
+    bool cssCalcMixEnabled;
+
     // The TOP-LEVEL function's `CSSValueID` raw value: `CSSValueCalc`, `CSSValueWebkitCalc`, or
     // whichever math function the grammar covers. The caller has it already -- it is the
     // `functionId` it tested with `isCalcFunction` -- so this is a copy of a value C++ read, not a
@@ -1519,6 +1531,18 @@ enum class CSSCalcSwiftParseDeclineReason : uint8_t {
     TreeCounting,
     // More tokens than the grammar's fixed cursor budget.
     TooManyTokens,
+    // A `calc-mix()` item weight that is a math function rather than a raw `<percentage>`. Its
+    // `CalcMix::Item::Weight` is a `Variant<Raw, UnevaluatedCalc>` and the second alternative holds
+    // a `Ref<CSSCalc::Value>` (CSSUnevaluatedCalc.h) -- a whole second calc value, not a `Child`,
+    // so no flat node can carry it. Stage G's one declined residue, named rather than folded into
+    // `MathFunction` so the remaining coverage stays attributable.
+    //
+    // APPENDED, NOT INSERTED IN GRAMMAR ORDER, and that is the prefix rule the validation harnesses
+    // already rely on for `CSSCalcParseComparison`: `cssprobe/validate/parsecheck.cpp`'s
+    // `declineReasonName` mirrors these numbers by hand, so inserting would have made it print
+    // `TooManyTokens` for this reason and `?` for that one -- a wrong name rather than a missing
+    // one. Appended, an un-updated mirror prints `?`, which is visible.
+    CalcMixWeight,
 };
 
 struct alignas(8) CSSCalcSwiftParseResult {

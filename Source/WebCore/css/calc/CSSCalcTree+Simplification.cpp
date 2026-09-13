@@ -2684,6 +2684,41 @@ bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, ui
         return finish(Clamp { WTF::move(minimum), WTF::move(value), bound(2) });
     }
 
+    // `calc-mix()` (P7b stage G slice 1), and the second alternative in the grammar's reach whose
+    // slots are not fillable from the operand stack alone.
+    //
+    // WHY THE WEIGHT STACK AND NOTHING ELSE. `CalcMix`'s one tuple slot is a `Vector<Item>`, and an
+    // `Item` is a `Child` plus an `std::optional<Weight>`. The `Child` half is an operand like any
+    // other; the weight half is not a subtree and has never been one, which is why
+    // `pushCalcMixItemWeight` and its `CalcMixWeightPlan` stack already exist for the SIMPLIFICATION
+    // direction. This entry consumes that same stack with the same consume-the-top-`childCount`
+    // discipline `rebuildSlot(const Vector<CalcMix::Item>&)` uses, so a nested `calc-mix()` cannot
+    // take an enclosing one's plans -- it pushed and consumed its own before the outer one pushed
+    // anything.
+    //
+    // `plan.replace` CARRIES PRESENCE HERE, WHERE IT CARRIES PROVENANCE THERE, and the two meanings
+    // are disjoint by call graph rather than by value. `rebuildSlot` has an ORIGINAL item list to
+    // copy an unreplaced weight from, so `replace == false` there means "item `origin`'s own weight,
+    // whatever it is, including a `Calc` one". A PARSED `calc-mix()` has no original at all -- that
+    // is the whole of the fused parse -- so `replace == false` here can only mean the one remaining
+    // thing, an OMITTED weight, and `origin` is unread. Swift passes 0 for it. The two readers are
+    // `rebuildFrom` and this entry, reached from `emit` and `emitParsed` respectively, and no tree
+    // reaches both.
+    case CSSCalcSwiftAlternative::CalcMix: {
+        auto& weights = m_operands->calcMixWeights;
+        if (weights.size() < childCount)
+            return false;
+        size_t weightBase = weights.size() - childCount;
+        Vector<CalcMix::Item> items(childCount, [&](size_t item) {
+            auto& plan = weights[weightBase + item];
+            // `CalcMix::Item::Weight { double }` is the construction `simplify(CalcMix&)` uses at
+            // each of its four weight assignments, so a weight built here matches one built there.
+            return CalcMix::Item { .value = WTF::move(stack[base + item]), .weight = plan.replace ? std::optional<CalcMix::Item::Weight> { CalcMix::Item::Weight { plan.weight } } : std::nullopt };
+        });
+        weights.shrink(weightBase);
+        return finish(CalcMix { WTF::move(items) });
+    }
+
     default:
         // Outside the set this entry serves. A contract violation of the caller's own scope rather
         // than an input it could serve, so the stack is left exactly as it was found.

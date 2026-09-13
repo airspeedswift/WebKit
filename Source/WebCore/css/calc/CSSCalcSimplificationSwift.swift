@@ -2580,6 +2580,24 @@ fileprivate enum CalcFlatNodeFlags {
     /// subtree -- an alternative this file has not been taught, sitting inside a side, still has to
     /// decline the whole tree -- so the distinction has to be a mark rather than an omission.
     static let insideAnchorSide: UInt8 = 1 << 3
+    /// On a PARSED `calc-mix()`'s interleaved weight node: the author wrote a `<percentage>` here.
+    ///
+    /// Clear means the item's weight was OMITTED, which is a state `CalcMix::Item`'s
+    /// `std::optional<Weight>` has and a `Percentage` leaf does not, so it needs a bit of its own --
+    /// a weight of `0%` and an absent weight are different inputs with different folds (`0%` is
+    /// dropped, absent takes step 2's `(100% - total) / n`).
+    ///
+    /// WHY A NODE PER ITEM RATHER THAN A PAYLOAD ON THE `CalcMix` NODE. The weight is a `Double` and
+    /// there is no `Double`-sized hole on a 40-byte flat node, let alone one per item; a
+    /// `Percentage` leaf already has the field, the alternative and the unit, and interleaving one
+    /// after each item's value keeps the child list self-describing after the fold drops items --
+    /// a presence MASK indexed by original item number would go out of step with the surviving list
+    /// the moment one was removed. It costs one node per item, which the parse's node bound already
+    /// covers: N items need at least 2N-1 tokens, and the bound is 2 * tokens + 1.
+    ///
+    /// It is never an operand. `emitParsedCalcMix` reads it and pushes a weight plan; the generic
+    /// child loop in `emitParsed` never sees a `CalcMix`.
+    static let calcMixWeightPresent: UInt8 = 1 << 4
 }
 
 /// Where a pre-order descent over the ORIGINAL tree got to.
@@ -3548,8 +3566,12 @@ fileprivate extension CalcFlatTree {
     /// of their alternatives, and that sentence is now WRONG: the grammar produces `SiblingCount`
     /// and `SiblingIndex`. The reason that replaces it is narrower and is carried at the arm
     /// itself -- those two get a no-op label below, and `calcParseZeroArguments` declines the whole
-    /// tree in the only configuration where `simplify(SiblingCount&)` folds anything. The other
-    /// three sites' alternatives are still unproducible (stage G).
+    /// tree in the only configuration where `simplify(SiblingCount&)` folds anything. STAGE G SLICE 1
+    /// adds `CalcMix`, and it is the first alternative whose FOLD had to be written a second time:
+    /// `simplifyCalcMix` reaches every weight through `withCalcOriginalNode`, so a parsed tree gets
+    /// `simplifyParsedCalcMix`, which reads the same weights off its own interleaved weight nodes
+    /// and shares everything downstream of that. The other two sites' alternatives -- `Anchor` /
+    /// `AnchorSize` and `Random` -- are still unproducible (stage G slices 2 and 3).
     ///
     /// So the switch below is `simplifyNode`'s hot arm with the cold call removed, and the
     /// `default` is a REFUSAL rather than a leave-alone: an alternative arriving there would be a
@@ -3724,10 +3746,151 @@ fileprivate extension CalcFlatTree {
         case .Sign:
             simplifySign(i, options)
 
+        // Stage G slice 1. NOT `simplifyCalcMix`, which is the FLATTENED path's fold and reaches
+        // every weight through `withCalcOriginalNode` -- a parsed tree has no original. The two
+        // share everything that is not the weight source: the census struct, `calcMixItemPlan`
+        // (which is a pure function of one weight and the census, and is the whole of spec steps
+        // 1 to 5) and `calcMixFoldToZero`.
+        case .CalcMix:
+            simplifyParsedCalcMix(i, options)
+
         default:
             return false
         }
         return true
+    }
+
+    /// `simplify(CalcMix&)` (`+Simplification.cpp:1446`-`:1691`) for a tree the GRAMMAR built.
+    ///
+    /// FOUR PHASES, the same four `simplifyCalcMix` keeps, over the interleaved weight nodes
+    /// instead of over the original item list: the weight census (`:1487`-`:1507`), the survivor
+    /// relink (`:1509`-`:1611`), and the accumulator (`:1613`-`:1689`), with the two all-weights-zero
+    /// early returns in between.
+    ///
+    /// `canNormalize` IS ALWAYS TRUE HERE AND THE `!canNormalize` ARM IS UNREACHABLE, which is a
+    /// property of the grammar rather than an assumption: that arm needs a `Calc` weight, and
+    /// `calcParseCalcMixWeight` DECLINES the whole tree for one. It is not reproduced, and it does
+    /// not need to be -- `calcMixItemPlan` still carries it, so nothing here depends on the
+    /// difference; what would be wrong is transcribing a branch this path cannot enter and having
+    /// no case able to cover it.
+    ///
+    /// THE PLAN IS APPLIED, NOT RECOMPUTED AT EMIT, which is the one place this is SIMPLER than the
+    /// flattened path rather than merely different. `simplifyCalcMix` cannot write a normalised
+    /// weight anywhere -- the original tree is borrowed and a flat node has two spare bytes -- so
+    /// `calcEmitCalcMix` runs `calcMixItemPlan` a second time over the same original weights. Here
+    /// the weights ARE flat nodes this pass owns, so a replaced weight is stored in its node and
+    /// `emitParsedCalcMix` just reads it. After this runs, every survivor's weight node is PRESENT:
+    /// `total >= 100` replaces all survivors, and `total < 100` replaces the omitted ones and leaves
+    /// the present ones alone.
+    ///
+    /// NOTHING IS ALLOCATED AND NOTHING IS COPIED. The C++ builds a fresh `Vector<CalcMix::Item>`
+    /// on four of its paths; a linked list relinks in place.
+    @inline(never)
+    private mutating func simplifyParsedCalcMix(_ i: Int, _ options: CalcSimplification) {
+        let itemCount = nodes[i].childCount / 2
+        // `emitParsedCalcMix` refuses an empty or odd list rather than trusting this, but an
+        // odd one must not reach the loops below at all: they step two at a time.
+        guard itemCount > 0, itemCount &* 2 == nodes[i].childCount else {
+            declined = true
+            return
+        }
+
+        // Phase 1 (`:1487`-`:1507`). `total` accumulates every weight in item order INCLUDING the
+        // zeros, so the rounding is the C++'s addition sequence.
+        var survey = CalcMixWeightSurvey()
+        var cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let weightSlot = nodes[Int(cursor)].nextSibling
+            guard weightSlot != CalcFlatNode.noNode else {
+                declined = true
+                return
+            }
+            let weight = nodes[Int(weightSlot)]
+            if weight.flags & CalcFlatNodeFlags.calcMixWeightPresent == 0 {
+                // `&+=`: bounded by `itemCount`, itself bounded by the node count.
+                survey.numberOfOmittedWeights &+= 1
+            } else {
+                if weight.value == 0 {
+                    survey.numberOfKnownZeroWeights &+= 1
+                }
+                survey.total += weight.value
+            }
+            cursor = weight.nextSibling
+        }
+
+        // `:1587`-`:1590`. The `!canNormalize` twin at `:1514`-`:1516` is the unreachable arm this
+        // function's note names.
+        if survey.total < 100, survey.numberOfKnownZeroWeights > 0, survey.numberOfOmittedWeights == 0,
+            itemCount == survey.numberOfKnownZeroWeights {
+            calcMixFoldToZero(i, options)
+            return
+        }
+
+        // Phases 2 and 3: keep the survivors, in item order, and write the planned weight into each
+        // survivor's own weight node. The pair stays contiguous, so the relink only has to reach
+        // over the VALUE of a dropped item -- its weight node follows it out of the list with it.
+        var previous = CalcFlatNode.noNode
+        var kept: UInt32 = 0
+        var c = nodes[i].firstChild
+        while c != CalcFlatNode.noNode {
+            let weightSlot = Int(nodes[Int(c)].nextSibling)
+            let next = nodes[weightSlot].nextSibling
+            let present = nodes[weightSlot].flags & CalcFlatNodeFlags.calcMixWeightPresent != 0
+            let plan = calcMixItemPlan(WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight(
+                value: nodes[weightSlot].value, present: present, isRaw: present), survey)
+            if plan.survives {
+                if plan.replaceWeight {
+                    nodes[weightSlot].value = plan.weight
+                    nodes[weightSlot].flags |= CalcFlatNodeFlags.calcMixWeightPresent
+                }
+                if previous == CalcFlatNode.noNode {
+                    nodes[i].firstChild = c
+                } else {
+                    nodes[Int(previous)].nextSibling = c
+                }
+                previous = UInt32(weightSlot)
+                kept &+= 1
+            }
+            c = next
+        }
+        if previous == CalcFlatNode.noNode {
+            nodes[i].firstChild = CalcFlatNode.noNode
+        } else {
+            nodes[Int(previous)].nextSibling = CalcFlatNode.noNode
+        }
+        nodes[i].childCount = kept &* 2
+
+        // Phase 4, the weighted sum (`:1613`-`:1689`), over the survivors and their POST-phase-3
+        // weights -- which is what the nodes now hold. `/ 100.0`, not `* 0.01`: they differ in the
+        // last bit. An item that is not a fully simplified `Numeric`, or one whose kind disagrees
+        // with the accumulator, ends the fold and the node is rebuilt from whatever the relink left
+        // -- the C++'s `return { }` at `:1681`, which does NOT undo the rewrite.
+        var accumulated: NumericLeaf? = nil
+        var s = nodes[i].firstChild
+        while s != CalcFlatNode.noNode {
+            let value = Int(s)
+            let weightSlot = Int(nodes[value].nextSibling)
+            s = nodes[weightSlot].nextSibling
+            guard let leaf = nodes[value].numericLeaf else {
+                return
+            }
+            let scaled = nodes[weightSlot].value / 100.0
+            guard let current = accumulated else {
+                accumulated = leaf.withValue(leaf.value * scaled)
+                continue
+            }
+            guard options.calcMixAccumulatorAgrees(current, leaf) else {
+                return
+            }
+            accumulated = current.withValue(current.value + leaf.value * scaled)
+        }
+        guard let result = accumulated else {
+            // No survivors. Unreachable for the same reason `simplifyCalcMix` gives -- every path
+            // that can empty the list folded through `calcMixFoldToZero` above -- and rebuilt rather
+            // than asserted, because `emitParsedCalcMix` refuses an empty list loudly.
+            return
+        }
+        setLeaf(i, result)
     }
 
     /// Replace node `i` with node `j`, keeping `i`'s place in its parent's list.
@@ -6048,7 +6211,16 @@ fileprivate extension CalcFlatTree {
         }
 
         guard alternativeBit & CalcParsedEmitCoverage.operationMask != 0 else {
-            return false
+            // `calc-mix()` IS DELIBERATELY NOT IN THE MASK, so its test costs the hot path nothing.
+            // It is the one alternative this emit builds that needs a second stack beside the
+            // operands, and putting it in `operationMask` would either add a label to the switch
+            // below or a compare before the child loop -- both of which run once per emitted node,
+            // where this runs only on the arm that was already about to refuse. Stage E1's two
+            // extra labels on this arm measured +12.7 retired instructions per parse; this is zero.
+            guard node.alternative == .CalcMix else {
+                return false
+            }
+            return emitParsedCalcMix(node, isRoot: isRoot, into: &builder)
         }
 
         var pushed: UInt32 = 0
@@ -6070,6 +6242,50 @@ fileprivate extension CalcFlatTree {
         // `anchorSideIsSubtree` and `insideAnchorSide` share the byte and mean nothing to C++.
         return builder.buildOperation(
             node.alternative, pushed, node.type, isRoot, node.flags & CalcFlatNodeFlags.clampNoneMask)
+    }
+
+    /// A PARSED `calc-mix()`: push each item's value as an operand and its weight as a plan, then
+    /// build. `buildOperation`'s `CSSCalcSwiftAlternative::CalcMix` arm
+    /// (`CSSCalcTree+Simplification.cpp`) pairs the two stacks.
+    ///
+    /// THE TWO STACKS ARE PUSHED INTERLEAVED AND THAT IS SAFE, which is the one thing here worth
+    /// checking rather than assuming. Operands and weights are separate `Vector`s, and both are
+    /// consumed "the top `childCount`" at the build. A nested `calc-mix()` inside item *k*'s value
+    /// subtree pushes its own weights and consumes exactly them during `emitParsed` of that value,
+    /// which happens BEFORE this item's weight is pushed -- so items 0..k-1's weights are strictly
+    /// below the nested node's base and cannot be taken by it. Pushing all the values first and all
+    /// the weights after would also work and would need two walks of the child list.
+    ///
+    /// THE PLAN'S `origin` IS 0 AND UNREAD. It names an item of the ORIGINAL `CalcMix`, and a parsed
+    /// tree has none; `replace` carries weight PRESENCE instead, which is the disjointness the
+    /// `buildOperation` arm's comment states.
+    ///
+    /// The child list is `value, weight, value, weight, ...`, so a missing weight node, an odd child
+    /// count or an empty list is a boundary contract violation and REFUSES rather than building a
+    /// `calc-mix()` with mispaired weights -- `CalcParseAttempt.emitRefused` reports that as
+    /// `Failed`, which is the loud answer.
+    @inline(never)
+    func emitParsedCalcMix(
+        _ node: CalcFlatNode,
+        isRoot: Bool,
+        into builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Bool {
+        var items: UInt32 = 0
+        var cursor = node.firstChild
+        while cursor != CalcFlatNode.noNode {
+            let value = Int(cursor)
+            guard emitParsed(value, isRoot: false, into: &builder) else { return false }
+            let weightSlot = nodes[value].nextSibling
+            guard weightSlot != CalcFlatNode.noNode else { return false }
+            let weight = nodes[Int(weightSlot)]
+            builder.pushCalcMixItemWeight(0, weight.value,
+                weight.flags & CalcFlatNodeFlags.calcMixWeightPresent != 0)
+            // `&+=`: one per pair of this node's own sibling list, so bounded by `nodes.count`.
+            items &+= 1
+            cursor = weight.nextSibling
+        }
+        guard items != 0, items &* 2 == node.childCount else { return false }
+        return builder.buildOperation(.CalcMix, items, node.type, isRoot, 0)
     }
 }
 
@@ -6201,10 +6417,12 @@ public func cssCalcFlattenProbeSwift(_ root: borrowing WebCore.CSSCalc.Child, _ 
 /// (stage E1), the ten one-argument math functions -- `sin()` `cos()` `tan()` `asin()` `acos()`
 /// `atan()` `sqrt()` `exp()` `abs()` `sign()` -- with the parse-time `Deg2Rad` insertion the first
 /// three need (stage E2), the type algebra that goes with them, and `sibling-count()` /
-/// `sibling-index()` behind the three-clause context gate (stage F1). DECLINED, each with its own
-/// reason so the coverage number stays attributable: symbols (stage F2), and the four alternatives
-/// whose payload a 40-byte POD node cannot hold -- `calc-mix()`, `random()`, `anchor()`,
-/// `anchor-size()` (stage G).
+/// `sibling-index()` behind the three-clause context gate (stage F1), and `calc-mix()` behind its
+/// own context gate (stage G slice 1). DECLINED, each with its own
+/// reason so the coverage number stays attributable: symbols (stage F2), a `calc-mix()` weight that
+/// is itself a math function rather than a raw `<percentage>`, and the three remaining alternatives
+/// whose payload a 40-byte POD node cannot hold -- `random()`, `anchor()`, `anchor-size()`
+/// (stage G slices 2 and 3).
 ///
 /// A DECLINE AND A FAILURE ARE DIFFERENT OUTCOMES and share no channel. `calc(1px +2px)` is a
 /// FAILURE -- the C++ arm rejects it too, so retrying would re-derive the same rejection and a
@@ -6253,6 +6471,7 @@ private struct CalcParseOptions {
     let absoluteLengthUnitsOnly: Bool
     let hasAllowedSymbols: Bool
     let treeCountingAllowed: Bool
+    let calcMixEnabled: Bool
     let rootFunctionId: UInt16
 
     @inline(always)
@@ -6261,6 +6480,7 @@ private struct CalcParseOptions {
         self.absoluteLengthUnitsOnly = options.absoluteLengthUnitsOnly
         self.hasAllowedSymbols = options.hasAllowedSymbols
         self.treeCountingAllowed = options.treeCountingAllowed
+        self.calcMixEnabled = options.cssCalcMixEnabled
         self.rootFunctionId = options.rootFunctionId
     }
 }
@@ -6451,7 +6671,8 @@ private func calcParseAppendLeaf(
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
     _ value: Double,
     _ unitType: UInt16,
-    _ percentHint: UInt8
+    _ percentHint: UInt8,
+    _ flags: UInt8 = 0
 ) -> UInt32? {
     // `setLeaf`'s narrowing guard, for the same reason it gives: no `CSSUnitType` enumerator can
     // fail it, because that enum is `uint8_t`-backed, but the flat node's `unitType` is a `UInt8`
@@ -6486,7 +6707,7 @@ private func calcParseAppendLeaf(
         unitType: narrowUnit,
         alternative: alternative,
         percentHint: percentHint,
-        flags: 0))
+        flags: flags))
     return me
 }
 
@@ -6760,6 +6981,16 @@ private enum CalcFunctionArguments: UInt8 {
     /// no extra dispatch. Routing it through the shared prologue instead would put a branch on
     /// every covered function's path for a fact only these two use.
     case zeroArguments
+    /// `[ <calc-sum> <percentage [0,100]>? ]#`, at least one -- `consumeCalcMix`
+    /// (`CSSCalcTree+Parser.cpp:1007`). Stage G slice 1, and `calc-mix()` is its only member.
+    ///
+    /// A CASE OF ITS OWN RATHER THAN `oneOrMore`, even though the two share `Min`'s entire type rule
+    /// (`input = Any`, `merge = Consistent`, `output = None`, `CSSCalcTree.h:1056`-`:1058`): what
+    /// differs is that each argument may be followed by a WEIGHT, which is not a `<calc-sum>`, not a
+    /// child of the operation in the C++ tree, and parsed by a different consumer. Threading that
+    /// through `calcParseArgumentList` as a flag would put a branch per argument on `min()`'s path
+    /// for a construct no real stylesheet contains.
+    case calcMix
 }
 
 /// Which `CSSCalcSwiftParseDeclineReason` an uncovered `isCalcFunction` belongs to.
@@ -6836,6 +7067,10 @@ private func calcParseFunctionAlternative(_ functionId: UInt16)
     // this is the table that owns it; what differs is only which construction entry the arm uses.
     case WebCore.CSSValueSiblingCount.rawValue: return (.SiblingCount, .zeroArguments)
     case WebCore.CSSValueSiblingIndex.rawValue: return (.SiblingIndex, .zeroArguments)
+    // Stage G slice 1. Last in the table because `parseCalcFunction` reaches `CSSValueCalcMix`
+    // after `progress()` (`CSSCalcTree+Parser.cpp:1412`), and the order of these labels is that
+    // switch's so the two can be read side by side.
+    case WebCore.CSSValueCalcMix.rawValue: return (.CalcMix, .calcMix)
     default: return nil
     }
 }
@@ -6887,6 +7122,9 @@ private func calcParseFunctionBlock(
     case .zeroArguments:
         argumentsParsed = calcParseZeroArguments(
             cursor, &inner, blockEnd, &out, &state, alternative)
+    case .calcMix:
+        argumentsParsed = calcParseCalcMix(
+            cursor, &inner, blockEnd, depth + 1, &out, &state)
     }
     guard let parsed = argumentsParsed else { return nil }
     // `if (!innerRange.atEnd()) return nullopt`. Vacuous for `<calc-sum>#`, whose loop runs to
@@ -7501,6 +7739,137 @@ private func calcParseArgumentList(
     return CalcParsed(index: me, type: mergedType)
 }
 
+// MARK: `calc-mix()` (P7b stage G slice 1)
+
+/// One `calc-mix()` item weight: `MetaConsumer<CalcMix::Item::Weight>::consume`
+/// (`CSSCalcTree+Parser.cpp:1053`) where `Weight = CSS::Percentage<CSS::ClosedPercentageRange>`.
+///
+/// THE ACCEPT SET IS THE CONSUMER'S, READ OFF IT RATHER THAN GUESSED.
+/// `ConsumerDefinition<CSS::Percentage<R, V>>` (`CSSPropertyParserConsumer+PercentageDefinitions.h:44`)
+/// declares exactly two token arms -- `PercentageToken` and `FunctionToken` -- so nothing else can
+/// be a weight, and a `DimensionToken`, an ident or a number is a parse FAILURE on both arms rather
+/// than a decline.
+///
+/// THE RANGE TEST IS `isValidCanonicalValue`
+/// (`CSSPropertyParserConsumer+MetaConsumerDefinitions.h:114`-`:130`) at
+/// `ClosedPercentageRange = Range { 0, 100 }` (`CSSPrimitiveNumericRange.h:96`) with the DEFAULT
+/// parse-time behaviour on both ends, i.e. reject rather than clamp. Written as the two comparisons
+/// the C++ compiles to rather than as a clamp: `!(v >= 0 && v <= 100)` rejects +-infinity and NaN
+/// for free, which is what the C++'s separate `std::isinf` check plus the comparisons do -- NaN
+/// fails both comparisons, and that is the behaviour, not an accident of the spelling.
+///
+/// A MATH-FUNCTION WEIGHT IS THE SLICE'S ONE DECLINED RESIDUE. `CalcMix::Item::Weight` is
+/// `Variant<Raw, UnevaluatedCalc>` and `UnevaluatedCalc` holds a `Ref<CSSCalc::Value>` -- a whole
+/// second calc value, not a `Child` -- so no flat node can carry one and no operand can stand in for
+/// it. Declining costs nothing and is attributable: `.CalcMixWeight`.
+@inline(never)
+private func calcParseCalcMixWeight(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState
+) -> Double? {
+    let token = calcToken(cursor, &state, index)
+    guard token.type == WebCore.PercentageToken else {
+        if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
+            state.declined = true
+            state.declineReason = .CalcMixWeight
+        }
+        return nil
+    }
+    let value = token.numericValue
+    guard value >= 0, value <= 100 else { return nil }
+    // `range.consumeIncludingWhitespace()` inside `PercentageConsumer::consume`.
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return value
+}
+
+/// `consumeCalcMix` (`CSSCalcTree+Parser.cpp:1007`-`:1077`):
+/// `calc-mix( [ <calc-sum> <percentage [0,100]>? ]# )`.
+///
+/// THE FIRST ARGUMENT IS A VALUE, NOT A PROGRESS, and the corpus that stood in this project's
+/// decline list had it backwards: `calc-mix(50%, 1px, 2px)` is THREE items each weighted 33.333%,
+/// and the 50%-weighted spelling is `calc-mix(1px 50%, 2px 50%)`. Nothing in the grammar special
+/// cases the first argument.
+///
+/// THE TYPE RULE IS `min()`'S, EXACTLY -- `input = AllowedTypes::Any` (so `validateType` is
+/// `return true` and there is nothing to call), `merge = MergePolicy::Consistent`, `output =
+/// OutputTransform::None` (`CSSCalcTree.h:1056`-`:1058`). So this is `calcParseArgumentList`'s
+/// algebra with a weight consumer spliced in, and the two are kept as separate functions for the
+/// reason `CalcFunctionArguments.calcMix` gives.
+///
+/// THE CHILD LIST IS `value, weight, value, weight, ...` AND `childCount` IS `2 * itemCount`. See
+/// `CalcFlatNodeFlags.calcMixWeightPresent` for why the weight is a node rather than a payload. The
+/// weight node is NEVER an operand: `emitParsedCalcMix` reads it and pushes a
+/// `pushCalcMixItemWeight` plan, and `emitParsed`'s generic child loop never reaches a `CalcMix`.
+///
+/// NOTHING HOLDS THE ITEMS, as in `calcParseArgumentList`: a running `CalcType`, a count and two
+/// link locals. No `Swift.Array`, no allocation, nothing for `swift_bridgeObjectRelease` to reach.
+private func calcParseCalcMix(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    // `if (!state.propertyParserState.context.cssCalcMixEnabled) return { }` (`:1013`-`:1014`).
+    // A FAILURE, not a decline: the C++ arm returns `std::nullopt` too, so retrying would burn a
+    // descent to reach the same rejection.
+    if !state.options.calcMixEnabled { return nil }
+
+    var mergedType = CalcType()
+    var itemCount: UInt32 = 0
+    var head = CalcFlatNode.noNode
+    var tail = CalcFlatNode.noNode
+
+    while index < end {
+        calcSkipWhitespace(cursor, &index, end, &state)
+        // `requireComma && !consumeCommaIncludingWhitespace(tokens)`, spelled as "every argument
+        // after the first".
+        if itemCount > 0 {
+            guard calcParseComma(cursor, &index, end, &state) else { return nil }
+        }
+
+        guard let value = calcParseSum(cursor, &index, end, depth, &out, &state) else { return nil }
+        if itemCount == 0 {
+            mergedType = value.type
+            head = value.index
+        } else {
+            guard let merged = mergedType.consistentType(with: value.type) else { return nil }
+            mergedType = merged
+            calcParseLink(&out, tail, value.index)
+        }
+
+        // `if (!tokens.atEnd() && tokens.peek().type() != CommaToken)` (`:1052`). No whitespace skip
+        // of its own: `<calc-value>` consumes the whitespace after every token it takes, so the
+        // index already stands on the first non-whitespace token after the sum, which is where
+        // `tokens.peek()` stands on the C++ arm.
+        var weightValue = 0.0
+        var weightFlags: UInt8 = 0
+        if index < end, calcToken(cursor, &state, index).type != WebCore.CommaToken {
+            guard let weight = calcParseCalcMixWeight(cursor, &index, end, &state) else { return nil }
+            weightValue = weight
+            weightFlags = CalcFlatNodeFlags.calcMixWeightPresent
+        }
+        guard let weightNode = calcParseAppendLeaf(&out, .Percentage, weightValue,
+            UInt16(WebCore.CSSUnitType.Percentage.rawValue), 0, weightFlags) else { return nil }
+        calcParseLink(&out, value.index, weightNode)
+        tail = weightNode
+        // `&+=`: one item per `<calc-sum>` parsed, each of which appended at least one node, so
+        // this is bounded by the buffer's capacity.
+        itemCount &+= 1
+    }
+
+    // `if (argumentCount < 1) return nullopt` -- `calc-mix()` is invalid input, not a decline.
+    if itemCount == 0 { return nil }
+    guard let me = calcParseAppendOperation(
+        &out, .CalcMix, head, itemCount &* 2, mergedType) else { return nil }
+    return CalcParsed(index: me, type: mergedType)
+}
+
 /// `<calc-product> = <calc-value> [ [ '*' | '/' ] <calc-value> ]*`
 private func calcParseProduct(
     _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
@@ -7636,11 +8005,13 @@ private struct CalcParseAttempt {
     /// The buffer filled up, so the caller should retry at an exact size rather than report.
     var overflowed = false
     /// A FOLD gave up on the tree, which is the `CalcFlatTree.declined` valve. A genuine decline:
-    /// the C++ arm must run. Currently unreachable and kept because it is the valve's contract, not
-    /// because it fires -- every site that sets `declined` is in `simplifySymbol`,
-    /// `simplifySiblingFunction`, `simplifyAnchorFunction`, `simplifyRandom`, `simplifyClamp`,
-    /// `simplifyRound`, `simplifyCalcMix` or `calcMixFoldToZero`, and this grammar produces none of
-    /// those alternatives.
+    /// the C++ arm must run. REACHABLE SINCE STAGE G SLICE 1, where it was not before: every site
+    /// that sets `declined` used to be in `simplifySymbol`, `simplifySiblingFunction`,
+    /// `simplifyAnchorFunction`, `simplifyRandom`, `simplifyClamp`, `simplifyRound`,
+    /// `simplifyCalcMix` or `calcMixFoldToZero`, and the grammar produced none of those
+    /// alternatives. `simplifyParsedCalcMix` now does -- it declines a child list whose weight
+    /// nodes and value nodes do not pair up, and it reaches `calcMixFoldToZero`, which declines a
+    /// first item whose `Type` has no calculation category.
     var foldRefused = false
     /// A CONSTRUCTION refused, which is a boundary contract violation and not a decline. Reported as
     /// `Failed`, deliberately: the differential treats a decline as never-a-mismatch, so routing a
@@ -7696,6 +8067,17 @@ public func cssCalcParseSwift(
     }
 
     guard let type = attempt.type else {
+        // A SECOND OVERFLOW IS A DECLINE, NOT A FAILURE, and this arm is why the node bound above
+        // does not have to be exact for correctness. `calcParseNodeUpperBound` is an argument
+        // (`2 * tokens + 1`, tight at exactly one shape -- a one-item `calc-mix()` with no weight),
+        // and an argument that turned out to be one node short would otherwise have reported
+        // `Failed` for valid CSS, which DROPS A DECLARATION. Declining costs a C++ descent on an
+        // input no corpus reaches and cannot be wrong.
+        if attempt.overflowed {
+            result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
+            result.declineReason = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.TooManyTokens.rawValue)
+            return result
+        }
         // A fold that gave up is a DECLINE with no alternative to blame, on `calcSimplifyFlatTree`'s
         // reasoning: none of the remaining shapes has one alternative behind it. A construction that
         // refused is a contract violation and reports `Failed`; a descent that stopped is whatever
@@ -7776,6 +8158,8 @@ private func calcParseAttempt(
                 descent = calcParseProgress(cursor, &index, end, 0, &out, &state)
             case .zeroArguments:
                 descent = calcParseZeroArguments(cursor, &index, end, &out, &state, rootFunction.alternative)
+            case .calcMix:
+                descent = calcParseCalcMix(cursor, &index, end, 0, &out, &state)
             }
         } else if state.options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
             || state.options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {

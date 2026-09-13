@@ -227,6 +227,7 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
             .treeCountingAllowed = propertyParserState.context.cssTreeCountingFunctionsEnabled
                 && (propertyParserState.currentRule == StyleRuleType::Style || propertyParserState.currentRule == StyleRuleType::Keyframe)
                 && propertyParserState.currentProperty != CSSPropertyInvalid,
+            .cssCalcMixEnabled = propertyParserState.context.cssCalcMixEnabled,
             .rootFunctionId = static_cast<uint16_t>(function),
         }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal, &swiftFlatNodes, &swiftFlatRootIndex);
 

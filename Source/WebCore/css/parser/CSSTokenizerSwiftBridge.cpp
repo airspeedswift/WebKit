@@ -2897,6 +2897,10 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
         .hasAllowedSymbols = withSymbols,
         .treeCountingAllowed = treeCountingAllowed,
+        // `calcParserContext()` sets `cssCalcMixEnabled`, so the C++ arm admits `calc-mix()` and
+        // the Swift arm has to be given the same answer or the two would not be comparing the same
+        // grammar -- a Swift FAILURE against a C++ parse, which is a loud mismatch, not a decline.
+        .cssCalcMixEnabled = true,
         .rootFunctionId = static_cast<uint16_t>(functionId),
     }, simplificationOptions, root, false);
 
@@ -2991,6 +2995,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
             .treeCountingAllowed = treeCountingAllowed,
+            .cssCalcMixEnabled = true,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, fusedRoot, true);
         result.fusedOutcome = fusedResult.outcome;
@@ -3022,6 +3027,7 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .absoluteLengthUnitsOnly = absoluteLengthUnitsOnly,
             .hasAllowedSymbols = withSymbols,
             .treeCountingAllowed = treeCountingAllowed,
+            .cssCalcMixEnabled = true,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, storeParseRoot, true, &storeNodes, &storeRootIndex);
         result.storeNodeCount = storeNodes.size();
@@ -3116,7 +3122,7 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
     // `treeCountingAllowed` true: this entry's `parserState` is `Style` / `CSSPropertyWidth` and
     // `calcParserContext()` sets the context flag, so all three C++ gates pass and the Swift arm has
     // to be given the same answer or the two would not be timing the same parse.
-    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .treeCountingAllowed = true, .rootFunctionId = static_cast<uint16_t>(functionId) };
+    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .treeCountingAllowed = true, .cssCalcMixEnabled = true, .rootFunctionId = static_cast<uint16_t>(functionId) };
 
     // Coverage is decided by running the Swift arm ONCE, before timing.
     {
