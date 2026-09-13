@@ -26,8 +26,10 @@
 #include "config.h"
 #include "HEVCUtilities.h"
 
+#include "CodecParsersSwiftTypes.h"
 #include "FourCC.h"
 #include "SharedBuffer.h"
+#include "WebCoreSwiftBoundaryTypes.h"
 #include <JavaScriptCore/DataView.h>
 #include <wtf/HexNumber.h>
 #include <wtf/MathExtras.h>
@@ -35,6 +37,12 @@
 #include <wtf/SortedArrayMap.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringToIntegerConversion.h>
+
+// Off by default. Select it by building WebCore with
+// WK_USE_SWIFT_CODEC_PARSERS=YES (Source/WebCore/Configurations/WebCore.xcconfig).
+#if !defined(USE_SWIFT_CODEC_PARSERS)
+#define USE_SWIFT_CODEC_PARSERS 0
+#endif
 
 namespace WebCore {
 
@@ -347,8 +355,60 @@ static bool NODELETE isValidProfileIDForCodec(uint16_t profileID, DoViParameters
     return codec == DoViParameters::Codec::HVC1 || codec == DoViParameters::Codec::HEV1;
 }
 
+CodecParserCounters& doViCodecParserCounters()
+{
+    static NeverDestroyed<CodecParserCounters> counters;
+    return counters.get();
+}
+
+// The crossing value, or `nullopt` for a candidate the Swift arm must not be asked about.
+//
+// Modelled on `makeSwiftColorText` (CSSParserFastPaths.cpp:515) with one difference that is the
+// whole reason this function can fail. The colour version cannot: a candidate longer than its
+// capacity cannot be a colour, so the Swift arm answers `notAColor` above the capacity and the
+// value is always built. There is no such length here. `parseInteger<uint8_t>` accepts unlimited
+// leading zeros, so `dvh1.0000000000000000004.09` is a *valid* DoVi string and no length exists
+// above which a codec string is certainly invalid. Refusing above the capacity would therefore
+// change behaviour, so the arm declines instead -- and the decline is counted.
+//
+// The second cause is a candidate that is not Latin-1. Every character any of these grammars
+// admits is ASCII: the tags and profile mnemonics are ASCII letters and digits, and
+// `parseInteger` accepts only ASCII digits, one '+' and the six characters of
+// `isUnicodeCompatibleASCIIWhitespace`. A 16-bit candidate is therefore narrowed rather than
+// given a second instantiation of the crossing type, and one that does not narrow is declined
+// rather than answered -- narrowing is cheap and rare, and declining keeps the claim to
+// "reproduces C++ exactly" free of a case that would have to be argued instead of checked.
+#if USE_SWIFT_CODEC_PARSERS
+static std::optional<CodecStringText> makeCodecStringText(StringView codecView)
+{
+    if (codecView.length() > codecStringTextCapacity)
+        return std::nullopt;
+
+    CodecStringText text { };
+    text.length = static_cast<uint32_t>(codecView.length());
+    for (size_t index = 0; index < codecView.length(); ++index) {
+        auto codeUnit = codecView[index];
+        if (codeUnit > 0xFF)
+            return std::nullopt;
+        text.units[index] = static_cast<Latin1Character>(codeUnit);
+    }
+    return text;
+}
+#endif
+
 std::optional<DoViParameters> parseDoViCodecParameters(StringView codecView)
 {
+#if USE_SWIFT_CODEC_PARSERS
+    // Checked at the top rather than through a wrapper: when the Swift arm answers, the answer
+    // is final and nothing below needs reconciling with it. The two arms return the same type,
+    // so there is no conversion here and no shape for one to be wrong in.
+    if (auto text = makeCodecStringText(codecView)) {
+        doViCodecParserCounters().answered.fetch_add(1, std::memory_order_relaxed);
+        return codecParseDoViSwift(*text);
+    }
+    doViCodecParserCounters().declined.fetch_add(1, std::memory_order_relaxed);
+#endif
+
     // The format of the DoVi codec string is specified in "Dolby Vision Profiles and Levels Version 1.3.2"
     auto codecSplit = codecView.split('.');
     auto nextElement = codecSplit.begin();

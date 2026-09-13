@@ -33,8 +33,26 @@ ENABLE_LLVM_PROFILE_GENERATION_DEFINES_YES = ENABLE_LLVM_PROFILE_GENERATION=1;
 WK_PGO_GEN_FLAGS = $(WK_PGO_GEN_FLAGS_$(ENABLE_LLVM_PROFILE_GENERATION));
 WK_PGO_GEN_FLAGS_YES = -fprofile-generate;
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT));
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CODEC_PARSERS_DEFINES);
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
+
+// Selects the Swift media codec-configuration parsers (CodecParsersSwift.swift). Off by
+// default, both arms compiled in either way, so flipping this needs no rebuild of anything
+// that does not include HEVCUtilities.cpp.
+//
+// TWO THINGS THIS GATE DOES NOT DO, neither of which a passing test run would reveal.
+//
+// It does not reach the GPU process. `LibWebRTCCodecsProxy.mm` calls the sibling AVC and HEVC
+// parsers and lives in the *WebKit* target, not WebCore, so a WebCore-only rebuild leaves that
+// caller on the C++ arm whatever this is set to. Budget a full stack for any claim that
+// involves the GPU-process caller. (Slice 1 is DoVi, which that file does not call, so the
+// question does not arise yet -- it arises for slice 2.)
+//
+// It does not tell you the arm ran. A decline is invisible and reads as parity, so confirm
+// coverage with `doViCodecParserCounters()` rather than by observing that the tests still
+// pass -- the layout tests pass identically on both arms by construction.
+WK_USE_SWIFT_CODEC_PARSERS_DEFINES = $(WK_USE_SWIFT_CODEC_PARSERS_DEFINES_$(WK_USE_SWIFT_CODEC_PARSERS));
+WK_USE_SWIFT_CODEC_PARSERS_DEFINES_YES = USE_SWIFT_CODEC_PARSERS=1;
 
 WK_OPTIMIZATION_PROFILE_FILE = $(BUILT_PRODUCTS_DIR)/DerivedSources/WebCore/Profiling/$(arch).profdata;
 WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER = $(WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER_$(USE_INTERNAL_SDK));

@@ -4,6 +4,19 @@ framework module WebCore_Private [system] {
         export *
     }
 
+    // The boundary module for the media codec-configuration parsers
+    // (CodecParsersSwift.swift). Two headers, and the second is the reason to read this
+    // comment: the Swift arm returns `std::optional<DoViParameters>` -- the C++ entry
+    // point's own return type -- rather than a parallel POD it would then have to be
+    // converted from, so it needs `DoViParameters` itself and not just the crossing value.
+    // That is what buys this island zero new C++ on the return side.
+    explicit module CodecParsersSwiftTypes {
+        header "CodecParsersSwiftTypes.h"
+        header "HEVCUtilities.h"
+        requires cplusplus
+        export *
+    }
+
     module Core {
         // Workaround for rdar://173516139: PrivateHeaders includes a header
         // "WorkAround173516139.h" that the build system regenerates whenever
