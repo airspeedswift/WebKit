@@ -228,6 +228,14 @@ WK_HAVE_URL_FORMATTING_xrsimulator = YES;
 WK_HAVE_URL_FORMATTING_maccatalyst = YES;
 WK_HAVE_URL_FORMATTING_macosx = YES;
 
+// Whole-module, matching JavaScriptCore.xcconfig:80. Without it Xcode compiles Swift
+// `-incremental -enable-batch-mode`, and nothing specializes across a Swift *file*
+// boundary: a call from one file to a generic function in another reaches the
+// unspecialized generic through a lazily-built conformance witness table, whatever
+// specializations already sit in the same binary -- a cost that can run into double
+// digits of a hot generic call's instruction count once the call crosses a file boundary.
+SWIFT_COMPILATION_MODE = wholemodule;
+
 SWIFT_INSTALL_OBJC_HEADER = NO;
 BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
 SWIFT_LIBRARY_LEVEL = spi;
