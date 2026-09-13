@@ -637,6 +637,45 @@ private extension CalcType {
         return angle == 1 && length == 0 && time == 0 && frequency == 0
             && resolution == 0 && flex == 0 && percent == 0
     }
+
+    /// `Type::calculationCategory()` (`CSSCalcType.cpp:362`-`:410`), narrowed to the four answers
+    /// `anchor()`'s two slots distinguish.
+    ///
+    /// EVERY REJECTED ANSWER COLLAPSES TO `other`, and that is exact rather than lossy: the C++'s
+    /// `std::nullopt` (a base type at a power other than 0 or 1, or two base types at once) and its
+    /// `Angle` / `Time` / `Frequency` / `Resolution` / `Flex` all reach the same
+    /// `default: return { }` in `consumeAnchorFallback` (`CSSCalcTree+Parser.cpp:1111`) and the same
+    /// `category != Percentage` rejection in the `<anchor-side>` lambda (`:1148`). Distinguishing
+    /// them would be five enumerators no caller reads.
+    ///
+    /// `LengthPercentage` is `length == 1` with ANY non-none hint, not specifically a `Length` hint,
+    /// because the C++ tests `if (percentHint)` -- `PercentHintValue`'s `explicit operator bool`.
+    @inline(always)
+    var anchorSlotCategory: CalcAnchorSlotCategory {
+        if angle != 0 || time != 0 || frequency != 0 || resolution != 0 || flex != 0 {
+            return .other
+        }
+        if length == 1 && percent == 0 {
+            return hasPercentHint ? .lengthPercentage : .length
+        }
+        if length == 0 && percent == 1 {
+            return .percentage
+        }
+        if length == 0 && percent == 0 {
+            return .number
+        }
+        return .other
+    }
+}
+
+/// The `CSS::Category` answers `anchor()` and `anchor-size()` act on, and one bucket for the rest.
+/// See `CalcType.anchorSlotCategory`.
+private enum CalcAnchorSlotCategory {
+    case length
+    case lengthPercentage
+    case number
+    case percentage
+    case other
 }
 
 /// `Type::multiply` through the selected arm.
@@ -838,6 +877,54 @@ private struct NumericLeaf {
             unitType: UInt16(WebCore.CSSUnitType.Percentage.rawValue),
             percentHint: percentHintRawValue(hint)
         )
+    }
+}
+
+/// `getType(const Percentage&)` (CSSCalcTree.cpp:351-:357): `Type { .percent = 1 }`, plus
+/// `applyPercentHint` if a hint is present. The zero test must be a literal `!= 0` comparison, not
+/// `PercentHint(rawValue:)`'s failure -- that init doesn't fail (see `percentHintFromRawValue`) and
+/// would alias an out-of-range value onto `length` via `applyPercentHint`'s `operator[]`.
+@inline(always)
+private func calcPercentageLeafType(_ leaf: NumericLeaf) -> CalcType? {
+    var type = CalcType.makePercent()
+    if leaf.percentHint != 0 {
+        guard let hint = percentHintFromRawValue(leaf.percentHint) else {
+            return nil
+        }
+        type = calcTypeApplyPercentHint(type, hint)
+    }
+    return type
+}
+
+/// `getType(const CanonicalDimension&)` (CSSCalcTree.cpp:359-:362) is `determineType(toCSSUnit(d))`,
+/// called rather than transcribed. `UInt8(exactly:)`, not `UInt8(_:)`, since narrowing the
+/// boundary's `uint16_t` unit back can fail.
+@inline(always)
+private func calcCanonicalDimensionLeafType(_ leaf: NumericLeaf) -> CalcType? {
+    guard let rawUnit = UInt8(exactly: leaf.unitType),
+          let unit = WebCore.CSSUnitType(rawValue: rawUnit) else {
+        return nil
+    }
+    return CalcType.determineType(unit)
+}
+
+/// `getType(const Child&)` (CSSCalcTree.cpp:384-:387) for a folded numeric leaf.
+///
+/// FREE FUNCTIONS RATHER THAN `CalcSimplification` METHODS, which is where these three lived until
+/// stage G slice 2 -- and the move is a correction, not a convenience: none of the three ever read a
+/// `SimplificationOptions` field, and `emitParsedAnchor` needs `getType(*after)` for the `calc()`
+/// prefix wrapper's type while having no options at all in scope. The methods remain as one-line
+/// forwards so that no existing call site moves.
+@inline(always)
+private func calcLeafType(_ leaf: NumericLeaf) -> CalcType? {
+    switch leaf.kind {
+    case .number:
+        // `getType(const Number&)` is `Type { }` (CSSCalcTree.cpp:346-:349): the identity type.
+        return CalcType()
+    case .percentage:
+        return calcPercentageLeafType(leaf)
+    case .canonicalDimension, .nonCanonicalDimension:
+        return calcCanonicalDimensionLeafType(leaf)
     }
 }
 
@@ -1498,14 +1585,7 @@ private extension CalcSimplification {
     /// would alias an out-of-range value onto `length` via `applyPercentHint`'s `operator[]`.
     @inline(always)
     func percentageLeafType(_ leaf: NumericLeaf) -> CalcType? {
-        var type = CalcType.makePercent()
-        if leaf.percentHint != 0 {
-            guard let hint = percentHintFromRawValue(leaf.percentHint) else {
-                return nil
-            }
-            type = calcTypeApplyPercentHint(type, hint)
-        }
-        return type
+        return calcPercentageLeafType(leaf)
     }
 
     /// `getType(const CanonicalDimension&)` (CSSCalcTree.cpp:359-:362) is `determineType(toCSSUnit(d))`,
@@ -1513,11 +1593,7 @@ private extension CalcSimplification {
     /// boundary's `uint16_t` unit back can fail; an out-of-enum value falls through to step 9.5.
     @inline(always)
     func canonicalDimensionLeafType(_ leaf: NumericLeaf) -> CalcType? {
-        guard let rawUnit = UInt8(exactly: leaf.unitType),
-              let unit = WebCore.CSSUnitType(rawValue: rawUnit) else {
-            return nil
-        }
-        return CalcType.determineType(unit)
+        return calcCanonicalDimensionLeafType(leaf)
     }
 
     /// `getType(const Child&)` (CSSCalcTree.cpp:384-:387) for a folded numeric leaf. Separate from
@@ -1525,15 +1601,7 @@ private extension CalcSimplification {
     /// for one), this one has a real overload and answers, so merging the two would make one wrong.
     @inline(always)
     func leafType(_ leaf: NumericLeaf) -> CalcType? {
-        switch leaf.kind {
-        case .number:
-            // `getType(const Number&)` is `Type { }` (CSSCalcTree.cpp:346-:349): the identity type.
-            return CalcType()
-        case .percentage:
-            return percentageLeafType(leaf)
-        case .canonicalDimension, .nonCanonicalDimension:
-            return canonicalDimensionLeafType(leaf)
-        }
+        return calcLeafType(leaf)
     }
 
     /// The eleven-case `CSS::Category` -> numeric-leaf table, shared by step 9.4's result switch and
@@ -2598,6 +2666,31 @@ fileprivate enum CalcFlatNodeFlags {
     /// It is never an operand. `emitParsedCalcMix` reads it and pushes a weight plan; the generic
     /// child loop in `emitParsed` never sees a `CalcMix`.
     static let calcMixWeightPresent: UInt8 = 1 << 4
+    /// On a PARSED `anchor()` node: the author wrote a MATH FUNCTION in the `<anchor-side>` slot.
+    ///
+    /// THIS IS THE `calc()` PREFIX, AND IT IS NOT DECORATION -- it is the tree's only record that
+    /// the author wrote one. `anchor()` is not a math function, so
+    /// `serializeWithoutOmittingPrefix` prints a `calc()` for a non-`Leaf` slot and nothing at all
+    /// for a `Leaf`, and `consumeValueWithoutSimplifyingRootCalc`
+    /// (`CSSCalcTree+Parser.cpp:980`-`:1005`) therefore wraps a function that parsed to a leaf in a
+    /// one-child `Sum`. `anchor(--a calc(50%))` and `anchor(--a 50%)` differ in exactly that node.
+    ///
+    /// THE WRAPPER IS NOT BUILT AT PARSE TIME AND THE BIT IS WHY. The C++ builds it, then
+    /// `copyAndSimplify` collapses it (css-values-4 8.3's one-term rule), then
+    /// `anchorSlotKeepingPrefix` (`+Simplification.cpp:1762`) puts it back iff the slot went in a
+    /// non-`Leaf` and came out a `Leaf`. Since a `<calc-value>` that is not a function is always a
+    /// leaf, "went in a non-`Leaf`" IS "started with a `FunctionToken`" -- so one bit captured at
+    /// parse time plus a leaf test at emit reproduces the whole round trip, and the grammar never
+    /// builds a node the fold would only remove.
+    static let anchorSideWasFunction: UInt8 = 1 << 5
+    /// The same, for the `<length-percentage>` fallback slot of an `anchor()` or an `anchor-size()`.
+    ///
+    /// A SECOND BIT RATHER THAN ONE SHARED ONE: the two slots are independent -- `anchor(--a
+    /// calc(50%), 1px)` has the prefix on one and not the other -- and `anchor-size()` has only this
+    /// one. They also differ in WHICH tree is tested at emit: the side is never simplified (the C++
+    /// `copy`s it), so its test is over the node as parsed, while the fallback's is over the node
+    /// the fold left behind.
+    static let anchorFallbackWasFunction: UInt8 = 1 << 6
 }
 
 /// Where a pre-order descent over the ORIGINAL tree got to.
@@ -3583,66 +3676,101 @@ fileprivate extension CalcFlatTree {
     ///
     /// Returns false when a fold gave up mid-pass, which is the `declined` valve `emitRoot` tests on
     /// the other path; asked here instead so a refused tree never reaches emit.
+    ///
+    /// `skipAnchorSides` IS HOISTED OUT OF THE LOOP RATHER THAN TESTED IN IT. `simplify` above reads
+    /// `insideAnchorSide` off every node because a FLATTENED tree can hold an `anchor()` anywhere
+    /// and the reverse pass has no cheaper answer. Here the parse already knows -- it is the only
+    /// thing that sets the flag -- so the common tree, which has no `anchor()` in it at all, runs a
+    /// loop with no flag load in it. Two loop bodies rather than one predicated one, for the reason
+    /// `emitParsed`'s two mask tests give: this pass runs once per node of every parse.
     mutating func simplifyParsed(
         _ options: CalcSimplification,
-        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?,
+        _ skipAnchorSides: Bool
     ) -> Bool {
-        var i = 0
-        while i < count {
-            switch nodes[i].alternative {
-            case .Negate:
-                simplifyNegate(i)
-
-            case .Invert:
-                simplifyInvert(i)
-
-            case .Sum:
-                simplifySum(i, options, builder)
-
-            case .Product:
-                simplifyProduct(i, options)
-
-            case .Min:
-                simplifyMinMax(i, options, false)
-
-            case .Max:
-                simplifyMinMax(i, options, true)
-
-            case .NonCanonicalDimension:
-                simplifyNonCanonicalDimension(i, options, builder)
-
-            case .Number, .Percentage, .CanonicalDimension:
-                // The three unconditional no-ops, as `simplifyNode` names them.
-                break
-
-            case .SiblingCount, .SiblingIndex:
-                // STAGE F1, AND A NO-OP THAT IS EXACT RATHER THAN CONSERVATIVE. `simplify`'s two
-                // overloads (`+Simplification.cpp:527`-`:545`) open by requiring
-                // `options.conversionData` and a style builder state, and return `{ }` -- keep the
-                // node -- without one. `calcParseZeroArguments` has already DECLINED the whole
-                // tree when `hasConversionData` is set, so by construction this arm is only ever
-                // reached in the configuration where the C++ fold is itself a no-op.
-                //
-                // `simplifySiblingFunction`, which is what `simplifyNode` runs for these two on the
-                // FLATTENED path, is not reachable from here and could not be: it resolves through
-                // `withCalcOriginalNode`, and a parsed tree has no original.
-                break
-
-            default:
-                // EVERY MATH FUNCTION, behind ONE call and behind `default`, which is
-                // `simplifyNode`'s shape and is measured rather than tidy: naming them here would
-                // take this switch from ten case values to twenty-one, and the thirty-first label on
-                // `simplifyNode`'s switch cost 6.7 retired instructions per simplification on a
-                // single-node tree that executes none of it (filings register section 51 -- LLVM
-                // merges the case clusters, peels the widest, and then declines a jump table below
-                // AArch64's ten-entry minimum). The hot switch names what a real page's CSS holds.
-                guard simplifyParsedFunction(i, options) else {
+        if skipAnchorSides {
+            var i = 0
+            while i < count {
+                // Never fold inside an `anchor()`'s `<anchor-side>`: `copyAndSimplifyChildren`
+                // COPIES that subtree (`+Simplification.cpp:1915`), so folding it would turn
+                // `anchor(--a calc(25% + 25%))` into `anchor(--a 50%)`, which the C++ does not do.
+                if nodes[i].flags & CalcFlatNodeFlags.insideAnchorSide == 0,
+                    !simplifyParsedNode(i, options, builder) {
                     return false
                 }
+                i += 1
+            }
+            return !declined
+        }
+        var i = 0
+        while i < count {
+            guard simplifyParsedNode(i, options, builder) else {
+                return false
             }
             i += 1
         }
         return !declined
+    }
+
+    /// One node of `simplifyParsed`'s pass. `false` declines the tree.
+    @inline(always)
+    private mutating func simplifyParsedNode(
+        _ i: Int,
+        _ options: CalcSimplification,
+        _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?
+    ) -> Bool {
+        switch nodes[i].alternative {
+        case .Negate:
+            simplifyNegate(i)
+
+        case .Invert:
+            simplifyInvert(i)
+
+        case .Sum:
+            simplifySum(i, options, builder)
+
+        case .Product:
+            simplifyProduct(i, options)
+
+        case .Min:
+            simplifyMinMax(i, options, false)
+
+        case .Max:
+            simplifyMinMax(i, options, true)
+
+        case .NonCanonicalDimension:
+            simplifyNonCanonicalDimension(i, options, builder)
+
+        case .Number, .Percentage, .CanonicalDimension:
+            // The three unconditional no-ops, as `simplifyNode` names them.
+            break
+
+        case .SiblingCount, .SiblingIndex:
+            // STAGE F1, AND A NO-OP THAT IS EXACT RATHER THAN CONSERVATIVE. `simplify`'s two
+            // overloads (`+Simplification.cpp:527`-`:545`) open by requiring
+            // `options.conversionData` and a style builder state, and return `{ }` -- keep the
+            // node -- without one. `calcParseZeroArguments` has already DECLINED the whole
+            // tree when `hasConversionData` is set, so by construction this arm is only ever
+            // reached in the configuration where the C++ fold is itself a no-op.
+            //
+            // `simplifySiblingFunction`, which is what `simplifyNode` runs for these two on the
+            // FLATTENED path, is not reachable from here and could not be: it resolves through
+            // `withCalcOriginalNode`, and a parsed tree has no original.
+            break
+
+        default:
+            // EVERY MATH FUNCTION, behind ONE call and behind `default`, which is
+            // `simplifyNode`'s shape and is measured rather than tidy: naming them here would
+            // take this switch from ten case values to twenty-one, and the thirty-first label on
+            // `simplifyNode`'s switch cost 6.7 retired instructions per simplification on a
+            // single-node tree that executes none of it (filings register section 51 -- LLVM
+            // merges the case clusters, peels the widest, and then declines a jump table below
+            // AArch64's ten-entry minimum). The hot switch names what a real page's CSS holds.
+            guard simplifyParsedFunction(i, options) else {
+                return false
+            }
+        }
+        return true
     }
 
     /// The math-function folds a PARSED tree can hold, behind one out-of-line call.
@@ -3753,6 +3881,20 @@ fileprivate extension CalcFlatTree {
         // 1 to 5) and `calcMixFoldToZero`.
         case .CalcMix:
             simplifyParsedCalcMix(i, options)
+
+        // Stage G slice 2, and a no-op that is exact rather than conservative, on the same footing
+        // as `SiblingCount`/`SiblingIndex` above. `simplify(Anchor&)` and `simplify(AnchorSize&)`
+        // (`+Simplification.cpp:1782`-`:1820`) OPEN by requiring `options.conversionData` and a
+        // style builder state and return `{ }` -- keep the node -- without one, and
+        // `calcParseAnchor` has already DECLINED the whole tree when
+        // `CalcParseState.conversionDataFoldsRun` is set. So by construction this arm is only ever
+        // reached in the configuration where the C++ fold is itself a no-op.
+        //
+        // `simplifyAnchorFunction`, which is what `simplifyNode` runs for these two on the FLATTENED
+        // path, is not reachable from here and could not be: it resolves through
+        // `withCalcOriginalNode`, and a parsed tree has no original.
+        case .Anchor, .AnchorSize:
+            break
 
         default:
             return false
@@ -6218,7 +6360,13 @@ fileprivate extension CalcFlatTree {
             // where this runs only on the arm that was already about to refuse. Stage E1's two
             // extra labels on this arm measured +12.7 retired instructions per parse; this is zero.
             guard node.alternative == .CalcMix else {
-                return false
+                // `anchor()` and `anchor-size()`, in the same place and for the same reason (stage G
+                // slice 2): both need information beside the operand stack -- an element-name token
+                // index and a keyword -- and neither is worth a label on the per-node switch below.
+                guard node.alternative == .Anchor || node.alternative == .AnchorSize else {
+                    return false
+                }
+                return emitParsedAnchor(i, isRoot: isRoot, into: &builder)
             }
             return emitParsedCalcMix(i, isRoot: isRoot, into: &builder)
         }
@@ -6295,6 +6443,81 @@ fileprivate extension CalcFlatTree {
         }
         guard items != 0, items &* 2 == nodes[i].childCount else { return false }
         return builder.buildOperation(.CalcMix, items, nodes[i].type, isRoot, 0)
+    }
+
+    /// A PARSED `anchor()` or `anchor-size()`: push the slots that ARE subtrees, restoring the
+    /// `calc()` prefix where the round trip would have, and build.
+    ///
+    /// THE `calc()` PREFIX IS THE ONLY NON-OBVIOUS PART, and it is `anchorSlotKeepingPrefix`
+    /// (`+Simplification.cpp:1762`-`:1768`) with its two inputs read off two different places. That
+    /// function wraps the slot in a one-child `Sum` iff the slot went INTO the pass a non-`Leaf` and
+    /// came OUT a `Leaf`; "went in a non-`Leaf`" is `anchorSideWasFunction` /
+    /// `anchorFallbackWasFunction`, captured at parse time because nothing downstream can recover
+    /// it, and "came out a `Leaf`" is this node's alternative now. The wrapper carries
+    /// `getType(*after)`, the child's own type, which is what `makeChild(Sum { ... }, type)` is
+    /// handed there.
+    ///
+    /// IT APPLIES TO THE SIDE TOO, even though `rebuildChildren` runs `anchorSlotKeepingPrefix` only
+    /// on the fallback: the side is COPIED rather than simplified, so its "before" and "after" are
+    /// the same tree and the same rule reproduces "the wrapper the parse built is still there".
+    ///
+    /// THE SIDE IS SLOT 0 WHEN IT IS A SUBTREE AT ALL, which `anchorChildren`
+    /// (`CSSCalcTree.cpp:95`-`:111`) is the authority for, and `valueID == CSSValueInvalid` on an
+    /// `Anchor` is exactly that case -- `Anchor::side` is not optional, so no keyword means a
+    /// subtree. Derived rather than read off `anchorSideIsSubtree` so that the count, the flag and
+    /// the keyword cannot disagree three ways.
+    ///
+    /// Takes the node's INDEX, for `emitParsedCalcMix`'s measured reason.
+    @inline(never)
+    func emitParsedAnchor(
+        _ i: Int,
+        isRoot: Bool,
+        into builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+    ) -> Bool {
+        let valueID = nodes[i].valueID
+        let sideSlots: UInt32 = nodes[i].alternative == .Anchor && valueID == 0 ? 1 : 0
+        // `pushedSlots`, not `pushed`, and the name is load-bearing rather than stylistic:
+        // `validate/selftest-typecheck.sh`'s control F injects its unsafe construct at the anchor
+        // line `var pushed: UInt32 = 0` and asserts that line occurs ONCE, so a fourth copy would
+        // make that control fail on its own uniqueness check instead of on the diagnostic it exists
+        // for. Controls G, I and J carry the same note for the same reason.
+        var pushedSlots: UInt32 = 0
+        var cursor = nodes[i].firstChild
+        while cursor != CalcFlatNode.noNode {
+            let slot = Int(cursor)
+            guard emitParsed(slot, isRoot: false, into: &builder) else { return false }
+            let prefixBit = pushedSlots < sideSlots
+                ? CalcFlatNodeFlags.anchorSideWasFunction
+                : CalcFlatNodeFlags.anchorFallbackWasFunction
+            if nodes[i].flags & prefixBit != 0,
+                CalcFlatCoverage.bit(nodes[slot].alternative) & CalcParsedEmitCoverage.leafMask != 0 {
+                // `makeChild(Sum { ... }, getType(*after))` -- the CHILD's type, which the flat node
+                // does not store: a leaf's `Type` slot is cleared at construction because
+                // `ChildConstruction<Leaf>::make` discards its `Type` argument, so it has to be
+                // recomputed from the payload exactly as `emittedType` does on the other path.
+                guard let leafType = parsedLeafType(slot),
+                    builder.buildOperation(.Sum, 1, leafType, false, 0) else { return false }
+            }
+            // `&+=`: one per child of this node's own sibling list, so bounded by `nodes.count`.
+            pushedSlots &+= 1
+            cursor = nodes[slot].nextSibling
+        }
+        guard pushedSlots == nodes[i].childCount else { return false }
+        return builder.buildAnchor(nodes[i].alternative, pushedSlots, nodes[i].type, isRoot, valueID,
+            nodes[i].origin)
+    }
+
+    /// `getType(const Child&)` for a node `emitParsed` has established is a LEAF.
+    ///
+    /// `numericLeaf` is nil for the two tree-counting leaves, whose `getType` is the identity type
+    /// (`CSSCalcTree.cpp:443`-`:451`) -- the same split `emittedType` makes on the flattened path,
+    /// and the reason this cannot just read `nodes[i].type`.
+    @inline(always)
+    func parsedLeafType(_ i: Int) -> CalcType? {
+        guard let leaf = nodes[i].numericLeaf else {
+            return CalcType()
+        }
+        return calcLeafType(leaf)
     }
 }
 
@@ -6476,20 +6699,47 @@ private let calcMaxExpressionDepth: Int32 = 100
 /// for no argument register at all and the descent carries one argument FEWER than before.
 /// Zero C++, four net lines of Swift.
 private struct CalcParseOptions {
-    let category: WebCore.CSS.Category
+    /// `Type::determinePercentHint(options.category)` AS A VALUE, hoisted out of the per-leaf path.
+    ///
+    /// `options.category` had exactly one reader -- the `PercentageToken` arm of `calcParseValue` --
+    /// and what it did with it was call `Type::determinePercentHint`, an OUT-OF-LINE C++ call
+    /// (`CSSCalcType.cpp:308`) followed by `percentHintRawValue`'s six comparisons, once per
+    /// percentage leaf. The answer is a pure function of a per-parse constant, so it is computed
+    /// once here and the arm is a field read.
+    ///
+    /// IT ALSO HAS TO BE OVERRIDABLE, which is what made this a field rather than a `let category`.
+    /// `consumeAnchor` parses its `<anchor-side>` under a FRESH `ParserOptions` whose category is
+    /// `CSS::Category::Percentage` (`CSSCalcTree+Parser.cpp:1131`-`:1136`), and
+    /// `determinePercentHint(Percentage)` is `{ }` where the enclosing property's
+    /// `LengthPercentage` gives `PercentHint::Length`. So `anchor(50%)` must build a HINTLESS
+    /// `Percentage` leaf. Carrying the hint rather than the category is what lets the side arm say
+    /// that without naming a `CSS::Category` enumerator, which the opaque forward declaration at
+    /// `CSSCalcTree.h` would not let it do anyway.
+    var percentageLeafHint: UInt8
     let absoluteLengthUnitsOnly: Bool
     let hasAllowedSymbols: Bool
     let treeCountingAllowed: Bool
     let calcMixEnabled: Bool
+    /// `CSSPropertyParserOptions::anchorPolicy` / `::anchorSizePolicy`, each already `== Allow`.
+    ///
+    /// `var`, and both are cleared for the duration of an `<anchor-side>`: that subtree is parsed
+    /// under `propertyOptions = { }` (`CSSCalcTree+Parser.cpp:1135`), whose defaults are `Forbid`,
+    /// so `anchor(--a anchor(top))` is invalid and the grammar must not accept it.
+    var anchorAllowed: Bool
+    var anchorSizeAllowed: Bool
+    let unitlessZeroLengthAllowed: Bool
     let rootFunctionId: UInt16
 
     @inline(always)
     init(_ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions) {
-        self.category = options.category
+        self.percentageLeafHint = percentHintRawValue(CalcType.determinePercentHint(options.category))
         self.absoluteLengthUnitsOnly = options.absoluteLengthUnitsOnly
         self.hasAllowedSymbols = options.hasAllowedSymbols
         self.treeCountingAllowed = options.treeCountingAllowed
         self.calcMixEnabled = options.cssCalcMixEnabled
+        self.anchorAllowed = options.anchorAllowed
+        self.anchorSizeAllowed = options.anchorSizeAllowed
+        self.unitlessZeroLengthAllowed = options.unitlessZeroLengthAllowed
         self.rootFunctionId = options.rootFunctionId
     }
 }
@@ -6500,7 +6750,12 @@ private struct CalcParseState {
     /// The parse options, read here rather than passed as a parameter of their own. This struct is
     /// already threaded through every descent function as one `inout` pointer, so carrying them
     /// costs no argument register at any level and saves the one the options used to occupy.
-    let options: CalcParseOptions
+    ///
+    /// `var` since stage G slice 2, and for one construct only: an `<anchor-side>` is parsed under a
+    /// different `ParserOptions` than its enclosing declaration (`CSSCalcTree+Parser.cpp:1131`), so
+    /// `calcParseAnchorSide` saves these, overrides the two fields that differ observably, and
+    /// restores them. Nothing else writes them.
+    var options: CalcParseOptions
 
     init(_ options: CalcParseOptions) {
         self.options = options
@@ -6511,19 +6766,17 @@ private struct CalcParseState {
     /// Set when the grammar hit something it does not cover, as opposed to invalid input.
     var declined = false
 
-    /// Whether a `sibling-count()` / `sibling-index()` leaf built HERE could be FOLDED by the C++
-    /// arm, in which case the grammar must decline rather than build it (stage F1).
+    /// Whether a fold that needs `options.conversionData` WOULD RUN on this parse, in which case the
+    /// grammar must decline every node whose fold it cannot reproduce rather than build it.
     ///
-    /// `simplify(SiblingCount&)` and `simplify(SiblingIndex&)`
-    /// (`CSSCalcTree+Simplification.cpp:527`-`:545`) resolve the node to a `Number` when
-    /// `options.conversionData` carries a style builder state with an element -- and production
-    /// parses at `ParseSimplification::Terminal`, so that fold is on the C++ arm's PARSE path, not
-    /// only on style resolution's. The island reaches the same answer through
-    /// `simplifySiblingFunction`, which goes through `withCalcOriginalNode(original,
-    /// nodes[i].origin, ...)`, and a PARSED tree has no original and never will (see
-    /// `calcParseAppendLeaf`'s note on `origin`). So a parsed tree-counting leaf cannot be folded,
-    /// and building an unfolded one where the C++ resolves it would be a divergence rather than a
-    /// conservative answer -- the one direction that loses a correct computed value.
+    /// TWO CONSTRUCTS ASK IT AND THEY ASK THE SAME QUESTION, which is why the field is named for the
+    /// question rather than for stage F1's caller: `sibling-count()` / `sibling-index()`, and
+    /// `anchor()` / `anchor-size()`. All four of their C++ folds open by requiring
+    /// `options.conversionData` and a style builder state, all four reach their answer through
+    /// `withCalcOriginalNode(original, nodes[i].origin, ...)`, and a PARSED tree has no original and
+    /// never will (see `calcParseAppendLeaf`'s note on `origin`). So building an unfolded node where
+    /// the C++ resolves it would be a divergence rather than a conservative answer -- the one
+    /// direction that loses a correct computed value.
     ///
     /// COSTS NO BOUNDARY FIELD AND NO UPCALL, because the fact ALREADY CROSSES:
     /// `CSSCalcSwiftSimplificationOptions::hasConversionData` (`CSSCalcSwiftTypes.h:778`) is filled
@@ -6542,7 +6795,17 @@ private struct CalcParseState {
     /// On the STATE rather than on `CSSCalcSwiftParseOptions`, for the cached token's reason: this
     /// struct is already threaded through the whole descent, so putting it on the boundary struct
     /// would be a second C++ field for a fact the first one already carries.
-    var treeCountingResolvable = false
+    var conversionDataFoldsRun = false
+
+    /// Whether the grammar built an `anchor()` whose `<anchor-side>` is a SUBTREE, which is the only
+    /// shape that puts `CalcFlatNodeFlags.insideAnchorSide` on anything.
+    ///
+    /// ON THE STATE SO THAT `simplifyParsed`'S LOOP CAN HOIST THE TEST OUT OF ITSELF. The C++ copies
+    /// an `<anchor-side>` rather than simplifying it, so the fold has to step over those nodes --
+    /// and a per-node flag read on a pass that runs over every node of every parse is exactly the
+    /// shape this island has measured at +12.7 instructions per parse for two label's worth of work.
+    /// A tree with no anchor side in it never reads a flag byte.
+    var hasAnchorSide = false
 
     /// A ONE-TOKEN CACHE, and it is not a micro-optimisation: `tokenAt` is an out-of-line call
     /// across the language boundary returning a 24-byte POD, and it cannot be inlined, because
@@ -6709,7 +6972,7 @@ private func calcParseAppendLeaf(
         // parsed tree. `simplifyParsed` routes the two tree-counting alternatives to a no-op arm
         // and never to `simplifySiblingFunction`, and it may do so because `calcParseZeroArguments`
         // has already declined the tree in the only configuration where the C++ fold would have
-        // done anything (`CalcParseState.treeCountingResolvable`). `emitParsed` refuses the
+        // done anything (`CalcParseState.conversionDataFoldsRun`). `emitParsed` refuses the
         // alternatives it cannot build outright rather than trusting that they cannot arrive.
         origin: CalcFlatNode.noNode,
         valueID: 0,
@@ -6731,7 +6994,9 @@ private func calcParseAppendOperation(
     _ firstChild: UInt32,
     _ childCount: UInt32,
     _ type: CalcType,
-    _ flags: UInt8 = 0
+    _ flags: UInt8 = 0,
+    _ valueID: UInt16 = 0,
+    _ origin: UInt32 = CalcFlatNode.noNode
 ) -> UInt32? {
     guard out.count < out.capacity else {
         return nil
@@ -6748,8 +7013,15 @@ private func calcParseAppendOperation(
         firstChild: firstChild,
         nextSibling: CalcFlatNode.noNode,
         childCount: childCount,
-        origin: CalcFlatNode.noNode,
-        valueID: 0,
+        // STILL THE SENTINEL FOR EVERY OPERATION BUT TWO. `origin` names a node of an ORIGINAL tree
+        // and a parsed tree has none, which is the note at `calcParseAppendLeaf`. Stage G slice 2
+        // gives it a second meaning on the parse path and ONLY there: on an `Anchor` or an
+        // `AnchorSize` it is the token index of the `<anchor-element>`, which `buildAnchor` turns
+        // back into a `CSS::CustomIdent`. The two meanings are disjoint by which pass wrote the
+        // node -- `withCalcOriginalNode` needs an `original` that `simplifyParsed` and `emitParsed`
+        // do not have, and neither reads this field for any other alternative.
+        origin: origin,
+        valueID: valueID,
         unitType: 0,
         alternative: alternative,
         percentHint: 0,
@@ -6803,17 +7075,19 @@ private func calcParseValue(
         return CalcParsed(index: me, type: CalcType())
 
     case WebCore.PercentageToken:
-        // `parseCalcPercentage`: the hint comes from the category, not from the token.
-        let hint = CalcType.determinePercentHint(state.options.category)
+        // `parseCalcPercentage`: the hint comes from the category, not from the token -- precomputed
+        // once per parse as `CalcParseOptions.percentageLeafHint`, and overridden for the duration of
+        // an `<anchor-side>`, which parses at `CSS::Category::Percentage` and so takes no hint.
+        let hint = state.options.percentageLeafHint
         guard let me = calcParseAppendLeaf(&out, .Percentage, token.numericValue,
-            UInt16(WebCore.CSSUnitType.Percentage.rawValue), percentHintRawValue(hint)) else { return nil }
+            UInt16(WebCore.CSSUnitType.Percentage.rawValue), hint) else { return nil }
         // `getType(const Percentage&)` (CSSCalcTree.cpp:428-:434) is `{ .percent = 1 }` and then
         // `applyPercentHint` if the hint is set -- which MOVES the percent exponent into the
         // hinted dimension rather than merely recording it, so setting `percentHint` directly
         // would be a different type.
         var percentType = CalcType()
         percentType.percent = 1
-        if let unwrapped = percentHintFromRawValue(percentHintRawValue(hint)) {
+        if let unwrapped = percentHintFromRawValue(hint) {
             percentType = percentType.withPercentHintApplied(unwrapped)
         }
         return CalcParsed(index: me, type: percentType)
@@ -7000,6 +7274,14 @@ private enum CalcFunctionArguments: UInt8 {
     /// through `calcParseArgumentList` as a flag would put a branch per argument on `min()`'s path
     /// for a construct no real stylesheet contains.
     case calcMix
+    /// `anchor( <anchor-element>? && <anchor-side>, <length-percentage>? )` -- `consumeAnchor`
+    /// (`CSSCalcTree+Parser.cpp:1116`). Stage G slice 2.
+    case anchor
+    /// `anchor-size( [ <anchor-element> || <anchor-size> ]? , <length-percentage>? )` --
+    /// `consumeAnchorSize` (`:1207`). A case of its own rather than a flag on `anchor`: the two
+    /// share `consumeAnchorFallback` and nothing else, and their `&&` and `||` combinators differ in
+    /// which half may be absent, which is the whole of their grammars.
+    case anchorSize
 }
 
 /// Which `CSSCalcSwiftParseDeclineReason` an uncovered `isCalcFunction` belongs to.
@@ -7080,6 +7362,9 @@ private func calcParseFunctionAlternative(_ functionId: UInt16)
     // after `progress()` (`CSSCalcTree+Parser.cpp:1412`), and the order of these labels is that
     // switch's so the two can be read side by side.
     case WebCore.CSSValueCalcMix.rawValue: return (.CalcMix, .calcMix)
+    // Stage G slice 2, in `parseCalcFunction`'s own order, which puts them last (`:1445`-`:1449`).
+    case WebCore.CSSValueAnchor.rawValue: return (.Anchor, .anchor)
+    case WebCore.CSSValueAnchorSize.rawValue: return (.AnchorSize, .anchorSize)
     default: return nil
     }
 }
@@ -7134,6 +7419,12 @@ private func calcParseFunctionBlock(
     case .calcMix:
         argumentsParsed = calcParseCalcMix(
             cursor, &inner, blockEnd, depth + 1, &out, &state)
+    case .anchor:
+        argumentsParsed = calcParseAnchor(
+            cursor, &inner, blockEnd, depth + 1, &out, &state)
+    case .anchorSize:
+        argumentsParsed = calcParseAnchorSize(
+            cursor, &inner, blockEnd, depth + 1, &out, &state)
     }
     guard let parsed = argumentsParsed else { return nil }
     // `if (!innerRange.atEnd()) return nullopt`. Vacuous for `<calc-sum>#`, whose loop runs to
@@ -7157,7 +7448,7 @@ private func calcParseFunctionBlock(
 ///     invalid input -- so declining here would burn a full C++ descent to reach the same
 ///     rejection, and parsing here would accept CSS the C++ rejects.
 ///   * gates pass but the node could be FOLDED -> **Declined**, `.TreeCounting`. See
-///     `CalcParseState.treeCountingResolvable`: the fold needs the original `CSSCalc::Child` and a
+///     `CalcParseState.conversionDataFoldsRun`: the fold needs the original `CSSCalc::Child` and a
 ///     parsed tree has none.
 ///   * gates pass and no fold is possible -> the leaf, unfolded, which is exactly what
 ///     `copyAndSimplify` leaves behind on the C++ arm in the same conditions.
@@ -7188,7 +7479,7 @@ private func calcParseZeroArguments(
     if !state.options.treeCountingAllowed {
         return nil
     }
-    if state.treeCountingResolvable {
+    if state.conversionDataFoldsRun {
         state.declined = true
         state.declineReason = .TreeCounting
         return nil
@@ -7879,6 +8170,431 @@ private func calcParseCalcMix(
     return CalcParsed(index: me, type: mergedType)
 }
 
+// MARK: `anchor()` and `anchor-size()` (P7b stage G slice 2)
+
+/// `consumeUnresolvedDashedIdent` (`CSSPropertyParserConsumer+Ident.cpp:139`-`:144`) AS AN INDEX.
+///
+/// The C++ is, in full, `if (peek().type() != IdentToken || !peek().value().startsWith("--")) return
+/// { }; return CustomIdent { consumeIncludingWhitespace().value().toAtomString() }`. Swift cannot see
+/// the text -- by design; `CSSCalcSwiftToken` carries no pointer -- so `tokenAt` answers the
+/// predicate as `cssCalcSwiftTokenIsDashedIdent` and this returns the token's INDEX for
+/// `CSSCalcSwiftBuilder::buildAnchor` to materialise from. Same token, same `toAtomString()`, same
+/// table: identical by construction, not by an argument about escapes.
+///
+/// The index is stable for the whole call. `parseAndSimplify` hands the island its
+/// `CSSParserTokenRange` by CONST reference and does not consume it (`CSSCalcTree+Parser.cpp:201`),
+/// which is the same fact that makes a decline free.
+@inline(always)
+private func calcParseDashedIdent(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState
+) -> UInt32? {
+    guard index < end else { return nil }
+    let token = calcToken(cursor, &state, index)
+    guard token.type == WebCore.IdentToken,
+        token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsDashedIdent != 0 else { return nil }
+    let me = index
+    // `range.consumeIncludingWhitespace()`.
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return me
+}
+
+/// `CSSPropertyParserHelpers::consumeIdentRaw<...>` over a caller-supplied keyword test: the id of
+/// the `IdentToken` here if the test accepts it, consuming it, or `CSSValueInvalid` leaving the
+/// index alone.
+///
+/// `CSSCalcSwiftToken.id` is non-zero only for an `IdentToken`, which is the same reasoning
+/// `calcParseSumOrNone` gives for testing `id` without testing the type -- but the type IS tested
+/// here, because `CSSValueInvalid` is the "no keyword" answer this returns and an id of 0 from a
+/// non-ident token would be indistinguishable from it.
+@inline(always)
+private func calcParseAnchorKeyword(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState,
+    _ accepts: (UInt16) -> Bool
+) -> UInt16 {
+    guard index < end else { return 0 }
+    let token = calcToken(cursor, &state, index)
+    guard token.type == WebCore.IdentToken, token.id != 0, accepts(token.id) else { return 0 }
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return token.id
+}
+
+/// `<anchor-side> = inside | outside | top | left | right | bottom | start | end | self-start |
+/// self-end | center` (`CSSCalcTree+Parser.cpp:1127`), as `consumeIdentRaw`'s accept set.
+///
+/// The enumerators are REAL `CSSValueID`s obtained from C++, never transcribed numbers -- stage E1
+/// established that `CSSValueKeywords.h`'s unscoped enum reaches Swift as top-level constants, which
+/// is what keeps a generated table from being copied here.
+@inline(always)
+private func calcIsAnchorSideKeyword(_ id: UInt16) -> Bool {
+    switch id {
+    case WebCore.CSSValueInside.rawValue, WebCore.CSSValueOutside.rawValue,
+        WebCore.CSSValueTop.rawValue, WebCore.CSSValueLeft.rawValue,
+        WebCore.CSSValueRight.rawValue, WebCore.CSSValueBottom.rawValue,
+        WebCore.CSSValueStart.rawValue, WebCore.CSSValueEnd.rawValue,
+        WebCore.CSSValueSelfStart.rawValue, WebCore.CSSValueSelfEnd.rawValue,
+        WebCore.CSSValueCenter.rawValue:
+        return true
+    default:
+        return false
+    }
+}
+
+/// `<anchor-size> = width | height | block | inline | self-block | self-inline` (`:1220`).
+@inline(always)
+private func calcIsAnchorSizeKeyword(_ id: UInt16) -> Bool {
+    switch id {
+    case WebCore.CSSValueWidth.rawValue, WebCore.CSSValueHeight.rawValue,
+        WebCore.CSSValueBlock.rawValue, WebCore.CSSValueInline.rawValue,
+        WebCore.CSSValueSelfBlock.rawValue, WebCore.CSSValueSelfInline.rawValue:
+        return true
+    default:
+        return false
+    }
+}
+
+/// One parsed anchor slot: the subtree's root, and whether the author wrote a MATH FUNCTION there.
+///
+/// The second half is the `calc()` prefix, and `CalcFlatNodeFlags.anchorSideWasFunction` is where it
+/// ends up. It is captured here because it is a property of the INPUT -- did the slot start with a
+/// `FunctionToken` -- which nothing downstream can recover once the fold has run.
+private struct CalcParsedAnchorSlot {
+    let index: UInt32
+    let type: CalcType
+    let wasFunction: Bool
+}
+
+/// `consumeValueWithoutSimplifyingRootCalc` (`CSSCalcTree+Parser.cpp:980`-`:1005`).
+///
+/// THE ONE-CHILD `Sum` WRAPPER IS NOT BUILT, and that is behaviour-preserving rather than a
+/// shortcut. The C++ wraps a function whose value is a LEAF so the `calc()` prefix survives
+/// serialization, `copyAndSimplify` then collapses the wrapper (css-values-4 8.3), and
+/// `anchorSlotKeepingPrefix` (`+Simplification.cpp:1762`) restores it iff the slot went in a
+/// non-`Leaf` and came out a `Leaf`. A `<calc-value>` that did not start with a function is always a
+/// leaf, so "went in a non-`Leaf`" IS `wasFunction`, and `emitParsedAnchor` applies the same rule to
+/// the node the fold left. Building and then folding the wrapper would reach the same tree by two
+/// extra nodes and a fold.
+///
+/// It is `parseCalcValue`, NOT `parseCalcSum`: `anchor(--a top, 10px 20%)` is invalid because the
+/// slot takes ONE `<calc-value>` and the trailing tokens then fail the block's own end check.
+@inline(always)
+private func calcParseAnchorSlotValue(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ state: inout CalcParseState
+) -> CalcParsedAnchorSlot? {
+    guard index < end else { return nil }
+    let token = calcToken(cursor, &state, index)
+    // `if (tokens.peek().type() == LeftParenthesisToken) return { }` -- a bare parenthesised group is
+    // not a legal anchor slot, where the identical tokens are legal inside a `calc()`.
+    if token.type == WebCore.LeftParenthesisToken { return nil }
+    let wasFunction = token.functionId != 0
+    guard let value = calcParseValue(cursor, &index, end, depth, &out, &state) else { return nil }
+    return CalcParsedAnchorSlot(index: value.index, type: value.type, wasFunction: wasFunction)
+}
+
+/// `consumeAnchorFallback` (`CSSCalcTree+Parser.cpp:1082`-`:1114`): the `<length-percentage>` an
+/// `anchor()` or `anchor-size()` falls back to, plus the unitless-zero arm.
+///
+/// IT CONSUMES BEFORE IT CAN FAIL, AND THAT IS LOAD-BEARING RATHER THAN INCIDENTAL -- see
+/// `calcParseAnchorSize`'s note on the neither-present arm. `calcParseValue` advances past the token
+/// before it decides, exactly as `parseCalcValue` does, so a caller that ignores the failure is left
+/// where the C++ caller is left.
+///
+/// THE `Category::Number` ARM REPLACES THE NODE. `TypedChild { makeNumeric(0, CSSUnitType::Px),
+/// Type::makeLength() }` (`:1108`) discards the parsed `Number` and substitutes a canonical zero
+/// length, so the node is rewritten in place here rather than appended -- the parsed leaf is already
+/// in the buffer and is the slot's root. `std::get_if<Number>` is why the test is on the
+/// ALTERNATIVE and not merely on the type: `calc(0)` has number type but is a `Sum`, and is
+/// rejected (`anchor-function-zero-fallback.html` asserts exactly that).
+@inline(always)
+private func calcParseAnchorFallback(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ state: inout CalcParseState
+) -> CalcParsedAnchorSlot? {
+    guard var slot = calcParseAnchorSlotValue(cursor, &index, end, depth, &out, &state) else {
+        return nil
+    }
+    switch slot.type.anchorSlotCategory {
+    case .length, .lengthPercentage:
+        return slot
+
+    case .number:
+        guard state.options.unitlessZeroLengthAllowed else { return nil }
+        var written = out.mutableSpan
+        let me = Int(slot.index)
+        // `!slot.wasFunction` IS THE `std::get_if<Number>` TEST, and leaving it out was a real
+        // divergence the differential caught: `anchor(left, calc(0))` parsed as `anchor(left, 0px)`
+        // where the C++ rejects it, and `anchor-function-zero-fallback.html` asserts the rejection.
+        //
+        // The C++ reaches `get_if<Number>` through `consumeValueWithoutSimplifyingRootCalc`'s
+        // RESULT, which is a one-child `Sum` whenever the slot was a function whose value is a leaf
+        // -- so a `calc(0)` fails the `get_if` and a bare `0` passes it. This grammar does not build
+        // that wrapper (see `CalcFlatNodeFlags.anchorSideWasFunction` for why), so the wrapper's
+        // PRESENCE has to be read off the bit that records it. `min(0, 0)` and `max(0)`, the other
+        // two shapes that file pins, are refused one line down instead: they are `Min`/`Max` nodes
+        // at parse time, not `Number` ones.
+        guard !slot.wasFunction, written[me].alternative == .Number, written[me].value == 0 else {
+            return nil
+        }
+        written[me].value = 0
+        written[me].unitType = UInt8(WebCore.CSSUnitType.Px.rawValue)
+        written[me].alternative = .CanonicalDimension
+        written[me].percentHint = 0
+        slot = CalcParsedAnchorSlot(index: slot.index, type: CalcType.makeLength(),
+            // The substituted node is a fresh `makeNumeric`, so the slot the C++ hands back is a
+            // LEAF with no wrapper -- and `wasFunction` is already false here by the guard above.
+            wasFunction: false)
+        return slot
+
+    case .percentage, .other:
+        return nil
+    }
+}
+
+/// `consumeAnchor` (`CSSCalcTree+Parser.cpp:1116`-`:1185`):
+/// `anchor( <anchor-element>? && <anchor-side>, <length-percentage>? )`.
+///
+/// THE `&&` IS SPELLED AS THE C++ SPELLS IT -- try the element, then the side, then the element
+/// again if the first attempt failed. That is not the same as "either order": a SECOND dashed ident
+/// after the side is accepted by neither arm (`anchor(--a --b top)` is invalid), because the
+/// re-parse only runs when the first one found nothing.
+///
+/// THE SIDE'S SUBTREE IS PARSED UNDER DIFFERENT OPTIONS AND IS NEVER SIMPLIFIED. `consumeAnchor`
+/// builds a fresh `ParserOptions { .category = Percentage, .allowedSymbols = { }, .propertyOptions =
+/// { } }` for it (`:1131`-`:1136`), and `copyAndSimplifyChildren` COPIES the side rather than
+/// simplifying it (`:1915`). Both are reproduced: `calcParseAnchorSide` overrides the two option
+/// fields that are observably different and marks every node it appended
+/// `CalcFlatNodeFlags.insideAnchorSide`, which `simplifyParsed` then steps over.
+private func calcParseAnchor(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    // `if (propertyOptions.anchorPolicy != AnchorPolicy::Allow) return { }` (`:1120`). A FAILURE,
+    // not a decline: the C++ arm returns `std::nullopt` too, so a retry would re-derive it.
+    if !state.options.anchorAllowed { return nil }
+    // A DECLINE, and a different outcome from the gate one line up. See
+    // `CalcParseState.conversionDataFoldsRun`: with conversion data the C++ EVALUATES the anchor
+    // against the position evaluator, and the island can only reach that through an original
+    // `CSSCalc::Child` a parsed tree has not got.
+    if state.conversionDataFoldsRun {
+        state.declined = true
+        state.declineReason = .AnchorEvaluation
+        return nil
+    }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+    var elementName = calcParseDashedIdent(cursor, &index, end, &state)
+
+    let sideKeyword = calcParseAnchorKeyword(cursor, &index, end, &state, calcIsAnchorSideKeyword)
+    var side: CalcParsedAnchorSlot? = nil
+    if sideKeyword == 0 {
+        guard let parsed = calcParseAnchorSide(cursor, &index, end, depth, &out, &state) else {
+            return nil
+        }
+        side = parsed
+    }
+
+    // `if (!anchorElement) anchorElement = consumeUnresolvedDashedIdent(...)` (`:1157`-`:1158`).
+    if elementName == nil {
+        elementName = calcParseDashedIdent(cursor, &index, end, &state)
+    }
+
+    var type = CalcType.makeLength()
+    var flags: UInt8 = 0
+    var head = CalcFlatNode.noNode
+    var tail = CalcFlatNode.noNode
+    var childCount: UInt32 = 0
+    if let parsedSide = side {
+        flags |= CalcFlatNodeFlags.anchorSideIsSubtree
+        if parsedSide.wasFunction {
+            flags |= CalcFlatNodeFlags.anchorSideWasFunction
+        }
+        head = parsedSide.index
+        tail = parsedSide.index
+        childCount = 1
+    }
+
+    if calcParseComma(cursor, &index, end, &state) {
+        guard let fallback = calcParseAnchorFallback(cursor, &index, end, depth, &out, &state) else {
+            return nil
+        }
+        if fallback.wasFunction {
+            flags |= CalcFlatNodeFlags.anchorFallbackWasFunction
+        }
+        // `type.percentHint = Type::determinePercentHint(*category)` (`:1173`), whose only non-empty
+        // answers are `PercentHint::Length` for `LengthPercentage` and `::Angle` for
+        // `AnglePercentage` -- and `consumeAnchorFallback` has already refused everything but
+        // `Length` and `LengthPercentage`, which is what the `ASSERT` one line up says.
+        if fallback.type.anchorSlotCategory == .lengthPercentage {
+            type.percentHint = CalcType.PercentHintValue(.Length)
+        }
+        if head == CalcFlatNode.noNode {
+            head = fallback.index
+        } else {
+            calcParseLink(&out, tail, fallback.index)
+        }
+        childCount &+= 1
+    }
+
+    state.requiresConversionData = true
+    guard let me = calcParseAppendOperation(&out, .Anchor, head, childCount, type, flags,
+        sideKeyword, elementName ?? CalcFlatNode.noNode) else { return nil }
+    return CalcParsed(index: me, type: type)
+}
+
+/// The `<percentage>` arm of `<anchor-side>` (`CSSCalcTree+Parser.cpp:1131`-`:1151`), under the
+/// fresh `ParserOptions` the C++ builds for it and with the subtree marked unsimplifiable.
+///
+/// TWO OPTION FIELDS DIFFER OBSERVABLY AND BOTH ARE OVERRIDDEN.
+///
+///   * `category` is `CSS::Category::Percentage`, so a `<percentage>` leaf in here takes NO percent
+///     hint where the enclosing inset property's `LengthPercentage` would give it `PercentHint::
+///     Length`. Carried as the precomputed `percentageLeafHint`, which is why no `CSS::Category`
+///     enumerator has to be nameable from Swift.
+///   * `propertyOptions` is `{ }`, whose `anchorPolicy` and `anchorSizePolicy` default to `Forbid`,
+///     so `anchor(--a anchor(top))` is INVALID. Without this the grammar would accept CSS the C++
+///     rejects, which is the one divergence direction that is never conservative.
+///
+/// `allowedSymbols = { }` is deliberately NOT reproduced, and the omission is safe rather than
+/// overlooked: with a non-empty table the grammar declines every `IdentToken`, and a decline runs
+/// the C++ arm, which is the correct answer by a slower route. Reproducing it would mean parsing a
+/// `<calc-keyword>` here on a claim about the symbol table rather than declining to it.
+///
+/// THE MARKING IS A RANGE, NOT A THREADED FLAG. Every node this call appended is in
+/// `[before, out.count)` -- the descent only ever appends -- so one pass over that range marks the
+/// whole subtree without `insideAnchorSide` having to reach `calcParseAppendLeaf`'s signature and
+/// every caller of it.
+@inline(never)
+private func calcParseAnchorSide(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ state: inout CalcParseState
+) -> CalcParsedAnchorSlot? {
+    let before = out.count
+    let saved = state.options
+    state.options.percentageLeafHint = 0
+    state.options.anchorAllowed = false
+    state.options.anchorSizeAllowed = false
+    let parsed = calcParseAnchorSlotValue(cursor, &index, end, depth, &out, &state)
+    state.options = saved
+
+    guard let slot = parsed, slot.type.anchorSlotCategory == .percentage else { return nil }
+
+    state.hasAnchorSide = true
+    let after = out.count
+    var written = out.mutableSpan
+    var k = before
+    while k < after {
+        written[k].flags |= CalcFlatNodeFlags.insideAnchorSide
+        k += 1
+    }
+    return slot
+}
+
+/// `consumeAnchorSize` (`CSSCalcTree+Parser.cpp:1207`-`:1267`):
+/// `anchor-size( [ <anchor-element> || <anchor-size> ]? , <length-percentage>? )`.
+///
+/// THE NEITHER-PRESENT ARM DOES NOT CHECK ITS FALLBACK, AND THAT IS DELIBERATELY REPRODUCED. With
+/// no element and no size, the C++ writes `fallback = consumeAnchorFallback(...)` (`:1242`) and
+/// tests nothing -- an absent fallback and a REJECTED one are the same `std::nullopt`. But
+/// `consumeAnchorFallback` reaches `parseCalcValue`, which consumes the token before it decides, so
+/// the range is left past it and the caller's end-of-block check has nothing to reject. The
+/// consequence is web-visible: `anchor-size(bogus)`, `anchor-size(1)` and `anchor-size(10deg)` all
+/// parse, as `anchor-size()`, and `anchor-size(bogus bogus)` does not -- one junk token passes and
+/// two do not, which is what makes this an explanation rather than a story.
+///
+/// THE ISLAND MATCHES THE C++ RATHER THAN THE SPEC, and the choice is made here rather than fallen
+/// into. The island's contract is to be indistinguishable from the arm it replaces: whether a
+/// declaration is valid must not depend on which arm ran, and `WK_USE_SWIFT_CSS_CALC_PARSER` is a
+/// build flag. Implementing the spec instead would make the differential report a mismatch that is
+/// really a C++ bug, on an input WPT does not cover either way. It also costs nothing to match --
+/// `calcParseValue` already consumes-then-fails in the same place -- where diverging would cost a
+/// deliberate rollback. The bug is recorded as a to-file item and the corpus pins the three lines in
+/// a block of their own, so the day the C++ is fixed exactly that block moves.
+private func calcParseAnchorSize(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ out: inout OutputSpan<CalcFlatNode>,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    // `if (propertyOptions.anchorSizePolicy != AnchorSizePolicy::Allow) return { }` (`:1213`).
+    if !state.options.anchorSizeAllowed { return nil }
+    // `calcParseAnchor`'s decline, for `simplify(AnchorSize&)`'s identical opening guard.
+    if state.conversionDataFoldsRun {
+        state.declined = true
+        state.declineReason = .AnchorEvaluation
+        return nil
+    }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+    var elementName = calcParseDashedIdent(cursor, &index, end, &state)
+    let sizeKeyword = calcParseAnchorKeyword(cursor, &index, end, &state, calcIsAnchorSizeKeyword)
+    // `if (maybeAnchorSize && !maybeAnchorElement)` (`:1224`): the `||` re-parse arm.
+    if sizeKeyword != 0, elementName == nil {
+        elementName = calcParseDashedIdent(cursor, &index, end, &state)
+    }
+
+    var head = CalcFlatNode.noNode
+    var childCount: UInt32 = 0
+    var flags: UInt8 = 0
+    var type = CalcType.makeLength()
+    var fallback: CalcParsedAnchorSlot? = nil
+    if sizeKeyword != 0 || elementName != nil {
+        if calcParseComma(cursor, &index, end, &state) {
+            guard let parsed = calcParseAnchorFallback(cursor, &index, end, depth, &out, &state) else {
+                return nil
+            }
+            fallback = parsed
+        }
+    } else {
+        // The unchecked call this function's note is about. A failure leaves `index` where the
+        // failed attempt left it, which is the whole mechanism.
+        fallback = calcParseAnchorFallback(cursor, &index, end, depth, &out, &state)
+    }
+
+    if let parsed = fallback {
+        if parsed.wasFunction {
+            flags |= CalcFlatNodeFlags.anchorFallbackWasFunction
+        }
+        if parsed.type.anchorSlotCategory == .lengthPercentage {
+            type.percentHint = CalcType.PercentHintValue(.Length)
+        }
+        head = parsed.index
+        childCount = 1
+    }
+
+    state.requiresConversionData = true
+    guard let me = calcParseAppendOperation(&out, .AnchorSize, head, childCount, type, flags,
+        sizeKeyword, elementName ?? CalcFlatNode.noNode) else { return nil }
+    return CalcParsed(index: me, type: type)
+}
+
 /// `<calc-product> = <calc-value> [ [ '*' | '/' ] <calc-value> ]*`
 private func calcParseProduct(
     _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
@@ -8132,8 +8848,8 @@ private func calcParseAttempt(
     // STAGE F1's decline condition, computed ONCE per attempt rather than read per node. `simplify`
     // is part of it because the differential's unsimplified arm runs the C++ at
     // `ParseSimplification::None`, which makes no fold on either side -- so declining there would
-    // decline a case the two arms agree on. See `CalcParseState.treeCountingResolvable`.
-    state.treeCountingResolvable = simplify && simplificationOptions.hasConversionData
+    // decline a case the two arms agree on. See `CalcParseState.conversionDataFoldsRun`.
+    state.conversionDataFoldsRun = simplify && simplificationOptions.hasConversionData
     return withTemporaryAllocation(of: CalcFlatNode.self, capacity: capacity) { out -> CalcParseAttempt in
         var attempt = CalcParseAttempt()
         var index: UInt32 = 0
@@ -8169,6 +8885,10 @@ private func calcParseAttempt(
                 descent = calcParseZeroArguments(cursor, &index, end, &out, &state, rootFunction.alternative)
             case .calcMix:
                 descent = calcParseCalcMix(cursor, &index, end, 0, &out, &state)
+            case .anchor:
+                descent = calcParseAnchor(cursor, &index, end, 0, &out, &state)
+            case .anchorSize:
+                descent = calcParseAnchorSize(cursor, &index, end, 0, &out, &state)
             }
         } else if state.options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
             || state.options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue) {
@@ -8219,7 +8939,7 @@ private func calcParseAttempt(
                 allowZeroValueLengthRemovalFromSum: simplificationOptions.allowZeroValueLengthRemovalFromSum,
                 category: simplificationOptions.category
             )
-            guard tree.simplifyParsed(simplification, builder) else {
+            guard tree.simplifyParsed(simplification, builder, state.hasAnchorSide) else {
                 attempt.foldRefused = true
                 return attempt
             }

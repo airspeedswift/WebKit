@@ -1106,6 +1106,13 @@ struct AnchorSize {
     bool operator==(const AnchorSize&) const = default;
 };
 
+// `<anchor-size>` as the `Style::AnchorSizeDimension` it names, or nothing. Defined in
+// CSSCalcTree+Parser.cpp beside `consumeAnchorSize`, its first caller, and declared HERE rather than
+// in CSSCalcTree+Parser.h so that `CSSCalcSwiftBuilder::buildAnchor` -- which reconstructs an
+// `AnchorSize` from a flat node carrying the keyword's `CSSValueID` -- reads the SAME six-case table
+// instead of a second copy of it, without CSSCalcTree+Simplification.cpp gaining an include.
+std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID);
+
 
 // MARK: TextStream
 

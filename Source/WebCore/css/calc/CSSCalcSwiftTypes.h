@@ -1056,6 +1056,32 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // positionally are unchanged: a parameter inserted before it would rewrite them for nothing.
     WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false, uint8_t noneMask = 0) noexcept;
 
+    // Pop the subtree slots of an `anchor()` or an `anchor-size()` and push the finished node
+    // (P7b stage G slice 2).
+    //
+    // A SEPARATE ENTRY RATHER THAN TWO MORE LABELS IN `buildOperation`, and the reason is the hot
+    // path rather than tidiness: the two extra arguments would be materialised at every one of
+    // `buildOperation`'s per-node call sites, and its label count is already the thing that trips
+    // clang's inliner cliff on this entry. Nothing here runs for a tree with no `anchor()` in it.
+    //
+    // THE ELEMENT NAME CROSSES AS A TOKEN INDEX, not as a string. Swift deliberately cannot see a
+    // token's text (`CSSCalcSwiftToken` carries no pointer, and says why), so the grammar decides
+    // *whether* the token is a `<dashed-ident>` from `cssCalcSwiftTokenIsDashedIdent` and this entry
+    // materialises the `CSS::CustomIdent` from `peek(elementNameToken)` -- the same one token
+    // `consumeUnresolvedDashedIdent` reads, through the same `toAtomString()`. Same `AtomString`,
+    // same atomisation, by construction. `cssCalcSwiftFlatNoNode` means no element name. This is the
+    // tokenizer island's own shape (`CSSParserToken.h:124`-`:143`: Swift writes an offset, C++
+    // resolves it), not a new one.
+    //
+    // `valueID` IS THE `<anchor-side>` KEYWORD FOR AN `Anchor` AND THE `<anchor-size>` KEYWORD FOR AN
+    // `AnchorSize`, and `CSSValueInvalid` carries the two "absent" answers, which are different
+    // answers and are disjoint by alternative: for an `AnchorSize` it means `dimension` is
+    // `std::nullopt`, and for an `Anchor` -- whose `side` is NOT optional -- it means the side is the
+    // `<percentage>` SUBTREE in slot 0. So the slot layout is derived here rather than sent: an
+    // `Anchor` with no keyword has a side slot, everything else does not, and the remaining slot is
+    // the fallback. Nothing about the shape needs a flags argument.
+    WEBCORE_EXPORT bool buildAnchor(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot, uint16_t valueID, uint32_t elementNameToken) noexcept;
+
     // Drop every operand.
     //
     // Two callers and they are not the same kind: `cssCalcSwiftParseIntoChild`'s failure and
@@ -1379,6 +1405,23 @@ static constexpr uint8_t cssCalcSwiftTokenIsCalcFunction = 1 << 1;
 // decline; a function block with neither bit is a parse FAILURE, which is what the C++ arm does
 // with it -- `findBlock` returns nothing and the value switch has no `FunctionToken` arm.
 static constexpr uint8_t cssCalcSwiftTokenIsPlainCalcFunction = 1 << 2;
+// Bit 3, for an IdentToken: the token's text starts with `--`, so it is a `<dashed-ident>` and a
+// candidate `<anchor-element>` (P7b stage G slice 2).
+//
+// THE ONE THING `anchor()` NEEDS THAT THIS BOUNDARY DELIBERATELY DOES NOT CARRY IS TEXT, and this is
+// the whole of it. `consumeUnresolvedDashedIdent` (CSSPropertyParserConsumer+Ident.cpp:139-:144) is
+// `range.peek().type() == IdentToken && range.peek().value().startsWith("--"_s)` over exactly ONE
+// token; this bit is that predicate over the same token, so the two arms' accept sets are identical
+// by construction rather than by an argument about escapes. The NAME still never crosses -- Swift
+// sends back the token's INDEX and `CSSCalcSwiftBuilder::buildAnchor` materialises the
+// `CSS::CustomIdent` from `peek(index)`, which is the same `toAtomString()` into the same table.
+//
+// A FLAG BIT RATHER THAN AN `identClassAt(index)` ENTRY ON THE CURSOR, which is what the design note
+// chose: the entry is nine lines of C++ and this is three, and this project prices a line of glue
+// above an instruction (CLAUDE.md 1). The cost is one compare on the fall-through arm of an
+// `if`/`else if` chain `tokenAt` already runs -- a DimensionToken and a FunctionToken pay nothing --
+// against the six retired instructions per token a FIELD here was measured to cost.
+static constexpr uint8_t cssCalcSwiftTokenIsDashedIdent = 1 << 3;
 static_assert(sizeof(CSSCalcSwiftToken) == 24);
 static_assert(alignof(CSSCalcSwiftToken) == 8);
 
@@ -1489,6 +1532,29 @@ struct CSSCalcSwiftParseOptions {
     // struct is passed by value once per parse, not per node.
     bool cssCalcMixEnabled;
 
+    // `CSSPropertyParserOptions::anchorPolicy` and `::anchorSizePolicy`, each already reduced to
+    // "is it `Allow`" -- `consumeAnchor`'s and `consumeAnchorSize`'s first statements
+    // (`CSSCalcTree+Parser.cpp:1120` and `:1213`), and their only context gates.
+    //
+    // CLEAR MEANS **FAILED**, NOT DECLINED, as for the two gates above: the C++ returns `{ }`.
+    //
+    // TWO FIELDS, NOT ONE "anchor positioning is on" BIT, because the two policies are INDEPENDENT
+    // in production and a single bit could not tell a conforming arm from one that conflated them:
+    // the eight inset properties allow both, while `width`/`height`/`max-*`/`margin-*` allow only
+    // `anchor-size()`. That asymmetry is what makes `width` a sharp negative control for `anchor()`
+    // and a treatment for `anchor-size()` in the same corpus.
+    bool anchorAllowed;
+    bool anchorSizeAllowed;
+
+    // `CSSPropertyParserOptions::unitlessZeroLength == UnitlessZeroQuirk::Allow`, which is
+    // `consumeAnchorFallback`'s `Category::Number` arm (`CSSCalcTree+Parser.cpp:1098`) and nothing
+    // else in the grammar's reach.
+    //
+    // IT HAS TO CROSS EVEN THOUGH ITS DEFAULT IS `Allow`, and the direction of the error is why:
+    // a property that FORBIDS it rejects `anchor(top, 0)`, so assuming `Allow` would make the island
+    // accept CSS the C++ arm rejects -- the one divergence direction that is never conservative.
+    bool unitlessZeroLengthAllowed;
+
     // The TOP-LEVEL function's `CSSValueID` raw value: `CSSValueCalc`, `CSSValueWebkitCalc`, or
     // whichever math function the grammar covers. The caller has it already -- it is the
     // `functionId` it tested with `isCalcFunction` -- so this is a copy of a value C++ read, not a
@@ -1543,6 +1609,12 @@ enum class CSSCalcSwiftParseDeclineReason : uint8_t {
     // `TooManyTokens` for this reason and `?` for that one -- a wrong name rather than a missing
     // one. Appended, an un-updated mirror prints `?`, which is visible.
     CalcMixWeight,
+    // An `anchor()` or `anchor-size()` in a configuration where the C++ arm's `simplify` would
+    // EVALUATE it -- `options.conversionData` with a style builder state. Both folds reach the
+    // anchor position evaluator through the original `CSSCalc::Child`, which a parsed tree has not
+    // got, so the island declines rather than handing back an unresolved node where the C++ hands
+    // back a length. Stage G slice 2. APPENDED, for the reason the enumerator above gives.
+    AnchorEvaluation,
 };
 
 struct alignas(8) CSSCalcSwiftParseResult {
@@ -1602,7 +1674,17 @@ WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParse
 // fallback a consumer keeps until it moves to Swift -- the charter's gate on P7c being that a
 // consumer either moves to Swift or keeps reading `Child`, never gets rewritten in C++ against the
 // flat form. False leaves `outRoot` untouched.
-WEBCORE_EXPORT bool cssCalcSwiftEmitStoreIntoChild(const CSSCalcSwiftFlatNodeVector&, uint32_t rootIndex, const SimplificationOptions&, Child& outRoot) noexcept;
+//
+// `tokens` IS THE RANGE THE TREE WAS PARSED FROM, and the parameter is required rather than
+// defaulted because the flat form is an encoding RELATIVE TO THAT RANGE: an `anchor()`'s
+// `<anchor-element>` is stored as a token index, not as a string (see `buildAnchor`), so a caller
+// that no longer has the tokens cannot decode one. That is a real limit of the flat arm and the
+// signature is where it is stated. IT IS SAFE, NOT MERELY DOCUMENTED: `buildAnchor` re-checks the
+// `IdentToken` and `--` predicate at the index, and a default-constructed range yields the EOF
+// token there, so a caller who passes the wrong range or none gets a REFUSAL -- false, `outRoot`
+// untouched, fall back to the `Child` -- and never a wrong element name. Every other alternative
+// the flat form carries is self-contained and decodes with an empty range.
+WEBCORE_EXPORT bool cssCalcSwiftEmitStoreIntoChild(const CSSCalcSwiftFlatNodeVector&, uint32_t rootIndex, const SimplificationOptions&, const CSSParserTokenRange& tokens, Child& outRoot) noexcept;
 
 } // namespace CSSCalc
 } // namespace WebCore

@@ -228,6 +228,9 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
                 && (propertyParserState.currentRule == StyleRuleType::Style || propertyParserState.currentRule == StyleRuleType::Keyframe)
                 && propertyParserState.currentProperty != CSSPropertyInvalid,
             .cssCalcMixEnabled = propertyParserState.context.cssCalcMixEnabled,
+            .anchorAllowed = parserOptions.propertyOptions.anchorPolicy == AnchorPolicy::Allow,
+            .anchorSizeAllowed = parserOptions.propertyOptions.anchorSizePolicy == AnchorSizePolicy::Allow,
+            .unitlessZeroLengthAllowed = parserOptions.propertyOptions.unitlessZeroLength == UnitlessZeroQuirk::Allow,
             .rootFunctionId = static_cast<uint16_t>(function),
         }, simplificationOptions, swiftRoot, parseSimplification == ParseSimplification::Terminal, &swiftFlatNodes, &swiftFlatRootIndex);
 
@@ -1184,7 +1187,11 @@ static std::optional<TypedChild> consumeAnchor(CSSParserTokenRange& tokens, int 
     return TypedChild { makeChild(WTF::move(anchor), type), type };
 }
 
-static std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID value)
+// NOT `static`, because `CSSCalcSwiftBuilder::buildAnchor` needs the identical mapping when it
+// materialises an `AnchorSize` from the flat node's `valueID`, and a second copy of a six-case table
+// in the other translation unit is exactly the duplication the boundary rules forbid. Declared in
+// CSSCalcTree+Parser.h.
+std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID value)
 {
     switch (value) {
     case CSSValueWidth:
@@ -1834,6 +1841,10 @@ CSSCalcSwiftToken CSSCalcSwiftParseCursor::tokenAt(uint32_t index) const noexcep
         flags = cssCalcSwiftUnitFlagsFor(token.unitType());
     else if (type == FunctionToken)
         flags = cssCalcSwiftFunctionFlagsFor(token.functionId());
+    // Stage G slice 2's one answer about a token's TEXT, and the only one the grammar ever needs:
+    // `consumeUnresolvedDashedIdent`'s predicate, over the same single token it reads.
+    else if (type == IdentToken && token.value().startsWith("--"_s))
+        flags = cssCalcSwiftTokenIsDashedIdent;
 
     return {
         .numericValue = isNumeric ? token.numericValue() : 0,

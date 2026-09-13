@@ -2260,6 +2260,24 @@ struct CSSCalcParseComparison {
     // return before any echo is checked, which is a silent pass over an unmeasured axis.
     bool sawRuleNotStyle;
     bool sawPropertyInvalid;
+    // STAGE G'S AXIS: the two `CSSPropertyParserOptions` anchor policies, echoed for the same reason
+    // as the four above, and APPENDED for the same reason -- the old layout stays a strict prefix.
+    //
+    // This entry drove both arms with `.propertyOptions = { }`, whose defaults are
+    // `AnchorPolicy::Forbid` and `AnchorSizePolicy::Forbid`, so `consumeAnchor` and
+    // `consumeAnchorSize` returned on their FIRST statement (`CSSCalcTree+Parser.cpp:1119` and
+    // `:1212`) and the C++ arm refused every `anchor()` and `anchor-size()` in the corpus. Against a
+    // Swift arm that declines them, that is agreement over two refusals -- a decline reading as
+    // parity, at the level of the harness rather than of the island. `calc-parse-declines.txt`
+    // recorded the consequence: five of the nine declining functions "report N/A rather than
+    // DECLINED and no delta exists to take".
+    //
+    // TWO BITS, NOT ONE, because the two policies are independent in production: the eight inset
+    // properties allow both, `width`/`height`/`max-*`/`margin-*` allow only `anchor-size()`, and a
+    // single "anchor positioning on" bit could not tell an arm that conflated them from one that did
+    // not.
+    bool sawAnchorAllowed;
+    bool sawAnchorSizeAllowed;
 };
 
 WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char*, size_t, uint64_t* outCpp, uint64_t* outSwift, uint32_t* outTokenCount);
@@ -2273,8 +2291,22 @@ enum CSSCalcCompareParseOption : uint32_t {
     // own bit. Set, the clause FAILS, which is what makes `sibling-count()` invalid in both arms.
     CSSCalcCompareParseRuleNotStyle = 1u << 2,
     CSSCalcCompareParsePropertyInvalid = 1u << 3,
+    // Stage G's axis: `CSSPropertyParserOptions::anchorPolicy` and `::anchorSizePolicy`. Set, the
+    // policy is `Allow`, which is what a real inset or sizing property supplies.
+    CSSCalcCompareParseAnchorAllowed = 1u << 4,
+    CSSCalcCompareParseAnchorSizeAllowed = 1u << 5,
 };
 WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char*, size_t, uint32_t options);
+// ENTRY 1b. Does this WebCore understand the two Stage G anchor-policy option bits?
+//
+// Its ABSENCE is the only thing a driver can test, and without it the failure is silent in the
+// worst possible way: `CSSCalcParseComparison` is returned by value, so a driver whose mirror of the
+// struct is two fields LONGER than the framework's reads uninitialised bytes for
+// `sawAnchorAllowed`/`sawAnchorSizeAllowed` -- which fails the echo assertion at random rather than
+// reproducibly, and reads like a flaky harness rather than a version skew. Same shape and same
+// reason as entry 13, which exists because a missing `parseSimplification` field would have made a
+// whole phase silently vacuous.
+WEBCORE_EXPORT bool webCoreCSSCalcCompareParseAnchorPolicyAvailable(void);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char*, size_t, unsigned arm, uint32_t iterations, uint32_t* outCovered);
 WEBCORE_EXPORT uint64_t webCoreCSSCalcSimplificationPrimitiveBench(uint32_t, uint32_t);
 WEBCORE_EXPORT bool webCoreCSSCalcSimplificationFontMetricsAvailable(void);
@@ -2780,17 +2812,26 @@ WEBCORE_EXPORT bool webCoreCSSCalcCompareParseTokens(const char* text, size_t le
 // is stated on `cppParsed`, and why a Swift-outcome floor would have read "not live" on the very
 // arm the axis was added to instrument.
 
+WEBCORE_EXPORT bool webCoreCSSCalcCompareParseAnchorPolicyAvailable(void)
+{
+    return true;
+}
+
 WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* text, size_t length, uint32_t options)
 {
     bool withSymbols = options & CSSCalcCompareParseWithSymbols;
     bool absoluteLengthUnitsOnly = options & CSSCalcCompareParseAbsoluteLengthUnitsOnly;
     bool ruleNotStyle = options & CSSCalcCompareParseRuleNotStyle;
     bool propertyInvalid = options & CSSCalcCompareParsePropertyInvalid;
+    bool anchorAllowed = options & CSSCalcCompareParseAnchorAllowed;
+    bool anchorSizeAllowed = options & CSSCalcCompareParseAnchorSizeAllowed;
     CSSCalcParseComparison result { };
     result.sawWithSymbols = withSymbols;
     result.sawAbsoluteLengthUnitsOnly = absoluteLengthUnitsOnly;
     result.sawRuleNotStyle = ruleNotStyle;
     result.sawPropertyInvalid = propertyInvalid;
+    result.sawAnchorAllowed = anchorAllowed;
+    result.sawAnchorSizeAllowed = anchorSizeAllowed;
     String source { unsafeMakeSpan(byteCast<Latin1Character>(text), length) };
 
     CSSTokenizer tokenizer(source);
@@ -2848,7 +2889,12 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .category = category,
             .range = WebCore::CSS::All,
             .allowedSymbols = withSymbols ? calcAllowedSymbols() : CSSCalcSymbolsAllowed { },
-            .propertyOptions = { },
+            // THE STAGE G AXIS. Swept rather than pinned, and the defaults are the OFF value, so a
+            // run that does not ask for the policies measures exactly what it measured before.
+            .propertyOptions = {
+                .anchorPolicy = anchorAllowed ? AnchorPolicy::Allow : AnchorPolicy::Forbid,
+                .anchorSizePolicy = anchorSizeAllowed ? AnchorSizePolicy::Allow : AnchorSizePolicy::Forbid,
+            },
         };
     };
     auto makeSimplificationOptions = [&](WebCore::CSS::Category category) {
@@ -2901,6 +2947,16 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
         // the Swift arm has to be given the same answer or the two would not be comparing the same
         // grammar -- a Swift FAILURE against a C++ parse, which is a loud mismatch, not a decline.
         .cssCalcMixEnabled = true,
+        // STAGE G'S AXIS, SWEPT WITH THE C++ ARM'S. `makeParserOptions` above hands the C++ arm
+        // `anchorPolicy`/`anchorSizePolicy` from the same two option bits; handing the Swift arm a
+        // constant instead would make an `anchor()` a Swift FAILURE against a C++ parse on every
+        // policies-ON row and a C++ refusal against a Swift parse on every OFF one -- the axis would
+        // be live in the report and dead in the comparison.
+        .anchorAllowed = anchorAllowed,
+        .anchorSizeAllowed = anchorSizeAllowed,
+        // `CSSPropertyParserOptions::unitlessZeroLength` defaults to `Allow` and neither
+        // `makeParserOptions` nor this entry overrides it, so the two arms agree at the default.
+        .unitlessZeroLengthAllowed = true,
         .rootFunctionId = static_cast<uint16_t>(functionId),
     }, simplificationOptions, root, false);
 
@@ -2996,6 +3052,9 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .hasAllowedSymbols = withSymbols,
             .treeCountingAllowed = treeCountingAllowed,
             .cssCalcMixEnabled = true,
+            .anchorAllowed = anchorAllowed,
+            .anchorSizeAllowed = anchorSizeAllowed,
+            .unitlessZeroLengthAllowed = true,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, fusedRoot, true);
         result.fusedOutcome = fusedResult.outcome;
@@ -3028,12 +3087,15 @@ WEBCORE_EXPORT CSSCalcParseComparison webCoreCSSCalcCompareParse(const char* tex
             .hasAllowedSymbols = withSymbols,
             .treeCountingAllowed = treeCountingAllowed,
             .cssCalcMixEnabled = true,
+            .anchorAllowed = anchorAllowed,
+            .anchorSizeAllowed = anchorSizeAllowed,
+            .unitlessZeroLengthAllowed = true,
             .rootFunctionId = static_cast<uint16_t>(functionId),
         }, simplificationOptions, storeParseRoot, true, &storeNodes, &storeRootIndex);
         result.storeNodeCount = storeNodes.size();
         if (result.cppSimplifiedParsed && storeResult.outcome == static_cast<uint8_t>(CSSCalc::CSSCalcSwiftParseOutcome::Parsed)) {
             CSSCalc::Child rebuiltRoot = CSSCalc::Number { .value = 0 };
-            if (CSSCalc::cssCalcSwiftEmitStoreIntoChild(storeNodes, storeRootIndex, simplificationOptions, rebuiltRoot))
+            if (CSSCalc::cssCalcSwiftEmitStoreIntoChild(storeNodes, storeRootIndex, simplificationOptions, storeInner, rebuiltRoot))
                 result.storeTreesAgree = cppTerminal->root == rebuiltRoot;
         }
     }
@@ -3122,7 +3184,15 @@ WEBCORE_EXPORT uint64_t webCoreCSSCalcParseArmBench(const char* text, size_t len
     // `treeCountingAllowed` true: this entry's `parserState` is `Style` / `CSSPropertyWidth` and
     // `calcParserContext()` sets the context flag, so all three C++ gates pass and the Swift arm has
     // to be given the same answer or the two would not be timing the same parse.
-    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .treeCountingAllowed = true, .cssCalcMixEnabled = true, .rootFunctionId = static_cast<uint16_t>(functionId) };
+    auto swiftParseOptions = CSSCalc::CSSCalcSwiftParseOptions { .category = category, .absoluteLengthUnitsOnly = false, .hasAllowedSymbols = false, .treeCountingAllowed = true, .cssCalcMixEnabled = true,
+        // FALSE, matching the `propertyOptions = { }` the C++ coverage probe above runs with: this
+        // entry TIMES the two arms, so an option the arms disagree on would time two different
+        // grammars. `anchor()` is uncovered on the C++ side here for exactly the same reason, so no
+        // corpus line reaches either arm's anchor code through this entry.
+        .anchorAllowed = false, .anchorSizeAllowed = false,
+        // `CSSPropertyParserOptions::unitlessZeroLength` defaults to `Allow`, which is what
+        // `propertyOptions = { }` gives the C++ arm.
+        .unitlessZeroLengthAllowed = true, .rootFunctionId = static_cast<uint16_t>(functionId) };
 
     // Coverage is decided by running the Swift arm ONCE, before timing.
     {
