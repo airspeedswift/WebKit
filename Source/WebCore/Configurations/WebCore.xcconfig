@@ -228,6 +228,10 @@ WK_HAVE_URL_FORMATTING_xrsimulator = YES;
 WK_HAVE_URL_FORMATTING_maccatalyst = YES;
 WK_HAVE_URL_FORMATTING_macosx = YES;
 
+// Whole-module. Without it a cross-file generic call stays unspecialized even where a
+// specialization already exists in the same binary.
+SWIFT_COMPILATION_MODE = wholemodule;
+
 SWIFT_INSTALL_OBJC_HEADER = NO;
 BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 SWIFT_LIBRARY_LEVEL = spi;
