@@ -24,7 +24,17 @@
 #include "../../Configurations/FeatureDefines.xcconfig"
 #include "../../../../Configurations/Version.xcconfig"
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) $(inherited);
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) $(inherited) $(WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES);
+
+// Selects the Swift UTF-8 decoder (TextCodecUTF8Swift.swift). Off by default; both arms are
+// compiled in either way, so flipping it rebuilds only TextCodecUTF8.cpp.
+//
+// It does not tell you the arm ran. The Swift arm covers input whose every character fits in
+// Latin-1 and declines the rest to the C++ loop in the same function, so both settings give
+// byte-identical output by construction and no correctness harness can distinguish them.
+// Read `textCodecUTF8SwiftCounters()` for that.
+WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES = $(WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES_$(WK_USE_SWIFT_TEXT_CODEC_UTF8));
+WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES_YES = USE_SWIFT_TEXT_CODEC_UTF8=1;
 
 FRAMEWORK_SEARCH_PATHS[sdk=iphone*] = $(FRAMEWORK_SEARCH_PATHS_ios_$(CONFIGURATION));
 FRAMEWORK_SEARCH_PATHS_ios_Debug = $(BUILT_PRODUCTS_DIR);

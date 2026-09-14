@@ -27,7 +27,7 @@
 #include "CryptoAlgorithmAESKWCocoaBridging.h"
 
 #include "CommonCryptoSPI.h"
-#include "PALSwift-Generated.h"
+#include "PALSwiftBoundaryTypes.h"
 #include <wtf/CryptographicUtilities.h>
 #include <wtf/EscapableByteSpan.h>
 

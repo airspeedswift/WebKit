@@ -27,6 +27,8 @@
 #include "TextCodecUTF8.h"
 
 #include "TextCodecASCIIFastPath.h"
+#include <pal/text/TextCodecUTF8SwiftTypes.h>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/CString.h>
@@ -35,6 +37,21 @@
 #include <wtf/text/WTFString.h>
 #include <wtf/unicode/CharacterNames.h>
 
+// Off by default. Select it by building PAL with WK_USE_SWIFT_TEXT_CODEC_UTF8=YES
+// (Source/WebCore/PAL/Configurations/PAL.xcconfig).
+#if !defined(USE_SWIFT_TEXT_CODEC_UTF8)
+#define USE_SWIFT_TEXT_CODEC_UTF8 0
+#endif
+
+#if USE_SWIFT_TEXT_CODEC_UTF8
+// The Swift entry point this file calls, plus every other PAL Swift boundary's types along with
+// it -- PALSwift-Generated.h is module-scoped, so a translation unit that includes it must
+// declare all of them. PALSwiftBoundaryTypes.h says why, and is the file a new Swift boundary
+// edits.
+#include "PALSwiftBoundaryTypes.h"
+#endif
+
+
 namespace PAL {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(TextCodecUTF8);
@@ -42,6 +59,30 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(TextCodecUTF8);
 using namespace WTF::Unicode;
 
 const int nonCharacter = -1;
+
+TextCodecUTF8SwiftCounters& textCodecUTF8SwiftCounters()
+{
+    static NeverDestroyed<TextCodecUTF8SwiftCounters> counters;
+    return counters.get();
+}
+
+TextCodecUTF8SwiftSink* TextCodecUTF8SwiftSink::create(std::span<Latin1Character> destination)
+{
+    return new TextCodecUTF8SwiftSink(destination);
+}
+
+void TextCodecUTF8SwiftSink::takeChunk(const Latin1Character *__counted_by(count) characters __attribute__((noescape)), size_t count)
+{
+    // The bound is the caller's own invariant -- this arm produces one character per input
+    // byte at most, and the destination was sized for one per input byte -- but it is checked
+    // rather than asserted, because `count` crossed a language boundary to get here.
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(count <= m_destination.size() - m_written);
+    // unsafeMakeSpan, and not std::span's two-argument constructor, even though __counted_by
+    // has just declared the pointer's extent: clang rejects that spelling under
+    // -Wunsafe-buffer-usage-in-container without consulting the annotation.
+    memcpySpan(m_destination.subspan(m_written, count), unsafeMakeSpan(characters, count));
+    m_written += count;
+}
 
 void TextCodecUTF8::registerEncodingNames(EncodingNameRegistrar registrar)
 {
@@ -316,6 +357,41 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
     auto source = bytes;
     auto* alignedEnd = WTF::alignToMachineWord(std::to_address(source.end()));
     auto destination = buffer.span();
+
+#if USE_SWIFT_TEXT_CODEC_UTF8
+    // The Swift arm, which covers input whose every character fits in Latin-1 and declines
+    // the rest. Placed before the loop rather than inside it because a decline is a decline
+    // of the whole input: it consumes nothing and touches no codec state, so the loop below
+    // then runs exactly as it would have.
+    //
+    // Both preconditions are the arm's, not the loop's. A parked partial sequence would make
+    // the first character depend on state Swift is not shown, and a pending byte order mark
+    // is the one character whose handling depends on *where* in the output it lands. Empty
+    // input is excluded so that neither the sink nor an empty `Span` has to be reasoned about
+    // for a call -- `flush` with no bytes, at the end of every stream -- that has no
+    // characters to decode either way.
+    if (!source.empty() && !m_partialSequenceSize && !m_shouldStripByteOrderMark) {
+        Ref sink = adoptRef(*TextCodecUTF8SwiftSink::create(destination));
+        // `pal::`, the Swift module's namespace, not `PAL::` -- the generated header puts every
+        // exposed Swift declaration under the module name, which is what the crypto bridges'
+        // `pal::EdKey::` calls are doing too.
+        auto swiftResult = pal::textCodecUTF8DecodeLatin1Swift(source, flush, sink.ptr());
+        if (swiftResult.answered) {
+            textCodecUTF8SwiftCounters().answered.fetch_add(1, std::memory_order_relaxed);
+            skip(source, swiftResult.consumedBytes);
+            skip(destination, sink->writtenCharacters());
+            if (swiftResult.partialSequenceSize) {
+                // Park the truncated tail exactly as the loop below would have. Swift only
+                // reports one when `flush` is false, which is the only case in which the
+                // loop parks one too.
+                m_partialSequenceSize = swiftResult.partialSequenceSize;
+                memcpySpan(std::span { m_partialSequence }, consumeSpan(source, m_partialSequenceSize));
+            }
+            ASSERT(source.empty());
+        } else
+            textCodecUTF8SwiftCounters().declined.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
 
     do {
         if (m_partialSequenceSize) {
