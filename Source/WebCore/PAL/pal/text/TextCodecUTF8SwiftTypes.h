@@ -74,9 +74,24 @@ struct TextCodecUTF8SwiftResult {
     // arm64-only differential cannot catch a packing-order mistake here.
     uint32_t partialSequence { 0 };
     // How many bytes of `partialSequence` are live, 0 to 4. Only ever non-zero when the arm
-    // answered and `flush` was false; a partial sequence at a flush is a decline, because that
-    // is where the C++ turns it into a replacement character and upconverts.
+    // answered and `flush` was false: `TextCodecUTF8::decode` ends a flushing call with
+    // `m_partialSequenceSize = 0` whichever exit it takes, so a park never survives one.
     uint8_t partialSequenceSize { 0 };
+    // Whether the arm met an ill-formed sequence. It is ORed into `TextCodecUTF8::decode`'s
+    // `sawError` out parameter rather than assigned: that parameter is a sticky flag owned by
+    // the caller -- `TextResourceDecoder` never clears it -- and the C++ only ever sets it
+    // true, so the arm may set it as freely as the loops do.
+    bool sawError { false };
+    // Whether `stopOnError` ended the decode at an ill-formed sequence with input still
+    // undecoded.
+    //
+    // This is the one thing that breaks "the arm consumed the whole input", and it breaks it
+    // deliberately: `stopOnError` makes each loop `break`, which SILENTLY DISCARDS the bytes it
+    // has not reached, so the arm reports where it stopped and the caller drops the remainder.
+    // A field rather than something the caller derives from `sawError && stopOnError`, which
+    // does imply it: the rule the loops depend on is that they have nothing left to decode, and
+    // that is worth stating by the arm that knows it rather than reconstructing.
+    bool stoppedOnError { false };
     bool answered { false };
 };
 

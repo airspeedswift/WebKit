@@ -403,15 +403,29 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
         // `pal::`, the Swift module's namespace, not `PAL::` -- the generated header puts every
         // exposed Swift declaration under the module name, which is what the crypto bridges'
         // `pal::EdKey::` calls are doing too.
-        auto swiftResult = pal::textCodecUTF8DecodeSwift(source, partialSequence, static_cast<uint8_t>(m_partialSequenceSize), flush, sink.ptr());
+        auto swiftResult = pal::textCodecUTF8DecodeSwift(source, partialSequence, static_cast<uint8_t>(m_partialSequenceSize), flush, stopOnError, sink.ptr());
         if (swiftResult.answered) {
             textCodecUTF8SwiftCounters().answered.fetch_add(1, std::memory_order_relaxed);
             // The character count is checked against the sink's, because the two are no longer
             // tied to the byte count or to each other: one character costs one to four bytes
             // and a four-byte one produces two code units.
             RELEASE_ASSERT(swiftResult.producedCharacters == sink->writtenCharacters());
+            if (swiftResult.sawError)
+                sawError = true;
             skip(source, swiftResult.consumedBytes);
-            ASSERT(source.empty());
+            // THE ARM CONSUMES THE WHOLE INPUT, and the loops below depend on it: they run over
+            // whatever is left, so anything left over would be decoded a second time.
+            // `stopOnError` is the one exception, which is why this is a rule and not an
+            // assertion that the input is empty -- it ends the decode at the first ill-formed
+            // sequence and DISCARDS everything after it, exactly as each loop's `break` does
+            // with the bytes it never reached. So the arm reports where it stopped and the
+            // remainder is dropped right here, leaving the loops with nothing to do either way.
+            if (swiftResult.stoppedOnError) {
+                ASSERT(stopOnError);
+                ASSERT(swiftResult.sawError);
+                source = { };
+            } else
+                ASSERT(source.empty());
             // THE PARK IS WRITTEN BACK ONLY HERE, on the answered path, and that is a
             // correctness requirement rather than tidiness. A decline has to leave
             // `m_partialSequence` and `m_partialSequenceSize` exactly as it found them, because

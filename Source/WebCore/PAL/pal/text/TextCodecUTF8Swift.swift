@@ -574,6 +574,10 @@ private typealias WideDecodeScratch = InlineArray<512, UInt16>
 ///
 /// The caller guarantees there is no byte order mark to strip and that `input` is not empty.
 ///
+/// `stopOnError` is the caller's own parameter, true for XML and nothing else. Where it applies is
+/// where the C++ applies it: at an ill-formed sequence, in place of the replacement character the
+/// C++ would otherwise emit.
+///
 /// Answers `answered == false`, meaning the caller must decode the whole input itself, for an
 /// ill-formed sequence, for a truncated sequence at a `flush`, for a truncated sequence whose
 /// bytes are not a valid prefix even when `flush` is false, and for an incoming park that is not
@@ -591,6 +595,7 @@ public func textCodecUTF8DecodeSwift(
     _ partialSequence: UInt32,
     _ partialSequenceSize: UInt8,
     _ flush: Bool,
+    _ stopOnError: Bool,
     _ sink: PAL.TextCodecUTF8SwiftSink
 ) -> PAL.TextCodecUTF8SwiftResult {
     let source = unsafe Span<UInt8>(_unsafeCxxSpan: input)
