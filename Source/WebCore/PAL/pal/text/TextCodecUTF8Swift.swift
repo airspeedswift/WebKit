@@ -122,6 +122,20 @@ private func isContinuationByte(_ byte: UInt8) -> Bool {
     byte >= 0x80 && byte <= 0xBF
 }
 
+/// Spreads the low four bytes of `x` into the four 16-bit lanes of the result: byte at bit
+/// position `8*i` of `x` moves to bit position `16*i`, and the odd bytes of the result are zero.
+/// The high four bytes of `x` are ignored, so a caller may pass a whole word for the low half.
+///
+/// Each term moves one byte by exactly the distance that separates its two positions -- byte 0 by
+/// 0, byte 1 by 8, byte 2 by 16, byte 3 by 24 -- and the four source fields are disjoint, so the
+/// four results are disjoint too and `|` is a sum. `<<` on a fixed-width integer discards rather
+/// than traps, and the widest term here is `0xFF00_0000 << 24`, whose top bit lands at 55: nothing
+/// is discarded in any case.
+@inline(always)
+private func spreadFourBytesToUTF16Lanes(_ x: UInt64) -> UInt64 {
+    (x & 0xFF) | ((x & 0xFF00) << 8) | ((x & 0xFF_0000) << 16) | ((x & 0xFF00_0000) << 24)
+}
+
 /// The outcome of decoding into one scratch buffer's worth of output.
 private enum ChunkOutcome {
     /// The scratch buffer filled, or the input ran out.
@@ -251,21 +265,59 @@ private func decodeWideChunk(
         // document that needs 16-bit output is not a document that stops being mostly ASCII
         // markup.
         //
-        // THE WORD LOAD IS A PREDICATE ONLY, which is what makes this endianness-correct by
-        // construction rather than by argument. `highBitsOfEachByte` is the same in all eight
-        // byte lanes, so `word & highBitsOfEachByte != 0` cannot depend on which end of the word
-        // input byte 0 landed in. The widening itself then reads the eight bytes back out of
-        // `source` BY INDEX, so every output element takes its value from a known input position
-        // on either host -- where shifting them out of `word` would reverse each group of eight
-        // on a big-endian host, and an arm64-only differential could never see it.
-        while index + 8 <= end && produced + 8 <= capacity {
-            let word = sourceBytes.load(fromByteOffset: index, as: UInt64.self)
-            if word & highBitsOfEachByte != 0 { break }
-            for offset in 0..<8 {
-                output[produced + offset] = UInt16(truncatingIfNeeded: source[index + offset])
+        // ONE CHECKED LOAD AND TWO CHECKED STORES, not sixteen subscripts. Widening the eight
+        // bytes through `output[produced + offset] = source[index + offset]` reads the same
+        // bytes and produces the same values, but it presents the optimiser with eight separate
+        // source indices and eight separate output indices to bound, and it does not eliminate
+        // them: it emitted a four-wide NEON comparison of the source indices plus three scalar
+        // ones, and a fifteen-instruction OR-tree coalescing the eight output indices, for 73
+        // instructions per eight bytes against the 8-bit kernel's 16. Presenting the same work
+        // as one `load` and two `storeBytes` puts three bounds checks in front of it instead of
+        // sixteen.
+        //
+        // ENDIANNESS, WRITTEN OUT, because no differential that runs here can catch getting it
+        // wrong -- and the 8-bit kernel's version of this comment is what let a byte-order bug
+        // through review once already.
+        //
+        //   * THE MASK TEST IS BYTE-ORDER-INDEPENDENT and stays exactly as it was.
+        //     `highBitsOfEachByte` holds the same value in all eight byte lanes, so
+        //     `word & highBitsOfEachByte != 0` cannot depend on which end of `word` input byte 0
+        //     landed in. Only the widening below needs an argument.
+        //   * `UInt64(littleEndian: word)` NORMALISES ONCE. `load` uses host byte order, so on a
+        //     little-endian host input byte `i` is already at bit `8*i` of `word` and this is the
+        //     identity; on a big-endian host it is at bit `8*(7-i)` and this is a byte swap. After
+        //     it, input byte `i` is at bit `8*i` of `w` on EITHER host, so `w` -- not `word` -- is
+        //     what the arithmetic may look at.
+        //   * THE SPLIT IS BY INPUT POSITION, not by "low half then high half of memory". Input
+        //     bytes 0-3 are the low 32 bits of `w` and become `lo`; bytes 4-7 are the high 32 and
+        //     become `hi`. `lo` is stored first because output element 0 comes first, and that is
+        //     a statement about `w`, which is host-independent, not about `word`, which is not.
+        //   * `.littleEndian` ON THE WAY OUT UNDOES THE NORMALISATION. `storeBytes` also uses
+        //     host byte order, so storing `lo.littleEndian` writes lane `j` of `lo` to output
+        //     element `j` on either host: the identity little-endian, and a swap on big-endian
+        //     that exactly cancels `storeBytes`'s own reordering. Choosing the value whose
+        //     little-endian representation is wanted is what makes the resulting memory
+        //     host-independent.
+        //
+        // The raw view is scoped to this loop, as in the 8-bit kernel, so its exclusive borrow of
+        // `output` ends before the tail below writes through `output` itself.
+        do {
+            var outputBytes = output.mutableBytes
+            while index + 8 <= end && produced + 8 <= capacity {
+                let word = sourceBytes.load(fromByteOffset: index, as: UInt64.self)
+                if word & highBitsOfEachByte != 0 { break }
+                let w = UInt64(littleEndian: word)
+                let lo = spreadFourBytesToUTF16Lanes(w)
+                let hi = spreadFourBytesToUTF16Lanes(w &>> 32)
+                // BYTE offsets, and `produced` counts 16-bit elements. `produced + 8 <=
+                // capacity` above, and `capacity` is a `MutableSpan<UInt16>`'s count, so
+                // `produced * 2 + 16` is within the raw view and cannot overflow.
+                let byteOffset = produced &* 2
+                outputBytes.storeBytes(of: lo.littleEndian, toByteOffset: byteOffset, as: UInt64.self)
+                outputBytes.storeBytes(of: hi.littleEndian, toByteOffset: byteOffset &+ 8, as: UInt64.self)
+                produced += 8
+                index += 8
             }
-            produced += 8
-            index += 8
         }
         if index >= end || produced + 2 > capacity { break }
 
