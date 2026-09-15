@@ -21,19 +21,38 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 // THE POSSIBILITY OF SUCH DAMAGE.
 
-// UTF-8 decoding, the Latin-1 half.
+// UTF-8 decoding.
 //
 // `TextCodecUTF8::decode` decodes optimistically into an 8-bit `StringBuffer` and abandons it
 // for a 16-bit one the moment it meets a character Latin-1 cannot hold, an ill-formed
-// sequence, or a byte order mark. This file covers the arm that does not abandon: input whose
-// every character is U+0000-U+00FF. That is ASCII plus one two-byte sequence form, and it is
-// what the overwhelming majority of the web's bytes are.
+// sequence, or a byte order mark. This file covers WELL-FORMED input at either width: ASCII and
+// the 0xC2/0xC3 two-byte sequences fill the 8-bit buffer, and the first character above U+00FF
+// flips the output to a 16-bit buffer that the sink allocates and owns from then on --
+// `TextCodecUTF8SwiftSink` records why the width is this arm's to choose rather than the
+// caller's to decide up front.
 //
-// EVERYTHING ELSE DECLINES, and a decline is a whole-input decline: the C++ re-runs its own
-// loop over the same bytes from the top. So one CJK character in a chunk costs that chunk's
-// Swift attempt entirely. That is this slice's boundary, not the end state -- the 16-bit path
-// is the next slice -- and `textCodecUTF8SwiftCounters()` is what makes it visible, because a
-// declining arm and an agreeing arm are byte-identical by construction.
+// WHAT STILL DECLINES, and a decline is a WHOLE-INPUT decline: the C++ re-runs its own loop over
+// the same bytes from the top, so one byte outside the subset costs that chunk's Swift attempt
+// entirely. Namely any ill-formed sequence -- the C++ answers one with U+FFFD, and `stopOnError`
+// interacts with it -- plus the three cases the caller's precondition excludes: a parked partial
+// sequence on entry, a pending byte order mark, and empty input.
+// `textCodecUTF8SwiftCounters()` is what makes that boundary visible, because a declining arm
+// and an agreeing arm are byte-identical by construction.
+//
+// A TRUNCATED TAIL IS PARKED ONLY WHEN THE BYTES PRESENT ARE A VALID PREFIX, which is narrower
+// than the C++'s park and has to be. The C++'s main loops park on sequence LENGTH alone, without
+// looking at the bytes present, and `handlePartialSequence` then diagnoses EAGERLY: its
+// park-and-wait fires only when the recomputed subpart length still equals the parked size, and
+// an already-invalid prefix makes it smaller. So {0xF0, 0x80} at the end of a chunk emits two
+// U+FFFD from that chunk with `flush` false -- it does not wait for more input -- and an arm
+// that parked it would answer differently.
+//
+// AND ONLY A BYTE THAT IS A VALID LEAD IS EVER PARKED. A lead byte whose sequence length is zero
+// (0x80-0xC1 and 0xF5-0xFF) reaches `nonCharacter` in the C++ before it reaches the park, so the
+// C++ can NEVER park one. A park keyed on "the input ended and the last byte is non-ASCII" would
+// therefore create a state only one arm can enter, which no differential can catch, because
+// only one arm can produce the transcript to compare. The length test comes before the
+// truncation test in both kernels below for that reason and no other.
 //
 // WHAT THE WORD-AT-A-TIME SCAN BUYS IS SPEED, NOT SAFETY, and the C++ it shadows has no
 // over-read to fix. `RawSpan.load(fromByteOffset:as:)` (SE-0525) is bounds-checked and has no
@@ -58,17 +77,66 @@ public import pal.Core.text.TextCodecUTF8SwiftTypes
 /// Set in every byte of a machine word whose corresponding input byte is non-ASCII.
 private let highBitsOfEachByte: UInt64 = 0x8080_8080_8080_8080
 
+/// How many bytes the sequence led by `firstByte` occupies, or 0 if it cannot lead one.
+///
+/// The C++'s `nonASCIISequenceLength` is a 256-entry table; this is three branch-predictable
+/// compares, and it is deliberately not a table. A Swift `let` global of non-trivial type costs a
+/// one-time-initialization token check on every access, and 256 entries would be 256 source facts
+/// that no behavioural harness can see -- half of them are the zeros, which every caller reads as
+/// "decline" and so can never distinguish from a wrong non-zero.
+///
+/// Callers test for ASCII first, so 0x00-0x7F reaching here would be a caller bug rather than a
+/// sequence of length one; it answers 0, the same as the continuation bytes and 0xC0/0xC1, whose
+/// two-byte forms are overlong.
+@inline(always)
+private func sequenceLength(_ firstByte: UInt8) -> Int {
+    if firstByte < 0xC2 { return 0 }
+    if firstByte < 0xE0 { return 2 }
+    if firstByte < 0xF0 { return 3 }
+    if firstByte < 0xF5 { return 4 }
+    return 0
+}
+
+/// Whether `secondByte` is valid at index 1 of a sequence led by `firstByte`.
+///
+/// Four leads have a narrower wall than the plain continuation range, and each is a labelled case
+/// of `decodeNonASCIISequence`: `case 0xE0` needs 0xA0-0xBF (below that is overlong), `case 0xED`
+/// needs 0x80-0x9F (above that is the surrogates), `case 0xF0` needs 0x90-0xBF (overlong again)
+/// and `case 0xF4` needs 0x80-0x8F (above that is beyond U+10FFFF). Every other lead takes the
+/// whole range, which is what both `default:` arms and the two-byte branch test.
+@inline(always)
+private func isValidSecondByte(_ firstByte: UInt8, _ secondByte: UInt8) -> Bool {
+    switch firstByte {
+    case 0xE0: return secondByte >= 0xA0 && secondByte <= 0xBF
+    case 0xED: return secondByte >= 0x80 && secondByte <= 0x9F
+    case 0xF0: return secondByte >= 0x90 && secondByte <= 0xBF
+    case 0xF4: return secondByte >= 0x80 && secondByte <= 0x8F
+    default: return secondByte >= 0x80 && secondByte <= 0xBF
+    }
+}
+
+/// Whether `byte` is valid at index 2 or 3 of a sequence: the three `sequence[2]`/`sequence[3]`
+/// tests in `decodeNonASCIISequence`, all of them the plain continuation range.
+@inline(always)
+private func isContinuationByte(_ byte: UInt8) -> Bool {
+    byte >= 0x80 && byte <= 0xBF
+}
+
 /// The outcome of decoding into one scratch buffer's worth of output.
 private enum ChunkOutcome {
     /// The scratch buffer filled, or the input ran out.
     case complete(consumed: Int, produced: Int)
     /// The input ended mid-sequence. `consumed` excludes the truncated sequence.
     case truncated(consumed: Int, produced: Int, partial: Int)
+    /// The 8-bit kernel met a character above U+00FF. Nothing is consumed for it: the 16-bit
+    /// kernel re-reads the sequence from `consumed`, which is also where its validity is decided.
+    case needsWide(consumed: Int, produced: Int)
     /// Something outside this arm's subset; the caller declines the whole input.
     case declined
 }
 
-/// Decodes from `source[start...]` into `output` until `output` is full or `source` runs out.
+/// Decodes from `source[start...]` into `output`, one Latin-1 character per byte, until `output`
+/// is full, `source` runs out, or a character above U+00FF calls for the 16-bit kernel instead.
 ///
 /// Bails out the moment it meets anything it does not cover, so a decline costs at most one
 /// scratch buffer of wasted work rather than a pass over the whole input.
@@ -126,15 +194,26 @@ private func decodeChunk(
 
         // 0xC2 and 0xC3 are the only lead bytes whose sequences reach Latin-1 and no further:
         // 0xC0 and 0xC1 are overlong, 0xC4 upwards starts at U+0100, and the three- and
-        // four-byte forms start at U+0800 and U+10000. So one range test stands in for the
-        // C++'s 256-entry `nonASCIISequenceLength` table plus its `isLatin1` check, and
-        // everything it excludes -- ill-formed and merely-too-large alike -- declines.
-        if firstByte != 0xC2 && firstByte != 0xC3 { return .declined }
+        // four-byte forms start at U+0800 and U+10000. So everything else either widens the
+        // output or is ill-formed, and the order the C++ decides that in is the order here:
+        // length first, then truncation, and only then the width.
+        let length = sequenceLength(firstByte)
+        if length == 0 { return .declined }
 
-        if index + 2 > end {
-            // Truncated at the very end of the input; nothing is consumed for it.
-            return .truncated(consumed: index, produced: produced, partial: end - index)
+        if index + length > end {
+            // Truncated at the very end of the input; nothing is consumed for it. The C++ parks
+            // a truncated tail of ANY width, because its 8-bit loop reaches the park before it
+            // reaches `isLatin1` -- so a chunk ending in a valid prefix of a wide sequence still
+            // finishes as an 8-bit string. Only a valid prefix may be parked, and at most three
+            // bytes can be present, so there is no fourth byte to test.
+            let available = end - index
+            if available >= 2 && !isValidSecondByte(firstByte, source[index + 1]) { return .declined }
+            if available >= 3 && !isContinuationByte(source[index + 2]) { return .declined }
+            return .truncated(consumed: index, produced: produced, partial: available)
         }
+
+        if firstByte > 0xC3 { return .needsWide(consumed: index, produced: produced) }
+
         let secondByte = source[index + 1]
         if secondByte < 0x80 || secondByte > 0xBF { return .declined }
 
@@ -143,6 +222,113 @@ private func decodeChunk(
         output[produced] = UInt8(truncatingIfNeeded: (UInt32(firstByte) << 6) &+ UInt32(secondByte) &- 0x3080)
         produced += 1
         index += 2
+    }
+
+    return .complete(consumed: index, produced: produced)
+}
+
+/// Decodes from `source[start...]` into 16-bit `output` until `output` is full or `source` runs
+/// out, covering every well-formed sequence: this is where the 0xC4-and-up two-byte forms, all
+/// three-byte forms and all four-byte forms are decoded, the last as surrogate pairs.
+///
+/// Never answers `.needsWide` -- it is already the wide kernel.
+private func decodeWideChunk(
+    _ source: Span<UInt8>,
+    _ sourceBytes: RawSpan,
+    from start: Int,
+    into output: inout MutableSpan<UInt16>
+) -> ChunkOutcome {
+    var index = start
+    var produced = 0
+    let end = source.count
+    let capacity = output.count
+
+    // A four-byte sequence produces TWO code units, so unlike the 8-bit kernel this loop cannot
+    // bound consumption by capacity once and forget it: room for a surrogate pair is checked at
+    // every character.
+    while index < end && produced + 2 <= capacity {
+        // ASCII, eight bytes at a time, and this matters as much here as in the 8-bit kernel: a
+        // document that needs 16-bit output is not a document that stops being mostly ASCII
+        // markup.
+        //
+        // THE WORD LOAD IS A PREDICATE ONLY, which is what makes this endianness-correct by
+        // construction rather than by argument. `highBitsOfEachByte` is the same in all eight
+        // byte lanes, so `word & highBitsOfEachByte != 0` cannot depend on which end of the word
+        // input byte 0 landed in. The widening itself then reads the eight bytes back out of
+        // `source` BY INDEX, so every output element takes its value from a known input position
+        // on either host -- where shifting them out of `word` would reverse each group of eight
+        // on a big-endian host, and an arm64-only differential could never see it.
+        while index + 8 <= end && produced + 8 <= capacity {
+            let word = sourceBytes.load(fromByteOffset: index, as: UInt64.self)
+            if word & highBitsOfEachByte != 0 { break }
+            for offset in 0..<8 {
+                output[produced + offset] = UInt16(truncatingIfNeeded: source[index + offset])
+            }
+            produced += 8
+            index += 8
+        }
+        if index >= end || produced + 2 > capacity { break }
+
+        let firstByte = source[index]
+        if firstByte < 0x80 {
+            output[produced] = UInt16(truncatingIfNeeded: firstByte)
+            produced += 1
+            index += 1
+            continue
+        }
+
+        // Length before truncation, and truncation before any byte is examined, for the reason
+        // at the top of this file: a zero-length lead is one the C++ can never park.
+        let length = sequenceLength(firstByte)
+        if length == 0 { return .declined }
+
+        if index + length > end {
+            let available = end - index
+            if available >= 2 && !isValidSecondByte(firstByte, source[index + 1]) { return .declined }
+            if available >= 3 && !isContinuationByte(source[index + 2]) { return .declined }
+            return .truncated(consumed: index, produced: produced, partial: available)
+        }
+
+        let secondByte = source[index + 1]
+        if !isValidSecondByte(firstByte, secondByte) { return .declined }
+        if length == 2 {
+            // The C++'s `((sequence[0] << 6) + sequence[1]) - 0x00003080`. 0xC2 0x80 is the
+            // smallest, U+0080, and 0xDF 0xBF the largest, U+07FF.
+            output[produced] = UInt16(truncatingIfNeeded: (UInt32(firstByte) << 6) &+ UInt32(secondByte) &- 0x3080)
+            produced += 1
+            index += 2
+            continue
+        }
+
+        let thirdByte = source[index + 2]
+        if !isContinuationByte(thirdByte) { return .declined }
+        if length == 3 {
+            // `((sequence[0] << 12) + (sequence[1] << 6) + sequence[2]) - 0x000E2080`. The walls
+            // above bound this at U+0800 (0xE0 0xA0 0x80) and U+FFFF (0xEF 0xBF 0xBF), and cut
+            // out D800-DFFF, so it is always exactly one code unit and never a lone surrogate.
+            // U+FEFF is emitted verbatim: a byte order mark only ever gets stripped when
+            // `m_shouldStripByteOrderMark` is set, and this arm is not entered when it is.
+            output[produced] = UInt16(truncatingIfNeeded:
+                (UInt32(firstByte) << 12) &+ (UInt32(secondByte) << 6) &+ UInt32(thirdByte) &- 0xE2080)
+            produced += 1
+            index += 3
+            continue
+        }
+
+        let fourthByte = source[index + 3]
+        if !isContinuationByte(fourthByte) { return .declined }
+        // `((sequence[0] << 18) + (sequence[1] << 12) + (sequence[2] << 6) + sequence[3]) -
+        // 0x03C82080`, which the walls bound at U+10000 (0xF0 0x90 0x80 0x80) and U+10FFFF
+        // (0xF4 0x8F 0xBF 0xBF).
+        let character = (UInt32(firstByte) << 18) &+ (UInt32(secondByte) << 12)
+            &+ (UInt32(thirdByte) << 6) &+ UInt32(fourthByte) &- 0x3C82080
+        // U16_LEAD and U16_TRAIL, as arithmetic rather than through `Unicode.Scalar`: that
+        // initializer is failing, so it would add an Optional and a trap edge to a value whose
+        // range the two lines above have already established.
+        output[produced] = UInt16(truncatingIfNeeded: (character &>> 10) &+ 0xD7C0)
+        output[produced + 1] = UInt16(truncatingIfNeeded: (character & 0x3FF) &+ 0xDC00)
+        produced += 2
+        index += 4
     }
 
     return .complete(consumed: index, produced: produced)
@@ -162,15 +348,28 @@ private func decodeChunk(
 /// which favours a large one.
 private typealias DecodeScratch = InlineArray<1024, UInt8>
 
-/// Decodes `input` as UTF-8, provided every character of it fits in Latin-1.
+/// The same, for 16-bit output, and it is a SECOND scratch rather than one shared buffer narrowed
+/// on the way out. That is measured, not assumed: one shared `InlineArray<1024, UInt16>` with a
+/// narrowing pass costs the Latin-1 path 1.70x at 8 input bytes and 1.021x at 1024, because that
+/// path then pays a 2048-byte zero-fill and an extra pass it has no use for.
+///
+/// 512 elements rather than 1024 keeps that zero-fill at 1024 bytes, identical to the narrow
+/// scratch above, where 1024 elements would be 2048. Treat the choice as a measurable and not a
+/// settled win: the flush count doubles in exchange, and which way that lands depends on the
+/// input lengths a real load presents.
+private typealias WideDecodeScratch = InlineArray<512, UInt16>
+
+/// Decodes `input` as UTF-8, provided every sequence in it is well formed.
 ///
 /// The caller guarantees there is no parked partial sequence and no byte order mark to strip,
 /// so this function reads no codec state and writes none: it reports what it consumed and the
 /// caller applies it. That is what makes a decline free of consequences -- the caller discards
-/// whatever the sink was handed simply by not advancing its destination.
+/// whatever the sink was handed simply by not advancing its destination, or by not taking the
+/// 16-bit buffer.
 ///
-/// Answers `answered == false`, meaning the caller must decode the whole input itself, for a
-/// character above U+00FF, an ill-formed sequence, or a truncated sequence at a `flush`.
+/// Answers `answered == false`, meaning the caller must decode the whole input itself, for an
+/// ill-formed sequence, for a truncated sequence at a `flush`, and for a truncated sequence whose
+/// bytes are not a valid prefix even when `flush` is false.
 ///
 /// TODO(unsafe): the one `unsafe` marker in this island. `input` arrives as an imported
 /// `std::span`, and turning that into a `Span` needs `Span(_unsafeCxxSpan:)` because Swift has
@@ -192,6 +391,7 @@ public func textCodecUTF8DecodeSwift(
     var consumed = 0
     var produced = 0
     var partial = 0
+    var wide = false
 
     while consumed < source.count {
         var output = scratch.mutableSpan
@@ -201,9 +401,18 @@ public func textCodecUTF8DecodeSwift(
         case .declined:
             return declined
 
+        case .needsWide(let chunkConsumed, let chunkProduced):
+            // The narrow scratch is flushed BEFORE the first wide chunk, and the sink asserts
+            // that ordering: it widens the characters already in the 8-bit buffer when the
+            // first wide chunk arrives, so anything still sitting here would be lost.
+            if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
+            consumed = chunkConsumed
+            produced += chunkProduced
+            wide = true
+
         case .truncated(let chunkConsumed, let chunkProduced, let partialSize):
             // A truncated sequence at a flush is not this arm's to answer: the C++ turns it
-            // into a replacement character, which is not Latin-1, and upconverts.
+            // into a replacement character, which is ill-formed handling.
             if flush { return declined }
             if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
             consumed = chunkConsumed
@@ -219,10 +428,43 @@ public func textCodecUTF8DecodeSwift(
         break
     }
 
+    if wide {
+        // Constructed HERE, inside the branch, so the Latin-1 majority never pays for its
+        // zero-fill. The flip is one-way, so the loop above cannot resume.
+        var wideScratch = WideDecodeScratch(repeating: 0)
+
+        while consumed < source.count {
+            var output = wideScratch.mutableSpan
+            let outcome = decodeWideChunk(source, sourceBytes, from: consumed, into: &output)
+
+            switch outcome {
+            // `.needsWide` cannot come back from the wide kernel; it is already wide.
+            case .declined, .needsWide:
+                return declined
+
+            case .truncated(let chunkConsumed, let chunkProduced, let partialSize):
+                if flush { return declined }
+                if chunkProduced > 0 { sink.takeWideChunk(output.span.extracting(0..<chunkProduced)) }
+                consumed = chunkConsumed
+                produced += chunkProduced
+                partial = partialSize
+
+            case .complete(let chunkConsumed, let chunkProduced):
+                if chunkProduced > 0 { sink.takeWideChunk(output.span.extracting(0..<chunkProduced)) }
+                consumed = chunkConsumed
+                produced += chunkProduced
+                continue
+            }
+            break
+        }
+    }
+
     var result = PAL.TextCodecUTF8SwiftResult()
-    // Both counts are bounded by the input length, which the caller has already established
-    // fits in a `uint32_t`: it computed the destination size as the input length plus the
-    // parked partial sequence and bailed out above UINT_MAX. `partial` is at most 3.
+    // `consumed` is bounded by the input length and `produced` by `consumed`, and the caller has
+    // already established that the input length fits in a `uint32_t`: it sized the destination as
+    // the input length plus the parked partial sequence and bailed out above UINT_MAX. One
+    // character never costs less than one byte, at either width -- the only sequence that yields
+    // two code units is four bytes long. `partial` is at most 3.
     result.consumedBytes = UInt32(consumed)
     result.producedCharacters = UInt32(produced)
     result.partialSequenceSize = UInt8(partial)
