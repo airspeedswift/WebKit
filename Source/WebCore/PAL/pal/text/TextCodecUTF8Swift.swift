@@ -169,40 +169,58 @@ private func decodeChunk(
     let limit = min(end, index + output.count)
 
     while index < limit {
-        // ASCII, a machine word at a time. No alignment gate: `load` has no alignment
-        // precondition, so unlike the C++ this needs no scalar run to re-align the cursor
-        // after every multi-byte sequence.
+        // ONE COMPARE GATES THE WORD LOOP, as in the 16-bit kernel and for the same reason: input
+        // whose next byte is not ASCII would otherwise pay the limit test, the `load`'s two-part
+        // bounds check, the eight-byte load, the mask and the branch to learn what one `ldrb` and
+        // one `cmp` answer. Latin-1 text is a run of two-byte sequences with no ASCII between
+        // them, so that is eleven wasted instructions per character on it, not a corner case.
         //
-        // The copy is FUSED with the test on purpose. Measuring the ASCII run first and
-        // copying it afterwards reads the source twice, and on long runs -- the common case
-        // here -- that costs more than the wider stores buy.
-        //
-        // The word goes back out as ONE store, through a raw view of the same output. That is
-        // not merely the shape a store-merging pass would have had to reconstruct from eight
-        // element stores: it is also what keeps the copy order-preserving on any host, because
-        // the store's byte order is the load's by construction. Eight shift-and-truncate
-        // stores would take input byte 0 from the low bits of the word and so reverse every
-        // group on a big-endian host.
-        //
-        // The raw view is scoped to this loop so that its exclusive borrow of `output` ends
-        // before the tail below writes through `output` itself.
-        do {
-            var outputBytes = output.mutableBytes
-            while index + 8 <= limit {
-                let word = sourceBytes.load(fromByteOffset: index, as: UInt64.self)
-                if word & highBitsOfEachByte != 0 { break }
-                outputBytes.storeBytes(of: word, toByteOffset: produced, as: UInt64.self)
-                produced += 8
-                index += 8
-            }
-        }
-        if index >= limit { break }
-
+        // AND THE GATE'S BYTE IS SPENT, not re-read. Reading `source[index]` again after the word
+        // loop -- the shape the 16-bit kernel uses, where the cursor has to be re-examined anyway
+        // -- costs a second checked subscript on every ASCII byte the word loop does not cover,
+        // and those bytes are the majority whenever the ASCII runs are shorter than eight: at one
+        // wide character every eight, the runs are seven bytes and the word loop never fires at
+        // all. Measured, that re-read form gave up 4-7% across periods 8 to 32 for the 51% it won
+        // on pure Latin-1. Emitting the gate's own byte and running the word loop from the byte
+        // AFTER it keeps both: the scalar path reads each byte exactly once, as it did before the
+        // gate existed, and one byte of every ASCII run is emitted scalar, which the run's
+        // remaining words amortise away.
         let firstByte = source[index]
         if firstByte < 0x80 {
             output[produced] = firstByte
             produced += 1
             index += 1
+
+            // ASCII, a machine word at a time. No alignment gate: `load` has no alignment
+            // precondition, so unlike the C++ this needs no scalar run to re-align the cursor
+            // after every multi-byte sequence.
+            //
+            // The copy is FUSED with the test on purpose. Measuring the ASCII run first and
+            // copying it afterwards reads the source twice, and on long runs -- the common case
+            // here -- that costs more than the wider stores buy.
+            //
+            // The word goes back out as ONE store, through a raw view of the same output. That is
+            // not merely the shape a store-merging pass would have had to reconstruct from eight
+            // element stores: it is also what keeps the copy order-preserving on any host, because
+            // the store's byte order is the load's by construction. Eight shift-and-truncate
+            // stores would take input byte 0 from the low bits of the word and so reverse every
+            // group on a big-endian host.
+            //
+            // The raw view is scoped to this loop so that its exclusive borrow of `output` ends
+            // before the tail below writes through `output` itself.
+            do {
+                var outputBytes = output.mutableBytes
+                while index + 8 <= limit {
+                    let word = sourceBytes.load(fromByteOffset: index, as: UInt64.self)
+                    if word & highBitsOfEachByte != 0 { break }
+                    outputBytes.storeBytes(of: word, toByteOffset: produced, as: UInt64.self)
+                    produced += 8
+                    index += 8
+                }
+            }
+            // `limit` bounds `index` from above and `produced == index - start` throughout, so the
+            // outer condition is the only one this needs; a byte was consumed above, so the loop
+            // cannot spin.
             continue
         }
 
@@ -261,72 +279,94 @@ private func decodeWideChunk(
     // bound consumption by capacity once and forget it: room for a surrogate pair is checked at
     // every character.
     while index < end && produced + 2 <= capacity {
-        // ASCII, eight bytes at a time, and this matters as much here as in the 8-bit kernel: a
-        // document that needs 16-bit output is not a document that stops being mostly ASCII
-        // markup.
+        // ONE COMPARE GATES THE WORD LOOP. Entering it unconditionally makes input with no ASCII
+        // in it at all -- a CJK document is the ordinary case, not a corner one -- pay two limit
+        // tests, the `load`'s own two-part bounds check, the eight-byte load, the mask and a
+        // branch before learning that the byte under the cursor was never ASCII: sixteen
+        // instructions per character where one `ldrsb` and one `tbnz` answer it. It is why the C++
+        // tests `isASCII(*source)` before its own word loop rather than after it.
         //
-        // ONE CHECKED LOAD AND TWO CHECKED STORES, not sixteen subscripts. Widening the eight
-        // bytes through `output[produced + offset] = source[index + offset]` reads the same
-        // bytes and produces the same values, but it presents the optimiser with eight separate
-        // source indices and eight separate output indices to bound, and it does not eliminate
-        // them: it emitted a four-wide NEON comparison of the source indices plus three scalar
-        // ones, and a fifteen-instruction OR-tree coalescing the eight output indices, for 73
-        // instructions per eight bytes against the 8-bit kernel's 16. Presenting the same work
-        // as one `load` and two `storeBytes` puts three bounds checks in front of it instead of
-        // sixteen.
-        //
-        // ENDIANNESS, WRITTEN OUT, because no differential that runs here can catch getting it
-        // wrong -- and the 8-bit kernel's version of this comment is what let a byte-order bug
-        // through review once already.
-        //
-        //   * THE MASK TEST IS BYTE-ORDER-INDEPENDENT and stays exactly as it was.
-        //     `highBitsOfEachByte` holds the same value in all eight byte lanes, so
-        //     `word & highBitsOfEachByte != 0` cannot depend on which end of `word` input byte 0
-        //     landed in. Only the widening below needs an argument.
-        //   * `UInt64(littleEndian: word)` NORMALISES ONCE. `load` uses host byte order, so on a
-        //     little-endian host input byte `i` is already at bit `8*i` of `word` and this is the
-        //     identity; on a big-endian host it is at bit `8*(7-i)` and this is a byte swap. After
-        //     it, input byte `i` is at bit `8*i` of `w` on EITHER host, so `w` -- not `word` -- is
-        //     what the arithmetic may look at.
-        //   * THE SPLIT IS BY INPUT POSITION, not by "low half then high half of memory". Input
-        //     bytes 0-3 are the low 32 bits of `w` and become `lo`; bytes 4-7 are the high 32 and
-        //     become `hi`. `lo` is stored first because output element 0 comes first, and that is
-        //     a statement about `w`, which is host-independent, not about `word`, which is not.
-        //   * `.littleEndian` ON THE WAY OUT UNDOES THE NORMALISATION. `storeBytes` also uses
-        //     host byte order, so storing `lo.littleEndian` writes lane `j` of `lo` to output
-        //     element `j` on either host: the identity little-endian, and a swap on big-endian
-        //     that exactly cancels `storeBytes`'s own reordering. Choosing the value whose
-        //     little-endian representation is wanted is what makes the resulting memory
-        //     host-independent.
-        //
-        // The raw view is scoped to this loop, as in the 8-bit kernel, so its exclusive borrow of
-        // `output` ends before the tail below writes through `output` itself.
-        do {
-            var outputBytes = output.mutableBytes
-            while index + 8 <= end && produced + 8 <= capacity {
-                let word = sourceBytes.load(fromByteOffset: index, as: UInt64.self)
-                if word & highBitsOfEachByte != 0 { break }
-                let w = UInt64(littleEndian: word)
-                let lo = spreadFourBytesToUTF16Lanes(w)
-                let hi = spreadFourBytesToUTF16Lanes(w &>> 32)
-                // BYTE offsets, and `produced` counts 16-bit elements. `produced + 8 <=
-                // capacity` above, and `capacity` is a `MutableSpan<UInt16>`'s count, so
-                // `produced * 2 + 16` is within the raw view and cannot overflow.
-                let byteOffset = produced &* 2
-                outputBytes.storeBytes(of: lo.littleEndian, toByteOffset: byteOffset, as: UInt64.self)
-                outputBytes.storeBytes(of: hi.littleEndian, toByteOffset: byteOffset &+ 8, as: UInt64.self)
-                produced += 8
-                index += 8
-            }
-        }
-        if index >= end || produced + 2 > capacity { break }
-
-        let firstByte = source[index]
+        // BUT THE GATE'S BYTE IS RE-READ HERE, NOT SPENT, which is the opposite of the 8-bit
+        // kernel and is measured rather than chosen. Emitting the gate's code unit first and
+        // running the word loop from the byte after it -- the shape that is right for the 8-bit
+        // kernel -- costs this one 17-20% on the long-ASCII-run bands, because `produced` then
+        // stops being a multiple of eight at the top of the word loop and the two `storeBytes`
+        // lose both the merge into a single sixteen-byte store and the constant-folded capacity
+        // check: 31 instructions per eight bytes become 37, plus an overflow check. It buys 8-13%
+        // back at periods four to sixteen and that is the smaller half. The asymmetry is real: the
+        // 8-bit kernel's store offset IS `produced`, so nothing there depends on its residue.
+        var firstByte = source[index]
         if firstByte < 0x80 {
-            output[produced] = UInt16(truncatingIfNeeded: firstByte)
-            produced += 1
-            index += 1
-            continue
+            // ASCII, eight bytes at a time, and this matters as much here as in the 8-bit kernel: a
+            // document that needs 16-bit output is not a document that stops being mostly ASCII
+            // markup.
+            //
+            // ONE CHECKED LOAD AND TWO CHECKED STORES, not sixteen subscripts. Widening the eight
+            // bytes through `output[produced + offset] = source[index + offset]` reads the same
+            // bytes and produces the same values, but it presents the optimiser with eight separate
+            // source indices and eight separate output indices to bound, and it does not eliminate
+            // them: it emitted a four-wide NEON comparison of the source indices plus three scalar
+            // ones, and a fifteen-instruction OR-tree coalescing the eight output indices, for 73
+            // instructions per eight bytes against the 8-bit kernel's 16. Presenting the same work
+            // as one `load` and two `storeBytes` puts three bounds checks in front of it instead of
+            // sixteen.
+            //
+            // ENDIANNESS, WRITTEN OUT, because no differential that runs here can catch getting it
+            // wrong -- and the 8-bit kernel's version of this comment is what let a byte-order bug
+            // through review once already.
+            //
+            //   * THE MASK TEST IS BYTE-ORDER-INDEPENDENT and stays exactly as it was.
+            //     `highBitsOfEachByte` holds the same value in all eight byte lanes, so
+            //     `word & highBitsOfEachByte != 0` cannot depend on which end of `word` input byte 0
+            //     landed in. Only the widening below needs an argument.
+            //   * `UInt64(littleEndian: word)` NORMALISES ONCE. `load` uses host byte order, so on a
+            //     little-endian host input byte `i` is already at bit `8*i` of `word` and this is the
+            //     identity; on a big-endian host it is at bit `8*(7-i)` and this is a byte swap. After
+            //     it, input byte `i` is at bit `8*i` of `w` on EITHER host, so `w` -- not `word` -- is
+            //     what the arithmetic may look at.
+            //   * THE SPLIT IS BY INPUT POSITION, not by "low half then high half of memory". Input
+            //     bytes 0-3 are the low 32 bits of `w` and become `lo`; bytes 4-7 are the high 32 and
+            //     become `hi`. `lo` is stored first because output element 0 comes first, and that is
+            //     a statement about `w`, which is host-independent, not about `word`, which is not.
+            //   * `.littleEndian` ON THE WAY OUT UNDOES THE NORMALISATION. `storeBytes` also uses
+            //     host byte order, so storing `lo.littleEndian` writes lane `j` of `lo` to output
+            //     element `j` on either host: the identity little-endian, and a swap on big-endian
+            //     that exactly cancels `storeBytes`'s own reordering. Choosing the value whose
+            //     little-endian representation is wanted is what makes the resulting memory
+            //     host-independent.
+            //
+            // The raw view is scoped to this loop, as in the 8-bit kernel, so its exclusive borrow of
+            // `output` ends before the tail below writes through `output` itself.
+            do {
+                var outputBytes = output.mutableBytes
+                while index + 8 <= end && produced + 8 <= capacity {
+                    let word = sourceBytes.load(fromByteOffset: index, as: UInt64.self)
+                    if word & highBitsOfEachByte != 0 { break }
+                    let w = UInt64(littleEndian: word)
+                    let lo = spreadFourBytesToUTF16Lanes(w)
+                    let hi = spreadFourBytesToUTF16Lanes(w &>> 32)
+                    // BYTE offsets, and `produced` counts 16-bit elements. `produced + 8 <=
+                    // capacity` above, and `capacity` is a `MutableSpan<UInt16>`'s count, so
+                    // `produced * 2 + 16` is within the raw view and cannot overflow.
+                    let byteOffset = produced &* 2
+                    outputBytes.storeBytes(of: lo.littleEndian, toByteOffset: byteOffset, as: UInt64.self)
+                    outputBytes.storeBytes(of: hi.littleEndian, toByteOffset: byteOffset &+ 8, as: UInt64.self)
+                    produced += 8
+                    index += 8
+                }
+            }
+            if index >= end || produced + 2 > capacity { break }
+
+            // The cursor may have moved, and the sequence tail below needs the byte under it NOW.
+            // Both routes into that tail therefore leave `firstByte == source[index]` with its
+            // high bit set.
+            firstByte = source[index]
+            if firstByte < 0x80 {
+                output[produced] = UInt16(truncatingIfNeeded: firstByte)
+                produced += 1
+                index += 1
+                continue
+            }
         }
 
         // Length before truncation, and truncation before any byte is examined, for the reason
