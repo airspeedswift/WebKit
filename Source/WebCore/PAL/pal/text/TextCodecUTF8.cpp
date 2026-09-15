@@ -66,46 +66,6 @@ TextCodecUTF8SwiftCounters& textCodecUTF8SwiftCounters()
     return counters.get();
 }
 
-TextCodecUTF8SwiftSink* TextCodecUTF8SwiftSink::create(std::span<Latin1Character> destination)
-{
-    return new TextCodecUTF8SwiftSink(destination);
-}
-
-void TextCodecUTF8SwiftSink::takeChunk(const Latin1Character *__counted_by(count) characters __attribute__((noescape)), size_t count)
-{
-    // The flip to 16-bit output is one-way, so every narrow chunk precedes every wide one and
-    // `m_destination` is still the live buffer here. Pinned rather than assumed: interleaving
-    // them would leave each buffer holding part of the output.
-    RELEASE_ASSERT(!m_wideBuffer);
-    // The bound is the caller's own invariant -- this arm produces one character per input
-    // byte at most, and the destination was sized for one per input byte -- but it is checked
-    // rather than asserted, because `count` crossed a language boundary to get here.
-    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(count <= m_destination.size() - m_written);
-    // unsafeMakeSpan, and not std::span's two-argument constructor, even though __counted_by
-    // has just declared the pointer's extent: clang rejects that spelling under
-    // -Wunsafe-buffer-usage-in-container without consulting the annotation.
-    memcpySpan(m_destination.subspan(m_written, count), unsafeMakeSpan(characters, count));
-    m_written += count;
-}
-
-void TextCodecUTF8SwiftSink::takeWideChunk(const char16_t *__counted_by(count) characters __attribute__((noescape)), size_t count)
-{
-    if (!m_wideBuffer) {
-        // The first character above U+00FF. `m_destination.size()` is `TextCodecUTF8::decode`'s
-        // own `bufferSize`, because this sink was made from the whole 8-bit buffer before
-        // anything had been written to it -- and one character per input byte bounds the 16-bit
-        // output too, since the only sequence yielding two code units is four bytes long.
-        // `decode` has already rejected a `bufferSize` above UINT_MAX.
-        m_wideBuffer = makeUnique<StringBuffer<char16_t>>(static_cast<unsigned>(m_destination.size()));
-        auto widened = m_wideBuffer->span();
-        for (size_t i = 0; i < m_written; ++i)
-            widened[i] = m_destination[i];
-    }
-    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(count <= m_wideBuffer->length() - m_written);
-    memcpySpan(m_wideBuffer->span().subspan(m_written, count), unsafeMakeSpan(characters, count));
-    m_written += count;
-}
-
 void TextCodecUTF8::registerEncodingNames(EncodingNameRegistrar registrar)
 {
     // From https://encoding.spec.whatwg.org.
@@ -381,83 +341,102 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
     auto destination = buffer.span();
 
 #if USE_SWIFT_TEXT_CODEC_UTF8
-    // The Swift arm, which covers input whose every character fits in Latin-1 and declines
-    // the rest. Placed before the loop rather than inside it because a decline is a decline
-    // of the whole input: it consumes nothing and touches no codec state, so the loop below
-    // then runs exactly as it would have.
+    // The narrow Swift arm, which decodes into the 8-bit `buffer` directly. It covers input
+    // whose every character fits in Latin-1 and returns `needsWide = true` at the first
+    // character it cannot: an ill-formed sequence (unless `stopOnError`), a well-formed
+    // character above U+00FF, or a park that resolves to either of those.
     //
     // Both preconditions are the arm's, not the loop's. A pending byte order mark is the one
-    // character whose handling depends on *where* in the output it lands. Empty input is
-    // excluded so that neither the sink nor an empty `Span` has to be reasoned about for a call
-    // -- `flush` with no bytes, at the end of every stream -- that has no characters to decode
-    // either way.
+    // character whose handling depends on where it lands. Empty input is excluded because
+    // neither arm has characters to decode -- `flush` with no bytes ends any stream.
     if (!source.empty() && !m_shouldStripByteOrderMark) {
-        Ref sink = adoptRef(*TextCodecUTF8SwiftSink::create(destination));
-        // A sequence parked by a previous call crosses PACKED, byte `i` at bit `8 * i`, with its
-        // size beside it; `TextCodecUTF8SwiftResult::partialSequence` says why that shape and
-        // why the bit position is host-independent by construction. Nothing is read past the
-        // size: `m_partialSequence` has no initializer, so its bytes above it are indeterminate.
         uint32_t partialSequence = 0;
         for (int i = 0; i < m_partialSequenceSize; ++i)
             partialSequence |= static_cast<uint32_t>(m_partialSequence[i]) << (8 * i);
-        // `pal::`, the Swift module's namespace, not `PAL::` -- the generated header puts every
-        // exposed Swift declaration under the module name, which is what the crypto bridges'
-        // `pal::EdKey::` calls are doing too.
-        auto swiftResult = pal::textCodecUTF8DecodeSwift(source, partialSequence, static_cast<uint8_t>(m_partialSequenceSize), flush, stopOnError, sink.ptr());
-        if (swiftResult.answered) {
+
+        auto narrowResult = pal::textCodecUTF8DecodeNarrow(
+            source, destination,
+            partialSequence, static_cast<uint8_t>(m_partialSequenceSize),
+            flush, stopOnError);
+
+        if (narrowResult.answered) {
             textCodecUTF8SwiftCounters().answered.fetch_add(1, std::memory_order_relaxed);
-            // The character count is checked against the sink's, because the two are no longer
-            // tied to the byte count or to each other: one character costs one to four bytes
-            // and a four-byte one produces two code units.
-            RELEASE_ASSERT(swiftResult.producedCharacters == sink->writtenCharacters());
-            if (swiftResult.sawError)
+            if (narrowResult.sawError)
                 sawError = true;
-            skip(source, swiftResult.consumedBytes);
-            // THE ARM CONSUMES THE WHOLE INPUT, and the loops below depend on it: they run over
-            // whatever is left, so anything left over would be decoded a second time.
-            // `stopOnError` is the one exception, which is why this is a rule and not an
-            // assertion that the input is empty -- it ends the decode at the first ill-formed
-            // sequence and DISCARDS everything after it, exactly as each loop's `break` does
-            // with the bytes it never reached. So the arm reports where it stopped and the
-            // remainder is dropped right here, leaving the loops with nothing to do either way.
-            if (swiftResult.stoppedOnError) {
-                ASSERT(stopOnError);
-                ASSERT(swiftResult.sawError);
-                source = { };
-            } else
-                ASSERT(source.empty());
-            // THE PARK IS WRITTEN BACK ONLY HERE, on the answered path, and that is a
-            // correctness requirement rather than tidiness. A decline has to leave
-            // `m_partialSequence` and `m_partialSequenceSize` exactly as it found them, because
-            // the fallback below is not always a re-run of the partial-sequence machine: when
-            // the 8-bit `handlePartialSequence` returns true it has already copied bytes out of
-            // `source` into `m_partialSequence` and already moved `m_partialSequenceSize`, and
-            // `upConvertTo16Bit` RESUMES from that state instead of starting over. Swift is
-            // therefore handed a copy of the park and reports a new one, rather than being given
-            // anything to mutate.
-            RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(static_cast<size_t>(swiftResult.partialSequenceSize) <= m_partialSequence.size());
-            m_partialSequenceSize = swiftResult.partialSequenceSize;
+            skip(source, narrowResult.consumedBytes);
+
+            // Write the park back before any early return.
+            RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(static_cast<size_t>(narrowResult.partialSequenceSize) <= m_partialSequence.size());
+            m_partialSequenceSize = narrowResult.partialSequenceSize;
             for (int i = 0; i < m_partialSequenceSize; ++i)
-                m_partialSequence[i] = static_cast<uint8_t>(swiftResult.partialSequence >> (8 * i));
-            if (auto* wideBuffer = sink->wideBuffer()) {
-                // The arm met a character above U+00FF and finished the input in a 16-bit buffer
-                // of its own, so `buffer` is dead and both loops below have nothing left to do.
-                // This is the 16-bit exit of the loop below, minus the two pieces of state that
-                // exit resets, both of which are already in the state it would set them to: the
-                // park has just been written back, and a `flush` this arm answers never reports
-                // one, while `m_shouldStripByteOrderMark` being false is a precondition of
-                // entering here at all.
-                wideBuffer->shrink(sink->writtenCharacters());
-                if (wideBuffer->length() > String::MaxLength) {
+                m_partialSequence[i] = static_cast<uint8_t>(narrowResult.partialSequence >> (8 * i));
+
+            if (narrowResult.stoppedOnError) {
+                ASSERT(stopOnError);
+                ASSERT(narrowResult.sawError);
+                source = { };
+                skip(destination, narrowResult.producedCharacters);
+                // Fall through to the 8-bit tail to handle flush/shrink.
+                goto swiftNarrowDone;
+            } else if (!narrowResult.needsWide) {
+                // Pure Latin-1 decode: the arm consumed the whole input.
+                ASSERT(source.empty());
+                skip(destination, narrowResult.producedCharacters);
+                // Fall through to the 8-bit tail below.
+                goto swiftNarrowDone;
+            } else {
+                // The arm met a character above U+00FF. Allocate a 16-bit buffer, widen the
+                // already-decoded narrow prefix into it, and call the wide arm for the rest.
+                StringBuffer<char16_t> buffer16(bufferSize);
+                auto destination16 = buffer16.span();
+                size_t narrowProduced = narrowResult.producedCharacters;
+                auto converted8 = buffer.span().first(narrowProduced);
+                for (size_t i = 0; i < narrowProduced; ++i)
+                    destination16[i] = converted8[i];
+
+                // Repack the park from the narrow result (already written back above).
+                uint32_t widePartialSequence = 0;
+                for (int i = 0; i < m_partialSequenceSize; ++i)
+                    widePartialSequence |= static_cast<uint32_t>(m_partialSequence[i]) << (8 * i);
+
+                auto wideResult = pal::textCodecUTF8DecodeWide(
+                    source,
+                    destination16.subspan(narrowProduced),
+                    widePartialSequence, static_cast<uint8_t>(m_partialSequenceSize),
+                    flush, stopOnError);
+
+                // The wide arm has no decline paths.
+                RELEASE_ASSERT(wideResult.answered);
+                if (wideResult.sawError)
+                    sawError = true;
+                if (wideResult.stoppedOnError) {
+                    ASSERT(stopOnError);
+                    source = { };
+                } else
+                    ASSERT(source.empty());
+
+                RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(static_cast<size_t>(wideResult.partialSequenceSize) <= m_partialSequence.size());
+                m_partialSequenceSize = wideResult.partialSequenceSize;
+                for (int i = 0; i < m_partialSequenceSize; ++i)
+                    m_partialSequence[i] = static_cast<uint8_t>(wideResult.partialSequence >> (8 * i));
+
+                size_t totalProduced = narrowProduced + wideResult.producedCharacters;
+                RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(totalProduced <= buffer16.length());
+                buffer16.shrink(static_cast<unsigned>(totalProduced));
+                if (buffer16.length() > String::MaxLength) {
                     sawError = true;
                     return { };
                 }
-                return String::adopt(WTF::move(*wideBuffer));
+                if (flush)
+                    m_partialSequenceSize = 0;
+                if (flush || buffer16.length())
+                    m_shouldStripByteOrderMark = false;
+                return String::adopt(WTF::move(buffer16));
             }
-            skip(destination, sink->writtenCharacters());
         } else
             textCodecUTF8SwiftCounters().declined.fetch_add(1, std::memory_order_relaxed);
     }
+    swiftNarrowDone:;
 #endif
 
     do {

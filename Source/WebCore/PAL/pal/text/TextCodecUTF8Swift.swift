@@ -499,15 +499,17 @@ private func decodeChunk(
     _ source: Span<UInt8>,
     _ sourceBytes: RawSpan,
     from start: Int,
-    into output: inout MutableSpan<UInt8>
+    into output: inout MutableSpan<UInt8>,
+    startingAt startProduced: Int = 0
 ) -> ChunkOutcome {
     var index = start
-    var produced = 0
+    var produced = startProduced
     let end = source.count
     // Every character this arm produces is exactly one byte and costs at least one input
     // byte, so output capacity bounds input consumption directly and the loop needs no
-    // per-character space check.
-    let limit = min(end, index + output.count)
+    // per-character space check. `startProduced` accounts for characters already committed
+    // earlier in the same destination buffer.
+    let limit = min(end, index + output.count - startProduced)
 
     while index < limit {
         // ONE COMPARE GATES THE WORD LOOP, as in the 16-bit kernel and for the same reason: input
@@ -794,30 +796,13 @@ private func decodeWideChunk(
     return .complete(consumed: index, produced: produced)
 }
 
-/// How many characters an attempt buffers before handing them to the sink.
-///
-/// This buffer is the price of the boundary: Swift cannot be handed the destination (see
-/// `TextCodecUTF8SwiftSink`), so the output is written twice -- once here, once by
-/// `takeChunk`'s copy. Chunking keeps the second write a hot-cache memcpy rather than a
-/// second pass over cold memory.
-///
-/// 1024 balances two costs that pull opposite ways, and both should be measured rather than
-/// argued: `InlineArray` has no uninitialized form, so the zero-fill is paid once per decode
-/// whatever the input length -- which favours a small buffer for the many short decodes a
-/// streaming load makes -- while each flush is a boundary crossing plus a `memcpy` call,
-/// which favours a large one.
-private typealias DecodeScratch = InlineArray<1024, UInt8>
-
-/// The same, for 16-bit output, and it is a SECOND scratch rather than one shared buffer narrowed
-/// on the way out. That is measured, not assumed: one shared `InlineArray<1024, UInt16>` with a
-/// narrowing pass costs the Latin-1 path 1.70x at 8 input bytes and 1.021x at 1024, because that
-/// path then pays a 2048-byte zero-fill and an extra pass it has no use for.
-///
-/// 512 elements rather than 1024 keeps that zero-fill at 1024 bytes, identical to the narrow
-/// scratch above, where 1024 elements would be 2048. Treat the choice as a measurable and not a
-/// settled win: the flush count doubles in exchange, and which way that lands depends on the
-/// input lengths a real load presents.
-private typealias WideDecodeScratch = InlineArray<512, UInt16>
+// The scratch buffers and the `TextCodecUTF8SwiftSink` class they fed are gone. Both entry
+// points below write directly into the C++ `StringBuffer` the caller allocated, accepting
+// `unsafe MutableSpan(_unsafeCxxSpan:)` the same way the input is accepted with
+// `Span(_unsafeCxxSpan:)`. The cost is two additional `unsafe` markers (one per entry point)
+// for the same rdar://186723514 the input already carries. The gain is the elimination of the
+// intermediate copy every decoded byte used to pay: Swift scratch → C++ buffer becomes just
+// C++ buffer, and the per-call zero-fill of the scratch is gone with it.
 
 /// Decodes `input` as UTF-8.
 ///
@@ -844,45 +829,45 @@ private typealias WideDecodeScratch = InlineArray<512, UInt16>
 /// since a main loop parks only when the input is exhausted and a drain against an exhausted input
 /// cannot hand control back to the main loop.
 ///
-/// TODO(unsafe): the one `unsafe` marker in this island. `input` arrives as an imported
-/// `std::span`, and turning that into a `Span` needs `Span(_unsafeCxxSpan:)` because Swift has
-/// no safe way to receive a bounds-carrying view from C++ (rdar://186723514). The borrow is
-/// well formed -- `TextCodecUTF8::decode` owns the bytes for the whole call and nothing here
-/// outlives it -- but the initializer is `@unsafe`, so the marker stands until the radar
-/// lands. `CSSTokenizerSwift.swift` carries the same two sites for the same reason.
+/// Decodes `input` as UTF-8 into `destInput`, a Latin-1 destination buffer.
+///
+/// `partialSequence` and `partialSequenceSize` are the sequence a previous call parked, packed as
+/// `packSequenceBytes` packs one. They are a COPY: this function reads them, works on locals and
+/// reports a new park in its result, and the caller applies that only when `answered` is true. It
+/// reads no other codec state and writes none, so a decline is free of consequences.
+///
+/// The caller guarantees there is no byte order mark to strip and that `input` is not empty.
+///
+/// Returns `needsWide = true` at the first character above U+00FF (or the first ill-formed
+/// sequence when `stopOnError` is false), leaving `consumed` pointing at the triggering sequence
+/// so the caller's wide arm re-reads it. The park drain can also force `needsWide` before the
+/// main loop runs -- an error inside a parked sequence upconverts even under `stopOnError`,
+/// matching the C++ 8-bit `handlePartialSequence` overload's `return true` path.
+///
+/// TODO(unsafe): `_unsafeCxxSpan:` for `input` and `destInput` -- rdar://186723514.
 @_expose(Cxx)
-public func textCodecUTF8DecodeSwift(
+public func textCodecUTF8DecodeNarrow(
     _ input: PAL.TextCodecUTF8SwiftInput,
+    _ destInput: PAL.TextCodecUTF8SwiftNarrowDest,
     _ partialSequence: UInt32,
     _ partialSequenceSize: UInt8,
     _ flush: Bool,
-    _ stopOnError: Bool,
-    _ sink: PAL.TextCodecUTF8SwiftSink
+    _ stopOnError: Bool
 ) -> PAL.TextCodecUTF8SwiftResult {
     let source = unsafe Span<UInt8>(_unsafeCxxSpan: input)
     let sourceBytes = source.bytes
+    var dest = unsafe MutableSpan<UInt8>(_unsafeCxxSpan: destInput)
     let declined = PAL.TextCodecUTF8SwiftResult()
 
-    // `consumed` is the cursor into `source` AND the byte count the caller advances by, so bytes
-    // that go into a new park count toward it -- the park may hold bytes that were never in
-    // `source` at all, so it cannot be taken off the end of the input the way it once was.
     var consumed = 0
     var produced = 0
     var packedPark = partialSequence
     var parkSize = Int(partialSequenceSize)
-    var wide = false
     var sawError = false
     var stoppedOnError = false
-    // Whether the sink has been told the output is 16 bits wide. It takes ownership of the wide
-    // buffer on its first wide chunk, and a decode CAN end 16-bit with nothing to put in one --
-    // `stopOnError` at the very first character of a wide-by-park input is the case -- so the flip
-    // is forced at the end rather than left to depend on there being output.
-    var sentWideChunk = false
-    // Set by a park drain that waits, or by `stopOnError`: either way the string ends here and the
-    // main loop must not run.
     var stageDone = false
 
-    // ---- The 8-bit stage. ------------------------------------------------------------------
+    // ---- The 8-bit park drain. ------------------------------------------------------------
     if parkSize != 0 {
         switch drainParkedSequenceNarrow(source, from: consumed, park: packedPark, size: parkSize, flush: flush) {
         case .declined:
@@ -895,85 +880,78 @@ public func textCodecUTF8DecodeSwift(
             stageDone = true
 
         case .needsWide(let park, let size, let cursor):
-            packedPark = park
-            parkSize = size
-            consumed = cursor
-            wide = true
+            // Park drain forced wide -- signal the caller without producing any narrow output.
+            var result = PAL.TextCodecUTF8SwiftResult()
+            result.consumedBytes = UInt32(cursor)
+            result.producedCharacters = 0
+            if !flush {
+                result.partialSequence = park
+                result.partialSequenceSize = UInt8(size)
+            }
+            result.needsWide = true
+            result.answered = true
+            return result
 
         case .latin1(let character, let cursor):
-            // One character, on its own, rather than seeded into the chunk that follows: the park's
-            // character is Latin-1 and the chunk that follows may be either width, and threading a
-            // pre-filled 8-bit scratch through a decode that turns out to be 16-bit is state the
-            // sink already owns. The price is one boundary crossing on a call that has a park to
-            // complete, amortised over the chunk that follows.
+            dest[produced] = character
+            produced += 1
             consumed = cursor
             packedPark = 0
             parkSize = 0
-            var unit = InlineArray<1, UInt8>(repeating: 0)
-            unit[0] = character
-            produced += 1
-            sink.takeChunk(unit.span)
         }
     }
 
-    // Skipped outright when the park already forced 16-bit output, which also spares that case the
-    // narrow scratch's zero-fill.
-    if !wide && !stageDone {
-        var scratch = DecodeScratch(repeating: 0)
+    if !stageDone {
         narrowStage: while true {
             var parked = false
             while consumed < source.count {
-                var output = scratch.mutableSpan
-                let outcome = decodeChunk(source, sourceBytes, from: consumed, into: &output)
+                let outcome = decodeChunk(source, sourceBytes, from: consumed, into: &dest, startingAt: produced)
 
                 switch outcome {
                 case .needsWide(let chunkConsumed, let chunkProduced):
-                    // The narrow scratch is flushed BEFORE the first wide chunk, and the sink
-                    // asserts that ordering: it widens the characters already in the 8-bit buffer
-                    // when the first wide chunk arrives, so anything still sitting here would be
-                    // lost.
-                    if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
-                    consumed = chunkConsumed
-                    produced += chunkProduced
-                    wide = true
+                    // Signal the caller; it widens the already-produced characters and calls wide.
+                    var result = PAL.TextCodecUTF8SwiftResult()
+                    result.consumedBytes = UInt32(chunkConsumed)
+                    result.producedCharacters = UInt32(chunkProduced)
+                    result.needsWide = true
+                    result.sawError = sawError
+                    result.answered = true
+                    return result
 
                 case .illFormed(let chunkConsumed, let chunkProduced, _):
-                    if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
+                    produced = chunkProduced
                     consumed = chunkConsumed
-                    produced += chunkProduced
                     sawError = true
                     if stopOnError {
-                        // `break` out of the C++'s inner loop, which falls through to the 8-BIT
-                        // tail: the string stays 8 bits wide and the rest of the input is dropped.
-                        // Get this backwards and `is8Bit()` flips on Latin-1-up-to-the-error XML.
                         stoppedOnError = true
                         stageDone = true
                     } else {
-                        // `goto upConvertTo16Bit` with NOTHING consumed for the offending sequence:
-                        // the 16-bit stage reads it again and settles it.
-                        wide = true
+                        // Upconvert: the ill-formed sequence is not Latin-1.
+                        var result = PAL.TextCodecUTF8SwiftResult()
+                        result.consumedBytes = UInt32(consumed)
+                        result.producedCharacters = UInt32(produced)
+                        result.needsWide = true
+                        result.sawError = true
+                        result.answered = true
+                        return result
                     }
 
                 case .truncated(let chunkConsumed, let chunkProduced, let partialSize):
-                    if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
+                    produced = chunkProduced
                     packedPark = packSequenceBytes(source, from: chunkConsumed, count: partialSize)
                     parkSize = partialSize
                     consumed = chunkConsumed + partialSize
-                    produced += chunkProduced
                     parked = true
 
                 case .complete(let chunkConsumed, let chunkProduced):
-                    if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
+                    produced = chunkProduced
                     consumed = chunkConsumed
-                    produced += chunkProduced
                     continue
                 }
                 break
             }
             if !parked { break }
 
-            // `} while (m_partialSequenceSize)`: the tail this loop just parked is diagnosed now,
-            // against an input that is by construction exhausted.
             switch drainParkedSequenceNarrow(source, from: consumed, park: packedPark, size: parkSize, flush: flush) {
             case .declined:
                 return declined
@@ -985,163 +963,160 @@ public func textCodecUTF8DecodeSwift(
                 stageDone = true
 
             case .needsWide(let park, let size, let cursor):
-                packedPark = park
-                parkSize = size
-                consumed = cursor
-                wide = true
+                var result = PAL.TextCodecUTF8SwiftResult()
+                result.consumedBytes = UInt32(cursor)
+                result.producedCharacters = UInt32(produced)
+                if !flush {
+                    result.partialSequence = park
+                    result.partialSequenceSize = UInt8(size)
+                }
+                result.needsWide = true
+                result.sawError = sawError
+                result.answered = true
+                return result
 
             case .latin1(let character, let cursor):
+                dest[produced] = character
+                produced += 1
                 consumed = cursor
                 packedPark = 0
                 parkSize = 0
-                var unit = InlineArray<1, UInt8>(repeating: 0)
-                unit[0] = character
-                produced += 1
-                sink.takeChunk(unit.span)
                 continue narrowStage
             }
             break
         }
     }
 
-    // ---- The 16-bit stage, which is `upConvertTo16Bit`'s copy of the same shape. -----------
-    if wide {
-        // Constructed HERE, inside the branch, so the Latin-1 majority never pays for its
-        // zero-fill. The flip is one-way, so the 8-bit stage cannot resume.
-        var wideScratch = WideDecodeScratch(repeating: 0)
+    var result = PAL.TextCodecUTF8SwiftResult()
+    result.consumedBytes = UInt32(consumed)
+    result.producedCharacters = UInt32(produced)
+    if !flush {
+        result.partialSequence = packedPark
+        result.partialSequenceSize = UInt8(parkSize)
+    }
+    result.sawError = sawError
+    result.stoppedOnError = stoppedOnError
+    result.answered = true
+    return result
+}
 
-        wideStage: while true {
-            // A drain can consume the whole input and produce a chunk's worth of replacement
-            // characters many times over, so it is looped over exactly as the main kernel is.
-            while parkSize != 0 && !stageDone {
-                var output = wideScratch.mutableSpan
-                var units = 0
-                let outcome = drainParkedSequenceWide(
-                    source, from: consumed, park: packedPark, size: parkSize,
-                    flush: flush, stopOnError: stopOnError,
-                    into: &output, units: &units, sawError: &sawError)
-                if units > 0 {
-                    sink.takeWideChunk(output.span.extracting(0..<units))
-                    produced += units
-                    sentWideChunk = true
-                }
-                switch outcome {
-                case .bufferFull(let park, let size, let cursor):
-                    packedPark = park
-                    parkSize = size
-                    consumed = cursor
+/// Decodes `input` as UTF-8 into `destInput`, a UTF-16 destination buffer.
+///
+/// Called by the C++ caller after `textCodecUTF8DecodeNarrow` returns `needsWide = true`. The
+/// caller has already widened the narrow prefix into a `StringBuffer<char16_t>` and passes here
+/// a span of that buffer starting at the narrow-prefix length, so this function writes from
+/// index zero of `destInput`. It handles the same park state the narrow function left behind.
+///
+/// Returns `.answered = true` always (no decline paths remain at this width).
+///
+/// TODO(unsafe): `_unsafeCxxSpan:` for `input` and `destInput` -- rdar://186723514.
+@_expose(Cxx)
+public func textCodecUTF8DecodeWide(
+    _ input: PAL.TextCodecUTF8SwiftInput,
+    _ destInput: PAL.TextCodecUTF8SwiftWideDest,
+    _ partialSequence: UInt32,
+    _ partialSequenceSize: UInt8,
+    _ flush: Bool,
+    _ stopOnError: Bool
+) -> PAL.TextCodecUTF8SwiftResult {
+    let source = unsafe Span<UInt8>(_unsafeCxxSpan: input)
+    let sourceBytes = source.bytes
+    var dest = unsafe MutableSpan<UInt16>(_unsafeCxxSpan: destInput)
 
-                case .drained(let cursor):
-                    consumed = cursor
-                    packedPark = 0
-                    parkSize = 0
+    var consumed = 0
+    var produced = 0
+    var packedPark = partialSequence
+    var parkSize = Int(partialSequenceSize)
+    var sawError = false
+    var stoppedOnError = false
+    var stageDone = false
 
-                case .waiting(let park, let size, let cursor):
-                    packedPark = park
-                    parkSize = size
-                    consumed = cursor
-                    stageDone = true
+    // ---- The 16-bit stage. ----------------------------------------------------------------
+    wideStage: while true {
+        // Drain any parked partial sequence first, looping because a drain can consume
+        // many input bytes before the park empties.
+        while parkSize != 0 && !stageDone {
+            var units = produced
+            let outcome = drainParkedSequenceWide(
+                source, from: consumed, park: packedPark, size: parkSize,
+                flush: flush, stopOnError: stopOnError,
+                into: &dest, units: &units, sawError: &sawError)
+            produced = units
+            switch outcome {
+            case .bufferFull(let park, let size, let cursor):
+                packedPark = park
+                parkSize = size
+                consumed = cursor
 
-                case .stopped(let park, let size, let cursor):
-                    // The park is left EXACTLY as it stood -- `stopOnError` returns before the
-                    // subpart it just diagnosed is dropped -- and whatever is left of the input
-                    // goes with it.
-                    packedPark = park
-                    parkSize = size
-                    consumed = cursor
+            case .drained(let cursor):
+                consumed = cursor
+                packedPark = 0
+                parkSize = 0
+
+            case .waiting(let park, let size, let cursor):
+                packedPark = park
+                parkSize = size
+                consumed = cursor
+                stageDone = true
+
+            case .stopped(let park, let size, let cursor):
+                packedPark = park
+                parkSize = size
+                consumed = cursor
+                sawError = true
+                stoppedOnError = true
+                stageDone = true
+            }
+        }
+        if stageDone { break }
+
+        var parked = false
+        outer: while consumed < source.count {
+            var chunkProduced = produced
+            var chunkCursor = consumed
+            while true {
+                switch decodeWideChunk(
+                    source, sourceBytes, from: chunkCursor, into: &dest,
+                    startingAt: chunkProduced) {
+                // Never from the wide kernel.
+                case .needsWide:
+                    var result = PAL.TextCodecUTF8SwiftResult()
+                    result.answered = false
+                    return result
+
+                case .illFormed(let errorAt, let chunkProducedSoFar, let subpart):
                     sawError = true
-                    stoppedOnError = true
-                    stageDone = true
-                }
-            }
-            if stageDone { break }
-
-            var parked = false
-            // ONE SCRATCH BUFFER PER OUTER ITERATION, AND ONE FLUSH, however many replacement
-            // characters it takes: an ill-formed sequence is written here and the kernel is
-            // re-entered where it left off, rather than being settled inside the kernel where
-            // `stopOnError` and `sawError` cost it two live registers. A crossing per replacement
-            // character would be worse again -- all-invalid input would make one per byte.
-            outer: while consumed < source.count {
-                var output = wideScratch.mutableSpan
-                var chunkProduced = 0
-                var chunkCursor = consumed
-                while true {
-                    switch decodeWideChunk(
-                        source, sourceBytes, from: chunkCursor, into: &output,
-                        startingAt: chunkProduced) {
-                    // Never from the wide kernel; it is already wide.
-                    case .needsWide:
-                        return declined
-
-                    case .illFormed(let errorAt, let chunkProducedSoFar, let subpart):
-                        sawError = true
-                        if stopOnError {
-                            if chunkProducedSoFar > 0 {
-                                sink.takeWideChunk(output.span.extracting(0..<chunkProducedSoFar))
-                                sentWideChunk = true
-                            }
-                            consumed = errorAt
-                            produced += chunkProducedSoFar
-                            stoppedOnError = true
-                            break outer
-                        }
-                        // `consume(destination16) = replacementCharacter;` and
-                        // `skip(source, count ? count : 1);`. There is room: the kernel's loop
-                        // reserves two elements per character, so it cannot report an ill-formed
-                        // sequence with fewer than two left.
-                        output[chunkProducedSoFar] = replacementCharacter
-                        chunkProduced = chunkProducedSoFar + 1
-                        chunkCursor = errorAt + (subpart == 0 ? 1 : subpart)
-
-                    case .truncated(let chunkConsumed, let chunkProducedSoFar, let partialSize):
-                        if chunkProducedSoFar > 0 {
-                            sink.takeWideChunk(output.span.extracting(0..<chunkProducedSoFar))
-                            sentWideChunk = true
-                        }
-                        packedPark = packSequenceBytes(source, from: chunkConsumed, count: partialSize)
-                        parkSize = partialSize
-                        consumed = chunkConsumed + partialSize
-                        produced += chunkProducedSoFar
-                        parked = true
+                    if stopOnError {
+                        consumed = errorAt
+                        produced = chunkProducedSoFar
+                        stoppedOnError = true
                         break outer
-
-                    case .complete(let chunkConsumed, let chunkProducedSoFar):
-                        if chunkProducedSoFar > 0 {
-                            sink.takeWideChunk(output.span.extracting(0..<chunkProducedSoFar))
-                            sentWideChunk = true
-                        }
-                        consumed = chunkConsumed
-                        produced += chunkProducedSoFar
-                        continue outer
                     }
+                    dest[chunkProducedSoFar] = replacementCharacter
+                    chunkProduced = chunkProducedSoFar + 1
+                    chunkCursor = errorAt + (subpart == 0 ? 1 : subpart)
+
+                case .truncated(let chunkConsumed, let chunkProducedSoFar, let partialSize):
+                    packedPark = packSequenceBytes(source, from: chunkConsumed, count: partialSize)
+                    parkSize = partialSize
+                    consumed = chunkConsumed + partialSize
+                    produced = chunkProducedSoFar
+                    parked = true
+                    break outer
+
+                case .complete(let chunkConsumed, let chunkProducedSoFar):
+                    consumed = chunkConsumed
+                    produced = chunkProducedSoFar
+                    continue outer
                 }
             }
-            if !parked || stoppedOnError { break }
         }
-
-        if !sentWideChunk {
-            // Nothing to copy, but the width is still this arm's answer: without this the caller
-            // would find no 16-bit buffer and take its 8-bit exit, and `is8Bit()` would disagree
-            // with the C++ on an input whose only 16-bit character never made it out.
-            let none = InlineArray<1, UInt16>(repeating: 0)
-            sink.takeWideChunk(none.span.extracting(0..<0))
-        }
+        if !parked || stoppedOnError { break }
     }
 
     var result = PAL.TextCodecUTF8SwiftResult()
-    // `consumed` is bounded by the input length and `produced` by `consumed`, and the caller has
-    // already established that the input length fits in a `uint32_t`: it sized the destination as
-    // the input length plus the parked partial sequence and bailed out above UINT_MAX. One
-    // character never costs less than one byte, at either width -- the only sequence that yields
-    // two code units is four bytes long. `parkSize` is at most 4, which is `U8_MAX_LENGTH` and the
-    // size of the C++'s own buffer; a drain's copy stage is what can fill all four.
     result.consumedBytes = UInt32(consumed)
     result.producedCharacters = UInt32(produced)
-    // A FLUSHING CALL REPORTS NO PARK, because the caller's 16-bit exit for this arm returns the
-    // string directly and so never reaches `if (flush) m_partialSequenceSize = 0;`. Only
-    // `stopOnError` can reach here with both -- its return from the drain leaves the park in place
-    // whether or not this is the last call -- and the C++ drops it in exactly that case.
     if !flush {
         result.partialSequence = packedPark
         result.partialSequenceSize = UInt8(parkSize)
