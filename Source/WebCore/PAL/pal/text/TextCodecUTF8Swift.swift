@@ -34,10 +34,18 @@
 // WHAT STILL DECLINES, and a decline is a WHOLE-INPUT decline: the C++ re-runs its own loop over
 // the same bytes from the top, so one byte outside the subset costs that chunk's Swift attempt
 // entirely. Namely any ill-formed sequence -- the C++ answers one with U+FFFD, and `stopOnError`
-// interacts with it -- plus a partial sequence parked by a previous call, plus the two cases the
-// caller's precondition excludes: a pending byte order mark and empty input.
+// interacts with it -- plus the two cases the caller's precondition excludes: a pending byte order
+// mark and empty input.
 // `textCodecUTF8SwiftCounters()` is what makes that boundary visible, because a declining arm
 // and an agreeing arm are byte-identical by construction.
+//
+// A SEQUENCE PARKED BY A PREVIOUS CALL IS COMPLETED HERE, and that is a coverage decision rather
+// than a completeness one. A power-of-two chunk boundary lands mid-sequence for almost any
+// multi-byte content, so this arm parks a tail, the caller stores it, and the NEXT call used to
+// fail the entry precondition and run as pure C++ -- which drained the park, letting the call
+// after that in again. Period three on pure three-byte content: the arm's own correct behaviour
+// re-armed the precondition that locked it out, and only about a third of `decode` calls on such
+// content reached it at all. `decodeParkedSequence` is what closes that cycle.
 //
 // A TRUNCATED TAIL IS PARKED ONLY WHEN THE BYTES PRESENT ARE A VALID PREFIX, which is narrower
 // than the C++'s park and has to be. The C++'s main loops park on sequence LENGTH alone, without
@@ -52,7 +60,9 @@
 // C++ can NEVER park one. A park keyed on "the input ended and the last byte is non-ASCII" would
 // therefore create a state only one arm can enter, which no differential can catch, because
 // only one arm can produce the transcript to compare. The length test comes before the
-// truncation test in both kernels below for that reason and no other.
+// truncation test in both kernels below for that reason and no other. The same two rules bound
+// what an INCOMING park may be: `decodeParkedSequence` completes only a valid prefix that is
+// shorter than the sequence it leads, and declines everything else.
 //
 // WHAT THE WORD-AT-A-TIME SCAN BUYS IS SPEED, NOT SAFETY, and the C++ it shadows has no
 // over-read to fix. `RawSpan.load(fromByteOffset:as:)` (SE-0525) is bounds-checked and has no
@@ -138,6 +148,13 @@ private func packSequenceBytes(_ source: Span<UInt8>, from start: Int, count: In
     return packed
 }
 
+/// Byte `index` of a sequence packed the way `packSequenceBytes` packs one. The inverse of that
+/// function, and the same statement about byte order applies.
+@inline(always)
+private func sequenceByte(_ packed: UInt32, _ index: Int) -> UInt8 {
+    UInt8(truncatingIfNeeded: packed &>> (8 &* index))
+}
+
 /// Spreads the low four bytes of `x` into the four 16-bit lanes of the result: byte at bit
 /// position `8*i` of `x` moves to bit position `16*i`, and the odd bytes of the result are zero.
 /// The high four bytes of `x` are ignored, so a caller may pass a whole word for the low half.
@@ -150,6 +167,85 @@ private func packSequenceBytes(_ source: Span<UInt8>, from start: Int, count: In
 @inline(always)
 private func spreadFourBytesToUTF16Lanes(_ x: UInt64) -> UInt64 {
     (x & 0xFF) | ((x & 0xFF00) << 8) | ((x & 0xFF_0000) << 16) | ((x & 0xFF00_0000) << 24)
+}
+
+/// The outcome of completing a sequence that a previous call parked.
+private enum ParkOutcome {
+    /// The park is complete. `character` is its scalar value, and `consumed` counts the bytes of
+    /// the new input that went into it -- at least one, since the park was shorter than the
+    /// sequence it leads.
+    case decoded(character: UInt32, consumed: Int)
+    /// The whole input joined the park without completing the sequence, so the call produces no
+    /// characters at all. `park` is packed as `packSequenceBytes` packs one.
+    case reparked(park: UInt32, size: Int)
+    /// Outside this arm's subset; the caller declines the whole input.
+    case declined
+}
+
+/// Completes the sequence packed in `park` from the front of `source`, and hands the character
+/// back rather than writing it.
+///
+/// A park holds at most one sequence -- the C++ only ever parks a truncated tail -- so there is
+/// exactly one character to be had from it. Returning it lets the caller place it at either output
+/// width, which is what keeps both chunk kernels starting every chunk at `produced == 0`; the wide
+/// kernel's two `storeBytes` merge into a single sixteen-byte store only while the optimiser can
+/// prove `produced` is a multiple of eight there.
+///
+/// WHAT MAY ARRIVE HERE IS WIDER THAN THE C++'s OWN PARK-AND-WAIT LEAVES, and each extra shape is
+/// declined rather than assumed away:
+///   * The main loops park on sequence LENGTH alone, without looking at the bytes present, so
+///     {0xE0, 0x80} is a park the C++ can hand over. `handlePartialSequence` then diagnoses it
+///     EAGERLY -- its park-and-wait fires only when the recomputed subpart length still equals the
+///     parked size, and an already-invalid prefix makes it smaller -- so that park resolves into
+///     replacement characters rather than waiting for more input.
+///   * `stopOnError` returns leave the park untouched, so it can be as long as the sequence it
+///     leads, or four bytes, and invalid with it.
+///   * A first byte with no sequence length reaches `nonCharacter` in the C++ before it reaches
+///     any park, and an ASCII first byte is emitted as a character by `handlePartialSequence`'s
+///     own first branch. Neither is a sequence to complete.
+/// Only a park that is a valid PREFIX of a sequence, and shorter than that sequence, is completed.
+private func decodeParkedSequence(_ source: Span<UInt8>, park: UInt32, size parkSize: Int) -> ParkOutcome {
+    let firstByte = sequenceByte(park, 0)
+    // Length first, as in both kernels. This is also what rejects an ASCII first byte: 0x00-0x7F
+    // has no sequence length either.
+    let length = sequenceLength(firstByte)
+    if length == 0 { return .declined }
+    if parkSize >= length { return .declined }
+    if parkSize >= 2 && !isValidSecondByte(firstByte, sequenceByte(park, 1)) { return .declined }
+    if parkSize >= 3 && !isContinuationByte(sequenceByte(park, 2)) { return .declined }
+
+    // Take bytes off the front of the input until the sequence is whole, checking each against the
+    // wall for the position it lands in. Running out is not an error: the C++ copies every byte it
+    // has into `m_partialSequence` and waits, exactly as this does.
+    var packed = park
+    var size = parkSize
+    var index = 0
+    while size < length {
+        if index == source.count { return .reparked(park: packed, size: size) }
+        let byte = source[index]
+        if size == 1 {
+            if !isValidSecondByte(firstByte, byte) { return .declined }
+        } else if !isContinuationByte(byte) {
+            return .declined
+        }
+        packed |= UInt32(byte) &<< (8 &* size)
+        size += 1
+        index += 1
+    }
+
+    // `decodeNonASCIISequence`'s three forms, the same arithmetic the two kernels use.
+    let b0 = UInt32(firstByte)
+    let b1 = UInt32(sequenceByte(packed, 1))
+    let character: UInt32
+    if length == 2 {
+        character = (b0 << 6) &+ b1 &- 0x3080
+    } else if length == 3 {
+        character = (b0 << 12) &+ (b1 << 6) &+ UInt32(sequenceByte(packed, 2)) &- 0xE2080
+    } else {
+        character = (b0 << 18) &+ (b1 << 12) &+ (UInt32(sequenceByte(packed, 2)) << 6)
+            &+ UInt32(sequenceByte(packed, 3)) &- 0x3C82080
+    }
+    return .decoded(character: character, consumed: index)
 }
 
 /// The outcome of decoding into one scratch buffer's worth of output.
@@ -501,11 +597,6 @@ public func textCodecUTF8DecodeSwift(
     let sourceBytes = source.bytes
     let declined = PAL.TextCodecUTF8SwiftResult()
 
-    // A sequence parked on entry is the next slice; declined here so that the boundary's new
-    // shape lands on its own.
-    if partialSequenceSize != 0 { return declined }
-
-    var scratch = DecodeScratch(repeating: 0)
     // `consumed` is the cursor into `source` AND the byte count the caller advances by, so bytes
     // that go into a new park count toward it -- the park may hold bytes that were never in
     // `source` at all, so it cannot be taken off the end of the input the way it once was.
@@ -515,40 +606,97 @@ public func textCodecUTF8DecodeSwift(
     var partial = 0
     var wide = false
 
-    while consumed < source.count {
-        var output = scratch.mutableSpan
-        let outcome = decodeChunk(source, sourceBytes, from: consumed, into: &output)
-
-        switch outcome {
+    // A sequence parked by a previous call is finished off FIRST, before either kernel runs, and
+    // its character goes to the sink on its own. That keeps both kernels exactly as they were --
+    // every chunk still starts at `produced == 0` -- at the price of one extra boundary crossing
+    // on a call that has a park to complete: one, amortised over the whole chunk that follows.
+    if partialSequenceSize != 0 {
+        switch decodeParkedSequence(source, park: partialSequence, size: Int(partialSequenceSize)) {
         case .declined:
             return declined
 
-        case .needsWide(let chunkConsumed, let chunkProduced):
-            // The narrow scratch is flushed BEFORE the first wide chunk, and the sink asserts
-            // that ordering: it widens the characters already in the 8-bit buffer when the
-            // first wide chunk arrives, so anything still sitting here would be lost.
-            if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
-            consumed = chunkConsumed
-            produced += chunkProduced
-            wide = true
-
-        case .truncated(let chunkConsumed, let chunkProduced, let partialSize):
-            // A truncated sequence at a flush is not this arm's to answer: the C++ turns it
-            // into a replacement character, which is ill-formed handling.
+        case .reparked(let park, let size):
+            // The whole input joined the park, so there is nothing to decode at all. That is what
+            // the C++ does too: `handlePartialSequence` copies every available byte into
+            // `m_partialSequence`, returns false, and `decode` breaks out of its loop with an
+            // empty 8-bit buffer. A flush would instead turn the incomplete sequence into
+            // replacement characters, which is ill-formed handling and not this arm's.
             if flush { return declined }
-            if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
-            packedPartial = packSequenceBytes(source, from: chunkConsumed, count: partialSize)
-            partial = partialSize
-            consumed = chunkConsumed + partialSize
-            produced += chunkProduced
+            var result = PAL.TextCodecUTF8SwiftResult()
+            result.consumedBytes = UInt32(source.count)
+            result.partialSequence = park
+            result.partialSequenceSize = UInt8(size)
+            result.answered = true
+            return result
 
-        case .complete(let chunkConsumed, let chunkProduced):
-            if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
-            consumed = chunkConsumed
-            produced += chunkProduced
-            continue
+        case .decoded(let character, let bytesTaken):
+            consumed = bytesTaken
+            if character > 0xFF {
+                // The park's character does not fit Latin-1, so the whole output is 16 bits wide,
+                // and it is wide from the FIRST character -- the C++ agrees: its 8-bit
+                // `handlePartialSequence` returns true for a non-Latin-1 character and
+                // `upConvertTo16Bit` re-decodes the now-complete park into the 16-bit buffer.
+                wide = true
+                var units = InlineArray<2, UInt16>(repeating: 0)
+                if character > 0xFFFF {
+                    // U16_LEAD and U16_TRAIL, as in the wide kernel.
+                    units[0] = UInt16(truncatingIfNeeded: (character &>> 10) &+ 0xD7C0)
+                    units[1] = UInt16(truncatingIfNeeded: (character & 0x3FF) &+ 0xDC00)
+                    produced = 2
+                    sink.takeWideChunk(units.span)
+                } else {
+                    units[0] = UInt16(truncatingIfNeeded: character)
+                    produced = 1
+                    sink.takeWideChunk(units.span.extracting(0..<1))
+                }
+            } else {
+                var unit = InlineArray<1, UInt8>(repeating: 0)
+                unit[0] = UInt8(truncatingIfNeeded: character)
+                produced = 1
+                sink.takeChunk(unit.span)
+            }
         }
-        break
+    }
+
+    // Skipped outright when the park's own character already needed 16-bit output, which also
+    // spares that case the narrow scratch's zero-fill.
+    if !wide {
+        var scratch = DecodeScratch(repeating: 0)
+        while consumed < source.count {
+            var output = scratch.mutableSpan
+            let outcome = decodeChunk(source, sourceBytes, from: consumed, into: &output)
+
+            switch outcome {
+            case .declined:
+                return declined
+
+            case .needsWide(let chunkConsumed, let chunkProduced):
+                // The narrow scratch is flushed BEFORE the first wide chunk, and the sink asserts
+                // that ordering: it widens the characters already in the 8-bit buffer when the
+                // first wide chunk arrives, so anything still sitting here would be lost.
+                if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
+                consumed = chunkConsumed
+                produced += chunkProduced
+                wide = true
+
+            case .truncated(let chunkConsumed, let chunkProduced, let partialSize):
+                // A truncated sequence at a flush is not this arm's to answer: the C++ turns it
+                // into a replacement character, which is ill-formed handling.
+                if flush { return declined }
+                if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
+                packedPartial = packSequenceBytes(source, from: chunkConsumed, count: partialSize)
+                partial = partialSize
+                consumed = chunkConsumed + partialSize
+                produced += chunkProduced
+
+            case .complete(let chunkConsumed, let chunkProduced):
+                if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
+                consumed = chunkConsumed
+                produced += chunkProduced
+                continue
+            }
+            break
+        }
     }
 
     if wide {
