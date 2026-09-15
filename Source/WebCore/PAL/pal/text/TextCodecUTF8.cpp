@@ -386,18 +386,24 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
     // of the whole input: it consumes nothing and touches no codec state, so the loop below
     // then runs exactly as it would have.
     //
-    // Both preconditions are the arm's, not the loop's. A parked partial sequence would make
-    // the first character depend on state Swift is not shown, and a pending byte order mark
-    // is the one character whose handling depends on *where* in the output it lands. Empty
-    // input is excluded so that neither the sink nor an empty `Span` has to be reasoned about
-    // for a call -- `flush` with no bytes, at the end of every stream -- that has no
-    // characters to decode either way.
-    if (!source.empty() && !m_partialSequenceSize && !m_shouldStripByteOrderMark) {
+    // Both preconditions are the arm's, not the loop's. A pending byte order mark is the one
+    // character whose handling depends on *where* in the output it lands. Empty input is
+    // excluded so that neither the sink nor an empty `Span` has to be reasoned about for a call
+    // -- `flush` with no bytes, at the end of every stream -- that has no characters to decode
+    // either way.
+    if (!source.empty() && !m_shouldStripByteOrderMark) {
         Ref sink = adoptRef(*TextCodecUTF8SwiftSink::create(destination));
+        // A sequence parked by a previous call crosses PACKED, byte `i` at bit `8 * i`, with its
+        // size beside it; `TextCodecUTF8SwiftResult::partialSequence` says why that shape and
+        // why the bit position is host-independent by construction. Nothing is read past the
+        // size: `m_partialSequence` has no initializer, so its bytes above it are indeterminate.
+        uint32_t partialSequence = 0;
+        for (int i = 0; i < m_partialSequenceSize; ++i)
+            partialSequence |= static_cast<uint32_t>(m_partialSequence[i]) << (8 * i);
         // `pal::`, the Swift module's namespace, not `PAL::` -- the generated header puts every
         // exposed Swift declaration under the module name, which is what the crypto bridges'
         // `pal::EdKey::` calls are doing too.
-        auto swiftResult = pal::textCodecUTF8DecodeSwift(source, flush, sink.ptr());
+        auto swiftResult = pal::textCodecUTF8DecodeSwift(source, partialSequence, static_cast<uint8_t>(m_partialSequenceSize), flush, sink.ptr());
         if (swiftResult.answered) {
             textCodecUTF8SwiftCounters().answered.fetch_add(1, std::memory_order_relaxed);
             // The character count is checked against the sink's, because the two are no longer
@@ -405,22 +411,28 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
             // and a four-byte one produces two code units.
             RELEASE_ASSERT(swiftResult.producedCharacters == sink->writtenCharacters());
             skip(source, swiftResult.consumedBytes);
-            if (swiftResult.partialSequenceSize) {
-                // Park the truncated tail exactly as the loop below would have. Swift only
-                // reports one when `flush` is false, which is the only case in which the
-                // loop parks one too.
-                m_partialSequenceSize = swiftResult.partialSequenceSize;
-                memcpySpan(std::span { m_partialSequence }, consumeSpan(source, m_partialSequenceSize));
-            }
             ASSERT(source.empty());
+            // THE PARK IS WRITTEN BACK ONLY HERE, on the answered path, and that is a
+            // correctness requirement rather than tidiness. A decline has to leave
+            // `m_partialSequence` and `m_partialSequenceSize` exactly as it found them, because
+            // the fallback below is not always a re-run of the partial-sequence machine: when
+            // the 8-bit `handlePartialSequence` returns true it has already copied bytes out of
+            // `source` into `m_partialSequence` and already moved `m_partialSequenceSize`, and
+            // `upConvertTo16Bit` RESUMES from that state instead of starting over. Swift is
+            // therefore handed a copy of the park and reports a new one, rather than being given
+            // anything to mutate.
+            RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(static_cast<size_t>(swiftResult.partialSequenceSize) <= m_partialSequence.size());
+            m_partialSequenceSize = swiftResult.partialSequenceSize;
+            for (int i = 0; i < m_partialSequenceSize; ++i)
+                m_partialSequence[i] = static_cast<uint8_t>(swiftResult.partialSequence >> (8 * i));
             if (auto* wideBuffer = sink->wideBuffer()) {
                 // The arm met a character above U+00FF and finished the input in a 16-bit buffer
                 // of its own, so `buffer` is dead and both loops below have nothing left to do.
                 // This is the 16-bit exit of the loop below, minus the two pieces of state that
-                // exit resets, both of which are already in the state it would set them to:
-                // `m_partialSequenceSize` is only cleared at a `flush`, and a `flush` this arm
-                // answers has no partial sequence to park, while `m_shouldStripByteOrderMark`
-                // being false is a precondition of entering here at all.
+                // exit resets, both of which are already in the state it would set them to: the
+                // park has just been written back, and a `flush` this arm answers never reports
+                // one, while `m_shouldStripByteOrderMark` being false is a precondition of
+                // entering here at all.
                 wideBuffer->shrink(sink->writtenCharacters());
                 if (wideBuffer->length() > String::MaxLength) {
                     sawError = true;

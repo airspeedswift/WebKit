@@ -46,11 +46,14 @@ using TextCodecUTF8SwiftInput = std::span<const uint8_t>;
 // `answered` false means the Swift arm DECLINED: it read something outside the subset it
 // covers and did no useful work, so `TextCodecUTF8::decode` runs its own loop over the same
 // input from the top. Anything the sink was handed before the decline is discarded by simply
-// not advancing the destination -- a decline touches no codec state, which is what makes the
-// fallback a re-run rather than a resume.
+// not advancing the destination, and the two park fields below are applied only when
+// `answered` is true -- a decline leaves every byte of codec state as it found it, which is
+// what makes the fallback a re-run rather than a resume.
 struct TextCodecUTF8SwiftResult {
-    // Input bytes the Swift arm consumed and turned into characters, NOT counting the
-    // trailing partial sequence below.
+    // Bytes of the input the Swift arm took, INCLUDING any that went into the partial sequence
+    // it reports below. That park can mix bytes that were already parked with bytes from this
+    // call, so it is not recoverable from the input the way a park made only of trailing bytes
+    // would be: it crosses explicitly, and the byte count says how far the input advanced.
     uint32_t consumedBytes { 0 };
     // Characters produced, which is NOT derivable from `consumedBytes`: a character costs one,
     // two, three or four input bytes, and a four-byte one produces TWO code units. The caller
@@ -59,10 +62,20 @@ struct TextCodecUTF8SwiftResult {
     // arithmetic, so a miscount would hand back a correctly filled buffer shrunk to the wrong
     // length.
     uint32_t producedCharacters { 0 };
-    // Bytes of a truncated sequence at the very end of the input, which the caller parks in
-    // `m_partialSequence` to be completed by the next chunk. Only ever non-zero when the
-    // arm answered and `flush` was false; a truncated sequence at a flush is a decline,
-    // because that is where the C++ turns it into a replacement character and upconverts.
+    // The partial sequence to park, PACKED: byte `i` of the sequence sits at bit `8 * i`, and
+    // only the low `partialSequenceSize` bytes carry anything. The same packing is what
+    // `TextCodecUTF8::decode` hands Swift for the sequence already parked on entry.
+    //
+    // A `uint32_t` and not a `uint8_t[4]`: an array member imports awkwardly into Swift, and a
+    // `std::span` over `m_partialSequence` would need the unsafe C++-span initializer on the
+    // other side, while four bytes and a count cross in registers with no array import at all.
+    // The bit position is the byte's index within the sequence and NOTHING ELSE, so the value
+    // means the same on a big-endian host as on a little-endian one -- stated because an
+    // arm64-only differential cannot catch a packing-order mistake here.
+    uint32_t partialSequence { 0 };
+    // How many bytes of `partialSequence` are live, 0 to 4. Only ever non-zero when the arm
+    // answered and `flush` was false; a partial sequence at a flush is a decline, because that
+    // is where the C++ turns it into a replacement character and upconverts.
     uint8_t partialSequenceSize { 0 };
     bool answered { false };
 };

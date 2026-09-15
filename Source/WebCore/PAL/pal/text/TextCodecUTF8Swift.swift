@@ -34,8 +34,8 @@
 // WHAT STILL DECLINES, and a decline is a WHOLE-INPUT decline: the C++ re-runs its own loop over
 // the same bytes from the top, so one byte outside the subset costs that chunk's Swift attempt
 // entirely. Namely any ill-formed sequence -- the C++ answers one with U+FFFD, and `stopOnError`
-// interacts with it -- plus the three cases the caller's precondition excludes: a parked partial
-// sequence on entry, a pending byte order mark, and empty input.
+// interacts with it -- plus a partial sequence parked by a previous call, plus the two cases the
+// caller's precondition excludes: a pending byte order mark and empty input.
 // `textCodecUTF8SwiftCounters()` is what makes that boundary visible, because a declining arm
 // and an agreeing arm are byte-identical by construction.
 //
@@ -120,6 +120,22 @@ private func isValidSecondByte(_ firstByte: UInt8, _ secondByte: UInt8) -> Bool 
 @inline(always)
 private func isContinuationByte(_ byte: UInt8) -> Bool {
     byte >= 0x80 && byte <= 0xBF
+}
+
+/// Packs `count` bytes of `source` starting at `start` the way a parked partial sequence crosses
+/// the boundary: byte `i` of the sequence at bit `8 * i` of the result, nothing above `count`.
+///
+/// The bit position is the byte's index within the sequence and nothing else, so the packed value
+/// means the same on a big-endian host as on a little-endian one. That is written down because it
+/// is unobservable here: every differential this island has runs on arm64 only, so a packing-order
+/// mistake would be invisible to it in both directions.
+@inline(always)
+private func packSequenceBytes(_ source: Span<UInt8>, from start: Int, count: Int) -> UInt32 {
+    var packed: UInt32 = 0
+    for offset in 0..<count {
+        packed |= UInt32(source[start + offset]) &<< (8 &* offset)
+    }
+    return packed
 }
 
 /// Spreads the low four bytes of `x` into the four 16-bit lanes of the result: byte at bit
@@ -453,15 +469,19 @@ private typealias WideDecodeScratch = InlineArray<512, UInt16>
 
 /// Decodes `input` as UTF-8, provided every sequence in it is well formed.
 ///
-/// The caller guarantees there is no parked partial sequence and no byte order mark to strip,
-/// so this function reads no codec state and writes none: it reports what it consumed and the
-/// caller applies it. That is what makes a decline free of consequences -- the caller discards
-/// whatever the sink was handed simply by not advancing its destination, or by not taking the
-/// 16-bit buffer.
+/// `partialSequence` and `partialSequenceSize` are the sequence a previous call parked, packed as
+/// `packSequenceBytes` packs one. They are a COPY: this function reads them, works on locals and
+/// reports a new park in its result, and the caller applies that only when `answered` is true. It
+/// reads no other codec state and writes none, so a decline is free of consequences -- the caller
+/// discards whatever the sink was handed simply by not advancing its destination, or by not taking
+/// the 16-bit buffer, and its own park is untouched.
+///
+/// The caller guarantees there is no byte order mark to strip and that `input` is not empty.
 ///
 /// Answers `answered == false`, meaning the caller must decode the whole input itself, for an
-/// ill-formed sequence, for a truncated sequence at a `flush`, and for a truncated sequence whose
-/// bytes are not a valid prefix even when `flush` is false.
+/// ill-formed sequence, for a truncated sequence at a `flush`, for a truncated sequence whose
+/// bytes are not a valid prefix even when `flush` is false, and for an incoming park that is not
+/// a valid prefix either.
 ///
 /// TODO(unsafe): the one `unsafe` marker in this island. `input` arrives as an imported
 /// `std::span`, and turning that into a `Span` needs `Span(_unsafeCxxSpan:)` because Swift has
@@ -472,6 +492,8 @@ private typealias WideDecodeScratch = InlineArray<512, UInt16>
 @_expose(Cxx)
 public func textCodecUTF8DecodeSwift(
     _ input: PAL.TextCodecUTF8SwiftInput,
+    _ partialSequence: UInt32,
+    _ partialSequenceSize: UInt8,
     _ flush: Bool,
     _ sink: PAL.TextCodecUTF8SwiftSink
 ) -> PAL.TextCodecUTF8SwiftResult {
@@ -479,9 +501,17 @@ public func textCodecUTF8DecodeSwift(
     let sourceBytes = source.bytes
     let declined = PAL.TextCodecUTF8SwiftResult()
 
+    // A sequence parked on entry is the next slice; declined here so that the boundary's new
+    // shape lands on its own.
+    if partialSequenceSize != 0 { return declined }
+
     var scratch = DecodeScratch(repeating: 0)
+    // `consumed` is the cursor into `source` AND the byte count the caller advances by, so bytes
+    // that go into a new park count toward it -- the park may hold bytes that were never in
+    // `source` at all, so it cannot be taken off the end of the input the way it once was.
     var consumed = 0
     var produced = 0
+    var packedPartial: UInt32 = 0
     var partial = 0
     var wide = false
 
@@ -507,9 +537,10 @@ public func textCodecUTF8DecodeSwift(
             // into a replacement character, which is ill-formed handling.
             if flush { return declined }
             if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
-            consumed = chunkConsumed
-            produced += chunkProduced
+            packedPartial = packSequenceBytes(source, from: chunkConsumed, count: partialSize)
             partial = partialSize
+            consumed = chunkConsumed + partialSize
+            produced += chunkProduced
 
         case .complete(let chunkConsumed, let chunkProduced):
             if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
@@ -537,9 +568,10 @@ public func textCodecUTF8DecodeSwift(
             case .truncated(let chunkConsumed, let chunkProduced, let partialSize):
                 if flush { return declined }
                 if chunkProduced > 0 { sink.takeWideChunk(output.span.extracting(0..<chunkProduced)) }
-                consumed = chunkConsumed
-                produced += chunkProduced
+                packedPartial = packSequenceBytes(source, from: chunkConsumed, count: partialSize)
                 partial = partialSize
+                consumed = chunkConsumed + partialSize
+                produced += chunkProduced
 
             case .complete(let chunkConsumed, let chunkProduced):
                 if chunkProduced > 0 { sink.takeWideChunk(output.span.extracting(0..<chunkProduced)) }
@@ -559,6 +591,7 @@ public func textCodecUTF8DecodeSwift(
     // two code units is four bytes long. `partial` is at most 3.
     result.consumedBytes = UInt32(consumed)
     result.producedCharacters = UInt32(produced)
+    result.partialSequence = packedPartial
     result.partialSequenceSize = UInt8(partial)
     result.answered = true
     return result
