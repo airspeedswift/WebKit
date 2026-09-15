@@ -179,7 +179,7 @@ private typealias DecodeScratch = InlineArray<1024, UInt8>
 /// outlives it -- but the initializer is `@unsafe`, so the marker stands until the radar
 /// lands. `CSSTokenizerSwift.swift` carries the same two sites for the same reason.
 @_expose(Cxx)
-public func textCodecUTF8DecodeLatin1Swift(
+public func textCodecUTF8DecodeSwift(
     _ input: PAL.TextCodecUTF8SwiftInput,
     _ flush: Bool,
     _ sink: PAL.TextCodecUTF8SwiftSink
@@ -190,6 +190,7 @@ public func textCodecUTF8DecodeLatin1Swift(
 
     var scratch = DecodeScratch(repeating: 0)
     var consumed = 0
+    var produced = 0
     var partial = 0
 
     while consumed < source.count {
@@ -200,24 +201,30 @@ public func textCodecUTF8DecodeLatin1Swift(
         case .declined:
             return declined
 
-        case .truncated(let chunkConsumed, let produced, let partialSize):
+        case .truncated(let chunkConsumed, let chunkProduced, let partialSize):
             // A truncated sequence at a flush is not this arm's to answer: the C++ turns it
             // into a replacement character, which is not Latin-1, and upconverts.
             if flush { return declined }
-            sink.takeChunk(output.span.extracting(0..<produced))
+            if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
             consumed = chunkConsumed
+            produced += chunkProduced
             partial = partialSize
 
-        case .complete(let chunkConsumed, let produced):
-            sink.takeChunk(output.span.extracting(0..<produced))
+        case .complete(let chunkConsumed, let chunkProduced):
+            if chunkProduced > 0 { sink.takeChunk(output.span.extracting(0..<chunkProduced)) }
             consumed = chunkConsumed
+            produced += chunkProduced
             continue
         }
         break
     }
 
     var result = PAL.TextCodecUTF8SwiftResult()
+    // Both counts are bounded by the input length, which the caller has already established
+    // fits in a `uint32_t`: it computed the destination size as the input length plus the
+    // parked partial sequence and bailed out above UINT_MAX. `partial` is at most 3.
     result.consumedBytes = UInt32(consumed)
+    result.producedCharacters = UInt32(produced)
     result.partialSequenceSize = UInt8(partial)
     result.answered = true
     return result

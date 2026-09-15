@@ -73,6 +73,10 @@ TextCodecUTF8SwiftSink* TextCodecUTF8SwiftSink::create(std::span<Latin1Character
 
 void TextCodecUTF8SwiftSink::takeChunk(const Latin1Character *__counted_by(count) characters __attribute__((noescape)), size_t count)
 {
+    // The flip to 16-bit output is one-way, so every narrow chunk precedes every wide one and
+    // `m_destination` is still the live buffer here. Pinned rather than assumed: interleaving
+    // them would leave each buffer holding part of the output.
+    RELEASE_ASSERT(!m_wideBuffer);
     // The bound is the caller's own invariant -- this arm produces one character per input
     // byte at most, and the destination was sized for one per input byte -- but it is checked
     // rather than asserted, because `count` crossed a language boundary to get here.
@@ -81,6 +85,24 @@ void TextCodecUTF8SwiftSink::takeChunk(const Latin1Character *__counted_by(count
     // has just declared the pointer's extent: clang rejects that spelling under
     // -Wunsafe-buffer-usage-in-container without consulting the annotation.
     memcpySpan(m_destination.subspan(m_written, count), unsafeMakeSpan(characters, count));
+    m_written += count;
+}
+
+void TextCodecUTF8SwiftSink::takeWideChunk(const char16_t *__counted_by(count) characters __attribute__((noescape)), size_t count)
+{
+    if (!m_wideBuffer) {
+        // The first character above U+00FF. `m_destination.size()` is `TextCodecUTF8::decode`'s
+        // own `bufferSize`, because this sink was made from the whole 8-bit buffer before
+        // anything had been written to it -- and one character per input byte bounds the 16-bit
+        // output too, since the only sequence yielding two code units is four bytes long.
+        // `decode` has already rejected a `bufferSize` above UINT_MAX.
+        m_wideBuffer = makeUnique<StringBuffer<char16_t>>(static_cast<unsigned>(m_destination.size()));
+        auto widened = m_wideBuffer->span();
+        for (size_t i = 0; i < m_written; ++i)
+            widened[i] = m_destination[i];
+    }
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(count <= m_wideBuffer->length() - m_written);
+    memcpySpan(m_wideBuffer->span().subspan(m_written, count), unsafeMakeSpan(characters, count));
     m_written += count;
 }
 
@@ -375,11 +397,14 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
         // `pal::`, the Swift module's namespace, not `PAL::` -- the generated header puts every
         // exposed Swift declaration under the module name, which is what the crypto bridges'
         // `pal::EdKey::` calls are doing too.
-        auto swiftResult = pal::textCodecUTF8DecodeLatin1Swift(source, flush, sink.ptr());
+        auto swiftResult = pal::textCodecUTF8DecodeSwift(source, flush, sink.ptr());
         if (swiftResult.answered) {
             textCodecUTF8SwiftCounters().answered.fetch_add(1, std::memory_order_relaxed);
+            // The character count is checked against the sink's, because the two are no longer
+            // tied to the byte count or to each other: one character costs one to four bytes
+            // and a four-byte one produces two code units.
+            RELEASE_ASSERT(swiftResult.producedCharacters == sink->writtenCharacters());
             skip(source, swiftResult.consumedBytes);
-            skip(destination, sink->writtenCharacters());
             if (swiftResult.partialSequenceSize) {
                 // Park the truncated tail exactly as the loop below would have. Swift only
                 // reports one when `flush` is false, which is the only case in which the
@@ -388,6 +413,22 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
                 memcpySpan(std::span { m_partialSequence }, consumeSpan(source, m_partialSequenceSize));
             }
             ASSERT(source.empty());
+            if (auto* wideBuffer = sink->wideBuffer()) {
+                // The arm met a character above U+00FF and finished the input in a 16-bit buffer
+                // of its own, so `buffer` is dead and both loops below have nothing left to do.
+                // This is the 16-bit exit of the loop below, minus the two pieces of state that
+                // exit resets, both of which are already in the state it would set them to:
+                // `m_partialSequenceSize` is only cleared at a `flush`, and a `flush` this arm
+                // answers has no partial sequence to park, while `m_shouldStripByteOrderMark`
+                // being false is a precondition of entering here at all.
+                wideBuffer->shrink(sink->writtenCharacters());
+                if (wideBuffer->length() > String::MaxLength) {
+                    sawError = true;
+                    return { };
+                }
+                return String::adopt(WTF::move(*wideBuffer));
+            }
+            skip(destination, sink->writtenCharacters());
         } else
             textCodecUTF8SwiftCounters().declined.fetch_add(1, std::memory_order_relaxed);
     }

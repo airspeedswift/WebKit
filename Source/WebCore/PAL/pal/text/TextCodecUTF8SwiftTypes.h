@@ -26,11 +26,13 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <pal/ExportMacros.h>
 #include <span>
 #include <wtf/SwiftBridging.h>
 #include <wtf/ThreadSafeRefCounted.h>
 #include <wtf/text/Latin1Character.h>
+#include <wtf/text/StringBuffer.h>
 
 namespace PAL {
 
@@ -50,6 +52,13 @@ struct TextCodecUTF8SwiftResult {
     // Input bytes the Swift arm consumed and turned into characters, NOT counting the
     // trailing partial sequence below.
     uint32_t consumedBytes { 0 };
+    // Characters produced, which is NOT derivable from `consumedBytes`: a character costs one,
+    // two, three or four input bytes, and a four-byte one produces TWO code units. The caller
+    // checks this against the sink's own count, because nothing else would notice a Swift
+    // accounting bug -- the sink's bound check is against the buffer, not against the arm's
+    // arithmetic, so a miscount would hand back a correctly filled buffer shrunk to the wrong
+    // length.
+    uint32_t producedCharacters { 0 };
     // Bytes of a truncated sequence at the very end of the input, which the caller parks in
     // `m_partialSequence` to be completed by the next chunk. Only ever non-zero when the
     // arm answered and `flush` was false; a truncated sequence at a flush is a decline,
@@ -58,7 +67,7 @@ struct TextCodecUTF8SwiftResult {
     bool answered { false };
 };
 
-// Receives the Latin-1 characters a decode attempt produces.
+// Receives the characters a decode attempt produces, at either output width.
 //
 // WHY A SINK AND NOT A BUFFER PARAMETER. Swift can PASS a bounds-carrying view to C++ but can
 // never RECEIVE one, in either mutability: an `@_expose(Cxx)` parameter of `Span` type is
@@ -92,7 +101,32 @@ public:
     // copy into storage only WTF can allocate.
     PAL_EXPORT void takeChunk(const Latin1Character *__counted_by(count) characters __attribute__((noescape)), size_t count);
 
+    // Appends one chunk of finished 16-bit characters, and on its first call takes ownership of
+    // the 16-bit buffer they go into.
+    //
+    // WHY THE WIDTH IS SWIFT'S TO CHOOSE, LAZILY, AND NOT THE CALLER'S UP FRONT. Which width an
+    // input needs depends on validity, not on byte values -- `0xC3 0x41` decodes to U+00C3
+    // followed by a replacement character, so it forces 16-bit output when `stopOnError` is
+    // false and stays 8-bit when it is true -- so a correct pre-scan IS a decode, and pricing
+    // one would also mean the 8-bit loop this island replaces could never become dead code.
+    // Always producing 16-bit and narrowing afterwards is worse still: `StringImpl::adopt`
+    // retains the allocation as it stands, so an all-ASCII decode would hold a 2N-byte buffer
+    // for the string's lifetime and every `is8Bit()` in the engine would change answer.
+    //
+    // So the flip happens where the first character above U+00FF is met, and it is one-way: the
+    // characters already written to the 8-bit destination are widened into the new buffer, and
+    // every chunk after that arrives here. `m_written` spans the flip, so `writtenCharacters()`
+    // keeps meaning what it meant. `takeChunk` asserts the ordering rather than trusting it.
+    PAL_EXPORT void takeWideChunk(const char16_t *__counted_by(count) characters __attribute__((noescape)), size_t count);
+
     size_t writtenCharacters() const { return m_written; }
+
+#if !defined(__swift__)
+    // Null unless the decode widened, and hidden from the importer for `create`'s reason: it
+    // hands out a pointer into WTF-owned storage, which is not a convention worth teaching the
+    // importer when only `TextCodecUTF8::decode` ever reads it.
+    StringBuffer<char16_t>* wideBuffer() LIFETIME_BOUND { return m_wideBuffer.get(); }
+#endif
 
 #ifdef __swift__
     // FIXME: rdar://165684636 means these have to be redeclared at this level of the
@@ -113,6 +147,8 @@ private:
 
     std::span<Latin1Character> m_destination;
     size_t m_written { 0 };
+    // Allocated on the first `takeWideChunk`, so the Latin-1 majority never pays for it.
+    std::unique_ptr<StringBuffer<char16_t>> m_wideBuffer;
 } SWIFT_SHARED_REFERENCE(.ref, .deref);
 
 // Coverage, and it is here from the first commit rather than retrofitted.
