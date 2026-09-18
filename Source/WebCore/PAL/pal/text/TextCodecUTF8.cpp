@@ -27,6 +27,8 @@
 #include "TextCodecUTF8.h"
 
 #include "TextCodecASCIIFastPath.h"
+#include <pal/text/TextCodecUTF8SwiftTypes.h>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/CString.h>
@@ -35,6 +37,18 @@
 #include <wtf/text/WTFString.h>
 #include <wtf/unicode/CharacterNames.h>
 
+// Off by default. Select it by building PAL with WK_USE_SWIFT_TEXT_CODEC_UTF8=YES
+// (Source/WebCore/PAL/Configurations/PAL.xcconfig).
+#if !defined(USE_SWIFT_TEXT_CODEC_UTF8)
+#define USE_SWIFT_TEXT_CODEC_UTF8 0
+#endif
+
+#if USE_SWIFT_TEXT_CODEC_UTF8
+// Never PALSwift-Generated.h directly: it is module-scoped, so every PAL Swift boundary's types
+// have to come with it. PALSwiftBoundaryTypes.h is where a new boundary adds its own.
+#include "PALSwiftBoundaryTypes.h"
+#endif
+
 namespace PAL {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(TextCodecUTF8);
@@ -42,6 +56,36 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(TextCodecUTF8);
 using namespace WTF::Unicode;
 
 const int nonCharacter = -1;
+
+TextCodecUTF8SwiftCounters& textCodecUTF8SwiftCounters()
+{
+    static NeverDestroyed<TextCodecUTF8SwiftCounters> counters;
+    return counters.get();
+}
+
+#if USE_SWIFT_TEXT_CODEC_UTF8
+// The partial sequence is the only codec state that crosses to Swift, and it crosses packed into a
+// `uint32_t`: byte `i` at bit `8 * i`, only the low `partialSequenceSize` bytes live.
+// `packPartialSequence` in TextCodecUTF8Swift.swift is the other half of the pair.
+static uint32_t packPartialSequence(std::span<const uint8_t> partialSequence)
+{
+    ASSERT(partialSequence.size() <= sizeof(uint32_t));
+    uint32_t packed = 0;
+    for (size_t i = 0; i < partialSequence.size(); ++i)
+        packed |= static_cast<uint32_t>(partialSequence[i]) << (8 * i);
+    return packed;
+}
+
+// Returns the new `m_partialSequenceSize`, so that the size and the bytes it describes cannot be
+// updated in one place and not the other.
+static uint8_t unpackPartialSequence(std::span<uint8_t> partialSequence, const TextCodecUTF8SwiftResult& result)
+{
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(static_cast<size_t>(result.partialSequenceSize) <= partialSequence.size());
+    for (uint8_t i = 0; i < result.partialSequenceSize; ++i)
+        partialSequence[i] = static_cast<uint8_t>(result.partialSequence >> (8 * i));
+    return result.partialSequenceSize;
+}
+#endif
 
 void TextCodecUTF8::registerEncodingNames(EncodingNameRegistrar registrar)
 {
@@ -316,6 +360,86 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
     auto source = bytes;
     auto* alignedEnd = WTF::alignToMachineWord(std::to_address(source.end()));
     auto destination = buffer.span();
+
+#if USE_SWIFT_TEXT_CODEC_UTF8
+    // Swift decodes into `buffer` directly and reports `needsWide` at the first character Latin-1
+    // cannot hold: an ill-formed sequence (unless `stopOnError`), a character above U+00FF, or a held
+    // partial sequence resolving to either. Two inputs are excluded before the call: a pending byte
+    // order mark, the one character whose handling depends on where it lands, and empty input.
+    if (!source.empty() && !m_shouldStripByteOrderMark) {
+        auto narrowResult = pal::textCodecUTF8DecodeNarrow(source, destination,
+            packPartialSequence(std::span { m_partialSequence }.first(m_partialSequenceSize)),
+            static_cast<uint8_t>(m_partialSequenceSize),
+            flush, stopOnError);
+
+        if (!narrowResult.answered)
+            textCodecUTF8SwiftCounters().declined.fetch_add(1, std::memory_order_relaxed);
+        else {
+            textCodecUTF8SwiftCounters().answered.fetch_add(1, std::memory_order_relaxed);
+            if (narrowResult.sawError)
+                sawError = true;
+            skip(source, narrowResult.consumedBytes);
+
+            m_partialSequenceSize = unpackPartialSequence(std::span { m_partialSequence }, narrowResult);
+
+            if (narrowResult.needsWide) {
+                // Widen what the 8-bit half produced and let the 16-bit half finish from its cursor,
+                // as this function's own upConvertTo16Bit label does.
+                //
+                // Both counts are checked before they index anything, since they are what sizes the
+                // two subspans below: a decoder that overstated either would otherwise form a span
+                // past the end of a buffer.
+                size_t narrowProduced = narrowResult.producedCharacters;
+                RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(narrowResult.consumedBytes <= bytes.size());
+                RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(narrowProduced <= bufferSize);
+
+                StringBuffer<char16_t> buffer16(bufferSize);
+                auto destination16 = buffer16.span();
+                auto converted8 = buffer.span().first(narrowProduced);
+                for (size_t i = 0; i < narrowProduced; ++i)
+                    destination16[i] = converted8[i];
+
+                auto wideResult = pal::textCodecUTF8DecodeWide(
+                    source, destination16.subspan(narrowProduced),
+                    narrowResult.partialSequence, narrowResult.partialSequenceSize,
+                    flush, stopOnError);
+
+                RELEASE_ASSERT(wideResult.answered);
+                if (wideResult.sawError)
+                    sawError = true;
+                if (wideResult.stoppedOnError) {
+                    ASSERT(stopOnError);
+                    source = { };
+                } else
+                    ASSERT(source.empty());
+
+                m_partialSequenceSize = unpackPartialSequence(std::span { m_partialSequence }, wideResult);
+
+                size_t totalProduced = narrowProduced + wideResult.producedCharacters;
+                RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(totalProduced <= buffer16.length());
+                buffer16.shrink(static_cast<unsigned>(totalProduced));
+                if (buffer16.length() > String::MaxLength) {
+                    sawError = true;
+                    return { };
+                }
+                if (flush)
+                    m_partialSequenceSize = 0;
+                if (flush || buffer16.length())
+                    m_shouldStripByteOrderMark = false;
+                return String::adopt(WTF::move(buffer16));
+            }
+
+            // 8-bit throughout. `stopOnError` is the one result that leaves input undecoded, and the
+            // remainder is dropped. Either way the 8-bit tail below handles flush and shrink.
+            if (narrowResult.stoppedOnError) {
+                ASSERT(stopOnError);
+                source = { };
+            } else
+                ASSERT(source.empty());
+            skip(destination, narrowResult.producedCharacters);
+        }
+    }
+#endif
 
     do {
         if (m_partialSequenceSize) {

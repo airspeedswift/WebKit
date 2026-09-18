@@ -51,6 +51,9 @@
 #include <pal/crypto/CryptoTypes.h>
 #include <wtf/EscapableByteSpan.h>
 
+// The UTF-8 decoder (TextCodecUTF8Swift.swift): the span aliases and the result value.
+#include <pal/text/TextCodecUTF8SwiftTypes.h>
+
 // FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops handing
 // C++ the Objective-C spelling. It treats C++11 as implying support for the Objective-C fixed-enum
 // forward declaration, so in C++ it expands `typedef SWIFT_ENUM(uint8_t, Name, closed) {` to

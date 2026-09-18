@@ -46,6 +46,8 @@
 		1C5C57CC27571531003B540D /* TextCodecCJK.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57C027571527003B540D /* TextCodecCJK.cpp */; };
 		1C5C57CD27571531003B540D /* TextCodecSingleByte.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57C227571529003B540D /* TextCodecSingleByte.cpp */; };
 		1C5C57CE27571531003B540D /* TextCodecUTF8.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57C32757152A003B540D /* TextCodecUTF8.cpp */; };
+		0BEN0002301000000069239A /* TextCodecUTF8Swift.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BEN0001301000000069239A /* TextCodecUTF8Swift.swift */; };
+		0BEN0004301000000069239A /* TextCodecUTF8SwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 0BEN0003301000000069239A /* TextCodecUTF8SwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0BEN0006301000000069239A /* PALSwiftBoundaryTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 0BEN0005301000000069239A /* PALSwiftBoundaryTypes.h */; };
 		1C5C57CF27571531003B540D /* TextCodec.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57B52757151D003B540D /* TextCodec.cpp */; };
 		1C5C57D027571531003B540D /* TextCodecReplacement.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57BB27571522003B540D /* TextCodecReplacement.cpp */; };
@@ -622,6 +624,8 @@
 		1C5C57C62757152E003B540D /* TextCodecASCIIFastPath.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TextCodecASCIIFastPath.h; sourceTree = "<group>"; };
 		1C5C57C72757152F003B540D /* TextCodecLatin1.cpp */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.cpp.cpp; path = TextCodecLatin1.cpp; sourceTree = "<group>"; };
 		1C5C57C827571531003B540D /* TextCodecUTF8.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TextCodecUTF8.h; sourceTree = "<group>"; };
+		0BEN0001301000000069239A /* TextCodecUTF8Swift.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TextCodecUTF8Swift.swift; sourceTree = "<group>"; };
+		0BEN0003301000000069239A /* TextCodecUTF8SwiftTypes.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TextCodecUTF8SwiftTypes.h; sourceTree = "<group>"; };
 		0BEN0005301000000069239A /* PALSwiftBoundaryTypes.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = PALSwiftBoundaryTypes.h; path = pal/PALSwiftBoundaryTypes.h; sourceTree = SOURCE_ROOT; };
 		1C5C57D227571622003B540D /* EncodingTables.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = EncodingTables.cpp; sourceTree = "<group>"; };
 		1C5C57D327571625003B540D /* EncodingTables.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = EncodingTables.h; sourceTree = "<group>"; };
@@ -1394,6 +1398,8 @@
 				1C5C57C42757152C003B540D /* TextCodecUTF16.h */,
 				1C5C57C32757152A003B540D /* TextCodecUTF8.cpp */,
 				1C5C57C827571531003B540D /* TextCodecUTF8.h */,
+				0BEN0001301000000069239A /* TextCodecUTF8Swift.swift */,
+				0BEN0003301000000069239A /* TextCodecUTF8SwiftTypes.h */,
 				1C5C57DA2757168E003B540D /* TextEncoding.cpp */,
 				1C5C57D827571688003B540D /* TextEncoding.h */,
 				1C5C57D92757168B003B540D /* TextEncodingDetector.h */,
@@ -1692,6 +1698,7 @@
 				DD20DE5727BC90D80093D175 /* TextCodecUserDefined.h in Headers */,
 				DD20DE5827BC90D80093D175 /* TextCodecUTF16.h in Headers */,
 				DD20DE5927BC90D80093D175 /* TextCodecUTF8.h in Headers */,
+				0BEN0004301000000069239A /* TextCodecUTF8SwiftTypes.h in Headers */,
 				DD20DE5A27BC90D80093D175 /* TextEncoding.h in Headers */,
 				DD20DE5B27BC90D80093D175 /* TextEncodingDetector.h in Headers */,
 				DD20DE5C27BC90D80093D175 /* TextEncodingRegistry.h in Headers */,
@@ -1966,6 +1973,7 @@
 				1C5C57CA27571531003B540D /* TextCodecUserDefined.cpp in Sources */,
 				1C5C57CB27571531003B540D /* TextCodecUTF16.cpp in Sources */,
 				1C5C57CE27571531003B540D /* TextCodecUTF8.cpp in Sources */,
+				0BEN0002301000000069239A /* TextCodecUTF8Swift.swift in Sources */,
 				1C5C57DD2757168F003B540D /* TextEncoding.cpp in Sources */,
 				1C5C57DC2757168F003B540D /* TextEncodingDetectorICU.cpp in Sources */,
 				1C5C57DB2757168F003B540D /* TextEncodingRegistry.cpp in Sources */,
