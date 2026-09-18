@@ -30,10 +30,9 @@
 // one of the crypto bridges; never include PALSwift-Generated.h directly.
 //
 // That header is emitted once for the whole module, so a translation unit including it must see
-// every boundary's types, not just its own. The crypto bridges each satisfy that by hand, which
-// works only while crypto is PAL's sole boundary: including the generated header from a second one
-// fails with twenty errors naming types that file never mentions. Stating the requirement here means
-// a new boundary adds its types to this file rather than to every consumer.
+// every boundary's types, not just its own. Stating the requirement here means a new boundary adds
+// its types to this file rather than to every consumer. (The crypto bridges predate this file and
+// each satisfies the requirement by hand.)
 //
 // A project header rather than a private one, and mechanically so: pal's `Core` module is
 // `umbrella "."` over the installed header directory, so an installed copy would be swept into that

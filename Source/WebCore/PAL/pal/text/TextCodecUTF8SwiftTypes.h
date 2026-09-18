@@ -82,4 +82,9 @@ struct TextCodecUTF8SwiftCounters {
 
 PAL_EXPORT TextCodecUTF8SwiftCounters& textCodecUTF8SwiftCounters();
 
+// Whether this PAL was built with USE_SWIFT_TEXT_CODEC_UTF8, which is to say which decoder is in
+// this binary. The define is private to the PAL target, so a test binary cannot ask the
+// preprocessor, and the two decoders are meant to be indistinguishable from their output.
+PAL_EXPORT bool textCodecUTF8SwiftEnabled();
+
 } // namespace PAL

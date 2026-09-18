@@ -87,6 +87,11 @@ static uint8_t unpackPartialSequence(std::span<uint8_t> partialSequence, const T
 }
 #endif
 
+bool textCodecUTF8SwiftEnabled()
+{
+    return USE_SWIFT_TEXT_CODEC_UTF8;
+}
+
 void TextCodecUTF8::registerEncodingNames(EncodingNameRegistrar registrar)
 {
     // From https://encoding.spec.whatwg.org.
@@ -438,6 +443,12 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
                 ASSERT(source.empty());
             skip(destination, narrowResult.producedCharacters);
         }
+    } else {
+        // Excluded before the call: a pending byte order mark, which Swift has no handling for, or
+        // empty input, which it is never handed. Counted the same as a refusal, because the
+        // measurement that matters is how much input the C++ loop below still has to decode, and by
+        // that measure a call not made and a call refused are the same thing.
+        textCodecUTF8SwiftCounters().declined.fetch_add(1, std::memory_order_relaxed);
     }
 #endif
 
