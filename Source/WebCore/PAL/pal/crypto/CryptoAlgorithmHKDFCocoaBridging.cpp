@@ -26,7 +26,7 @@
 #include "config.h"
 #include "CryptoAlgorithmHKDFCocoaBridging.h"
 
-#include "PALSwift-Generated.h"
+#include "PALSwiftBoundaryTypes.h"
 #include <wtf/EscapableByteSpan.h>
 
 namespace PAL::Crypto {

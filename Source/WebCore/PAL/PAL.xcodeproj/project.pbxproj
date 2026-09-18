@@ -46,6 +46,7 @@
 		1C5C57CC27571531003B540D /* TextCodecCJK.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57C027571527003B540D /* TextCodecCJK.cpp */; };
 		1C5C57CD27571531003B540D /* TextCodecSingleByte.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57C227571529003B540D /* TextCodecSingleByte.cpp */; };
 		1C5C57CE27571531003B540D /* TextCodecUTF8.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57C32757152A003B540D /* TextCodecUTF8.cpp */; };
+		0BEN0006301000000069239A /* PALSwiftBoundaryTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 0BEN0005301000000069239A /* PALSwiftBoundaryTypes.h */; };
 		1C5C57CF27571531003B540D /* TextCodec.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57B52757151D003B540D /* TextCodec.cpp */; };
 		1C5C57D027571531003B540D /* TextCodecReplacement.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57BB27571522003B540D /* TextCodecReplacement.cpp */; };
 		1C5C57D127571531003B540D /* TextCodecLatin1.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1C5C57C72757152F003B540D /* TextCodecLatin1.cpp */; };
@@ -621,6 +622,7 @@
 		1C5C57C62757152E003B540D /* TextCodecASCIIFastPath.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TextCodecASCIIFastPath.h; sourceTree = "<group>"; };
 		1C5C57C72757152F003B540D /* TextCodecLatin1.cpp */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.cpp.cpp; path = TextCodecLatin1.cpp; sourceTree = "<group>"; };
 		1C5C57C827571531003B540D /* TextCodecUTF8.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TextCodecUTF8.h; sourceTree = "<group>"; };
+		0BEN0005301000000069239A /* PALSwiftBoundaryTypes.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = PALSwiftBoundaryTypes.h; path = pal/PALSwiftBoundaryTypes.h; sourceTree = SOURCE_ROOT; };
 		1C5C57D227571622003B540D /* EncodingTables.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = EncodingTables.cpp; sourceTree = "<group>"; };
 		1C5C57D327571625003B540D /* EncodingTables.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = EncodingTables.h; sourceTree = "<group>"; };
 		1C5C57D527571681003B540D /* TextEncodingDetectorICU.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = TextEncodingDetectorICU.cpp; sourceTree = "<group>"; };
@@ -1159,6 +1161,7 @@
 				07ED41272F771BC200C91401 /* CryptoEDKeyBridging.h */,
 				94F4AA012B730D2C006DFFDE /* CryptoKitShim.swift */,
 				07C9C8DB2EDAAABD007B579A /* CryptoTypes.h */,
+				0BEN0005301000000069239A /* PALSwiftBoundaryTypes.h */,
 				078D1F412F74FB5D00B6BFA9 /* PlatformECKey.cpp */,
 				078D1F3C2F74D8D000B6BFA9 /* PlatformECKey.h */,
 				BB0000000000000000000011 /* WTFExtras.swift */,
@@ -1642,6 +1645,7 @@
 				DD20DD1827BC90D60093D175 /* OTSVGTable.h in Headers */,
 				DD20DD1327BC90D60093D175 /* OutputContext.h in Headers */,
 				DD20DD1427BC90D60093D175 /* OutputDevice.h in Headers */,
+				0BEN0006301000000069239A /* PALSwiftBoundaryTypes.h in Headers */,
 				DD20DE0227BC90D80093D175 /* PassKitInstallmentsSPI.h in Headers */,
 				DD20DD2227BC90D60093D175 /* PassKitSoftLink.h in Headers */,
 				DD20DE0327BC90D80093D175 /* PassKitSPI.h in Headers */,
