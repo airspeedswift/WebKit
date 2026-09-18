@@ -26,9 +26,8 @@
 // `decode` fills an 8-bit `StringBuffer` optimistically and abandons it for a 16-bit one at the
 // first character Latin-1 cannot hold. `textCodecUTF8DecodeNarrow` does the 8-bit half and reports
 // `needsWide` at that point; the caller widens what it has and calls `textCodecUTF8DecodeWide` to
-// finish. Between them they decode every input the call site is given, which is now every input
-// there is. Two partial-sequence shapes still go to the C++ decode loop rather than trapping; the
-// counters are what make that observable, since the other path produces identical output.
+// finish. Between them they decode every input, so neither may refuse one: where these functions
+// are compiled, the C++ decode loops are not.
 //
 // Four decoding rules worth stating, because getting them backwards produces plausible output:
 //
@@ -218,8 +217,6 @@ private enum NarrowPartialSequenceOutcome {
     /// emitted: the C++ caller passes that overload a copy of its destination and keeps it only on
     /// false, so anything written before returning true is discarded.
     case needsWide(partialSequence: UInt32, size: Int, consumed: Int)
-    /// Outside what this handles, naming the shape so that the caller's counters can too.
-    case declined(reason: PAL.TextCodecUTF8SwiftDeclineReason)
 }
 
 /// The 8-bit `handlePartialSequence`, which is one iteration of its `do`/`while` rather than a loop.
@@ -227,13 +224,8 @@ private enum NarrowPartialSequenceOutcome {
 /// That rests on two properties of a held sequence, both preconditions here: its first byte is not
 /// ASCII, and when that byte leads a sequence the held size is at most that sequence's length. So
 /// the one exit that could loop -- a decoded Latin-1 character -- subtracts the whole sequence
-/// length from a size that is at most that length.
-///
-/// Two shapes fall outside that invariant, and no main loop can construct one: an ASCII first byte,
-/// which a main loop turns into a character before it could hold it, and a held sequence longer than
-/// its lead's sequence, which needs a writer other than a main loop running out of input. Both go to
-/// the C++ loop rather than trapping, because that loop is still there to take them, and the counters
-/// keep the two shapes apart so that a nonzero count says which one turned up.
+/// length from a size that is at most that length. Nothing in this file can produce either shape:
+/// a main loop holds a sequence only when a non-ASCII lead runs out of input.
 ///
 /// `@inline(never)` because this is cold and its caller is not. With one call site the optimiser
 /// inlines it into `textCodecUTF8DecodeNarrow`, which relays out that function and moves the 8-bit
@@ -247,10 +239,7 @@ private func handlePartialSequenceNarrow(
     flush: Bool
 ) -> NarrowPartialSequenceOutcome {
     let firstByte = partialSequenceByte(partialSequence, 0)
-    if firstByte < 0x80 {
-        assertionFailure("a held UTF-8 partial sequence cannot begin with an ASCII byte")
-        return .declined(reason: .ParkedLeadIsASCII)
-    }
+    precondition(firstByte >= 0x80, "a held UTF-8 partial sequence cannot begin with an ASCII byte")
     let length = sequenceLength(firstByte)
     // `if (!count) return true;`. This overload takes no `sawError`, so a byte that leads nothing is
     // not recorded as an error until the 16-bit overload meets it again.
@@ -272,10 +261,7 @@ private func handlePartialSequenceNarrow(
     guard let character, character <= 0xFF else {
         return .needsWide(partialSequence: packed, size: size, consumed: index)
     }
-    if size != length {
-        assertionFailure("a held UTF-8 partial sequence cannot outrun its lead byte's sequence")
-        return .declined(reason: .ParkExceedsLeadLength)
-    }
+    precondition(size == length, "a held UTF-8 partial sequence cannot outrun its lead byte's sequence")
     return .latin1(character: UInt8(truncatingIfNeeded: character), consumed: index)
 }
 
@@ -625,7 +611,8 @@ private func decodeWideChunk(
     return .complete(consumed: index, produced: produced)
 }
 
-/// A decoded result, as opposed to `makeDeclinedResult`, whose `answered` is false.
+/// A decoded result. There is no other kind: every input this cannot decode is a precondition
+/// violation rather than a return value.
 @inline(always)
 private func makeResult(
     consumed: Int,
@@ -646,17 +633,6 @@ private func makeResult(
     result.sawError = sawError
     result.stoppedOnError = stoppedOnError
     result.shouldStripByteOrderMark = shouldStripByteOrderMark
-    result.answered = true
-    return result
-}
-
-/// An input handed to the C++ loop instead, naming the shape so that the counters can.
-@inline(always)
-private func makeDeclinedResult(
-    _ reason: PAL.TextCodecUTF8SwiftDeclineReason
-) -> PAL.TextCodecUTF8SwiftResult {
-    var result = PAL.TextCodecUTF8SwiftResult()
-    result.declineReason = reason
     return result
 }
 
@@ -667,9 +643,8 @@ private func makeDeclinedResult(
 ///
 /// `partialSequence` and `partialSequenceSize` are a copy of what a previous call left incomplete,
 /// packed by `packPartialSequence`. This reads them, works on locals, and reports a new partial
-/// sequence for the caller to store, and only when `answered` is true. It reads and writes no other
-/// codec state, so handing an input to the C++ loop has no consequences: everything that crosses is a
-/// value, in and out.
+/// sequence for the caller to store. It reads and writes no other codec state: everything that
+/// crosses is a value, in and out.
 ///
 /// The caller guarantees nothing about `input`, empty included, which answers with nothing consumed
 /// and nothing produced.
@@ -707,9 +682,6 @@ public func textCodecUTF8DecodeNarrow(
     stages: while true {
         if packedSize != 0 {
             switch handlePartialSequenceNarrow(source, from: consumed, partialSequence: packed, size: packedSize, flush: flush) {
-            case .declined(let reason):
-                return makeDeclinedResult(reason)
-
             case .waiting(let held, let size, let cursor):
                 packed = held
                 packedSize = size
@@ -785,7 +757,7 @@ public func textCodecUTF8DecodeNarrow(
 /// Decodes `input` as UTF-8 into `destInput`, a UTF-16 destination, after
 /// `textCodecUTF8DecodeNarrow` reported `needsWide`. The caller has widened the 8-bit prefix into a
 /// `StringBuffer<char16_t>` and passes a span starting past it, so this writes from index zero, and
-/// it continues from the partial sequence the narrow half handed over. It always answers.
+/// it continues from the partial sequence the narrow half handed over.
 ///
 /// `startsFinalBuffer` says the destination span begins at index 0 of the final string buffer, which
 /// is to say that the narrow half produced nothing before handing over. It is the other half of the

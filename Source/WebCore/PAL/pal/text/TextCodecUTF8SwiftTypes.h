@@ -25,7 +25,6 @@
 
 #pragma once
 
-#include <atomic>
 #include <pal/ExportMacros.h>
 #include <span>
 #include <wtf/text/Latin1Character.h>
@@ -43,23 +42,11 @@ using TextCodecUTF8SwiftInput = std::span<const uint8_t>;
 using TextCodecUTF8SwiftNarrowDest = std::span<Latin1Character>;
 using TextCodecUTF8SwiftWideDest = std::span<char16_t>;
 
-// Which shape went to the C++ loop, so that a remaining count names one rather than being a lump.
-// Both are partial sequences that only that loop can leave behind -- see
-// `handlePartialSequenceNarrow` -- so both go away once nothing but Swift leaves one.
-enum class TextCodecUTF8SwiftDeclineReason : uint8_t {
-    None = 0,
-    // The held sequence's first byte is ASCII.
-    ParkedLeadIsASCII = 1,
-    // The held sequence is longer than its lead byte's sequence length.
-    ParkExceedsLeadLength = 2,
-};
-
 // What one decode reports back, as a value, so the whole thing crosses in registers.
 //
-// `answered` false means Swift read something outside what it covers and did no useful work, so
-// `TextCodecUTF8::decode` runs its own loop over the same input from the top. The fields above are
-// applied only when it is true, so that case leaves every byte of codec state as it found it, which
-// is what makes the C++ loop a re-run rather than a resume.
+// There is no "could not decode it" field: USE_SWIFT_TEXT_CODEC_UTF8 selects which decoder is
+// compiled, so in a build where these functions exist the C++ decode loops do not, and a refusal
+// would have nowhere to go.
 struct TextCodecUTF8SwiftResult {
     // Bytes taken, including any that went into `partialSequence` below, which can mix bytes held
     // from an earlier call with bytes from this one and so is not recoverable from the input.
@@ -86,36 +73,11 @@ struct TextCodecUTF8SwiftResult {
     // sequence, which spends the flag on any character it decodes, and the main loop, which spends
     // it only for a U+FEFF landing at index 0 of the final buffer.
     bool shouldStripByteOrderMark { false };
-    TextCodecUTF8SwiftDeclineReason declineReason { TextCodecUTF8SwiftDeclineReason::None };
-    bool answered { false };
 };
-
-// Which decoder handled an input, since both produce byte-identical output by construction and these
-// counters are the only thing that can tell them apart. Relaxed: read after a run, never a
-// synchronisation mechanism.
-//
-// `declined` counts every decode the C++ loop had to handle, which is now the same as the number of
-// calls that returned `answered == false`, Swift being offered every decode. The per-reason counters
-// sum to it and say which shape is still getting through.
-struct TextCodecUTF8SwiftCounters {
-    std::atomic<uint64_t> answered { 0 };
-    std::atomic<uint64_t> declined { 0 };
-    std::atomic<uint64_t> declinedParkedLeadIsASCII { 0 };
-    std::atomic<uint64_t> declinedParkExceedsLeadLength { 0 };
-};
-
-PAL_EXPORT TextCodecUTF8SwiftCounters& textCodecUTF8SwiftCounters();
 
 // Whether this PAL was built with USE_SWIFT_TEXT_CODEC_UTF8, which is to say which decoder is in
 // this binary. The define is private to the PAL target, so a test binary cannot ask the
 // preprocessor, and the two decoders are meant to be indistinguishable from their output.
 PAL_EXPORT bool textCodecUTF8SwiftEnabled();
-
-// Testing hook: forces `TextCodecUTF8::decode` down its own C++ loop, so that a differential can run
-// the same input through both implementations in one process. Without it that loop is unreachable on
-// any input Swift handles, which is now every input, leaving only chunking invariance -- which a
-// decoder that is wrong the same way in every chunking passes. Not thread-safe; goes away with the
-// C++ decoder.
-PAL_EXPORT void setTextCodecUTF8SwiftDisabledForTesting(bool);
 
 } // namespace PAL

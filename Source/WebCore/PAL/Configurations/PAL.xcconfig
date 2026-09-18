@@ -26,10 +26,9 @@
 
 GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) $(inherited) $(WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES);
 
-// Selects the Swift UTF-8 decoder (TextCodecUTF8Swift.swift). Off by default; both arms are
-// compiled either way, so flipping it rebuilds only TextCodecUTF8.cpp. It does not tell you the
-// arm ran -- both settings give byte-identical output by construction. Read
-// `textCodecUTF8SwiftCounters()` for that.
+// Selects the Swift UTF-8 decoder (TextCodecUTF8Swift.swift) in place of the C++ one, which is then
+// not compiled. Off by default. `PAL::textCodecUTF8SwiftEnabled()` reports which one a binary has,
+// since the two are meant to be indistinguishable from their output.
 WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES = $(WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES_$(WK_USE_SWIFT_TEXT_CODEC_UTF8));
 WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES_YES = USE_SWIFT_TEXT_CODEC_UTF8=1;
 
