@@ -87,6 +87,15 @@ static uint8_t unpackPartialSequence(std::span<uint8_t> partialSequence, const T
 }
 #endif
 
+// Not thread-safe, and goes away with the C++ decoder: it exists so that a differential can run the
+// same input through both implementations in one process.
+static bool swiftDecoderDisabledForTesting;
+
+void setTextCodecUTF8SwiftDisabledForTesting(bool disabled)
+{
+    swiftDecoderDisabledForTesting = disabled;
+}
+
 bool textCodecUTF8SwiftEnabled()
 {
     return USE_SWIFT_TEXT_CODEC_UTF8;
@@ -369,17 +378,30 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
 #if USE_SWIFT_TEXT_CODEC_UTF8
     // Swift decodes into `buffer` directly and reports `needsWide` at the first character Latin-1
     // cannot hold: an ill-formed sequence (unless `stopOnError`), a character above U+00FF, or a held
-    // partial sequence resolving to either. Two inputs are excluded before the call: a pending byte
-    // order mark, the one character whose handling depends on where it lands, and empty input.
-    if (!source.empty() && !m_shouldStripByteOrderMark) {
+    // partial sequence resolving to either. Every decode is offered to it, which is what makes the
+    // count below a measurement of what the C++ loop still has to do. Empty input included:
+    // `bufferSize` is then zero and both spans are empty, which Swift takes as an empty `Span`, and
+    // the call is how the flush that turns a truncated tail into U+FFFD is decoded.
+    if (!swiftDecoderDisabledForTesting) {
         auto narrowResult = pal::textCodecUTF8DecodeNarrow(source, destination,
             packPartialSequence(std::span { m_partialSequence }.first(m_partialSequenceSize)),
             static_cast<uint8_t>(m_partialSequenceSize),
-            flush, stopOnError);
+            flush, stopOnError, m_shouldStripByteOrderMark);
 
-        if (!narrowResult.answered)
+        if (!narrowResult.answered) {
             textCodecUTF8SwiftCounters().declined.fetch_add(1, std::memory_order_relaxed);
-        else {
+            switch (narrowResult.declineReason) {
+            case TextCodecUTF8SwiftDeclineReason::ParkedLeadIsASCII:
+                textCodecUTF8SwiftCounters().declinedParkedLeadIsASCII.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case TextCodecUTF8SwiftDeclineReason::ParkExceedsLeadLength:
+                textCodecUTF8SwiftCounters().declinedParkExceedsLeadLength.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case TextCodecUTF8SwiftDeclineReason::None:
+                ASSERT_NOT_REACHED();
+                break;
+            }
+        } else {
             textCodecUTF8SwiftCounters().answered.fetch_add(1, std::memory_order_relaxed);
             if (narrowResult.sawError)
                 sawError = true;
@@ -407,7 +429,12 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
                 auto wideResult = pal::textCodecUTF8DecodeWide(
                     source, destination16.subspan(narrowProduced),
                     narrowResult.partialSequence, narrowResult.partialSequenceSize,
-                    flush, stopOnError);
+                    flush, stopOnError,
+                    // The position rule at :567 is about index 0 of the final buffer, and the 16-bit
+                    // half is handed a span starting past the widened 8-bit prefix, so it cannot see
+                    // that from its own cursor: a non-empty prefix means nothing it writes can be at
+                    // index 0.
+                    narrowResult.shouldStripByteOrderMark, !narrowProduced);
 
                 RELEASE_ASSERT(wideResult.answered);
                 if (wideResult.sawError)
@@ -419,6 +446,7 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
                     ASSERT(source.empty());
 
                 m_partialSequenceSize = unpackPartialSequence(std::span { m_partialSequence }, wideResult);
+                m_shouldStripByteOrderMark = wideResult.shouldStripByteOrderMark;
 
                 size_t totalProduced = narrowProduced + wideResult.producedCharacters;
                 RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(totalProduced <= buffer16.length());
@@ -443,12 +471,6 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
                 ASSERT(source.empty());
             skip(destination, narrowResult.producedCharacters);
         }
-    } else {
-        // Excluded before the call: a pending byte order mark, which Swift has no handling for, or
-        // empty input, which it is never handed. Counted the same as a refusal, because the
-        // measurement that matters is how much input the C++ loop below still has to decode, and by
-        // that measure a call not made and a call refused are the same thing.
-        textCodecUTF8SwiftCounters().declined.fetch_add(1, std::memory_order_relaxed);
     }
 #endif
 

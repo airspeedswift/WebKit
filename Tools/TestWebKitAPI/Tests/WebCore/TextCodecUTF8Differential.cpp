@@ -31,12 +31,19 @@
 // property is the oracle, so there are no expected strings here and no reference decoder is needed --
 // the single-chunk decode of the same bytes is the expectation, and every chunking of them is the
 // test. Chunk boundaries are where the two decoders differ in structure, since a boundary is the only
-// thing that parks a partial sequence, and that sequence is the whole of what crosses between C++ and
+// thing that leaves a partial sequence, and that sequence is the whole of what crosses between C++ and
 // Swift.
 //
-// The second thing here is a coverage check: how much input the Swift decoder handled. The rest goes
-// to the C++ loop, which produces identical output by construction, so a build where Swift handled
-// nothing passes every correctness test in the suite. Only the counters can tell those apart.
+// The second thing here is a coverage count: how much input Swift decoded. The rest goes to the C++
+// loop, which produces identical output by construction, so a build where Swift decoded nothing
+// passes every correctness test in the suite. Only the counters can tell those apart.
+//
+// The third is a direct differential, which chunking invariance is not: a decoder that is wrong the
+// same way at every chunking passes that oracle, and now that Swift decodes every input the C++ loop
+// is unreachable and cannot contradict it. `setTextCodecUTF8SwiftDisabledForTesting` forces the C++
+// loop, so that both implementations can decode the same bytes in one process. This is the only check
+// here that can see a rule copied wrongly rather than inconsistently, which is what the two
+// byte-order-mark rules are, since they disagree with each other by design.
 
 #include "config.h"
 
@@ -120,6 +127,14 @@ struct Outcome {
 // list is the single-chunk decode. A split at 0 or at size deliberately produces an EMPTY chunk:
 // those are not degenerate cases but the two the production gate currently refuses to hand to Swift,
 // and a split at size is the flush-only final call that every streamed decode ends with.
+// Forces `TextCodecUTF8::decode` down its own C++ loop for the lifetime of the scope, so the two
+// implementations can be compared against each other.
+class ForceCppDecoder {
+public:
+    ForceCppDecoder() { PAL::setTextCodecUTF8SwiftDisabledForTesting(true); }
+    ~ForceCppDecoder() { PAL::setTextCodecUTF8SwiftDisabledForTesting(false); }
+};
+
 static Outcome decodeInChunks(std::span<const uint8_t> bytes, std::span<const size_t> splits, bool stopOnError, bool stripByteOrderMark)
 {
     auto codec = newTextCodec(PAL::TextEncoding { "UTF-8"_s });
@@ -195,9 +210,17 @@ static ASCIILiteral corpusLiterals[] = {
     "EF BB BF 61 62 63 64 65 66 67 68"_s,
     "EF"_s,
     "EF BB"_s,
+    // A byte order mark that can only be settled out of a held partial sequence, next to one that
+    // cannot be a mark at all, and one followed straight by an error: the rule that applies to a held
+    // sequence is position-independent while the main loop's is not, so these are where the two rules
+    // can be told apart.
+    "61 EF BB"_s,
+    "EF BB 61"_s,
+    "EF BB BF EF BB"_s,
+    "EF BB BF 80"_s,
 
-    // Truncated sequences: the park is the only state that crosses the boundary, and on flush each
-    // of these has to become a replacement character.
+    // Truncated sequences: a held partial sequence is the only state that crosses the boundary, and on
+    // flush each of these has to become a replacement character.
     "C2"_s,
     "E2"_s,
     "E2 98"_s,
@@ -268,6 +291,23 @@ static void checkAllChunkings(std::span<const uint8_t> bytes, bool stripByteOrde
             ADD_FAILURE() << utf8Chars(detail);
         }
 
+        // The same chunking through the C++ decoder. Unlike the oracle above this compares the two
+        // IMPLEMENTATIONS, so it is what catches a rule transcribed wrongly rather than
+        // inconsistently -- above all the byte order mark, whose two C++ rules differ from each
+        // other and whose position rule has to survive the narrow-to-wide handoff.
+        Outcome viaCpp;
+        {
+            ForceCppDecoder forceCpp;
+            viaCpp = decodeInChunks(bytes, splits.span(), false, stripByteOrderMark);
+        }
+        if (!(viaCpp == chunked)) {
+            auto detail = makeString(
+                context(bytes, splits.span(), false, stripByteOrderMark),
+                "\n  as built: "_s, describeString(chunked.text), chunked.sawError ? " ERROR"_s : ""_s,
+                "\n  C++ loop: "_s, describeString(viaCpp.text), viaCpp.sawError ? " ERROR"_s : ""_s).utf8();
+            ADD_FAILURE() << utf8Chars(detail);
+        }
+
         // `stopOnError` truncates the decode at the first error, so it is only equivalent on input
         // that has no errors to stop at. On input that does, the flag's behaviour is pinned by the
         // hand-written cases in TextCodec.cpp; here it is exercised for crashes and for the
@@ -280,12 +320,25 @@ static void checkAllChunkings(std::span<const uint8_t> bytes, bool stripByteOrde
                 "\n  one shot:    "_s, describeString(reference.text)).utf8();
             ADD_FAILURE() << utf8Chars(detail);
         }
+
+        Outcome stoppedViaCpp;
+        {
+            ForceCppDecoder forceCpp;
+            stoppedViaCpp = decodeInChunks(bytes, splits.span(), true, stripByteOrderMark);
+        }
+        if (!(stoppedViaCpp == stopped)) {
+            auto detail = makeString(
+                context(bytes, splits.span(), true, stripByteOrderMark),
+                "\n  as built: "_s, describeString(stopped.text), stopped.sawError ? " ERROR"_s : ""_s,
+                "\n  C++ loop: "_s, describeString(stoppedViaCpp.text), stoppedViaCpp.sawError ? " ERROR"_s : ""_s).utf8();
+            ADD_FAILURE() << utf8Chars(detail);
+        }
     }
 }
 
 } // namespace
 
-// Splitting an input must not change what it decodes to.
+// Splitting an input must not change what it decodes to, and the two implementations must agree.
 TEST(TextCodecUTF8Differential, ChunkingInvariance)
 {
     unsigned casesRun = 0;
@@ -298,9 +351,9 @@ TEST(TextCodecUTF8Differential, ChunkingInvariance)
 }
 
 // The counters are the only way to see which decoder ran, because the two produce identical output
-// by construction. This test is the acceptance criterion for deleting the C++ decoder: when
-// `declined` is zero across the corpus above, nothing reaches the C++ loop, and the `#if` can select
-// one implementation or the other instead of layering them.
+// invisible in the output by construction. This test is the acceptance criterion for deleting the
+// C++ decoder: when `declined` is zero across the corpus above, nothing reaches the C++ loop, and
+// the `#if` can select one implementation or the other instead of layering them.
 TEST(TextCodecUTF8Differential, SwiftDecoderCoverage)
 {
     if (!PAL::textCodecUTF8SwiftEnabled()) {
@@ -313,6 +366,8 @@ TEST(TextCodecUTF8Differential, SwiftDecoderCoverage)
     auto& counters = PAL::textCodecUTF8SwiftCounters();
     uint64_t answeredBefore = counters.answered.load(std::memory_order_relaxed);
     uint64_t declinedBefore = counters.declined.load(std::memory_order_relaxed);
+    uint64_t leadIsASCIIBefore = counters.declinedParkedLeadIsASCII.load(std::memory_order_relaxed);
+    uint64_t exceedsLengthBefore = counters.declinedParkExceedsLeadLength.load(std::memory_order_relaxed);
 
     unsigned casesRun = 0;
     for (auto literal : corpusLiterals) {
@@ -323,16 +378,21 @@ TEST(TextCodecUTF8Differential, SwiftDecoderCoverage)
 
     uint64_t answered = counters.answered.load(std::memory_order_relaxed) - answeredBefore;
     uint64_t declined = counters.declined.load(std::memory_order_relaxed) - declinedBefore;
+    uint64_t leadIsASCII = counters.declinedParkedLeadIsASCII.load(std::memory_order_relaxed) - leadIsASCIIBefore;
+    uint64_t exceedsLength = counters.declinedParkExceedsLeadLength.load(std::memory_order_relaxed) - exceedsLengthBefore;
 
     // Not vacuous: the corpus has to have reached Swift at all.
     EXPECT_GT(answered, 0ULL);
 
-    // The goal. Expected to FAIL until the byte-order-mark and empty-input gaps are closed: today
-    // the call site in TextCodecUTF8::decode excludes both, and the two shapes
-    // handlePartialSequenceNarrow hands back cover partial sequences only the C++ loop can leave.
+    // The goal. Every one of these is input the C++ loop still has to handle, and both remaining shapes
+    // are partial sequences only that loop can leave -- so a non-zero count here says some call is
+    // still reaching it, and which of the two shapes it left.
     EXPECT_EQ(declined, 0ULL)
         << declined << " of " << (answered + declined)
-        << " decodes went to the C++ loop; each one is input the C++ decoder still has to handle.";
+        << " decodes went to the C++ loop; each one is input the C++ decoder still has to handle."
+        << "\n  held lead is ASCII:         " << leadIsASCII
+        << "\n  held run exceeds its lead:   " << exceedsLength
+        << "\n  unattributed:               " << (declined - leadIsASCII - exceedsLength);
 }
 
 } // namespace TestWebKitAPI

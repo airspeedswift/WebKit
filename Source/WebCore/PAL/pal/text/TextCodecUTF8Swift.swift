@@ -26,10 +26,9 @@
 // `decode` fills an 8-bit `StringBuffer` optimistically and abandons it for a 16-bit one at the
 // first character Latin-1 cannot hold. `textCodecUTF8DecodeNarrow` does the 8-bit half and reports
 // `needsWide` at that point; the caller widens what it has and calls `textCodecUTF8DecodeWide` to
-// finish. Two inputs go to the C++ decode loop instead, and the call site excludes both before
-// calling: a pending byte order mark and empty input. Which path took an input is invisible in the
-// output, since the other path is what a differential compares against, so
-// `textCodecUTF8SwiftCounters()` is what makes it observable.
+// finish. Between them they decode every input the call site is given, which is now every input
+// there is. Two partial-sequence shapes still go to the C++ decode loop rather than trapping; the
+// counters are what make that observable, since the other path produces identical output.
 //
 // Four decoding rules worth stating, because getting them backwards produces plausible output:
 //
@@ -58,6 +57,13 @@ private let highBitsOfEachByte: UInt64 = 0x8080_8080_8080_8080
 /// U+FFFD, what every ill-formed sequence decodes to. Not Latin-1, so it only ever reaches 16-bit
 /// output.
 private let replacementCharacter: UInt16 = 0xFFFD
+
+/// U+FEFF, and its only encoding that decodes: the overlong four-byte form F0 8F BB BF fails the
+/// second-byte test. So "the next character is a byte order mark" and "the next three bytes are
+/// EF BB BF" are the same statement, which is what lets the position-dependent strip rule be
+/// settled before the kernel runs rather than inside its per-character path.
+private let byteOrderMark: UInt32 = 0xFEFF
+private let byteOrderMarkBytes: (UInt8, UInt8, UInt8) = (0xEF, 0xBB, 0xBF)
 
 /// How many bytes the sequence led by `firstByte` occupies, or 0 if it cannot lead one.
 ///
@@ -212,8 +218,8 @@ private enum NarrowPartialSequenceOutcome {
     /// emitted: the C++ caller passes that overload a copy of its destination and keeps it only on
     /// false, so anything written before returning true is discarded.
     case needsWide(partialSequence: UInt32, size: Int, consumed: Int)
-    /// Outside what this handles: the caller hands the whole input to the C++ loop.
-    case declined
+    /// Outside what this handles, naming the shape so that the caller's counters can too.
+    case declined(reason: PAL.TextCodecUTF8SwiftDeclineReason)
 }
 
 /// The 8-bit `handlePartialSequence`, which is one iteration of its `do`/`while` rather than a loop.
@@ -227,7 +233,7 @@ private enum NarrowPartialSequenceOutcome {
 /// which a main loop turns into a character before it could hold it, and a held sequence longer than
 /// its lead's sequence, which needs a writer other than a main loop running out of input. Both go to
 /// the C++ loop rather than trapping, because that loop is still there to take them, and the counters
-/// counter says whether either turned up.
+/// keep the two shapes apart so that a nonzero count says which one turned up.
 ///
 /// `@inline(never)` because this is cold and its caller is not. With one call site the optimiser
 /// inlines it into `textCodecUTF8DecodeNarrow`, which relays out that function and moves the 8-bit
@@ -243,7 +249,7 @@ private func handlePartialSequenceNarrow(
     let firstByte = partialSequenceByte(partialSequence, 0)
     if firstByte < 0x80 {
         assertionFailure("a held UTF-8 partial sequence cannot begin with an ASCII byte")
-        return .declined
+        return .declined(reason: .ParkedLeadIsASCII)
     }
     let length = sequenceLength(firstByte)
     // `if (!count) return true;`. This overload takes no `sawError`, so a byte that leads nothing is
@@ -268,7 +274,7 @@ private func handlePartialSequenceNarrow(
     }
     if size != length {
         assertionFailure("a held UTF-8 partial sequence cannot outrun its lead byte's sequence")
-        return .declined
+        return .declined(reason: .ParkExceedsLeadLength)
     }
     return .latin1(character: UInt8(truncatingIfNeeded: character), consumed: index)
 }
@@ -277,9 +283,6 @@ private func handlePartialSequenceNarrow(
 private enum WidePartialSequenceOutcome {
     /// Nothing is held any more and the 16-bit main loop takes over.
     case decoded(consumed: Int)
-    /// The destination filled. Re-entering cannot advance, so the caller ends the decode with what is
-    /// held preserved and reports a short decode.
-    case bufferFull(partialSequence: UInt32, size: Int, consumed: Int)
     /// The sequence is still incomplete and the decode is over.
     case waiting(partialSequence: UInt32, size: Int, consumed: Int)
     /// `stopOnError` ended it at an ill-formed sequence, leaving what is held as it stood.
@@ -291,8 +294,15 @@ private enum WidePartialSequenceOutcome {
 ///
 /// It loops because its output is bounded by the input rather than by what is held: it takes fresh
 /// bytes on every iteration, so { 0xF0 } against an input of 0xF0 bytes emits one replacement
-/// character per input byte without the main loop ever running. That is the shape `.bufferFull` is
-/// for: the destination can fill mid-sequence, and the caller then reports a short decode.
+/// character per input byte without the main loop ever running. The destination is sized for that,
+/// at one slot per input byte, which is worst case even for a four-byte sequence, since four bytes
+/// produce two UTF-16 units.
+///
+/// `shouldStripByteOrderMark` is position-independent here, which is the rule this ports rather than
+/// an oversight in it: TextCodecUTF8.cpp:318 spends the flag on the first character this decodes,
+/// wherever in the buffer it lands, and strips it only if that character is U+FEFF. The main loop's
+/// rule at :567 is the position-dependent one. A sequence has to have been held for this rule to
+/// apply, so the two differ only on input split across a chunk boundary.
 private func handlePartialSequenceWide(
     _ source: Span<UInt8>,
     from start: Int,
@@ -302,16 +312,17 @@ private func handlePartialSequenceWide(
     stopOnError: Bool,
     into output: inout MutableSpan<UInt16>,
     units: inout Int,
-    sawError: inout Bool
+    sawError: inout Bool,
+    shouldStripByteOrderMark: inout Bool
 ) -> WidePartialSequenceOutcome {
     var packed = partialSequence
     var size = partialSequenceSize
     var index = start
     repeat {
-        // One slot per character, as in the wide kernel and for the same reason: asking for two stops
-        // a character early on an exactly-tight destination. The surrogate pair is the one case
-        // needing two, and it asks below, before it mutates what is held.
-        if units >= output.count { return .bufferFull(partialSequence: packed, size: size, consumed: index) }
+        // One slot per character, as in the wide kernel and for the same reason: asking for two
+        // stops a character early on an exactly-tight destination. A surrogate pair's second slot is
+        // guaranteed by the sizing above and bounds-checked by `appendScalar`.
+        precondition(units < output.count, "UTF-8 wide partial sequence ran out of destination")
 
         let firstByte = partialSequenceByte(packed, 0)
         if firstByte < 0x80 {
@@ -354,16 +365,15 @@ private func handlePartialSequenceWide(
             continue
         }
 
-        // The surrogate pair asks for its second slot before what is held is shifted: returning
-        // `.bufferFull` afterwards would drop the character the caller is being asked to fit.
-        if character > 0xFFFF && units + 2 > output.count {
-            return .bufferFull(partialSequence: packed, size: size, consumed: index)
-        }
-
         packed = packed &>> (8 &* length)
         size -= length
-        // A byte order mark is emitted verbatim: stripping one needs `m_shouldStripByteOrderMark`,
-        // and this is not called when that is set.
+        // `if (std::exchange(m_shouldStripByteOrderMark, false) && character == byteOrderMark)
+        // continue;`, in that order: the flag is spent on any character decoded here, and only a
+        // U+FEFF is dropped.
+        if shouldStripByteOrderMark {
+            shouldStripByteOrderMark = false
+            if character == byteOrderMark { continue }
+        }
         units += appendScalar(character, to: &output, at: units)
     } while size != 0
 
@@ -624,7 +634,8 @@ private func makeResult(
     partialSequenceSize: Int = 0,
     needsWide: Bool = false,
     sawError: Bool = false,
-    stoppedOnError: Bool = false
+    stoppedOnError: Bool = false,
+    shouldStripByteOrderMark: Bool = false
 ) -> PAL.TextCodecUTF8SwiftResult {
     var result = PAL.TextCodecUTF8SwiftResult()
     result.consumedBytes = UInt32(consumed)
@@ -634,14 +645,19 @@ private func makeResult(
     result.needsWide = needsWide
     result.sawError = sawError
     result.stoppedOnError = stoppedOnError
+    result.shouldStripByteOrderMark = shouldStripByteOrderMark
     result.answered = true
     return result
 }
 
-/// An input handed to the C++ loop instead: `answered` false, and nothing else set.
+/// An input handed to the C++ loop instead, naming the shape so that the counters can.
 @inline(always)
-private func makeDeclinedResult() -> PAL.TextCodecUTF8SwiftResult {
-    PAL.TextCodecUTF8SwiftResult()
+private func makeDeclinedResult(
+    _ reason: PAL.TextCodecUTF8SwiftDeclineReason
+) -> PAL.TextCodecUTF8SwiftResult {
+    var result = PAL.TextCodecUTF8SwiftResult()
+    result.declineReason = reason
+    return result
 }
 
 /// Decodes `input` as UTF-8 into `destInput`, a Latin-1 destination, reporting `needsWide` at the
@@ -655,8 +671,12 @@ private func makeDeclinedResult() -> PAL.TextCodecUTF8SwiftResult {
 /// codec state, so handing an input to the C++ loop has no consequences: everything that crosses is a
 /// value, in and out.
 ///
-/// The caller excludes two inputs before calling: a pending byte order mark, the one character whose
-/// handling depends on where it lands, and empty input.
+/// The caller guarantees nothing about `input`, empty included, which answers with nothing consumed
+/// and nothing produced.
+///
+/// `shouldStripByteOrderMark` is `m_shouldStripByteOrderMark`, and is echoed unchanged in the
+/// result: no 8-bit path in the C++ reads or writes that flag, because a byte order mark is not
+/// Latin-1, so this reports `needsWide` at one rather than deciding it.
 ///
 /// TODO(unsafe): `_unsafeCxxSpan:` for `input` and `destInput` -- rdar://186723514.
 @_expose(Cxx)
@@ -666,7 +686,8 @@ public func textCodecUTF8DecodeNarrow(
     _ partialSequence: UInt32,
     _ partialSequenceSize: UInt8,
     _ flush: Bool,
-    _ stopOnError: Bool
+    _ stopOnError: Bool,
+    _ shouldStripByteOrderMark: Bool
 ) -> PAL.TextCodecUTF8SwiftResult {
     // The destination is a `StringBuffer` the caller has just allocated, so it cannot overlap the
     // input.
@@ -686,8 +707,8 @@ public func textCodecUTF8DecodeNarrow(
     stages: while true {
         if packedSize != 0 {
             switch handlePartialSequenceNarrow(source, from: consumed, partialSequence: packed, size: packedSize, flush: flush) {
-            case .declined:
-                return makeDeclinedResult()
+            case .declined(let reason):
+                return makeDeclinedResult(reason)
 
             case .waiting(let held, let size, let cursor):
                 packed = held
@@ -701,7 +722,8 @@ public func textCodecUTF8DecodeNarrow(
                 // suppressing it under `flush` would hand that half an empty partial sequence and an
                 // empty source, and nobody would emit the truncated tail's U+FFFD.
                 return makeResult(consumed: cursor, produced: produced, partialSequence: held, partialSequenceSize: size,
-                                  needsWide: true, sawError: sawError)
+                                  needsWide: true, sawError: sawError,
+                                  shouldStripByteOrderMark: shouldStripByteOrderMark)
 
             case .latin1(let character, let cursor):
                 dest[produced] = character
@@ -717,7 +739,8 @@ public func textCodecUTF8DecodeNarrow(
         switch decodeChunk(source, from: consumed, into: &dest, startingAt: produced) {
         case .needsWide(let chunkConsumed, let chunkProduced):
             return makeResult(consumed: chunkConsumed, produced: chunkProduced,
-                              needsWide: true, sawError: sawError)
+                              needsWide: true, sawError: sawError,
+                              shouldStripByteOrderMark: shouldStripByteOrderMark)
 
         case .illFormed(let chunkConsumed, let chunkProduced, _):
             produced = chunkProduced
@@ -727,7 +750,8 @@ public func textCodecUTF8DecodeNarrow(
             // the C++ breaks to its 8-bit tail and the string stays 8-bit.
             if !stopOnError {
                 return makeResult(consumed: consumed, produced: produced,
-                                  needsWide: true, sawError: true)
+                                  needsWide: true, sawError: true,
+                                  shouldStripByteOrderMark: shouldStripByteOrderMark)
             }
             stoppedOnError = true
             break stages
@@ -754,13 +778,19 @@ public func textCodecUTF8DecodeNarrow(
 
     return makeResult(consumed: consumed, produced: produced,
                       partialSequence: flush ? 0 : packed, partialSequenceSize: flush ? 0 : packedSize,
-                      sawError: sawError, stoppedOnError: stoppedOnError)
+                      sawError: sawError, stoppedOnError: stoppedOnError,
+                      shouldStripByteOrderMark: shouldStripByteOrderMark)
 }
 
 /// Decodes `input` as UTF-8 into `destInput`, a UTF-16 destination, after
 /// `textCodecUTF8DecodeNarrow` reported `needsWide`. The caller has widened the 8-bit prefix into a
 /// `StringBuffer<char16_t>` and passes a span starting past it, so this writes from index zero, and
 /// it continues from the partial sequence the narrow half handed over. It always answers.
+///
+/// `startsFinalBuffer` says the destination span begins at index 0 of the final string buffer, which
+/// is to say that the narrow half produced nothing before handing over. It is the other half of the
+/// position-dependent strip rule at TextCodecUTF8.cpp:567,
+/// `destination16.data() == buffer16.characters()`, which is not visible from this cursor.
 ///
 /// TODO(unsafe): `_unsafeCxxSpan:` for `input` and `destInput` -- rdar://186723514.
 @_expose(Cxx)
@@ -770,7 +800,9 @@ public func textCodecUTF8DecodeWide(
     _ partialSequence: UInt32,
     _ partialSequenceSize: UInt8,
     _ flush: Bool,
-    _ stopOnError: Bool
+    _ stopOnError: Bool,
+    _ shouldStripByteOrderMark: Bool,
+    _ startsFinalBuffer: Bool
 ) -> PAL.TextCodecUTF8SwiftResult {
     // The destination is the caller's second `StringBuffer`, so it cannot overlap the input.
     let source = unsafe Span<UInt8>(_unsafeCxxSpan: input)
@@ -782,26 +814,20 @@ public func textCodecUTF8DecodeWide(
     var packedSize = Int(partialSequenceSize)
     var sawError = false
     var stoppedOnError = false
+    var shouldStrip = shouldStripByteOrderMark
 
     stages: while true {
         if packedSize != 0 {
             let outcome = handlePartialSequenceWide(
                 source, from: consumed, partialSequence: packed, size: packedSize,
                 flush: flush, stopOnError: stopOnError,
-                into: &dest, units: &produced, sawError: &sawError)
+                into: &dest, units: &produced, sawError: &sawError,
+                shouldStripByteOrderMark: &shouldStrip)
             switch outcome {
             case .decoded(let cursor):
                 consumed = cursor
                 packed = 0
                 packedSize = 0
-
-            case .bufferFull(let held, let size, let cursor):
-                // The destination is full, so re-entering cannot advance. End the decode with what is
-                // held preserved; the caller sees a short decode.
-                packed = held
-                packedSize = size
-                consumed = cursor
-                break stages
 
             case .waiting(let held, let size, let cursor):
                 packed = held
@@ -820,6 +846,22 @@ public func textCodecUTF8DecodeWide(
         }
 
         guard consumed < source.count else { break stages }
+
+        // The main loop's strip rule, TextCodecUTF8.cpp:567, settled before the kernel runs rather
+        // than inside it. It fires only for a U+FEFF landing at index 0 of the final buffer, so it
+        // can fire at most once per decode and only while that buffer is still empty -- and a mark
+        // there is exactly the three bytes at the cursor, since no other encoding of U+FEFF decodes.
+        // Settling it here keeps the wide kernel's per-character path, which is the hot one, free of
+        // a flag it would test on every character to use on none. A mark too short to be whole falls
+        // through to the kernel, which holds it, and the next call settles it under the other rule.
+        if shouldStrip && startsFinalBuffer && produced == 0
+            && consumed + 3 <= source.count
+            && source[consumed] == byteOrderMarkBytes.0
+            && source[consumed + 1] == byteOrderMarkBytes.1
+            && source[consumed + 2] == byteOrderMarkBytes.2 {
+            shouldStrip = false
+            consumed += 3
+        }
 
         while true {
             switch decodeWideChunk(source, from: consumed, into: &dest, startingAt: produced) {
@@ -863,5 +905,6 @@ public func textCodecUTF8DecodeWide(
 
     return makeResult(consumed: consumed, produced: produced,
                       partialSequence: flush ? 0 : packed, partialSequenceSize: flush ? 0 : packedSize,
-                      sawError: sawError, stoppedOnError: stoppedOnError)
+                      sawError: sawError, stoppedOnError: stoppedOnError,
+                      shouldStripByteOrderMark: shouldStrip)
 }
