@@ -46,6 +46,8 @@ private:
     String decode(std::span<const uint8_t>, bool flush, bool stopOnError, bool& sawError) final;
     Vector<uint8_t> encode(StringView, UnencodableHandling) const final;
 
+    // Not defined when PAL is built with USE_SWIFT_TEXT_CODEC_UTF8. That define is private to PAL,
+    // so these stay declared to keep the class the same everywhere.
     bool handlePartialSequence(std::span<Latin1Character>& destination, std::span<const uint8_t>& source, bool flush);
     void handlePartialSequence(std::span<char16_t>& destination, std::span<const uint8_t>& source, bool flush, bool stopOnError, bool& sawError);
     void consumePartialSequenceByte();

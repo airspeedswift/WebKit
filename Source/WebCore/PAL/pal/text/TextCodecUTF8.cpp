@@ -26,22 +26,31 @@
 #include "config.h"
 #include "TextCodecUTF8.h"
 
-#include "TextCodecASCIIFastPath.h"
+// Set by WK_USE_SWIFT_TEXT_CODEC_UTF8 in PAL.xcconfig. When on, `decode` is implemented in
+// TextCodecUTF8.swift and the C++ decode loops below are not compiled.
+#if !defined(USE_SWIFT_TEXT_CODEC_UTF8)
+#define USE_SWIFT_TEXT_CODEC_UTF8 0
+#endif
+
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
-#include <wtf/text/CString.h>
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringBuffer.h>
 #include <wtf/text/WTFString.h>
 #include <wtf/unicode/CharacterNames.h>
+
+#if USE_SWIFT_TEXT_CODEC_UTF8
+#include "PALSwiftBoundaryTypes.h"
+#include <pal/text/TextCodecUTF8SwiftTypes.h>
+#else
+#include "TextCodecASCIIFastPath.h"
+#endif
 
 namespace PAL {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(TextCodecUTF8);
 
 using namespace WTF::Unicode;
-
-const int nonCharacter = -1;
 
 void TextCodecUTF8::registerEncodingNames(EncodingNameRegistrar registrar)
 {
@@ -70,6 +79,10 @@ void TextCodecUTF8::registerCodecs(TextCodecRegistrar registrar)
         return codec();
     });
 }
+
+#if !USE_SWIFT_TEXT_CODEC_UTF8
+
+const int nonCharacter = -1;
 
 static inline uint8_t NODELETE nonASCIISequenceLength(uint8_t firstByte)
 {
@@ -477,6 +490,75 @@ upConvertTo16Bit:
     }
     return String::adopt(WTF::move(buffer16));
 }
+
+#else // USE_SWIFT_TEXT_CODEC_UTF8
+
+String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool stopOnError, bool& sawError)
+{
+    static_assert(std::is_same_v<decltype(m_partialSequence), TextCodecUTF8SwiftPartialSequence>);
+
+    // Each input byte might turn into a character.
+    // That includes all bytes in the partial-sequence buffer because
+    // each byte in an invalid sequence will turn into a replacement character.
+    size_t bufferSize = m_partialSequenceSize + bytes.size();
+    if (bufferSize > std::numeric_limits<unsigned>::max()) {
+        sawError = true;
+        return { };
+    }
+
+    auto adoptDecoded = [&](auto& stringBuffer, size_t produced) -> String {
+        RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(produced <= stringBuffer.length());
+        stringBuffer.shrink(static_cast<unsigned>(produced));
+        if (flush)
+            m_partialSequenceSize = 0;
+        if (flush || stringBuffer.length())
+            m_shouldStripByteOrderMark = false;
+        if (stringBuffer.length() > String::MaxLength) {
+            sawError = true;
+            return { };
+        }
+        return String::adopt(WTF::move(stringBuffer));
+    };
+
+    StringBuffer<Latin1Character> buffer(bufferSize);
+    auto narrowResult = pal::textCodecUTF8DecodeNarrow(bytes, buffer.span(),
+        m_partialSequence, static_cast<uint8_t>(m_partialSequenceSize),
+        flush, stopOnError, m_shouldStripByteOrderMark);
+    if (narrowResult.sawError)
+        sawError = true;
+
+    if (!narrowResult.needsWide) {
+        ASSERT(narrowResult.stoppedOnError || narrowResult.consumedBytes == bytes.size());
+        RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(narrowResult.partialSequenceSize <= m_partialSequence.size());
+        m_partialSequence = narrowResult.partialSequence;
+        m_partialSequenceSize = narrowResult.partialSequenceSize;
+        m_shouldStripByteOrderMark = narrowResult.shouldStripByteOrderMark;
+        return adoptDecoded(buffer, narrowResult.producedCharacters);
+    }
+
+    size_t narrowProduced = narrowResult.producedCharacters;
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(narrowProduced <= bufferSize);
+
+    StringBuffer<char16_t> buffer16(bufferSize);
+    auto destination16 = buffer16.span();
+    auto converted8 = buffer.span();
+    for (size_t i = 0; i < narrowProduced; ++i)
+        destination16[i] = converted8[i];
+
+    auto wideResult = pal::textCodecUTF8DecodeWide(bytes, destination16, narrowResult, flush, stopOnError);
+    if (wideResult.sawError)
+        sawError = true;
+    ASSERT(wideResult.stoppedOnError || wideResult.consumedBytes == bytes.size());
+    ASSERT(!wideResult.needsWide);
+
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(wideResult.partialSequenceSize <= m_partialSequence.size());
+    m_partialSequence = wideResult.partialSequence;
+    m_partialSequenceSize = wideResult.partialSequenceSize;
+    m_shouldStripByteOrderMark = wideResult.shouldStripByteOrderMark;
+    return adoptDecoded(buffer16, wideResult.producedCharacters);
+}
+
+#endif // USE_SWIFT_TEXT_CODEC_UTF8
 
 Vector<uint8_t> TextCodecUTF8::encodeUTF8(StringView string)
 {
