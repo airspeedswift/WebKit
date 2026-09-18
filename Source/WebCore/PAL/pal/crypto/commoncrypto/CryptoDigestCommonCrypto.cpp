@@ -26,7 +26,7 @@
 #include "config.h"
 #include "CryptoDigest.h"
 
-#include "PALSwift-Generated.h"
+#include "PALSwiftBoundaryTypes.h"
 #include <CommonCrypto/CommonCrypto.h>
 #include <optional>
 #include <pal/crypto/CryptoTypes.h>
