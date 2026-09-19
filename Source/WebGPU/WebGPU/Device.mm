@@ -302,6 +302,9 @@ Device::Device(id<MTLDevice> device, id<MTLCommandQueue> defaultQueue, HardwareC
     , m_defaultQueue(Queue::create(defaultQueue, adapter, *this))
 #if ENABLE(WEBGPU_SWIFT)
     , m_errorScopes(makeUniqueWithoutFastMallocCheck<DeviceErrorScopes>(DeviceErrorScopes::init()))
+    // computeMaxCountForDevice rather than m_maxVerticesPerDrawCall: that field is
+    // declared after this one and so is not initialized yet.
+    , m_clampPipelines(makeUniqueWithoutFastMallocCheck<DeviceClampPipelines>(DeviceClampPipelines::init(device, computeMaxCountForDevice(device), bufferIndexForICBContainer())))
 #endif
     , m_xrSubImage(XRSubImage::create(*this))
     , m_capabilities(WTF::move(capabilities))
@@ -377,6 +380,7 @@ Device::Device(Adapter& adapter)
     : m_defaultQueue(Queue::createInvalid(adapter, *this))
 #if ENABLE(WEBGPU_SWIFT)
     , m_errorScopes(makeUniqueWithoutFastMallocCheck<DeviceErrorScopes>(DeviceErrorScopes::init()))
+    , m_clampPipelines(makeUniqueWithoutFastMallocCheck<DeviceClampPipelines>(DeviceClampPipelines::init(nil, 0, bufferIndexForICBContainer())))
 #endif
     , m_adapter(adapter)
     , m_instance(adapter.weakInstance())
@@ -765,6 +769,9 @@ id<MTLBuffer> Device::dispatchCallBuffer()
 
 id<MTLComputePipelineState> Device::dispatchCallPipelineState(id<MTLFunction> function)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return m_clampPipelines->dispatchCallPipelineState(function);
+#else
     if (!m_device)
         return nil;
 
@@ -775,10 +782,14 @@ id<MTLComputePipelineState> Device::dispatchCallPipelineState(id<MTLFunction> fu
             WTFLogAlways("Metal code failure: %@", error);
     }
     return m_dispatchCallPipelineState;
+#endif
 }
 
 id<MTLRenderPipelineState> Device::indexBufferClampPipeline(MTLIndexType indexType, NSUInteger rasterSampleCount)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return m_clampPipelines->indexBufferClampPipeline(indexType, rasterSampleCount);
+#else
     if (!m_device)
         return nil;
 
@@ -862,10 +873,14 @@ id<MTLRenderPipelineState> Device::indexBufferClampPipeline(MTLIndexType indexTy
         return nil;
     }
     return result;
+#endif
 }
 
 id<MTLRenderPipelineState> Device::indexedIndirectBufferClampPipeline(NSUInteger rasterSampleCount)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return m_clampPipelines->indexedIndirectBufferClampPipeline(rasterSampleCount);
+#else
     if (!m_device)
         return nil;
 
@@ -932,10 +947,14 @@ id<MTLRenderPipelineState> Device::indexedIndirectBufferClampPipeline(NSUInteger
         return nil;
     }
     return result;
+#endif
 }
 
 id<MTLRenderPipelineState> Device::indirectBufferClampPipeline(NSUInteger rasterSampleCount)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return m_clampPipelines->indirectBufferClampPipeline(rasterSampleCount);
+#else
     if (!m_device)
         return nil;
 
@@ -995,10 +1014,14 @@ id<MTLRenderPipelineState> Device::indirectBufferClampPipeline(NSUInteger raster
         return nil;
     }
     return result;
+#endif
 }
 
 id<MTLRenderPipelineState> Device::icbIndirectEncodePipeline(bool isIndexed, MTLIndexType indexType, NSUInteger rasterSampleCount)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return m_clampPipelines->icbIndirectEncodePipeline(isIndexed, indexType, rasterSampleCount);
+#else
     if (!m_device)
         return nil;
 
@@ -1041,8 +1064,10 @@ id<MTLRenderPipelineState> Device::icbIndirectEncodePipeline(bool isIndexed, MTL
         return nil;
     }
     return result;
+#endif
 }
 
+#if !ENABLE(WEBGPU_SWIFT)
 // Encodes an indirect draw into an ICB slot on the GPU, reading the draw counts from the args buffer
 // (clamped shadow args, or the app's raw buffer when no clamping is required) at executeBundles() time.
 id<MTLFunction> Device::icbIndirectEncodeFunction(bool isIndexed, MTLIndexType indexType)
@@ -1124,9 +1149,13 @@ id<MTLFunction> Device::icbIndirectEncodeFunction(bool isIndexed, MTLIndexType i
         return functionDraw;
     return indexType == MTLIndexTypeUInt16 ? functionIndexedUshort : functionIndexedUint;
 }
+#endif
 
 id<MTLRenderPipelineState> Device::icbCommandClampPipeline(MTLIndexType indexType, NSUInteger rasterSampleCount)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return m_clampPipelines->icbCommandClampPipeline(indexType, rasterSampleCount);
+#else
     if (!m_device)
         return nil;
 
@@ -1160,6 +1189,7 @@ id<MTLRenderPipelineState> Device::icbCommandClampPipeline(MTLIndexType indexTyp
         return nil;
     }
     return result;
+#endif
 }
 
 int Device::bufferIndexForICBContainer() const
@@ -1170,6 +1200,9 @@ int Device::bufferIndexForICBContainer() const
 
 id<MTLFunction> Device::icbCommandClampFunction(MTLIndexType indexType)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return m_clampPipelines->icbCommandClampFunction(indexType);
+#else
     static id<MTLFunction> function = nil;
     static id<MTLFunction> functionUshort = nil;
     NSError *error = nil;
@@ -1262,13 +1295,15 @@ id<MTLFunction> Device::icbCommandClampFunction(MTLIndexType indexType)
         function = [library newFunctionWithName:@"vsICB"];
         functionUshort = [library newFunctionWithName:@"vsUshortICB"];
     });
-#undef DEVICE_BUFFER_INDEX_FOR_ICB_CONTAINER
-#undef OBJC_STRINGIFY
-#undef OBJC_STRINGIFYHELPER
 
     RELEASE_ASSERT(function && functionUshort);
     return indexType == MTLIndexTypeUInt16 ? functionUshort : function;
+#endif
 }
+
+#undef DEVICE_BUFFER_INDEX_FOR_ICB_CONTAINER
+#undef OBJC_STRINGIFY
+#undef OBJC_STRINGIFYHELPER
 
 bool Device::pauseErrorReporting(bool pauseReporting)
 {

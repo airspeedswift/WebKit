@@ -81,10 +81,11 @@ class XRView;
 struct LibraryCompileRequest;
 
 #if ENABLE(WEBGPU_SWIFT)
-// Defined in DeviceErrorScopes.swift and reached through WebGPUSwift-Generated.h,
-// which this header cannot include: that header names WebGPU::Device in the
-// signatures of the island's thunks.
+// Defined in DeviceErrorScopes.swift and DeviceClampPipelines.swift, and reached
+// through WebGPUSwift-Generated.h, which this header cannot include: that header
+// names WebGPU::Device in the signatures of the island's thunks.
 class DeviceErrorScopes;
+class DeviceClampPipelines;
 #endif
 
 #if ENABLE(WEBGPU_BY_DEFAULT)
@@ -106,6 +107,26 @@ struct WebKitMTLDrawPrimitivesIndirectArguments { \
     unsigned lostOrOOBRead;                                 \
 };
 WEBKIT_DRAW_INDIRECT_STRUCT_TYPE
+
+// The two struct declarations above are pasted into the shaders that write them,
+// so that the layout the CPU reads and the layout the GPU writes are one source.
+// Swift has no way to expand a preprocessor macro, so the expansion crosses to the
+// Swift that builds those shaders as a string.
+#define WEBKIT_SHADER_TEXT_HELPER(x) @#x
+#define WEBKIT_SHADER_TEXT(x) WEBKIT_SHADER_TEXT_HELPER(x)
+
+inline NSString *_Nonnull drawIndirectArgumentsShaderText()
+{
+    return WEBKIT_SHADER_TEXT(WEBKIT_DRAW_INDIRECT_STRUCT_TYPE);
+}
+
+inline NSString *_Nonnull drawIndexedIndirectArgumentsShaderText()
+{
+    return WEBKIT_SHADER_TEXT(WEBKIT_DRAW_INDEXED_INDIRECT_STRUCT_TYPE);
+}
+
+#undef WEBKIT_SHADER_TEXT
+#undef WEBKIT_SHADER_TEXT_HELPER
 
 // https://gpuweb.github.io/gpuweb/#gpudevice
 class Device : public WGPUDeviceImpl, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Device> {
@@ -212,7 +233,9 @@ public:
     id<MTLRenderPipelineState> _Nullable icbCommandClampPipeline(MTLIndexType, NSUInteger rasterSampleCount);
     id<MTLFunction> icbCommandClampFunction(MTLIndexType);
     id<MTLRenderPipelineState> _Nullable icbIndirectEncodePipeline(bool isIndexed, MTLIndexType, NSUInteger rasterSampleCount);
+#if !ENABLE(WEBGPU_SWIFT)
     id<MTLFunction> icbIndirectEncodeFunction(bool isIndexed, MTLIndexType);
+#endif
     id<MTLBuffer> safeCreateBuffer(NSUInteger length, MTLStorageMode, bool skipMemoryAttribution = false, MTLCPUCacheMode = MTLCPUCacheModeDefaultCache, MTLHazardTrackingMode = MTLHazardTrackingModeDefault) const;
     id<MTLBuffer> safeCreateBuffer(NSUInteger, bool skipMemoryAttribution = false) const;
     template<typename T>
@@ -350,6 +373,12 @@ private:
     // the lost flag, and whether an error went uncaptured -- cross as an argument
     // and as a return value.
     const std::unique_ptr<DeviceErrorScopes> m_errorScopes;
+
+    // The pipelines that clamp a draw or dispatch to what its buffers can supply,
+    // and the shaders they are built from, live in Swift. Ownership runs one way:
+    // the two Device facts those shaders name -- the per-draw vertex limit and the
+    // ICB container's buffer index -- cross as constructor arguments.
+    const std::unique_ptr<DeviceClampPipelines> m_clampPipelines;
 #else
     Vector<ErrorScope> m_errorScopeStack;
 #endif
@@ -366,8 +395,10 @@ private:
     id<MTLTexture> m_placeholderTexture { nil };
     id<MTLTexture> m_placeholderDepthStencilTexture { nil };
     id<MTLBuffer> _Nullable m_dispatchCallBuffer { nil };
-    id<MTLComputePipelineState> _Nullable m_dispatchCallPipelineState { nil };
     mutable id<MTLComputePipelineState> _Nullable m_premultiplyAlphaPipeline { nil };
+
+#if !ENABLE(WEBGPU_SWIFT)
+    id<MTLComputePipelineState> _Nullable m_dispatchCallPipelineState { nil };
 
     id<MTLRenderPipelineState> _Nullable m_indexBufferClampUintPSO { nil };
     id<MTLRenderPipelineState> _Nullable m_indexBufferClampUshortPSO { nil };
@@ -391,6 +422,7 @@ private:
     id<MTLRenderPipelineState> _Nullable m_icbIndirectEncodeUshortPSOMS { nil };
     id<MTLRenderPipelineState> _Nullable m_icbIndirectEncodeDrawPSO { nil };
     id<MTLRenderPipelineState> _Nullable m_icbIndirectEncodeDrawPSOMS { nil };
+#endif
 
     const Ref<Adapter> m_adapter;
     const ThreadSafeWeakPtr<Instance> m_instance;

@@ -85,4 +85,12 @@ inline ThreadSafeWeakPtr<WebGPU::CommandBuffer> commandBufferThreadSafeWeakPtr(c
     return ThreadSafeWeakPtr(input);
 }
 
+// Logs a failure reported by the Metal compiler or by pipeline creation, in the
+// format the callers of this in C++ use. WTFLogAlways is variadic, and Swift
+// cannot call a variadic C function, so the format string is fixed here.
+inline void logMetalFailure(NSError *error)
+{
+    WTFLogAlways("%@", error); // NOLINT
+}
+
 }
