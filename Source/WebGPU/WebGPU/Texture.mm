@@ -715,6 +715,9 @@ uint32_t Texture::texelBlockHeight(WGPUTextureFormat format)
 
 bool Texture::isColorRenderableFormat(WGPUTextureFormat format, const Device& device)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormatDeviceCapabilities::isColorRenderableFormat(format, device.hasFeature(WGPUFeatureName_TextureFormatsTier1), device.hasFeature(WGPUFeatureName_RG11B10UfloatRenderable));
+#else
     // https://gpuweb.github.io/gpuweb/#renderable-format
     switch (format) {
     case WGPUTextureFormat_R8Unorm:
@@ -830,10 +833,14 @@ bool Texture::isColorRenderableFormat(WGPUTextureFormat format, const Device& de
         ASSERT_NOT_REACHED();
         return false;
     }
+#endif
 }
 
 bool Texture::isDepthStencilRenderableFormat(WGPUTextureFormat format, const Device&)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormatDeviceCapabilities::isDepthStencilRenderableFormat(format);
+#else
     // https://gpuweb.github.io/gpuweb/#renderable-format
     switch (format) {
     case WGPUTextureFormat_R8Unorm:
@@ -946,10 +953,14 @@ bool Texture::isDepthStencilRenderableFormat(WGPUTextureFormat format, const Dev
         ASSERT_NOT_REACHED();
         return false;
     }
+#endif
 }
 
 bool Texture::isRenderableFormat(WGPUTextureFormat format, const Device& device)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormatDeviceCapabilities::isRenderableFormat(format, device.hasFeature(WGPUFeatureName_TextureFormatsTier1), device.hasFeature(WGPUFeatureName_RG11B10UfloatRenderable));
+#else
     // https://gpuweb.github.io/gpuweb/#renderable-format
     switch (format) {
     case WGPUTextureFormat_R8Unorm:
@@ -1063,6 +1074,7 @@ bool Texture::isRenderableFormat(WGPUTextureFormat format, const Device& device)
         ASSERT_NOT_REACHED();
         return false;
     }
+#endif
 }
 
 uint32_t Texture::renderTargetPixelByteCost(WGPUTextureFormat format)
@@ -1314,6 +1326,9 @@ uint32_t Texture::renderTargetPixelByteAlignment(WGPUTextureFormat format)
 
 bool Texture::supportsMultisampling(WGPUTextureFormat format, const Device& device)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormatDeviceCapabilities::supportsMultisampling(format, device.hasFeature(WGPUFeatureName_TextureFormatsTier1), device.hasFeature(WGPUFeatureName_RG11B10UfloatRenderable));
+#else
     switch (format) {
     // https://gpuweb.github.io/gpuweb/#texture-format-caps
     case WGPUTextureFormat_R8Unorm:
@@ -1429,10 +1444,14 @@ bool Texture::supportsMultisampling(WGPUTextureFormat format, const Device& devi
         ASSERT_NOT_REACHED();
         return false;
     }
+#endif
 }
 
 bool Texture::supportsResolve(WGPUTextureFormat format, const Device& device)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormatDeviceCapabilities::supportsResolve(format, device.hasFeature(WGPUFeatureName_TextureFormatsTier1), device.hasFeature(WGPUFeatureName_RG11B10UfloatRenderable));
+#else
     switch (format) {
     case WGPUTextureFormat_R8Unorm:
     case WGPUTextureFormat_R16Float:
@@ -1545,10 +1564,14 @@ bool Texture::supportsResolve(WGPUTextureFormat format, const Device& device)
     case WGPUTextureFormat_Force32:
         RELEASE_ASSERT_NOT_REACHED();
     }
+#endif
 }
 
 bool Texture::supportsBlending(WGPUTextureFormat format, const Device& device)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormatDeviceCapabilities::supportsBlending(format, device.hasFeature(WGPUFeatureName_TextureFormatsTier1), device.hasFeature(WGPUFeatureName_RG11B10UfloatRenderable), device.hasFeature(WGPUFeatureName_Float32Blendable));
+#else
     switch (format) {
     // https://gpuweb.github.io/gpuweb/#texture-format-caps
     case WGPUTextureFormat_R8Unorm:
@@ -1664,6 +1687,7 @@ bool Texture::supportsBlending(WGPUTextureFormat format, const Device& device)
         ASSERT_NOT_REACHED();
         return false;
     }
+#endif
 }
 
 static uint32_t maximumMiplevelCount(WGPUTextureDimension dimension, WGPUExtent3D size)
@@ -1693,6 +1717,9 @@ static uint32_t maximumMiplevelCount(WGPUTextureDimension dimension, WGPUExtent3
 
 bool Texture::hasStorageBindingCapability(WGPUTextureFormat format, const Device& device, std::optional<WGPUStorageTextureAccess> access)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormatDeviceCapabilities::hasStorageBindingCapability(format, access.value_or(WGPUStorageTextureAccess_Undefined), device.hasFeature(WGPUFeatureName_TextureFormatsTier1), device.hasFeature(WGPUFeatureName_TextureFormatsTier2), device.hasFeature(WGPUFeatureName_BGRA8UnormStorage));
+#else
     // https://gpuweb.github.io/gpuweb/#plain-color-formats
     switch (format) {
     // These formats always support read-only and write-only storage access;
@@ -1813,6 +1840,7 @@ bool Texture::hasStorageBindingCapability(WGPUTextureFormat format, const Device
         ASSERT_NOT_REACHED();
         return false;
     }
+#endif
 }
 
 WGPUTextureFormat Texture::removeSRGBSuffix(WGPUTextureFormat format)
