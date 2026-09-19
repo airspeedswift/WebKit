@@ -122,7 +122,9 @@ public:
     void finalizeBlitCommandEncoder();
     static void clearTextureIfNeeded(const WGPUImageCopyTexture&, NSUInteger, const Device&, id<MTLBlitCommandEncoder>);
     static void clearTextureIfNeeded(Texture&, NSUInteger, NSUInteger, const Device&, id<MTLBlitCommandEncoder>);
-    void clearTextureIfNeeded(const WGPUImageCopyTexture&, NSUInteger) HAS_SWIFTCXX_THUNK;
+#if !ENABLE(WEBGPU_SWIFT)
+    void clearTextureIfNeeded(const WGPUImageCopyTexture&, NSUInteger);
+#endif
     void makeInvalid(NSString*);
     void makeSubmitInvalid(NSString* = nil);
     void incrementBufferMapCount();

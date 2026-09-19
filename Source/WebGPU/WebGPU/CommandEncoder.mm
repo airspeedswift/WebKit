@@ -1353,14 +1353,12 @@ NSString* CommandEncoder::errorValidatingCopyTextureToBuffer(const WGPUImageCopy
 }
 #endif
 
+#if !ENABLE(WEBGPU_SWIFT)
 void CommandEncoder::clearTextureIfNeeded(const WGPUImageCopyTexture& destination, NSUInteger slice)
 {
-#if ENABLE(WEBGPU_SWIFT)
-    commandEncoderClearTextureIfNeeded(this, destination, slice);
-#else
     clearTextureIfNeeded(destination, slice, m_device, m_blitCommandEncoder);
-#endif
 }
+#endif
 
 
 void CommandEncoder::clearTextureIfNeeded(const WGPUImageCopyTexture& destination, NSUInteger slice, const Device& device, id<MTLBlitCommandEncoder> blitCommandEncoder)

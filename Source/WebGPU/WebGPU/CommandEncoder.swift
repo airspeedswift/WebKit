@@ -158,11 +158,6 @@ func commandEncoderRunClearEncoder(
 }
 
 @_expose(Cxx)
-func commandEncoderClearTextureIfNeeded(_ commandEncoder: WebGPU.CommandEncoder, destination: WGPUImageCopyTexture, slice: UInt) {
-    commandEncoder.clearTextureIfNeeded(destination: destination, slice: slice)
-}
-
-@_expose(Cxx)
 func commandEncoderFinish(
     _ commandEncoder: WebGPU.CommandEncoder,
     descriptor: WGPUCommandBufferDescriptor
