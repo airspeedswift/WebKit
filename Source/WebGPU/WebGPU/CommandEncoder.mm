@@ -2380,12 +2380,11 @@ void CommandEncoder::lock(bool shouldLock)
         setExistingEncoder(nil);
 }
 
-size_t CommandEncoder::computeSize(TrackedResourceContainer& container, const Device& device)
+size_t CommandEncoder::computeSize(const TrackedEncoderSet& encoders, const Device& device)
 {
-    container.removeIf([&](auto commandEncoder) {
+    return encoders.removeEncodersAndCount([&](auto commandEncoder) {
         return !device.commandEncoderFromIdentifier(commandEncoder);
     });
-    return container.size();
 }
 
 void CommandEncoder::clearTracking()
@@ -2409,43 +2408,43 @@ void CommandEncoder::clearTracking()
     m_trackedQuerySets.clear();
 }
 
-bool CommandEncoder::trackEncoderForBuffer(const Buffer& buffer, TrackedResourceContainer& encoderContainer)
+bool CommandEncoder::trackEncoderForBuffer(const Buffer& buffer)
 {
-    auto addResult = encoderContainer.add(uniqueId());
-    if (addResult.isNewEntry)
+    bool isNewEntry = buffer.addEncoder(uniqueId());
+    if (isNewEntry)
         m_trackedBuffers.append(buffer);
-    return addResult.isNewEntry;
+    return isNewEntry;
 }
-void CommandEncoder::trackEncoderForTexture(const Texture& texture, TrackedResourceContainer& encoderContainer)
+void CommandEncoder::trackEncoderForTexture(const Texture& texture)
 {
-    if (encoderContainer.add(uniqueId()).isNewEntry)
+    if (texture.addEncoder(uniqueId()))
         m_trackedTextures.append(texture);
 }
 #if !ENABLE(WEBGPU_SWIFT)
-void CommandEncoder::trackEncoderForTextureView(const TextureView& textureView, TrackedResourceContainer& encoderContainer)
+void CommandEncoder::trackEncoderForTextureView(const TextureView& textureView)
 {
-    if (encoderContainer.add(uniqueId()).isNewEntry)
+    if (textureView.addEncoder(uniqueId()))
         m_trackedTextureViews.append(textureView);
 }
 #endif
 #if !ENABLE(WEBGPU_SWIFT)
-void CommandEncoder::trackEncoderForExternalTexture(const ExternalTexture& externalTexture, TrackedResourceContainer& encoderContainer)
+void CommandEncoder::trackEncoderForExternalTexture(const ExternalTexture& externalTexture)
 {
-    if (encoderContainer.add(uniqueId()).isNewEntry)
+    if (externalTexture.addEncoder(uniqueId()))
         m_trackedExternalTextures.append(externalTexture);
 }
 #endif
 #if !ENABLE(WEBGPU_SWIFT)
-void CommandEncoder::trackEncoderForQuerySet(const QuerySet& querySet, TrackedResourceContainer& encoderContainer)
+void CommandEncoder::trackEncoderForQuerySet(const QuerySet& querySet)
 {
-    if (encoderContainer.add(uniqueId()).isNewEntry)
+    if (querySet.addEncoder(uniqueId()))
         m_trackedQuerySets.append(querySet);
 }
 #endif
 
-void CommandEncoder::trackEncoder(CommandEncoder& commandEncoder, HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>& encoderContainer)
+void CommandEncoder::trackEncoder(CommandEncoder& commandEncoder, const TrackedEncoderSet& encoders)
 {
-    encoderContainer.add(commandEncoder.uniqueId());
+    encoders.addEncoder(commandEncoder.uniqueId());
 }
 
 void CommandEncoder::addOnCommitHandler(Function<bool(CommandBuffer&, CommandEncoder&)>&& onCommitHandler)

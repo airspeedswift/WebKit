@@ -3456,10 +3456,10 @@ void Texture::makeCanvasBacking()
 bool Texture::waitForCommandBufferCompletion()
 {
     bool result = true;
-    for (auto commandEncoder : m_commandEncoders) {
+    forEachEncoder([&](auto commandEncoder) {
         if (RefPtr ptr = m_device->commandEncoderFromIdentifier(commandEncoder))
             result = ptr->waitForCommandBufferCompletion() && result;
-    }
+    });
 
     return result;
 }
@@ -3487,7 +3487,7 @@ void Texture::resetGPUFrameCost() const
 
 void Texture::setCommandEncoder(CommandEncoder& commandEncoder) const
 {
-    commandEncoder.trackEncoderForTexture(*this, m_commandEncoders);
+    commandEncoder.trackEncoderForTexture(*this);
     commandEncoder.addTexture(*this);
     if (!m_canvasBacking && isDestroyed())
         commandEncoder.makeSubmitInvalid();
@@ -3718,9 +3718,9 @@ void Texture::destroy()
         }
     }
     if (!m_canvasBacking)
-        m_device->makeSubmitInvalidClearingEncoders(m_commandEncoders);
+        m_device->makeSubmitInvalidClearingEncoders(*this);
 
-    m_commandEncoders.clear();
+    clearEncoders();
 
     m_textureViews.clear();
 }

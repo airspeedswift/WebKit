@@ -1299,10 +1299,9 @@ void Device::trackTimestampsBuffer(id<MTLCommandBuffer> commandBuffer, id<MTLCou
     [sampleBufferArray addObject:counterSampleBuffer];
 }
 
-void Device::makeSubmitInvalidClearingEncoders(TrackedResourceContainer& commandEncoders)
+void Device::makeSubmitInvalidClearingEncoders(const TrackedResource& resource)
 {
-    auto encoders = std::exchange(commandEncoders, { });
-    for (auto commandEncoder : encoders) {
+    for (auto commandEncoder : resource.takeEncoders()) {
         if (RefPtr ptr = commandEncoderFromIdentifier(commandEncoder))
             ptr->makeSubmitInvalid();
     }

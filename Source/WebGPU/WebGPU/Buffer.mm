@@ -213,12 +213,11 @@ static bool verifyIndexBufferData(id<MTLBuffer> buffer, uint32_t firstIndex, uin
     return true;
 }
 
-static size_t computeSize(HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>& encoders, Device& device)
+static size_t computeSize(const TrackedEncoderSet& encoders, Device& device)
 {
-    encoders.removeIf([&](uint64_t encoderId) {
+    return encoders.removeEncodersAndCount([&](uint64_t encoderId) {
         return !device.commandEncoderFromIdentifier(encoderId);
     });
-    return encoders.size();
 }
 
 #if ENABLE(WEBGPU_SWIFT)
@@ -421,24 +420,24 @@ Buffer::~Buffer()
 
 void Buffer::incrementBufferMapCount()
 {
-    for (auto commandEncoder : m_commandEncoders) {
+    forEachEncoder([&](auto commandEncoder) {
         if (RefPtr ptr = m_device->commandEncoderFromIdentifier(commandEncoder))
             ptr->incrementBufferMapCount();
-    }
+    });
 }
 
 void Buffer::decrementBufferMapCount()
 {
-    for (auto commandEncoder : m_commandEncoders) {
+    forEachEncoder([&](auto commandEncoder) {
         if (RefPtr ptr = m_device->commandEncoderFromIdentifier(commandEncoder))
             ptr->decrementBufferMapCount();
-    }
+    });
 }
 
 void Buffer::setCommandEncoder(CommandEncoder& commandEncoder, bool mayModifyBuffer) const
 {
     UNUSED_PARAM(mayModifyBuffer);
-    bool isNewEntry = commandEncoder.trackEncoderForBuffer(*this, m_commandEncoders);
+    bool isNewEntry = commandEncoder.trackEncoderForBuffer(*this);
 #if !CPU(X86_64)
     if (m_device->isShaderValidationEnabled())
 #endif
@@ -462,7 +461,7 @@ void Buffer::destroy()
     }
 
     setState(State::Destroyed);
-    m_device->makeSubmitInvalidClearingEncoders(m_commandEncoders);
+    m_device->makeSubmitInvalidClearingEncoders(*this);
     m_device->removeBufferFromCache(buffer().gpuAddress);
     replaceAllocation(m_device->placeholderBuffer());
 }
@@ -737,7 +736,8 @@ void Buffer::indirectBufferInvalidated(CommandEncoder* commandEncoder)
         return;
 
     if (auto currentSize = computeSize(m_skippedValidationCommandEncoders, m_device.get())) {
-        bool validationNotNeeded = currentSize == 1 && commandEncoder && commandEncoder == m_device->commandEncoderFromIdentifier(*m_skippedValidationCommandEncoders.begin().get());
+        auto firstEncoder = m_skippedValidationCommandEncoders.firstEncoder();
+        bool validationNotNeeded = currentSize == 1 && commandEncoder && firstEncoder && commandEncoder == m_device->commandEncoderFromIdentifier(*firstEncoder);
         if (!validationNotNeeded)
             setMustTakeSlowIndexValidationPath(true);
     }
@@ -749,7 +749,7 @@ void Buffer::indirectBufferInvalidated(CommandEncoder* commandEncoder)
 
 void Buffer::removeSkippedValidationCommandEncoder(uint64_t uniqueId)
 {
-    m_skippedValidationCommandEncoders.remove(uniqueId);
+    m_skippedValidationCommandEncoders.removeEncoder(uniqueId);
 }
 
 void Buffer::clearMustTakeSlowIndexValidationPath()

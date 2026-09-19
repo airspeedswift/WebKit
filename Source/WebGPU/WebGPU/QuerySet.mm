@@ -118,7 +118,7 @@ void QuerySet::destroy()
     // https://gpuweb.github.io/gpuweb/#dom-gpuqueryset-destroy
     m_visibilityBuffer = nil;
     m_timestampBufferWithOffset.buffer = nil;
-    m_device->makeSubmitInvalidClearingEncoders(m_commandEncoders);
+    m_device->makeSubmitInvalidClearingEncoders(*this);
 }
 
 void QuerySet::setLabel(String&& label)
@@ -133,7 +133,7 @@ void QuerySet::setOverrideLocation(QuerySet&, uint32_t, uint32_t)
 
 void QuerySet::setCommandEncoder(CommandEncoder& commandEncoder) const
 {
-    CommandEncoder::trackEncoder(commandEncoder, m_commandEncoders);
+    CommandEncoder::trackEncoder(commandEncoder, *this);
     commandEncoder.addBuffer(m_visibilityBuffer);
     commandEncoder.addBuffer(m_timestampBufferWithOffset.buffer);
     if (isDestroyed())

@@ -165,12 +165,67 @@ using DrawIndexCacheContainer = HashMap<GenericHashKey<DrawIndexCacheContainerKe
 using DrawIndexCacheContainerIterator = DrawIndexCacheContainer::const_iterator;
 
 using TrackedResourceContainer = HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>;
-struct TrackedResource {
-    mutable TrackedResourceContainer m_commandEncoders;
+
+// A set of command encoders, by identifier. The set is reached through these
+// operations rather than by handing the container out, because the encoders that
+// write it belong to CommandEncoder and Device while the set belongs to whoever
+// holds it.
+class TrackedEncoderSet {
+public:
+    // Whether the encoder was not already in the set.
+    bool addEncoder(uint64_t identifier) const
+    {
+        return m_commandEncoders.add(identifier).isNewEntry;
+    }
+
     void removeEncoder(uint64_t identifier) const
     {
         m_commandEncoders.remove(identifier);
     }
+
+    void clearEncoders() const
+    {
+        m_commandEncoders.clear();
+    }
+
+    // Leaves the set empty, so a caller acting on every encoder cannot act on one
+    // twice.
+    TrackedResourceContainer takeEncoders() const
+    {
+        return std::exchange(m_commandEncoders, { });
+    }
+
+    std::optional<uint64_t> firstEncoder() const
+    {
+        if (m_commandEncoders.isEmpty())
+            return std::nullopt;
+        return *m_commandEncoders.begin();
+    }
+
+    template<typename Predicate>
+    size_t removeEncodersAndCount(NOESCAPE Predicate&& predicate) const
+    {
+        m_commandEncoders.removeIf(std::forward<Predicate>(predicate));
+        return m_commandEncoders.size();
+    }
+
+    template<typename Callback>
+    void forEachEncoder(NOESCAPE Callback&& callback) const
+    {
+        for (auto identifier : m_commandEncoders)
+            callback(identifier);
+    }
+
+private:
+    mutable TrackedResourceContainer m_commandEncoders;
+};
+
+// The command encoders reading a resource. A base of Buffer, Texture,
+// TextureView, QuerySet and ExternalTexture, which is the set CommandEncoder
+// tracks a resource in. A holder that wants a second such set — Buffer keeps one
+// for the encoders whose index validation it skipped — holds a TrackedEncoderSet
+// instead, since a class cannot inherit one twice.
+struct TrackedResource : public TrackedEncoderSet {
 };
 
 } // namespace WebGPU

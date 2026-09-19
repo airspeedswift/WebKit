@@ -174,14 +174,14 @@ void TextureView::destroy()
 {
     m_texture = protect(m_device)->placeholderTexture(format());
     if (!m_parentTexture->isCanvasBacking())
-        m_device->makeSubmitInvalidClearingEncoders(m_commandEncoders);
+        m_device->makeSubmitInvalidClearingEncoders(*this);
 
-    m_commandEncoders.clear();
+    clearEncoders();
 }
 
 void TextureView::setCommandEncoder(CommandEncoder& commandEncoder) const
 {
-    CommandEncoder::trackEncoder(commandEncoder, m_commandEncoders);
+    CommandEncoder::trackEncoder(commandEncoder, *this);
     m_parentTexture->setCommandEncoder(commandEncoder);
     if (isDestroyed() && !m_parentTexture->isCanvasBacking())
         commandEncoder.makeSubmitInvalid();

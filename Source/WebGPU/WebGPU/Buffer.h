@@ -211,7 +211,9 @@ private:
     // TrackedResource and not with the storage.
     DrawIndexCacheContainer m_drawIndexedCache;
     mutable HashMap<uint64_t, uint32_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_gpuResourceMap;
-    HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_skippedValidationCommandEncoders;
+    // Held rather than inherited: TrackedResource above is already this type, and
+    // a class cannot inherit it twice.
+    TrackedEncoderSet m_skippedValidationCommandEncoders;
     HashMap<uint64_t, bool, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_didReadOOB;
 #if CPU(X86_64) && (PLATFORM(MAC) || PLATFORM(MACCATALYST))
     bool m_mappedAtCreation { false };

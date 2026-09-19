@@ -144,13 +144,13 @@ public:
     void generateInvalidEncoderStateError();
     bool NODELETE validateClearBuffer(const Buffer&, uint64_t offset, uint64_t size);
     void clearTracking();
-    bool trackEncoderForBuffer(const Buffer&, TrackedResourceContainer&);
-    void trackEncoderForTexture(const Texture&, TrackedResourceContainer&);
-    void trackEncoderForTextureView(const TextureView&, TrackedResourceContainer&);
-    void trackEncoderForExternalTexture(const ExternalTexture&, TrackedResourceContainer&);
-    void trackEncoderForQuerySet(const QuerySet&, TrackedResourceContainer&);
-    static void trackEncoder(CommandEncoder&, HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>&);
-    static size_t computeSize(TrackedResourceContainer&, const Device&);
+    bool trackEncoderForBuffer(const Buffer&);
+    void trackEncoderForTexture(const Texture&);
+    void trackEncoderForTextureView(const TextureView&);
+    void trackEncoderForExternalTexture(const ExternalTexture&);
+    void trackEncoderForQuerySet(const QuerySet&);
+    static void trackEncoder(CommandEncoder&, const TrackedEncoderSet&);
+    static size_t computeSize(const TrackedEncoderSet&, const Device&);
     uint64_t uniqueId() const { return m_uniqueId; }
     NSMutableSet<id<MTLCounterSampleBuffer>> * _Nullable timestampBuffers() const { return m_retainedTimestampBuffers; };
     void addOnCommitHandler(Function<bool(CommandBuffer&, CommandEncoder&)>&&);
