@@ -662,7 +662,7 @@ extension WebGPU.CommandEncoder {
 
     private func areCopyCompatible(format1: WGPUTextureFormat, format2: WGPUTextureFormat) -> Bool {
         // https://gpuweb.github.io/gpuweb/#copy-compatible
-        format1 == format2 ? true : WebGPU.Texture.removeSRGBSuffix(format1) == WebGPU.Texture.removeSRGBSuffix(format2)
+        format1 == format2 ? true : TextureFormat.removeSRGBSuffix(format1) == TextureFormat.removeSRGBSuffix(format2)
     }
 
     private func errorValidatingCopyTextureToTexture(
@@ -675,9 +675,9 @@ extension WebGPU.CommandEncoder {
             case WGPUTextureAspect_All:
                 return true
             case WGPUTextureAspect_StencilOnly:
-                return WebGPU.Texture.containsStencilAspect(format) && !WebGPU.Texture.containsDepthAspect(format)
+                return TextureFormat.containsStencilAspect(format) && !TextureFormat.containsDepthAspect(format)
             case WGPUTextureAspect_DepthOnly:
-                return WebGPU.Texture.containsDepthAspect(format) && !WebGPU.Texture.containsStencilAspect(format)
+                return TextureFormat.containsDepthAspect(format) && !TextureFormat.containsStencilAspect(format)
             case WGPUTextureAspect_Force32:
                 assertionFailure()
                 return false
@@ -723,8 +723,8 @@ extension WebGPU.CommandEncoder {
             return errorString("destination texture and source texture are not copy compatible")
         }
 
-        let srcIsDepthOrStencil = WebGPU.Texture.isDepthOrStencilFormat(sourceTexture.format())
-        let dstIsDepthOrStencil = WebGPU.Texture.isDepthOrStencilFormat(destinationTexture.format())
+        let srcIsDepthOrStencil = TextureFormat.isDepthOrStencilFormat(sourceTexture.format())
+        let dstIsDepthOrStencil = TextureFormat.isDepthOrStencilFormat(destinationTexture.format())
 
         if srcIsDepthOrStencil {
             if !refersToAllAspects(format: sourceTexture.format(), aspect: source.aspect)
@@ -807,12 +807,12 @@ extension WebGPU.CommandEncoder {
 
         var aspectSpecificFormat = sourceTexture.format()
 
-        if WebGPU.Texture.isDepthOrStencilFormat(sourceTexture.format()) {
+        if TextureFormat.isDepthOrStencilFormat(sourceTexture.format()) {
             if !WebGPU.Texture.refersToSingleAspect(sourceTexture.format(), source.aspect) {
                 return errorString("copying to depth stencil texture with more than one aspect")
             }
 
-            if !WebGPU.Texture.isValidDepthStencilCopySource(sourceTexture.format(), source.aspect) {
+            if !TextureFormat.isValidDepthStencilCopySource(sourceTexture.format(), source.aspect) {
                 return errorString("copying to depth stencil texture, validDepthStencilCopySource fails")
             }
 
@@ -831,14 +831,14 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if !WebGPU.Texture.isDepthOrStencilFormat(sourceTexture.format()) {
+        if !TextureFormat.isDepthOrStencilFormat(sourceTexture.format()) {
             let texelBlockSize = WebGPU.Texture.texelBlockSize(sourceTexture.format())
             if destination.layout.offset % texelBlockSize.value() != 0 {
                 return errorString("destination.layout.offset is not a multiple of texelBlockSize")
             }
         }
 
-        if WebGPU.Texture.isDepthOrStencilFormat(sourceTexture.format()) {
+        if TextureFormat.isDepthOrStencilFormat(sourceTexture.format()) {
             if destination.layout.offset % 4 != 0 {
                 return errorString("destination.layout.offset is not a multiple of 4")
             }
@@ -906,12 +906,12 @@ extension WebGPU.CommandEncoder {
 
         var aspectSpecificFormat = destinationTexture.format()
 
-        if WebGPU.Texture.isDepthOrStencilFormat(destinationTexture.format()) {
+        if TextureFormat.isDepthOrStencilFormat(destinationTexture.format()) {
             if !WebGPU.Texture.refersToSingleAspect(destinationTexture.format(), destination.aspect) {
                 return errorString("destination aspect refers to more than one asepct")
             }
 
-            if !WebGPU.Texture.isValidDepthStencilCopyDestination(destinationTexture.format(), destination.aspect) {
+            if !TextureFormat.isValidDepthStencilCopyDestination(destinationTexture.format(), destination.aspect) {
                 return errorString("destination is not valid depthStencilCopyDestination")
             }
 
@@ -922,14 +922,14 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if !WebGPU.Texture.isDepthOrStencilFormat(destinationTexture.format()) {
+        if !TextureFormat.isDepthOrStencilFormat(destinationTexture.format()) {
             let texelBlockSize = WebGPU.Texture.texelBlockSize(destinationTexture.format())
             if source.layout.offset % texelBlockSize.value() != 0 {
                 return errorString("source.layout.offset is not a multiple of texelBlockSize")
             }
         }
 
-        if WebGPU.Texture.isDepthOrStencilFormat(destinationTexture.format()) {
+        if TextureFormat.isDepthOrStencilFormat(destinationTexture.format()) {
             if source.layout.offset % 4 != 0 {
                 return errorString("source.layout.offset is not a multiple of four for depth stencil format")
             }
@@ -1157,10 +1157,10 @@ extension WebGPU.CommandEncoder {
                 sampleCount = texture.sampleCount()
                 let textureFormat = texture.format()
                 bytesPerSample = roundUpToMultipleOfNonPowerOfTwoUInt32UInt32(
-                    WebGPU.Texture.renderTargetPixelByteAlignment(textureFormat),
+                    TextureFormat.renderTargetPixelByteAlignment(textureFormat),
                     bytesPerSample
                 )
-                bytesPerSample += WebGPU.Texture.renderTargetPixelByteCost(textureFormat)
+                bytesPerSample += TextureFormat.renderTargetPixelByteCost(textureFormat)
                 if bytesPerSample > maxColorAttachmentBytesPerSample {
                     return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "total bytes per sample exceeds limit")
                 }
@@ -1316,8 +1316,8 @@ extension WebGPU.CommandEncoder {
             }
             let metalDepthStencilTexture = textureView.texture()
             let textureFormat = textureView.format()
-            hasStencilComponent = WebGPU.Texture.containsStencilAspect(textureFormat)
-            hasDepthComponent = WebGPU.Texture.containsDepthAspect(textureFormat)
+            hasStencilComponent = TextureFormat.containsStencilAspect(textureFormat)
+            hasDepthComponent = TextureFormat.containsDepthAspect(textureFormat)
             let isDestroyed = textureView.isDestroyed()
             if !isDestroyed {
                 if textureWidth != 0
@@ -1652,7 +1652,7 @@ extension WebGPU.CommandEncoder {
         }
 
         destinationBytesPerRow = roundUpToMultipleOfNonPowerOfTwoCheckedUInt32UnsignedLong(blockSize, destinationBytesPerRow)
-        let blockHeight = WebGPU.Texture.texelBlockHeight(aspectSpecificFormat)
+        let blockHeight = TextureFormat.texelBlockHeight(aspectSpecificFormat)
         guard blockHeight != 0 else {
             return
         }
@@ -2009,7 +2009,7 @@ extension WebGPU.CommandEncoder {
         }
         let maxSourceBytesPerRow =
             textureDimension == WGPUTextureDimension_3D ? (2048 * blockSize.value()) : sourceBytesPerRow
-        let blockHeight = WebGPU.Texture.texelBlockHeight(aspectSpecificFormat)
+        let blockHeight = TextureFormat.texelBlockHeight(aspectSpecificFormat)
         guard blockHeight != 0 else {
             return
         }

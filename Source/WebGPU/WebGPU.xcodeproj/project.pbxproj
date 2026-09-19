@@ -52,6 +52,7 @@
 		0DD5FD362C66947B004AF552 /* XRProjectionLayer.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0DD5FD342C66947B004AF552 /* XRProjectionLayer.mm */; };
 		0DE2BFAD2C150DF700D04AEB /* ShaderStage.h in Headers */ = {isa = PBXBuildFile; fileRef = 0DE2BFAC2C150DF700D04AEB /* ShaderStage.h */; };
 		14C834402EBA7CBB003B591A /* StdLibExtras.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C8343F2EBA7CBB003B591A /* StdLibExtras.swift */; };
+		14C834422EBB1A00003B591A /* TextureFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C834412EBB1A00003B591A /* TextureFormat.swift */; };
 		1C0F41EE280940650005886D /* HardwareCapabilities.mm in Sources */ = {isa = PBXBuildFile; fileRef = 1C0F41EC280940650005886D /* HardwareCapabilities.mm */; };
 		1C2CEDEE271E8A7300EDC16F /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1C2CEDED271E8A7300EDC16F /* Metal.framework */; };
 		1C582FF927E04131009B40F0 /* CommandsMixin.mm in Sources */ = {isa = PBXBuildFile; fileRef = 1C582FF727E04131009B40F0 /* CommandsMixin.mm */; };
@@ -368,6 +369,7 @@
 		0DD5FD342C66947B004AF552 /* XRProjectionLayer.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = XRProjectionLayer.mm; sourceTree = "<group>"; };
 		0DE2BFAC2C150DF700D04AEB /* ShaderStage.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ShaderStage.h; sourceTree = "<group>"; };
 		14C8343F2EBA7CBB003B591A /* StdLibExtras.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StdLibExtras.swift; sourceTree = "<group>"; };
+		14C834412EBB1A00003B591A /* TextureFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextureFormat.swift; sourceTree = "<group>"; };
 		1C0F41EC280940650005886D /* HardwareCapabilities.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = HardwareCapabilities.mm; sourceTree = "<group>"; };
 		1C0F41ED280940650005886D /* HardwareCapabilities.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = HardwareCapabilities.h; sourceTree = "<group>"; };
 		1C2CEDED271E8A7300EDC16F /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
@@ -752,6 +754,7 @@
 				14C8343F2EBA7CBB003B591A /* StdLibExtras.swift */,
 				1C5ACA99273A426D0095F8D5 /* Texture.h */,
 				1C5ACAB1273A426D0095F8D5 /* Texture.mm */,
+				14C834412EBB1A00003B591A /* TextureFormat.swift */,
 				0D164A392E8EE14700864EA1 /* TextureOrTextureView.h */,
 				1C5ACADD273A4F3D0095F8D5 /* TextureView.h */,
 				1C5ACAEA273A560D0095F8D5 /* TextureView.mm */,
@@ -1445,6 +1448,7 @@
 				1C5ACACE273A426E0095F8D5 /* ShaderModule.mm in Sources */,
 				14C834402EBA7CBB003B591A /* StdLibExtras.swift in Sources */,
 				1C5ACACF273A426E0095F8D5 /* Texture.mm in Sources */,
+				14C834422EBB1A00003B591A /* TextureFormat.swift in Sources */,
 				1C5ACAEB273A560D0095F8D5 /* TextureView.mm in Sources */,
 				0D943C102C6571BC00D33BA5 /* XRBinding.mm in Sources */,
 				0DD5FD362C66947B004AF552 /* XRProjectionLayer.mm in Sources */,

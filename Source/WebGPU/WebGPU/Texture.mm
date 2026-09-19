@@ -36,6 +36,15 @@
 #import <wtf/StdLibExtras.h>
 #import <wtf/TZoneMallocInlines.h>
 
+#if ENABLE(WEBGPU_SWIFT)
+// WebGPUSwift-Generated.h declares every exposed Swift member, not only the ones
+// this file calls, so it needs the bridging types the rest of the island's
+// signatures name.
+#import "CxxBridging.h"
+#import <WebGPU/CxxBridgingPublic.h>
+#import "WebGPUSwift-Generated.h"
+#endif
+
 namespace WebGPU {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Texture);
@@ -47,6 +56,18 @@ bool Texture::isCompressedFormat(WGPUTextureFormat format)
 
 std::optional<Texture::CompressFormat> Texture::compressedFormatType(WGPUTextureFormat format)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    // Texture::CompressFormat is declared in Texture.h, and std::optional of it has
+    // no representation across @_expose(Cxx), so the Swift table reports the family
+    // as an int32_t and reports "not compressed" as a negative value.
+    static_assert(!static_cast<int32_t>(CompressFormat::ASTC));
+    static_assert(static_cast<int32_t>(CompressFormat::BC) == 1);
+    static_assert(static_cast<int32_t>(CompressFormat::ETC) == 2);
+    auto family = TextureFormat::compressedFormatType(format);
+    if (family < 0)
+        return std::nullopt;
+    return static_cast<CompressFormat>(family);
+#else
     // https://gpuweb.github.io/gpuweb/#packed-formats
     switch (format) {
     case WGPUTextureFormat_BC1RGBAUnorm:
@@ -160,10 +181,17 @@ std::optional<Texture::CompressFormat> Texture::compressedFormatType(WGPUTexture
         ASSERT_NOT_REACHED();
         return std::nullopt;
     }
+#endif
 }
 
 static std::optional<WGPUTextureFormat> NODELETE depthSpecificFormat(WGPUTextureFormat textureFormat)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    auto depthFormat = TextureFormat::depthSpecificFormat(textureFormat);
+    if (depthFormat == WGPUTextureFormat_Undefined)
+        return std::nullopt;
+    return depthFormat;
+#else
     // https://gpuweb.github.io/gpuweb/#aspect-specific-format
 
     switch (textureFormat) {
@@ -281,10 +309,17 @@ static std::optional<WGPUTextureFormat> NODELETE depthSpecificFormat(WGPUTexture
         ASSERT_NOT_REACHED();
         return std::nullopt;
     }
+#endif
 }
 
 static std::optional<WGPUTextureFormat> NODELETE stencilSpecificFormat(WGPUTextureFormat textureFormat)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    auto stencilFormat = TextureFormat::stencilSpecificFormat(textureFormat);
+    if (stencilFormat == WGPUTextureFormat_Undefined)
+        return std::nullopt;
+    return stencilFormat;
+#else
     // https://gpuweb.github.io/gpuweb/#aspect-specific-format
 
     switch (textureFormat) {
@@ -402,6 +437,7 @@ static std::optional<WGPUTextureFormat> NODELETE stencilSpecificFormat(WGPUTextu
         ASSERT_NOT_REACHED();
         return std::nullopt;
     }
+#endif
 }
 
 bool Texture::containsDepthAspect(WGPUTextureFormat textureFormat)
@@ -422,6 +458,9 @@ bool Texture::isDepthOrStencilFormat(WGPUTextureFormat format)
 
 uint32_t Texture::texelBlockWidth(WGPUTextureFormat format)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormat::texelBlockWidth(format);
+#else
     // https://gpuweb.github.io/gpuweb/#texel-block-width
     switch (format) {
     case WGPUTextureFormat_BC1RGBAUnorm:
@@ -540,10 +579,14 @@ uint32_t Texture::texelBlockWidth(WGPUTextureFormat format)
         ASSERT_NOT_REACHED();
         return 0;
     }
+#endif
 }
 
 uint32_t Texture::texelBlockHeight(WGPUTextureFormat format)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormat::texelBlockHeight(format);
+#else
     // https://gpuweb.github.io/gpuweb/#texel-block-height
     switch (format) {
     case WGPUTextureFormat_BC1RGBAUnorm:
@@ -667,6 +710,7 @@ uint32_t Texture::texelBlockHeight(WGPUTextureFormat format)
         ASSERT_NOT_REACHED();
         return 0;
     }
+#endif
 }
 
 bool Texture::isColorRenderableFormat(WGPUTextureFormat format, const Device& device)
@@ -1023,6 +1067,9 @@ bool Texture::isRenderableFormat(WGPUTextureFormat format, const Device& device)
 
 uint32_t Texture::renderTargetPixelByteCost(WGPUTextureFormat format)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormat::renderTargetPixelByteCost(format);
+#else
     // https://gpuweb.github.io/gpuweb/#renderable-format
     switch (format) {
     case WGPUTextureFormat_R8Unorm:
@@ -1141,10 +1188,14 @@ uint32_t Texture::renderTargetPixelByteCost(WGPUTextureFormat format)
         ASSERT_NOT_REACHED();
         return 0;
     }
+#endif
 }
 
 uint32_t Texture::renderTargetPixelByteAlignment(WGPUTextureFormat format)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormat::renderTargetPixelByteAlignment(format);
+#else
     // https://gpuweb.github.io/gpuweb/#renderable-format
     switch (format) {
     case WGPUTextureFormat_R8Unorm:
@@ -1258,6 +1309,7 @@ uint32_t Texture::renderTargetPixelByteAlignment(WGPUTextureFormat format)
         ASSERT_NOT_REACHED();
         return 0;
     }
+#endif
 }
 
 bool Texture::supportsMultisampling(WGPUTextureFormat format, const Device& device)
@@ -1765,6 +1817,9 @@ bool Texture::hasStorageBindingCapability(WGPUTextureFormat format, const Device
 
 WGPUTextureFormat Texture::removeSRGBSuffix(WGPUTextureFormat format)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormat::removeSRGBSuffix(format);
+#else
     switch (format) {
     case WGPUTextureFormat_R8Unorm:
     case WGPUTextureFormat_R8Snorm:
@@ -1901,6 +1956,7 @@ WGPUTextureFormat Texture::removeSRGBSuffix(WGPUTextureFormat format)
         ASSERT_NOT_REACHED();
         return WGPUTextureFormat_Undefined;
     }
+#endif
 }
 
 static bool NODELETE textureViewFormatCompatible(WGPUTextureFormat format1, WGPUTextureFormat format2)
@@ -3803,6 +3859,9 @@ bool Texture::refersToSingleAspect(WGPUTextureFormat format, WGPUTextureAspect a
 
 bool Texture::isValidDepthStencilCopySource(WGPUTextureFormat format, WGPUTextureAspect aspect)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormat::isValidDepthStencilCopySource(format, aspect);
+#else
     // https://gpuweb.github.io/gpuweb/#depth-formats
     ASSERT(Texture::isDepthOrStencilFormat(format));
 
@@ -3919,6 +3978,7 @@ bool Texture::isValidDepthStencilCopySource(WGPUTextureFormat format, WGPUTextur
         ASSERT_NOT_REACHED();
         return false;
     }
+#endif
 }
 
 bool Texture::isValid() const
@@ -3928,6 +3988,9 @@ bool Texture::isValid() const
 
 bool Texture::isValidDepthStencilCopyDestination(WGPUTextureFormat format, WGPUTextureAspect aspect)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return TextureFormat::isValidDepthStencilCopyDestination(format, aspect);
+#else
     // https://gpuweb.github.io/gpuweb/#depth-formats
     ASSERT(Texture::isDepthOrStencilFormat(format));
 
@@ -4045,6 +4108,7 @@ bool Texture::isValidDepthStencilCopyDestination(WGPUTextureFormat format, WGPUT
         ASSERT_NOT_REACHED();
         return false;
     }
+#endif
 }
 
 NSString* Texture::errorValidatingTextureCopyRange(const WGPUImageCopyTexture& imageCopyTexture, const WGPUExtent3D& copySize)
