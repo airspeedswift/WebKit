@@ -27,10 +27,8 @@ import WebGPU_Private.CxxBridgingPublic
 
 extension WebGPU.Buffer {
     func copy(from source: Span<UInt8>, offset: Int) {
-        // FIXME (rdar://161274084): Swift doesn't have a lifetime-safe way to return a borrowed value from a refcounted object yet.
-        let bufferContents = unsafe MutableSpan(_unsafeCxxSpan: getBufferContents())
-
-        var destination = bufferContents._consumingExtracting(droppingFirst: offset)
+        let contents = BufferContents(m_buffer)
+        var destination = contents.bytes()._consumingExtracting(droppingFirst: offset)
         destination.copyMemory(from: source)
     }
 }
@@ -78,5 +76,42 @@ extension WebGPU.Buffer {
         }
 
         return unsafe getBufferContents().subspan(offset, rangeSize)
+    }
+}
+
+/// The Metal allocation backing a `Buffer`, and the only place a raw pointer to
+/// it is turned into a span.
+///
+/// Noncopyable so there is exactly one handle per allocation: copying this would
+/// produce two wrappers over one `MTLBuffer` with no indication at the use site.
+/// Metal still refcounts the allocation itself, and command buffers retain the
+/// resources they use, so the uniqueness is our handle's and not the GPU
+/// object's.
+struct BufferContents: ~Copyable {
+    private let buffer: any MTLBuffer
+
+    init(_ buffer: any MTLBuffer) {
+        self.buffer = buffer
+    }
+
+    /// The allocation's bytes, valid for as long as this value is borrowed.
+    @_lifetime(borrow self)
+    borrowing func bytes() -> MutableSpan<UInt8> {
+        let count = buffer.length
+        // SAFETY: `contents` returns the base of the allocation that `length`
+        // measures, so binding `length` bytes of it stays inside the allocation.
+        // Not provable today because Metal declares `contents` as `void*` with no
+        // `__sized_by(length)`, leaving SafeInteropWrappers no extent to work from.
+        let start = unsafe buffer.contents().bindMemory(to: UInt8.self, capacity: count)
+        // SAFETY: the same extent, restated as a span over the same allocation.
+        // Not provable today for the same reason.
+        let span = unsafe MutableSpan<UInt8>(_unsafeStart: start, count: count)
+        // SAFETY: the pointer is interior to `buffer`, which this value owns, so it
+        // stays valid for as long as `self` is borrowed. `NS_RETURNS_INNER_POINTER`
+        // on `contents` states this, and ARC already depends on it.
+        // Not provable today because that attribute is not imported as a lifetime
+        // dependency, so the span's inferred dependency is on `start` rather than on
+        // the receiver. (rdar://161274084)
+        return unsafe _overrideLifetime(span, borrowing: self)
     }
 }
