@@ -69,12 +69,11 @@ class BufferState;
 
 // https://gpuweb.github.io/gpuweb/#gpubuffer
 //
-// The storage lives in Swift, in BufferState. This class remains because a Swift
-// class cannot inherit the four C++ bases every holder of a Buffer relies on -
-// the WGPUBufferImpl the C API hands out, the thread-safe refcount and weak
-// pointer, CanBorrow, and the TrackedResource that CommandEncoder writes the
-// encoder set through - rdar://163102366. When it can, this class goes and
-// BufferState takes its place.
+// The storage lives in Swift, in BufferState. This class holds it because a Swift
+// class cannot inherit from a C++ class, and every holder of a Buffer relies on
+// four C++ bases: the WGPUBufferImpl the C API hands out, the thread-safe refcount
+// and weak pointer, CanBorrow, and the TrackedResource that CommandEncoder writes
+// the encoder set through (rdar://163102366).
 class Buffer : public WGPUBufferImpl, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Buffer>, public CanBorrow, public TrackedResource {
     WTF_MAKE_TZONE_ALLOCATED(Buffer);
 public:
