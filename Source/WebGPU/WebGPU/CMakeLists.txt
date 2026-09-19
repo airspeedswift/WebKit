@@ -231,8 +231,10 @@ if (SWIFT_REQUIRED)
     target_sources(WebGPU PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Buffer.swift
         ${CMAKE_CURRENT_SOURCE_DIR}/CommandEncoder.swift
+        ${CMAKE_CURRENT_SOURCE_DIR}/DeviceErrorScopes.swift
         ${CMAKE_CURRENT_SOURCE_DIR}/Queue.swift
         ${CMAKE_CURRENT_SOURCE_DIR}/StdLibExtras.swift
+        ${CMAKE_CURRENT_SOURCE_DIR}/TextureFormat.swift
     )
 
     webkit_target_add_swift_options(WebGPU

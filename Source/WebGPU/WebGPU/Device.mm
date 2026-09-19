@@ -52,6 +52,16 @@
 #import <wtf/WeakPtr.h>
 #import <wtf/darwin/DispatchExtras.h>
 
+#if ENABLE(WEBGPU_SWIFT)
+// The generated header declares every thunk in the island, so including it pulls in
+// the span aliases and the bridging helpers those thunks name, whatever this file
+// itself uses. Buffer.mm carries the same set for the same reason.
+#import "CxxBridging.h"
+#import <WebGPU/CxxBridgingPublic.h>
+#import <WebGPU/WGPUTextureImpl.h>
+#import "WebGPUSwift-Generated.h"
+#endif
+
 #define OBJC_STRINGIFYHELPER(x) @#x
 #define OBJC_STRINGIFY(x) OBJC_STRINGIFYHELPER(x)
 
@@ -290,6 +300,9 @@ static uint32_t computeAppleGPUFamily(id<MTLDevice> device)
 Device::Device(id<MTLDevice> device, id<MTLCommandQueue> defaultQueue, HardwareCapabilities&& capabilities, Adapter& adapter)
     : m_device(device)
     , m_defaultQueue(Queue::create(defaultQueue, adapter, *this))
+#if ENABLE(WEBGPU_SWIFT)
+    , m_errorScopes(makeUniqueWithoutFastMallocCheck<DeviceErrorScopes>(DeviceErrorScopes::init()))
+#endif
     , m_xrSubImage(XRSubImage::create(*this))
     , m_capabilities(WTF::move(capabilities))
     , m_adapter(adapter)
@@ -362,6 +375,9 @@ Device::Device(id<MTLDevice> device, id<MTLCommandQueue> defaultQueue, HardwareC
 
 Device::Device(Adapter& adapter)
     : m_defaultQueue(Queue::createInvalid(adapter, *this))
+#if ENABLE(WEBGPU_SWIFT)
+    , m_errorScopes(makeUniqueWithoutFastMallocCheck<DeviceErrorScopes>(DeviceErrorScopes::init()))
+#endif
     , m_adapter(adapter)
     , m_instance(adapter.weakInstance())
 {
@@ -483,6 +499,7 @@ bool Device::hasFeature(WGPUFeatureName feature) const
     return m_capabilities.features.contains(feature);
 }
 
+#if !ENABLE(WEBGPU_SWIFT)
 auto Device::currentErrorScope(WGPUErrorFilter type) -> ErrorScope*
 {
     // https://gpuweb.github.io/gpuweb/#abstract-opdef-current-error-scope
@@ -493,10 +510,61 @@ auto Device::currentErrorScope(WGPUErrorFilter type) -> ErrorScope*
     }
     return nullptr;
 }
+#endif
 
 void Device::generateAValidationError(NSString * message)
 {
     generateAValidationError(String { message });
+}
+
+// The three generateA*Error members differ only in the error type they carry: a
+// scope that captures that type takes the message, and the uncaptured-error
+// callback runs when none does. recordGeneratedError is that shared rule, and
+// the callback stays here because WTF::Function has no representation across
+// @_expose(Cxx).
+//
+// The message is taken by const reference and copied into the scope rather than
+// moved, so that the callers can still hand it to the uncaptured-error callback
+// on the path where no scope captured it. Copying a WTF::String is a reference
+// count.
+//
+// One difference the round trip through NSString makes: createNSString() converts a
+// null String to an empty NSString, so a captured error whose message was null is
+// reported with an empty message where the C++ arm reports it as null. Every message
+// generated here is a literal or a formatted string, so no call site reaches that.
+//
+// https://gpuweb.github.io/gpuweb/#abstract-opdef-generate-a-validation-error
+// https://gpuweb.github.io/gpuweb/#abstract-opdef-generate-an-out-of-memory-error
+// https://gpuweb.github.io/gpuweb/#abstract-opdef-generate-an-internal-error
+bool Device::recordGeneratedError(WGPUErrorType type, const String& message)
+{
+#if ENABLE(WEBGPU_SWIFT)
+    return m_errorScopes->recordError(type, message.createNSString().get());
+#else
+    WGPUErrorFilter filter;
+    switch (type) {
+    case WGPUErrorType_Validation:
+        filter = WGPUErrorFilter_Validation;
+        break;
+    case WGPUErrorType_OutOfMemory:
+        filter = WGPUErrorFilter_OutOfMemory;
+        break;
+    case WGPUErrorType_Internal:
+        filter = WGPUErrorFilter_Internal;
+        break;
+    default:
+        // No filter names NoError, Unknown or DeviceLost, so no scope captures one.
+        return false;
+    }
+
+    auto* scope = currentErrorScope(filter);
+    if (!scope)
+        return false;
+
+    if (!scope->error)
+        scope->error = Error { type, String { message } };
+    return true;
+#endif
 }
 
 void Device::generateAValidationError(String&& message)
@@ -504,13 +572,8 @@ void Device::generateAValidationError(String&& message)
     if (m_supressAllErrors)
         return;
 
-    // https://gpuweb.github.io/gpuweb/#abstract-opdef-generate-a-validation-error
-    auto* scope = currentErrorScope(WGPUErrorFilter_Validation);
-    if (scope) {
-        if (!scope->error)
-            scope->error = Error { WGPUErrorType_Validation, WTF::move(message) };
+    if (recordGeneratedError(WGPUErrorType_Validation, message))
         return;
-    }
 
     if (m_uncapturedErrorCallback) {
         m_uncapturedErrorCallback(WGPUErrorType_Validation, WTF::move(message));
@@ -523,15 +586,8 @@ void Device::generateAnOutOfMemoryError(String&& message)
     if (m_supressAllErrors)
         return;
 
-    // https://gpuweb.github.io/gpuweb/#abstract-opdef-generate-an-out-of-memory-error
-
-    auto* scope = currentErrorScope(WGPUErrorFilter_OutOfMemory);
-
-    if (scope) {
-        if (!scope->error)
-            scope->error = Error { WGPUErrorType_OutOfMemory, WTF::move(message) };
+    if (recordGeneratedError(WGPUErrorType_OutOfMemory, message))
         return;
-    }
 
     if (m_uncapturedErrorCallback) {
         m_uncapturedErrorCallback(WGPUErrorType_OutOfMemory, WTF::move(message));
@@ -544,15 +600,8 @@ void Device::generateAnInternalError(String&& message)
     if (m_supressAllErrors)
         return;
 
-    // https://gpuweb.github.io/gpuweb/#abstract-opdef-generate-an-internal-error
-
-    auto* scope = currentErrorScope(WGPUErrorFilter_Internal);
-
-    if (scope) {
-        if (!scope->error)
-            scope->error = Error { WGPUErrorType_Internal, WTF::move(message) };
+    if (recordGeneratedError(WGPUErrorType_Internal, message))
         return;
-    }
 
     if (m_uncapturedErrorCallback) {
         m_uncapturedErrorCallback(WGPUErrorType_Internal, WTF::move(message));
@@ -588,8 +637,22 @@ void Device::captureFrameIfNeeded() const
     GPUFrameCapture::captureSingleFrameIfNeeded(m_device);
 }
 
+#if ENABLE(WEBGPU_SWIFT)
+// DeviceErrorScopes::validatePop reports "the pop proceeds" as WGPUErrorType_Force32,
+// which is not a type any error takes: a Swift return cannot carry std::nullopt
+// across @_expose(Cxx). These pin the two values it does return.
+static_assert(WGPUErrorType_NoError != WGPUErrorType_Force32);
+static_assert(WGPUErrorType_Unknown != WGPUErrorType_Force32);
+#endif
+
 std::optional<WGPUErrorType> Device::validatePopErrorScope() const
 {
+#if ENABLE(WEBGPU_SWIFT)
+    auto result = m_errorScopes->validatePop(m_isLost);
+    if (result == WGPUErrorType_Force32)
+        return std::nullopt;
+    return result;
+#else
     if (m_isLost)
         return WGPUErrorType_NoError;
 
@@ -597,6 +660,7 @@ std::optional<WGPUErrorType> Device::validatePopErrorScope() const
         return WGPUErrorType_Unknown;
 
     return std::nullopt;
+#endif
 }
 
 bool Device::popErrorScope(CompletionHandler<void(WGPUErrorType, String&&)>&& callback)
@@ -608,6 +672,25 @@ bool Device::popErrorScope(CompletionHandler<void(WGPUErrorType, String&&)>&& ca
         return false;
     }
 
+#if ENABLE(WEBGPU_SWIFT)
+    // Read the innermost scope's error, then discard the scope. Read here rather
+    // than inside the scheduled work because the scope does not outlive this
+    // function: the C++ arm moved the scope out of the stack and carried it into
+    // the closure, which amounts to the same two values.
+    auto errorType = m_errorScopes->getInnermostErrorType();
+    String errorMessage { m_errorScopes->getInnermostErrorMessage() };
+    m_errorScopes->removeInnermost();
+
+    if (auto inst = instance(); inst.get()) {
+        inst->scheduleWork([errorType, errorMessage = WTF::move(errorMessage), callback = WTF::move(callback)]() mutable {
+            if (errorType != WGPUErrorType_NoError)
+                callback(errorType, WTF::move(errorMessage));
+            else
+                callback(WGPUErrorType_NoError, { });
+        });
+    } else
+        callback(WGPUErrorType_NoError, { });
+#else
     auto scope = m_errorScopeStack.takeLast();
 
     if (auto inst = instance(); inst.get()) {
@@ -619,6 +702,7 @@ bool Device::popErrorScope(CompletionHandler<void(WGPUErrorType, String&&)>&& ca
         });
     } else
         callback(WGPUErrorType_NoError, { });
+#endif
 
     // FIXME: Make sure this is the right thing to return.
     return true;
@@ -628,9 +712,13 @@ void Device::pushErrorScope(WGPUErrorFilter filter)
 {
     // https://gpuweb.github.io/gpuweb/#dom-gpudevice-pusherrorscope
 
+#if ENABLE(WEBGPU_SWIFT)
+    m_errorScopes->push(filter);
+#else
     ErrorScope scope { std::nullopt, filter };
 
     m_errorScopeStack.append(WTF::move(scope));
+#endif
 }
 
 void Device::setDeviceLostCallback(Function<void(WGPUDeviceLostReason, String&&)>&& callback)

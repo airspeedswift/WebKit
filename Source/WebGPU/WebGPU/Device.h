@@ -35,6 +35,7 @@
 #import <Metal/Metal.h>
 #import <WebGPU/WebGPU.h>
 #import <WebGPU/WebGPUExt.h>
+#import <memory>
 #import <simd/matrix_types.h>
 #import <wtf/CompletionHandler.h>
 #import <wtf/FastMalloc.h>
@@ -78,6 +79,13 @@ class XRProjectionLayer;
 class XRView;
 
 struct LibraryCompileRequest;
+
+#if ENABLE(WEBGPU_SWIFT)
+// Defined in DeviceErrorScopes.swift and reached through WebGPUSwift-Generated.h,
+// which this header cannot include: that header names WebGPU::Device in the
+// signatures of the island's thunks.
+class DeviceErrorScopes;
+#endif
 
 #if ENABLE(WEBGPU_BY_DEFAULT)
 using GPUShaderValidation = MTLShaderValidation;
@@ -286,9 +294,18 @@ private:
     Device(id<MTLDevice>, id<MTLCommandQueue> defaultQueue, HardwareCapabilities&&, Adapter&);
     Device(Adapter&);
 
+#if !ENABLE(WEBGPU_SWIFT)
     struct ErrorScope;
+    // Only the C++ arm declares this: under ENABLE(WEBGPU_SWIFT) finding the scope
+    // that captures an error is part of DeviceErrorScopes::recordError, which owns
+    // the stack it searches.
     ErrorScope* NODELETE currentErrorScope(WGPUErrorFilter);
+#endif
     std::optional<WGPUErrorType> NODELETE validatePopErrorScope() const;
+    // The scope-capturing half of the three generateA*Error members, which differ
+    // only in the error type they carry. Reports whether an error scope captured
+    // the error; the callers run the uncaptured-error callback when none did.
+    bool recordGeneratedError(WGPUErrorType, const String&);
     bool validateCreateIOSurfaceBackedTexture(const WGPUTextureDescriptor&, const Vector<WGPUTextureFormat>& viewFormats, IOSurfaceRef backing);
 
     bool NODELETE validateRenderPipeline(const WGPURenderPipelineDescriptor&);
@@ -310,6 +327,9 @@ private:
     void captureFrameIfNeeded() const;
     GPUShaderValidation shaderValidationState() const;
 
+#if !ENABLE(WEBGPU_SWIFT)
+    // The captured error and the scope that holds it. Under ENABLE(WEBGPU_SWIFT)
+    // both are DeviceErrorScopes' own, declared in DeviceErrorScopes.swift.
     struct Error {
         WGPUErrorType type;
         String message;
@@ -318,11 +338,21 @@ private:
         std::optional<Error> error;
         const WGPUErrorFilter filter;
     };
+#endif
     id<MTLDevice> _Nullable m_device { nil };
     const Ref<Queue> m_defaultQueue;
 
     Function<void(WGPUErrorType, String&&)> m_uncapturedErrorCallback;
+#if ENABLE(WEBGPU_SWIFT)
+    // The stack of pushed error scopes, and the rule deciding which one captures a
+    // generated error, live in Swift. Ownership runs one way: this holds the
+    // scopes and they hold no pointer back, so the two Device facts they need --
+    // the lost flag, and whether an error went uncaptured -- cross as an argument
+    // and as a return value.
+    const std::unique_ptr<DeviceErrorScopes> m_errorScopes;
+#else
     Vector<ErrorScope> m_errorScopeStack;
+#endif
     RefPtr<XRSubImage> m_xrSubImage;
 
     Function<void(WGPUDeviceLostReason, String&&)> m_deviceLostCallback;
