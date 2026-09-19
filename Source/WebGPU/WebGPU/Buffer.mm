@@ -292,10 +292,8 @@ static size_t NODELETE computeRangeSize(uint64_t size, size_t offset)
 std::span<uint8_t> Buffer::getMappedRange(size_t offset, size_t size)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled())
-        return bufferGetMappedRange(this, offset, size);
-#endif
-
+    return bufferGetMappedRange(this, offset, size);
+#else
     // https://gpuweb.github.io/gpuweb/#dom-gpubuffer-getmappedrange
     if (!isValid())
         return std::span<uint8_t> { };
@@ -313,6 +311,7 @@ std::span<uint8_t> Buffer::getMappedRange(size_t offset, size_t size)
     if (!m_buffer.contents)
         return { };
     return getBufferContents().subspan(offset);
+#endif
 }
 
 std::span<uint8_t> Buffer::getBufferContents()

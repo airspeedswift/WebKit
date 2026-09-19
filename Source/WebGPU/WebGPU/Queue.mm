@@ -727,13 +727,10 @@ std::pair<id<MTLBuffer>, uint64_t> Queue::newTemporaryBufferWithBytes(std::span<
 void Queue::writeBuffer(id<MTLBuffer> buffer, uint64_t bufferOffset, std::span<uint8_t> data)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled()) {
-        queueWriteBuffer(this, buffer, bufferOffset, data);
-        return;
-    }
-#endif
-
+    queueWriteBuffer(this, buffer, bufferOffset, data);
+#else
     stageBufferWrite(buffer, bufferOffset, data);
+#endif
 }
 
 void Queue::stageBufferWrite(id<MTLBuffer> buffer, uint64_t bufferOffset, std::span<uint8_t> data)

@@ -73,6 +73,7 @@ void CommandEncoder::generateInvalidEncoderStateError()
     GENERATE_INVALID_ENCODER_STATE_ERROR();
 }
 
+#if !ENABLE(WEBGPU_SWIFT)
 static MTLLoadAction NODELETE loadAction(WGPULoadOp loadOp, bool readOnly = false)
 {
     switch (loadOp) {
@@ -87,7 +88,9 @@ static MTLLoadAction NODELETE loadAction(WGPULoadOp loadOp, bool readOnly = fals
         return MTLLoadActionDontCare;
     }
 }
+#endif
 
+#if !ENABLE(WEBGPU_SWIFT)
 static MTLStoreAction NODELETE storeAction(WGPUStoreOp storeOp, bool hasResolveTarget = false)
 {
     switch (storeOp) {
@@ -102,6 +105,7 @@ static MTLStoreAction NODELETE storeAction(WGPUStoreOp storeOp, bool hasResolveT
         return MTLStoreActionDontCare;
     }
 }
+#endif
 
 Ref<CommandEncoder> Device::createCommandEncoder(const WGPUCommandEncoderDescriptor& descriptor)
 {
@@ -226,10 +230,12 @@ static auto NODELETE timestampWriteIndex(auto writeIndex)
     return writeIndex == WGPU_QUERY_SET_INDEX_UNDEFINED ? 0 : writeIndex;
 }
 
+#if !ENABLE(WEBGPU_SWIFT)
 static NSUInteger NODELETE timestampWriteIndex(NSUInteger writeIndex, NSUInteger defaultValue, uint32_t offset)
 {
     return writeIndex == WGPU_QUERY_SET_INDEX_UNDEFINED ? defaultValue : (writeIndex + offset);
 }
+#endif
 
 static NSString* errorValidatingTimestampWrites(const auto& timestampWrites, const CommandEncoder& commandEncoder)
 {
@@ -263,10 +269,8 @@ NSString* CommandEncoder::errorValidatingComputePassDescriptor(const WGPUCompute
 Ref<ComputePassEncoder> CommandEncoder::beginComputePass(const WGPUComputePassDescriptor& descriptor)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled())
-        return commandEncoderBeginComputePass(this, descriptor);
-#endif
-
+    return commandEncoderBeginComputePass(this, descriptor);
+#else
     if (!prepareTheEncoderState()) {
         GENERATE_INVALID_ENCODER_STATE_ERROR();
         // https://gpuweb.github.io/gpuweb/#dom-gpucomputepassencoder-end
@@ -308,6 +312,7 @@ Ref<ComputePassEncoder> CommandEncoder::beginComputePass(const WGPUComputePassDe
     computeCommandEncoder.label = descriptor.label.createNSString().get();
 
     return ComputePassEncoder::create(computeCommandEncoder, descriptor, *this, m_device);
+#endif
 }
 
 void CommandEncoder::setExistingEncoder(id<MTLCommandEncoder> encoder)
@@ -393,6 +398,7 @@ id<MTLFunction> Device::nopVertexFunction(id<MTLDevice> device)
     return function;
 }
 
+#if !ENABLE(WEBGPU_SWIFT)
 static std::pair<id<MTLRenderPipelineState>, id<MTLDepthStencilState>> createSimplePso(NSMutableDictionary<NSNumber*, TextureAndClearColor*> *attachmentsToClear, id<MTLTexture> depthStencilAttachmentToClear, bool depthAttachmentToClear, bool stencilAttachmentToClear, id<MTLDevice> device)
 {
     MTLRenderPipelineDescriptor* mtlRenderPipelineDescriptor = [MTLRenderPipelineDescriptor new];
@@ -439,16 +445,13 @@ static std::pair<id<MTLRenderPipelineState>, id<MTLDepthStencilState>> createSim
 
     return std::make_pair(pso, depthStencil);
 }
+#endif
 
 void CommandEncoder::runClearEncoder(NSMutableDictionary<NSNumber*, TextureAndClearColor*> *attachmentsToClear, id<MTLTexture> depthStencilAttachmentToClear, bool depthAttachmentToClear, bool stencilAttachmentToClear, float depthClearValue, uint32_t stencilClearValue, id<MTLRenderCommandEncoder> existingEncoder)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled()) {
-        commandEncoderRunClearEncoder(this, attachmentsToClear, depthStencilAttachmentToClear, depthAttachmentToClear, stencilAttachmentToClear, depthClearValue, stencilClearValue, existingEncoder);
-        return;
-    }
-#endif
-
+    commandEncoderRunClearEncoder(this, attachmentsToClear, depthStencilAttachmentToClear, depthAttachmentToClear, stencilAttachmentToClear, depthClearValue, stencilClearValue, existingEncoder);
+#else
     if (!attachmentsToClear.count && !depthAttachmentToClear && !stencilAttachmentToClear) {
         endEncoding(existingEncoder);
         return;
@@ -524,20 +527,21 @@ void CommandEncoder::runClearEncoder(NSMutableDictionary<NSNumber*, TextureAndCl
     [clearRenderCommandEncoder drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1 instanceCount:1 baseInstance:0];
     m_device->getQueue()->endEncoding(clearRenderCommandEncoder, m_commandBuffer);
     setExistingEncoder(nil);
+#endif
 }
 
+#if !ENABLE(WEBGPU_SWIFT)
 static bool isMultisampleTexture(id<MTLTexture> texture)
 {
     return texture.textureType == MTLTextureType2DMultisample || texture.textureType == MTLTextureType2DMultisampleArray;
 }
+#endif
 
 Ref<RenderPassEncoder> CommandEncoder::beginRenderPass(const WGPURenderPassDescriptor& descriptor)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled())
-        return commandEncoderBeginRenderPass(this, descriptor);
-#endif
-
+    return commandEncoderBeginRenderPass(this, descriptor);
+#else
     auto maxDrawCount = descriptor.maxDrawCount;
 
     if (!prepareTheEncoderState()) {
@@ -839,6 +843,7 @@ Ref<RenderPassEncoder> CommandEncoder::beginRenderPass(const WGPURenderPassDescr
     ASSERT(!m_existingCommandEncoder);
     setExistingEncoder(mtlRenderCommandEncoder);
     return RenderPassEncoder::create(mtlRenderCommandEncoder, descriptor, visibilityResultBufferSize, depthReadOnly, stencilReadOnly, *this, visibilityResultBuffer, maxDrawCount, m_device, mtlDescriptor);
+#endif
 }
 
 id<MTLCommandBuffer> CommandEncoder::commandBuffer() const
@@ -913,13 +918,9 @@ void CommandEncoder::decrementBufferMapCount()
 void CommandEncoder::copyBufferToBuffer(const Buffer& source, uint64_t sourceOffset, Buffer& destination, uint64_t destinationOffset, uint64_t size)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled()) {
-        // FIXME: rdar://138047285
-        commandEncoderCopyBufferToBuffer(this, &const_cast<Buffer&>(source), sourceOffset, &destination, destinationOffset, size);
-        return;
-    }
-#endif
-
+    // FIXME: rdar://138047285
+    commandEncoderCopyBufferToBuffer(this, &const_cast<Buffer&>(source), sourceOffset, &destination, destinationOffset, size);
+#else
     // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copybuffertobuffer
     if (!prepareTheEncoderState()) {
         GENERATE_INVALID_ENCODER_STATE_ERROR();
@@ -940,6 +941,7 @@ void CommandEncoder::copyBufferToBuffer(const Buffer& source, uint64_t sourceOff
     ensureBlitCommandEncoder();
 
     [m_blitCommandEncoder copyFromBuffer:source.buffer() sourceOffset:static_cast<NSUInteger>(sourceOffset) toBuffer:destination.buffer() destinationOffset:static_cast<NSUInteger>(destinationOffset) size:static_cast<NSUInteger>(size)];
+#endif
 }
 
 NSString* CommandEncoder::errorValidatingImageCopyBuffer(const WGPUImageCopyBuffer& imageCopyBuffer) const
@@ -1029,12 +1031,8 @@ NSString* CommandEncoder::errorValidatingCopyBufferToTexture(const WGPUImageCopy
 void CommandEncoder::copyBufferToTexture(const WGPUImageCopyBuffer& source, const WGPUImageCopyTexture& destination, const WGPUExtent3D& copySize)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled()) {
-        commandEncoderCopyBufferToTexture(this, source, destination, copySize);
-        return;
-    }
-#endif
-
+    commandEncoderCopyBufferToTexture(this, source, destination, copySize);
+#else
     // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copybuffertotexture
 
     if (!prepareTheEncoderState()) {
@@ -1283,6 +1281,7 @@ void CommandEncoder::copyBufferToTexture(const WGPUImageCopyBuffer& source, cons
         ASSERT_NOT_REACHED();
         return;
     }
+#endif
 }
 
 NSString* CommandEncoder::errorValidatingCopyTextureToBuffer(const WGPUImageCopyTexture& source, const WGPUImageCopyBuffer& destination, const WGPUExtent3D& copySize) const
@@ -1343,13 +1342,10 @@ NSString* CommandEncoder::errorValidatingCopyTextureToBuffer(const WGPUImageCopy
 void CommandEncoder::clearTextureIfNeeded(const WGPUImageCopyTexture& destination, NSUInteger slice)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled()) {
-        commandEncoderClearTextureIfNeeded(this, destination, slice);
-        return;
-    }
-#endif
-
+    commandEncoderClearTextureIfNeeded(this, destination, slice);
+#else
     clearTextureIfNeeded(destination, slice, m_device, m_blitCommandEncoder);
+#endif
 }
 
 
@@ -1563,6 +1559,7 @@ void CommandEncoder::makeSubmitInvalid(NSString* errorString)
         commandBuffer->makeInvalid(errorString ?: m_lastErrorString);
 }
 
+#if !ENABLE(WEBGPU_SWIFT)
 static bool NODELETE hasValidDimensions(WGPUTextureDimension dimension, NSUInteger width, NSUInteger height, NSUInteger depth)
 {
     switch (dimension) {
@@ -1576,16 +1573,13 @@ static bool NODELETE hasValidDimensions(WGPUTextureDimension dimension, NSUInteg
         return true;
     }
 }
+#endif
 
 void CommandEncoder::copyTextureToBuffer(const WGPUImageCopyTexture& source, const WGPUImageCopyBuffer& destination, const WGPUExtent3D& copySize)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled()) {
-        commandEncoderCopyTextureToBuffer(this, source, destination, copySize);
-        return;
-    }
-#endif
-
+    commandEncoderCopyTextureToBuffer(this, source, destination, copySize);
+#else
     // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copytexturetobuffer
 
     if (!prepareTheEncoderState()) {
@@ -1813,6 +1807,7 @@ void CommandEncoder::copyTextureToBuffer(const WGPUImageCopyTexture& source, con
         ASSERT_NOT_REACHED();
         return;
     }
+#endif
 }
 
 static bool NODELETE areCopyCompatible(WGPUTextureFormat format1, WGPUTextureFormat format2)
@@ -1906,12 +1901,8 @@ NSString* CommandEncoder::errorValidatingCopyTextureToTexture(const WGPUImageCop
 void CommandEncoder::copyTextureToTexture(const WGPUImageCopyTexture& source, const WGPUImageCopyTexture& destination, const WGPUExtent3D& copySize)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled()) {
-        commandEncoderCopyTextureToTexture(this, source, destination, copySize);
-        return;
-    }
-#endif
-
+    commandEncoderCopyTextureToTexture(this, source, destination, copySize);
+#else
     // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copytexturetotexture
 
     if (!prepareTheEncoderState()) {
@@ -2060,6 +2051,7 @@ void CommandEncoder::copyTextureToTexture(const WGPUImageCopyTexture& source, co
         ASSERT_NOT_REACHED();
         return;
     }
+#endif
 }
 
 bool CommandEncoder::validateClearBuffer(const Buffer& buffer, uint64_t offset, uint64_t size)
@@ -2087,12 +2079,8 @@ void CommandEncoder::clearBuffer(Buffer& buffer, uint64_t offset, uint64_t size)
 {
     // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-clearbuffer
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled()) {
-        commandEncoderClearBuffer(this, &buffer, offset, size);
-        return;
-    }
-#endif
-
+    commandEncoderClearBuffer(this, &buffer, offset, size);
+#else
     if (!prepareTheEncoderState()) {
         GENERATE_INVALID_ENCODER_STATE_ERROR();
         return;
@@ -2121,6 +2109,7 @@ void CommandEncoder::clearBuffer(Buffer& buffer, uint64_t offset, uint64_t size)
     ensureBlitCommandEncoder();
 
     [m_blitCommandEncoder fillBuffer:buffer.buffer() range:range value:0];
+#endif
 }
 
 void CommandEncoder::setLastError(NSString* errorString)
@@ -2147,10 +2136,8 @@ NSString* CommandEncoder::validateFinishError() const
 Ref<CommandBuffer> CommandEncoder::finish(const WGPUCommandBufferDescriptor& descriptor)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    if (isWebGPUSwiftEnabled())
-        return commandEncoderFinish(this, descriptor);
-#endif
-
+    return commandEncoderFinish(this, descriptor);
+#else
     if (!isValid() || (m_existingCommandEncoder && m_existingCommandEncoder != m_blitCommandEncoder)) {
         m_state = EncoderState::Ended;
         discardCommandBuffer();
@@ -2200,6 +2187,7 @@ Ref<CommandBuffer> CommandEncoder::finish(const WGPUCommandBufferDescriptor& des
         result->makeInvalid(m_lastErrorString);
 
     return result;
+#endif
 }
 
 void CommandEncoder::insertDebugMarker(String&& markerLabel)
@@ -2261,6 +2249,7 @@ void CommandEncoder::pushDebugGroup(String&& groupLabel)
     [m_commandBuffer pushDebugGroup:groupLabel.createNSString().get()];
 }
 
+#if !ENABLE(WEBGPU_SWIFT)
 static bool NODELETE validateResolveQuerySet(const QuerySet& querySet, uint32_t firstQuery, uint32_t queryCount, const Buffer& destination, uint64_t destinationOffset)
 {
     if (!querySet.isDestroyed() && !querySet.isValid())
@@ -2289,16 +2278,14 @@ static bool NODELETE validateResolveQuerySet(const QuerySet& querySet, uint32_t 
 
     return true;
 }
+#endif
 
 void CommandEncoder::resolveQuerySet(const QuerySet& querySet, uint32_t firstQuery, uint32_t queryCount, Buffer& destination, uint64_t destinationOffset)
 {
 #if ENABLE(WEBGPU_SWIFT)
     // FIXME: rdar://138047285 const_cast is needed as a workaround.
-    if (isWebGPUSwiftEnabled()) {
-        commandEncoderResolveQuerySet(this, const_cast<QuerySet*>(&querySet), firstQuery, queryCount, &destination, destinationOffset);
-        return;
-    }
-#endif
+    commandEncoderResolveQuerySet(this, const_cast<QuerySet*>(&querySet), firstQuery, queryCount, &destination, destinationOffset);
+#else
     if (!prepareTheEncoderState()) {
         GENERATE_INVALID_ENCODER_STATE_ERROR();
         return;
@@ -2337,6 +2324,7 @@ void CommandEncoder::resolveQuerySet(const QuerySet& querySet, uint32_t firstQue
         ASSERT_NOT_REACHED();
         break;
     }
+#endif
 }
 
 void CommandEncoder::writeTimestamp(QuerySet& querySet, uint32_t queryIndex)
