@@ -26,24 +26,6 @@ import Metal
 import WebGPU_Internal.Buffer
 import WebGPU_Private.CxxBridgingPublic
 
-extension WebGPU.Buffer {
-    func copy(from source: Span<UInt8>, offset: Int) {
-        let contents = BufferContents(m_buffer)
-        var destination = contents.bytes()._consumingExtracting(droppingFirst: offset)
-        destination.copyMemory(from: source)
-    }
-}
-
-@_expose(Cxx)
-func bufferCopyFrom(_ buffer: WebGPU.Buffer, from data: WebGPU.SpanConstUInt8, offset: Int) {
-    buffer.copy(from: unsafe Span<UInt8>(_unsafeCxxSpan: data), offset: offset)
-}
-
-@_expose(Cxx)
-func bufferGetMappedRange(_ buffer: WebGPU.Buffer, offset: Int, size: Int) -> WebGPU.SpanUInt8 {
-    unsafe buffer.getMappedRange(offset: offset, size: size)
-}
-
 extension WebGPU.SpanUInt8 {
     /// A default-constructed, zero-length span: a null base pointer that's never read through.
     ///
@@ -51,32 +33,6 @@ extension WebGPU.SpanUInt8 {
     @safe
     fileprivate static var empty: WebGPU.SpanUInt8 {
         unsafe WebGPU.SpanUInt8()
-    }
-}
-
-extension WebGPU.Buffer {
-    func getMappedRange(offset: Int, size: Int) -> WebGPU.SpanUInt8 {
-        if !isValid() {
-            return .empty
-        }
-
-        var rangeSize = size
-        if size == WGPU_WHOLE_MAP_SIZE {
-            rangeSize = max(Int(currentSize()) - offset, 0)
-        }
-
-        if !validateGetMappedRange(offset, rangeSize) {
-            return .empty
-        }
-
-        m_mappedRanges.add(.init(UInt(offset), UInt(offset + rangeSize)))
-        m_mappedRanges.compact()
-
-        if m_buffer.storageMode == .private || m_buffer.storageMode == .memoryless || m_buffer.length == 0 {
-            return .empty
-        }
-
-        return unsafe getBufferContents().subspan(offset, rangeSize)
     }
 }
 
@@ -114,6 +70,15 @@ struct BufferContents: ~Copyable {
         // dependency, so the span's inferred dependency is on `start` rather than on
         // the receiver. (rdar://161274084)
         return unsafe _overrideLifetime(span, borrowing: self)
+    }
+
+    /// The allocation's bytes as the `std::span` the C API hands out.
+    ///
+    /// Separate from `bytes()` because a `std::span` carries no lifetime
+    /// dependency: what keeps it valid is the `MTLBuffer` its holder retains, and
+    /// the C callers this is handed to are the ones that already rely on that.
+    borrowing func cxxSpan() -> WebGPU.SpanUInt8 {
+        unsafe WebGPU.SpanUInt8(bytes())
     }
 }
 
@@ -260,6 +225,12 @@ final class BufferState {
         allocation != nil
     }
 
+    /// A destroyed buffer reports itself valid, matching `Buffer::isValid`: it has
+    /// been through `destroy` rather than having failed creation.
+    var isValid: Bool {
+        rawState == MapState.destroyed.rawValue || allocation != nil
+    }
+
     /// The length of the current allocation, which is what the buffer reports as
     /// its current size.
     var currentSize: UInt64 {
@@ -283,6 +254,47 @@ final class BufferState {
     /// uses this to swap in the device's placeholder.
     func replaceAllocation(with buffer: (any MTLBuffer)?) {
         allocation = buffer
+    }
+
+    /// Writes `source` into the allocation starting at `offset`.
+    func copy(from source: WebGPU.SpanConstUInt8, offset: Int) {
+        guard let allocation else {
+            return
+        }
+        let contents = BufferContents(allocation)
+        var destination = contents.bytes()._consumingExtracting(droppingFirst: offset)
+        destination.copyMemory(from: unsafe Span<UInt8>(_unsafeCxxSpan: source))
+    }
+
+    /// The bytes of the range `getMappedRange` hands to the caller, recording the
+    /// range so a later overlapping request fails validation.
+    ///
+    /// https://gpuweb.github.io/gpuweb/#dom-gpubuffer-getmappedrange
+    func getMappedRange(offset: Int, size: Int) -> WebGPU.SpanUInt8 {
+        if !isValid {
+            return .empty
+        }
+
+        var rangeSize = size
+        if size == WGPU_WHOLE_MAP_SIZE {
+            rangeSize = max(Int(currentSize) - offset, 0)
+        }
+
+        if !validateGetMappedRange(offset: offset, rangeSize: rangeSize) {
+            return .empty
+        }
+
+        addMappedRange(begin: offset, end: offset + rangeSize)
+
+        // An allocation with no host-visible bytes has no range to hand out. Checked
+        // before the allocation is wrapped, because that is what binds its contents
+        // pointer.
+        guard let allocation, allocation.storageMode != .private, allocation.storageMode != .memoryless, allocation.length > 0 else {
+            return .empty
+        }
+
+        let contents = BufferContents(allocation)
+        return unsafe contents.cxxSpan().subspan(offset, rangeSize)
     }
 
     func mappedRangesOverlap(begin: Int, end: Int) -> Bool {
