@@ -58,6 +58,10 @@ class Device;
 
 #if ENABLE(WEBGPU_SWIFT_BUFFER)
 
+#if !ENABLE(WEBGPU_SWIFT)
+#error ENABLE_WEBGPU_SWIFT_BUFFER selects a Buffer whose storage is a Swift type, so it requires ENABLE_WEBGPU_SWIFT.
+#endif
+
 // Defined in Buffer.swift and reached through WebGPUSwift-Generated.h, which this
 // header cannot include: that header names WebGPU::Buffer in the signatures of the
 // island's thunks.

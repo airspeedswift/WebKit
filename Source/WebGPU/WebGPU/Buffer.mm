@@ -183,6 +183,44 @@ Ref<Buffer> Device::createBuffer(const WGPUBufferDescriptor& descriptor)
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Buffer);
 
+// Used by both arms of the ENABLE(WEBGPU_SWIFT_BUFFER) condition below.
+
+static size_t NODELETE computeRangeSize(uint64_t size, size_t offset)
+{
+    auto result = checkedDifference<uint64_t>(size, offset);
+    if (result.hasOverflowed())
+        return 0;
+    return result.value();
+}
+
+static DrawIndexCacheContainerKey makeKey(uint32_t firstIndex, uint32_t indexCount, MTLIndexType indexType, uint32_t primitiveOffset, id<MTLIndirectCommandBuffer> icb)
+{
+    return { firstIndex, indexCount, primitiveOffset | static_cast<uint32_t>(indexType << 1), static_cast<uint32_t>(icb.gpuResourceID._impl & 0xffffffff), static_cast<uint32_t>((icb.gpuResourceID._impl >> 32) & 0xffffffff) };
+}
+
+template <typename T>
+static bool verifyIndexBufferData(id<MTLBuffer> buffer, uint32_t firstIndex, uint32_t indexCount, uint32_t vertexCount, uint32_t primitiveRestart, uint32_t indexBufferOffsetInBytes = 0)
+{
+    auto indexData = span<T>(buffer, indexBufferOffsetInBytes);
+    if (firstIndex + indexCount > indexData.size())
+        return false;
+    for (size_t index = firstIndex; index < firstIndex + indexCount; ++index) {
+        T vertexIndex = primitiveRestart + indexData[index];
+        if (vertexIndex >= vertexCount + primitiveRestart)
+            return false;
+    }
+
+    return true;
+}
+
+static size_t computeSize(HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>& encoders, Device& device)
+{
+    encoders.removeIf([&](uint64_t encoderId) {
+        return !device.commandEncoderFromIdentifier(encoderId);
+    });
+    return encoders.size();
+}
+
 #if !ENABLE(WEBGPU_SWIFT_BUFFER)
 
 Buffer::Buffer(id<MTLBuffer> buffer, uint64_t initialSize, WGPUBufferUsageFlags usage, State initialState, MappingRange initialMappingRange, Device& device)
@@ -281,14 +319,6 @@ bool Buffer::validateGetMappedRange(size_t offset, size_t rangeSize) const
         return false;
 
     return true;
-}
-
-static size_t NODELETE computeRangeSize(uint64_t size, size_t offset)
-{
-    auto result = checkedDifference<uint64_t>(size, offset);
-    if (result.hasOverflowed())
-        return 0;
-    return result.value();
 }
 
 std::span<uint8_t> Buffer::getMappedRange(size_t offset, size_t size)
@@ -480,11 +510,6 @@ bool Buffer::isValid() const
     return isDestroyed() || m_buffer;
 }
 
-static DrawIndexCacheContainerKey makeKey(uint32_t firstIndex, uint32_t indexCount, MTLIndexType indexType, uint32_t primitiveOffset, id<MTLIndirectCommandBuffer> icb)
-{
-    return { firstIndex, indexCount, primitiveOffset | static_cast<uint32_t>(indexType << 1), static_cast<uint32_t>(icb.gpuResourceID._impl & 0xffffffff), static_cast<uint32_t>((icb.gpuResourceID._impl >> 32) & 0xffffffff) };
-}
-
 std::optional<DrawIndexCacheContainerIterator> Buffer::canSkipDrawIndexedValidation(uint32_t firstIndex, uint32_t indexCount, uint32_t vertexCount, MTLIndexType indexType, uint32_t primitiveOffset, id<MTLIndirectCommandBuffer> icb) const
 {
     auto containerIt = m_drawIndexedCache.find(makeKey(firstIndex, indexCount, indexType, primitiveOffset, icb));
@@ -506,21 +531,6 @@ void Buffer::drawIndexedValidated(uint32_t firstIndex, uint32_t indexCount, uint
     // with indices at or below these values don't need to invalidate.
     m_maxValidatedUnsignedIndex = std::max(m_maxValidatedUnsignedIndex, m_maxUnsignedIndex);
     m_maxValidatedUshortIndex = std::max(m_maxValidatedUshortIndex, m_maxUshortIndex);
-}
-
-template <typename T>
-static bool verifyIndexBufferData(id<MTLBuffer> buffer, uint32_t firstIndex, uint32_t indexCount, uint32_t vertexCount, uint32_t primitiveRestart, uint32_t indexBufferOffsetInBytes = 0)
-{
-    auto indexData = span<T>(buffer, indexBufferOffsetInBytes);
-    if (firstIndex + indexCount > indexData.size())
-        return false;
-    for (size_t index = firstIndex; index < firstIndex + indexCount; ++index) {
-        T vertexIndex = primitiveRestart + indexData[index];
-        if (vertexIndex >= vertexCount + primitiveRestart)
-            return false;
-    }
-
-    return true;
 }
 
 void Buffer::takeSlowIndexValidationPath(CommandBuffer& commandBuffer, uint32_t firstIndex, uint32_t indexCount, MTLIndexType indexType, uint32_t primitiveOffset, uint32_t vertexCount)
@@ -587,14 +597,6 @@ void Buffer::indirectBufferInvalidated(CommandEncoder& commandEncoder)
     });
 }
 
-static size_t computeSize(HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>& encoders, Device& device)
-{
-    encoders.removeIf([&](uint64_t encoderId) {
-        return !device.commandEncoderFromIdentifier(encoderId);
-    });
-    return encoders.size();
-}
-
 bool Buffer::needsIndexValidation(uint32_t maxUnsignedIndex, uint16_t maxUshortIndex)
 {
     const bool needsUpdate = maxUnsignedIndex > m_maxValidatedUnsignedIndex || maxUshortIndex > m_maxValidatedUshortIndex;
@@ -639,7 +641,425 @@ void Buffer::clearMustTakeSlowIndexValidationPath()
     m_mustTakeSlowIndexValidationPath = false;
 }
 
-#endif // !ENABLE(WEBGPU_SWIFT_BUFFER)
+#else // ENABLE(WEBGPU_SWIFT_BUFFER)
+
+// BufferState holds Buffer::State as its underlying value. Buffer.swift mirrors
+// this order; these are what it mirrors.
+static_assert(static_cast<uint8_t>(Buffer::State::Mapped) == 0);
+static_assert(static_cast<uint8_t>(Buffer::State::MappedAtCreation) == 1);
+static_assert(static_cast<uint8_t>(Buffer::State::MappingPending) == 2);
+static_assert(static_cast<uint8_t>(Buffer::State::Unmapped) == 3);
+static_assert(static_cast<uint8_t>(Buffer::State::Destroyed) == 4);
+
+Ref<Buffer> Buffer::create(id<MTLBuffer> buffer, uint64_t initialSize, WGPUBufferUsageFlags usage, State initialState, MappingRange initialMappingRange, Device& device)
+{
+    return adoptRef(*new Buffer(buffer, initialSize, usage, initialState, initialMappingRange, device));
+}
+
+Ref<Buffer> Buffer::createInvalid(Device& device)
+{
+    return adoptRef(*new Buffer(device));
+}
+
+Buffer::Buffer(id<MTLBuffer> buffer, uint64_t initialSize, WGPUBufferUsageFlags usage, State initialState, MappingRange initialMappingRange, Device& device)
+    : m_storage(makeUniqueWithoutFastMallocCheck<BufferState>(BufferState::init(buffer, initialSize, usage, static_cast<uint8_t>(initialState), static_cast<swift::Int>(initialMappingRange.beginOffset), static_cast<swift::Int>(initialMappingRange.endOffset))))
+    , m_device(device)
+#if CPU(X86_64) && (PLATFORM(MAC) || PLATFORM(MACCATALYST))
+    , m_mappedAtCreation(initialState == State::MappedAtCreation)
+#endif
+{
+}
+
+Buffer::Buffer(Device& device)
+    : m_storage(makeUniqueWithoutFastMallocCheck<BufferState>(BufferState::init(nil, 0, 0, static_cast<uint8_t>(State::Unmapped), 0, 0)))
+    , m_device(device)
+{
+}
+
+Buffer::~Buffer()
+{
+    m_device->removeBufferFromCache(buffer().gpuAddress);
+}
+
+id<MTLBuffer> Buffer::buffer() const
+{
+    return m_storage->getMetalBuffer();
+}
+
+uint64_t Buffer::initialSize() const
+{
+    return m_storage->getInitialSize();
+}
+
+uint64_t Buffer::currentSize() const
+{
+    return m_storage->getCurrentSize();
+}
+
+WGPUBufferUsageFlags Buffer::usage() const
+{
+    return m_storage->getUsage();
+}
+
+Buffer::State Buffer::state() const
+{
+    return static_cast<State>(m_storage->getRawState());
+}
+
+bool Buffer::isValid() const
+{
+    return isDestroyed() || m_storage->hasAllocation();
+}
+
+uint64_t Buffer::contentsGeneration() const
+{
+    return m_storage->getContentsGeneration();
+}
+
+uint64_t Buffer::indexContentsGeneration() const
+{
+    return m_storage->getIndexContentsGeneration();
+}
+
+void Buffer::indexBufferContentsModified(uint32_t maxUintValue, uint16_t maxUshortValue)
+{
+    m_storage->indexBufferContentsModified(maxUintValue, maxUshortValue);
+}
+
+bool Buffer::allIndexValuesBelow(MTLIndexType indexType, uint32_t vertexCount) const
+{
+    return m_storage->allIndexValuesBelow(indexType == MTLIndexTypeUInt16, vertexCount);
+}
+
+bool Buffer::mustTakeSlowIndexValidationPath() const
+{
+    return m_storage->getMustTakeSlowIndexValidationPath();
+}
+
+bool Buffer::needsIndexValidation(uint32_t maxUnsignedIndex, uint16_t maxUshortIndex)
+{
+    return m_storage->needsIndexValidation(maxUnsignedIndex, maxUshortIndex);
+}
+
+bool Buffer::validateGetMappedRange(size_t offset, size_t rangeSize) const
+{
+    return m_storage->validateGetMappedRange(static_cast<swift::Int>(offset), static_cast<swift::Int>(rangeSize));
+}
+
+void Buffer::setState(State state)
+{
+    m_storage->setStateUnlessDestroyed(static_cast<uint8_t>(state));
+}
+
+void Buffer::incrementBufferMapCount()
+{
+    for (auto commandEncoder : m_commandEncoders) {
+        if (RefPtr ptr = m_device->commandEncoderFromIdentifier(commandEncoder))
+            ptr->incrementBufferMapCount();
+    }
+}
+
+void Buffer::decrementBufferMapCount()
+{
+    for (auto commandEncoder : m_commandEncoders) {
+        if (RefPtr ptr = m_device->commandEncoderFromIdentifier(commandEncoder))
+            ptr->decrementBufferMapCount();
+    }
+}
+
+void Buffer::setCommandEncoder(CommandEncoder& commandEncoder, bool mayModifyBuffer) const
+{
+    UNUSED_PARAM(mayModifyBuffer);
+    bool isNewEntry = commandEncoder.trackEncoderForBuffer(*this, m_commandEncoders);
+#if !CPU(X86_64)
+    if (m_device->isShaderValidationEnabled())
+#endif
+        commandEncoder.addBuffer(buffer());
+
+    if (state() != State::Unmapped && isNewEntry)
+        commandEncoder.incrementBufferMapCount();
+    if (isDestroyed())
+        commandEncoder.makeSubmitInvalid();
+}
+
+void Buffer::destroy()
+{
+    crashIfBorrowed();
+
+    // https://gpuweb.github.io/gpuweb/#dom-gpubuffer-destroy
+
+    if (state() != State::Unmapped && state() != State::Destroyed) {
+        // FIXME: ASSERT() that this call doesn't fail.
+        unmap();
+    }
+
+    setState(State::Destroyed);
+    m_device->makeSubmitInvalidClearingEncoders(m_commandEncoders);
+    m_device->removeBufferFromCache(buffer().gpuAddress);
+    m_storage->replaceAllocation(m_device->placeholderBuffer());
+}
+
+std::span<uint8_t> Buffer::getMappedRange(size_t offset, size_t size)
+{
+    return bufferGetMappedRange(this, offset, size);
+}
+
+std::span<uint8_t> Buffer::getBufferContents()
+{
+    return span<uint8_t>(buffer());
+}
+
+void Buffer::bufferCopy(std::span<const uint8_t> data, size_t offset)
+{
+    bufferCopyFrom(this, data, offset);
+}
+
+NSString *Buffer::errorValidatingMapAsync(WGPUMapModeFlags mode, size_t offset, size_t rangeSize) const
+{
+#define ERROR_STRING(x) (@"GPUBuffer.mapAsync: " x)
+    if (!isValid())
+        return ERROR_STRING(@"Buffer is not valid");
+
+    if (offset % 8)
+        return ERROR_STRING(@"Offset is not divisible by 8");
+
+    if (rangeSize % 4)
+        return ERROR_STRING(@"range size is not divisible by 4");
+
+    auto end = checkedSum<uint64_t>(offset, rangeSize);
+    if (end.hasOverflowed() || end.value() > currentSize())
+        return ERROR_STRING(@"offset and rangeSize overflowed");
+
+    if (state() != State::Unmapped)
+        return ERROR_STRING(@"state != Unmapped");
+
+    auto readWriteModeFlags = mode & (WGPUMapMode_Read | WGPUMapMode_Write);
+    if (readWriteModeFlags != WGPUMapMode_Read && readWriteModeFlags != WGPUMapMode_Write)
+        return ERROR_STRING(@"readWriteModeFlags != Read && readWriteModeFlags != Write");
+
+    if ((mode & WGPUMapMode_Read) && !(usage() & WGPUBufferUsage_MapRead))
+        return ERROR_STRING(@"(mode & Read) && !(usage & Read)");
+
+    if ((mode & WGPUMapMode_Write) && !(usage() & WGPUBufferUsage_MapWrite))
+        return ERROR_STRING(@"(mode & Write) && !(usage & Write)");
+
+#undef ERROR_STRING
+    return nil;
+}
+
+void Buffer::mapAsync(WGPUMapModeFlags mode, size_t offset, size_t size, CompletionHandler<void(WGPUBufferMapAsyncStatus)>&& callback)
+{
+    // https://gpuweb.github.io/gpuweb/#dom-gpubuffer-mapasync
+
+    auto rangeSize = size;
+    if (size == WGPU_WHOLE_MAP_SIZE)
+        rangeSize = computeRangeSize(currentSize(), offset);
+
+    Ref device = m_device;
+
+    if (NSString* error = errorValidatingMapAsync(mode, offset, rangeSize)) {
+        device->generateAValidationError(error);
+
+        callback(WGPUBufferMapAsyncStatus_ValidationError);
+        return;
+    }
+
+    setState(State::MappingPending);
+    incrementBufferMapCount();
+
+    m_storage->setMapMode(mode);
+
+    device->getQueue()->onSubmittedWorkDone([protectedThis = protect(*this), offset, rangeSize, callback = WTF::move(callback)](WGPUQueueWorkDoneStatus status) mutable {
+        if (protectedThis->state() == State::MappingPending) {
+            protectedThis->setState(State::Mapped);
+
+            protectedThis->m_storage->setMappingBeginOffset(static_cast<swift::Int>(offset));
+            protectedThis->m_storage->setMappingEndOffset(static_cast<swift::Int>(offset + rangeSize));
+
+            protectedThis->m_storage->clearMappedRanges();
+        }
+
+        switch (status) {
+        case WGPUQueueWorkDoneStatus_Success:
+            callback(WGPUBufferMapAsyncStatus_Success);
+            return;
+        case WGPUQueueWorkDoneStatus_Error:
+            callback(WGPUBufferMapAsyncStatus_ValidationError);
+            return;
+        case WGPUQueueWorkDoneStatus_Unknown:
+            callback(WGPUBufferMapAsyncStatus_Unknown);
+            return;
+        case WGPUQueueWorkDoneStatus_DeviceLost:
+            callback(WGPUBufferMapAsyncStatus_DeviceLost);
+            return;
+        case WGPUQueueWorkDoneStatus_Force32:
+            ASSERT_NOT_REACHED();
+            callback(WGPUBufferMapAsyncStatus_ValidationError);
+            return;
+        }
+    });
+}
+
+bool Buffer::validateUnmap() const
+{
+    return true;
+}
+
+void Buffer::unmap()
+{
+    // https://gpuweb.github.io/gpuweb/#dom-gpubuffer-unmap
+
+    if (!validateUnmap() && !m_device->isValid())
+        return;
+
+    decrementBufferMapCount();
+    m_storage->resetMaxIndices();
+    indirectBufferInvalidated();
+
+#if CPU(X86_64) && (PLATFORM(MAC) || PLATFORM(MACCATALYST))
+    ALLOW_DEPRECATED_DECLARATIONS_BEGIN
+    id<MTLBuffer> metalBuffer = buffer();
+    if (metalBuffer.storageMode == MTLStorageModeManaged) {
+        if (m_mappedAtCreation)
+            [metalBuffer didModifyRange:NSMakeRange(0, metalBuffer.length)];
+        else {
+            for (swift::Int i = 0, count = m_storage->compactMappedRanges(); i < count; ++i) {
+                auto begin = m_storage->mappedRangeBegin(i);
+                [metalBuffer didModifyRange:NSMakeRange(static_cast<NSUInteger>(begin), static_cast<NSUInteger>(m_storage->mappedRangeEnd(i) - begin))];
+            }
+        }
+    }
+    ALLOW_DEPRECATED_DECLARATIONS_END
+#endif
+
+    setState(State::Unmapped);
+    m_storage->clearMappedRanges();
+}
+
+void Buffer::setLabel(String&& label)
+{
+    buffer().label = label.createNSString().get();
+}
+
+void Buffer::generateAValidationError(String&& message)
+{
+    m_device->generateAValidationError(WTF::move(message));
+}
+
+std::optional<DrawIndexCacheContainerIterator> Buffer::canSkipDrawIndexedValidation(uint32_t firstIndex, uint32_t indexCount, uint32_t vertexCount, MTLIndexType indexType, uint32_t primitiveOffset, id<MTLIndirectCommandBuffer> icb) const
+{
+    auto containerIt = m_drawIndexedCache.find(makeKey(firstIndex, indexCount, indexType, primitiveOffset, icb));
+    if (containerIt != m_drawIndexedCache.end() && containerIt->value.indexContentsGeneration == indexContentsGeneration() && containerIt->value.vertexCount <= vertexCount)
+        return containerIt;
+
+    return std::nullopt;
+}
+
+void Buffer::drawIndexedValidated(uint32_t firstIndex, uint32_t indexCount, uint32_t vertexCount, MTLIndexType indexType, uint32_t primitiveOffset, uint64_t validationGeneration, id<MTLIndirectCommandBuffer> icb)
+{
+    constexpr auto maxCacheSize = 1000000;
+    if (m_drawIndexedCache.size() > maxCacheSize)
+        m_drawIndexedCache.clear();
+
+    m_drawIndexedCache.set(makeKey(firstIndex, indexCount, indexType, primitiveOffset, icb), DrawIndexValidationCacheEntry { vertexCount, validationGeneration });
+
+    m_storage->recordValidatedIndices();
+}
+
+void Buffer::takeSlowIndexValidationPath(CommandBuffer& commandBuffer, uint32_t firstIndex, uint32_t indexCount, MTLIndexType indexType, uint32_t primitiveOffset, uint32_t vertexCount)
+{
+    WTFLogAlways("WARNING: Severe performance penalty due to encoding drawIndexed calls out of order with submission"); // NOLINT
+    Ref queue = m_device->getQueue();
+    id<MTLBuffer> metalBuffer = buffer();
+    queue->waitForAllCommitedWorkToComplete();
+    queue->synchronizeResourceAndWait(metalBuffer);
+    bool verified = false;
+    if (indexType == MTLIndexTypeUInt16)
+        verified = verifyIndexBufferData<uint16_t>(metalBuffer, firstIndex, indexCount, vertexCount, primitiveOffset);
+    else
+        verified = verifyIndexBufferData<uint32_t>(metalBuffer, firstIndex, indexCount, vertexCount, primitiveOffset);
+
+    if (!verified) {
+        SUPPRESS_UNCOUNTED_ARG Vector<uint8_t> priorData = borrow(*this)->getBufferContents();
+
+        queue->clearBuffer(metalBuffer);
+        queue->finalizeBlitCommandEncoder();
+#if PLATFORM(MAC) || PLATFORM(MACCATALYST)
+        ALLOW_DEPRECATED_DECLARATIONS_BEGIN
+        if (metalBuffer.storageMode == MTLStorageModeManaged)
+            [metalBuffer didModifyRange:NSMakeRange(0, metalBuffer.length)];
+        ALLOW_DEPRECATED_DECLARATIONS_END
+#endif
+        commandBuffer.addPostCommitHandler([queue, priorData = WTF::move(priorData), protectedThis = protect(*this)](id<MTLCommandBuffer> mtlCommandBuffer) mutable {
+            [mtlCommandBuffer waitUntilCompleted];
+            queue->writeBuffer(*protectedThis.ptr(), 0, priorData.mutableSpan());
+        });
+    }
+}
+
+void Buffer::skippedDrawIndexedValidation(CommandEncoder& commandEncoder, DrawIndexCacheContainerIterator it)
+{
+    CommandEncoder::trackEncoder(commandEncoder, m_skippedValidationCommandEncoders);
+    commandEncoder.skippedDrawIndexedValidation(buffer().gpuAddress, it);
+}
+
+bool Buffer::didReadOOB(id<MTLIndirectCommandBuffer> icb) const
+{
+    auto it = m_didReadOOB.find(icb.gpuResourceID._impl);
+    return it == m_didReadOOB.end() ? false : it->value;
+}
+
+void Buffer::didReadOOB(uint32_t v, id<MTLIndirectCommandBuffer> icb)
+{
+    m_didReadOOB.set(icb.gpuResourceID._impl, !!v || didReadOOB(icb));
+}
+
+void Buffer::indirectBufferInvalidated(CommandEncoder& commandEncoder)
+{
+    m_storage->resetMaxIndices();
+    indirectBufferInvalidated();
+
+    commandEncoder.addOnCommitHandler([weakThis = ThreadSafeWeakPtr { *this }, weakCommandEncoder = WeakPtr { commandEncoder }](CommandBuffer&, CommandEncoder&) {
+        if (!weakThis.get() || !weakCommandEncoder)
+            return true;
+
+        RefPtr protectedThis = weakThis.get();
+        protectedThis->m_storage->resetMaxIndices();
+        RefPtr commandEncoder = weakCommandEncoder.get();
+        protectedThis->indirectBufferInvalidated(commandEncoder.get());
+        return true;
+    });
+}
+
+void Buffer::indirectBufferInvalidated(CommandEncoder* commandEncoder)
+{
+    if (!(usage() & (WGPUBufferUsage_Indirect | WGPUBufferUsage_Index)))
+        return;
+
+    if (auto currentSize = computeSize(m_skippedValidationCommandEncoders, m_device.get())) {
+        bool validationNotNeeded = currentSize == 1 && commandEncoder && commandEncoder == m_device->commandEncoderFromIdentifier(*m_skippedValidationCommandEncoders.begin().get());
+        if (!validationNotNeeded)
+            m_storage->setMustTakeSlowIndexValidationPath(true);
+    }
+
+    m_gpuResourceMap.clear();
+    m_drawIndexedCache.clear();
+    m_storage->invalidateIndexValidation();
+}
+
+void Buffer::removeSkippedValidationCommandEncoder(uint64_t uniqueId)
+{
+    m_skippedValidationCommandEncoders.remove(uniqueId);
+}
+
+void Buffer::clearMustTakeSlowIndexValidationPath()
+{
+    if (computeSize(m_skippedValidationCommandEncoders, m_device.get()))
+        return;
+    m_storage->setMustTakeSlowIndexValidationPath(false);
+}
+
+#endif // ENABLE(WEBGPU_SWIFT_BUFFER)
 
 } // namespace WebGPU
 

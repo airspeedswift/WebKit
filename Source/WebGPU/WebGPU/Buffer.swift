@@ -179,6 +179,18 @@ struct MappedRanges {
     }
 }
 
+/// `Buffer::State`, in the order `Buffer.h` declares it. `BufferState` holds the
+/// underlying value rather than the enumeration, because the enumeration is part
+/// of the interface `Buffer` presents to C++ and stays declared there; Buffer.mm
+/// static_asserts that the two orders agree.
+private enum MapState: UInt8 {
+    case mapped = 0
+    case mappedAtCreation = 1
+    case mappingPending = 2
+    case unmapped = 3
+    case destroyed = 4
+}
+
 /// The storage a `Buffer` owns: its Metal allocation, the size and usage fixed
 /// when it was created, the mapping state, and the memo that lets a repeated
 /// indexed draw skip revalidating the same index data.
@@ -308,5 +320,79 @@ final class BufferState {
 
     func allIndexValuesBelow(ushortIndices: Bool, vertexCount: UInt32) -> Bool {
         (ushortIndices ? UInt32(indexValueUpperBoundUshort) : indexValueUpperBoundUint) < vertexCount
+    }
+
+    /// Whether a range of `rangeSize` bytes at `offset` may be handed out.
+    ///
+    /// https://gpuweb.github.io/gpuweb/#dom-gpubuffer-getmappedrange
+    func validateGetMappedRange(offset: Int, rangeSize: Int) -> Bool {
+        if rawState == MapState.destroyed.rawValue {
+            return false
+        }
+
+        if rawState != MapState.mapped.rawValue && rawState != MapState.mappedAtCreation.rawValue {
+            return false
+        }
+
+        if offset % 8 != 0 {
+            return false
+        }
+
+        if rangeSize % 4 != 0 {
+            return false
+        }
+
+        if offset < mappingBeginOffset {
+            return false
+        }
+
+        let (endOffset, overflowed) = offset.addingReportingOverflow(rangeSize)
+        if overflowed || endOffset > mappingEndOffset {
+            return false
+        }
+
+        return !mappedRangesOverlap(begin: offset, end: endOffset)
+    }
+
+    /// A destroyed buffer stays destroyed; every other transition is taken.
+    func setStateUnlessDestroyed(_ newState: UInt8) {
+        if rawState != MapState.destroyed.rawValue {
+            rawState = newState
+        }
+    }
+
+    /// Records the largest index values a write is about to put in the buffer, and
+    /// reports whether they reach past what has already been validated.
+    func needsIndexValidation(maxUnsignedIndex: UInt32, maxUshortIndex: UInt16) -> Bool {
+        let needsUpdate = maxUnsignedIndex > maxValidatedUnsignedIndex || maxUshortIndex > maxValidatedUshortIndex
+        // Track the current write's max so the validated threshold can be raised
+        // once a clamp-shader pass succeeds.
+        self.maxUnsignedIndex = maxUnsignedIndex
+        self.maxUshortIndex = maxUshortIndex
+        return needsUpdate
+    }
+
+    func resetMaxIndices() {
+        maxUnsignedIndex = 0
+        maxUshortIndex = 0
+    }
+
+    /// Raises the validated high-water marks to the values the last write carried,
+    /// so a later write at or below them needs no invalidation.
+    func recordValidatedIndices() {
+        maxValidatedUnsignedIndex = max(maxValidatedUnsignedIndex, maxUnsignedIndex)
+        maxValidatedUshortIndex = max(maxValidatedUshortIndex, maxUshortIndex)
+    }
+
+    /// Everything a change to the contents invalidates: the generations a
+    /// previously encoded indirect draw was validated against, and the upper
+    /// bounds the fast index path reads.
+    func invalidateIndexValidation() {
+        contentsGeneration += 1
+        indexContentsGeneration += 1
+        indexValueUpperBoundUint = UInt32.max
+        indexValueUpperBoundUshort = UInt16.max
+        maxValidatedUnsignedIndex = 0
+        maxValidatedUshortIndex = 0
     }
 }
