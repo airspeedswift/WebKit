@@ -183,6 +183,8 @@ Ref<Buffer> Device::createBuffer(const WGPUBufferDescriptor& descriptor)
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Buffer);
 
+#if !ENABLE(WEBGPU_SWIFT_BUFFER)
+
 Buffer::Buffer(id<MTLBuffer> buffer, uint64_t initialSize, WGPUBufferUsageFlags usage, State initialState, MappingRange initialMappingRange, Device& device)
     : m_buffer(buffer)
     , m_initialSize(initialSize)
@@ -636,6 +638,8 @@ void Buffer::clearMustTakeSlowIndexValidationPath()
         return;
     m_mustTakeSlowIndexValidationPath = false;
 }
+
+#endif // !ENABLE(WEBGPU_SWIFT_BUFFER)
 
 } // namespace WebGPU
 

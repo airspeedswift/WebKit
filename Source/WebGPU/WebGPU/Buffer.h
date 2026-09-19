@@ -32,6 +32,7 @@
 #import <WebGPU/WGPUBufferImpl.h>
 #import <WebGPU/WebGPU.h>
 #import <WebGPU/WebGPUExt.h>
+#import <memory>
 #import <utility>
 #import <wtf/CanBorrow.h>
 #import <wtf/Compiler.h>
@@ -54,6 +55,118 @@ namespace WebGPU {
 class CommandBuffer;
 class CommandEncoder;
 class Device;
+
+#if ENABLE(WEBGPU_SWIFT_BUFFER)
+
+// Defined in Buffer.swift and reached through WebGPUSwift-Generated.h, which this
+// header cannot include: that header names WebGPU::Buffer in the signatures of the
+// island's thunks.
+class BufferState;
+
+// https://gpuweb.github.io/gpuweb/#gpubuffer
+//
+// The storage lives in Swift, in BufferState. This class remains because a Swift
+// class cannot inherit the four C++ bases every holder of a Buffer relies on -
+// the WGPUBufferImpl the C API hands out, the thread-safe refcount and weak
+// pointer, CanBorrow, and the TrackedResource that CommandEncoder writes the
+// encoder set through - rdar://163102366. When it can, this class goes and
+// BufferState takes its place.
+class Buffer : public WGPUBufferImpl, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Buffer>, public CanBorrow, public TrackedResource {
+    WTF_MAKE_TZONE_ALLOCATED(Buffer);
+public:
+    enum class State : uint8_t;
+    struct MappingRange {
+        size_t beginOffset; // Inclusive
+        size_t endOffset; // Exclusive
+    };
+
+    static Ref<Buffer> create(id<MTLBuffer>, uint64_t initialSize, WGPUBufferUsageFlags, State initialState, MappingRange initialMappingRange, Device&);
+    static Ref<Buffer> createInvalid(Device&);
+
+    // Declared here and defined in Buffer.mm: destroying the unique_ptr needs a
+    // complete BufferState, which only the generated header provides.
+    ~Buffer();
+
+    void destroy();
+    std::span<uint8_t> getMappedRange(size_t offset, size_t) HAS_SWIFTCXX_THUNK;
+    void bufferCopy(std::span<const uint8_t>, size_t offset);
+    void mapAsync(WGPUMapModeFlags, size_t offset, size_t, CompletionHandler<void(WGPUBufferMapAsyncStatus)>&& callback);
+    void unmap();
+    void setLabel(String&&);
+    void generateAValidationError(String&&);
+
+    bool NODELETE isValid() const;
+
+    // https://gpuweb.github.io/gpuweb/#buffer-state
+    enum class State : uint8_t {
+        Mapped,
+        MappedAtCreation,
+        MappingPending,
+        Unmapped,
+        Destroyed,
+    };
+
+    id<MTLBuffer> buffer() const;
+
+    uint64_t NODELETE initialSize() const;
+    uint64_t currentSize() const;
+    WGPUBufferUsageFlags usage() const;
+    State state() const;
+
+    Device& device() const { return m_device; }
+    bool isDestroyed() const { return state() == State::Destroyed; }
+
+    void setCommandEncoder(CommandEncoder&, bool mayModifyBuffer = false) const;
+    std::span<uint8_t> getBufferContents();
+
+    std::optional<DrawIndexCacheContainerIterator> canSkipDrawIndexedValidation(uint32_t firstIndex, uint32_t indexCount, uint32_t vertexCount, MTLIndexType, uint32_t primitiveOffset, id<MTLIndirectCommandBuffer> = nil) const;
+    void drawIndexedValidated(uint32_t firstIndex, uint32_t indexCount, uint32_t vertexCount, MTLIndexType, uint32_t primitiveOffset, uint64_t validationGeneration, id<MTLIndirectCommandBuffer> = nil);
+    void skippedDrawIndexedValidation(CommandEncoder&, DrawIndexCacheContainerIterator);
+
+    bool didReadOOB(id<MTLIndirectCommandBuffer> = nil) const;
+    void didReadOOB(uint32_t v, id<MTLIndirectCommandBuffer> = nil);
+
+    void indirectBufferInvalidated(CommandEncoder* = nullptr);
+    void indirectBufferInvalidated(CommandEncoder&);
+    // Bumped whenever the contents change in a way that invalidates a previously GPU-encoded indirect draw.
+    uint64_t contentsGeneration() const;
+    uint64_t indexContentsGeneration() const;
+    void indexBufferContentsModified(uint32_t maxUintValue, uint16_t maxUshortValue);
+    bool allIndexValuesBelow(MTLIndexType, uint32_t vertexCount) const;
+    void removeSkippedValidationCommandEncoder(uint64_t);
+    bool mustTakeSlowIndexValidationPath() const;
+    void clearMustTakeSlowIndexValidationPath();
+    void takeSlowIndexValidationPath(CommandBuffer&, uint32_t firstIndex, uint32_t indexCount, MTLIndexType, uint32_t primitiveOffset, uint32_t vertexCount);
+    bool needsIndexValidation(uint32_t, uint16_t);
+
+private:
+    Buffer(id<MTLBuffer>, uint64_t initialSize, WGPUBufferUsageFlags, State initialState, MappingRange initialMappingRange, Device&);
+    Buffer(Device&);
+
+    bool validateGetMappedRange(size_t offset, size_t rangeSize) const;
+    NSString * _Nullable errorValidatingMapAsync(WGPUMapModeFlags, size_t offset, size_t rangeSize) const;
+    bool NODELETE validateUnmap() const;
+    void NODELETE setState(State);
+    void incrementBufferMapCount();
+    void decrementBufferMapCount();
+
+    const std::unique_ptr<BufferState> m_storage;
+
+    const Ref<Device> m_device;
+
+    // Keyed by command encoder or indirect command buffer rather than by anything
+    // of the buffer's own, so these belong with the encoder tracking in
+    // TrackedResource and not with the storage in BufferState.
+    DrawIndexCacheContainer m_drawIndexedCache;
+    mutable HashMap<uint64_t, uint32_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_gpuResourceMap;
+    HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_skippedValidationCommandEncoders;
+    HashMap<uint64_t, bool, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_didReadOOB;
+#if CPU(X86_64) && (PLATFORM(MAC) || PLATFORM(MACCATALYST))
+    bool m_mappedAtCreation { false };
+#endif
+} SWIFT_SHARED_REFERENCE(refBuffer, derefBuffer) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
+
+#else
 
 // https://gpuweb.github.io/gpuweb/#gpubuffer
 class Buffer : public WGPUBufferImpl, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Buffer>, public CanBorrow, public TrackedResource {
@@ -179,6 +292,8 @@ private:
 #endif
     HashMap<uint64_t, bool, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_didReadOOB;
 } SWIFT_SHARED_REFERENCE(refBuffer, derefBuffer) SWIFT_PRIVATE_FILEID("WebGPU/Buffer.swift") SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
+
+#endif // ENABLE(WEBGPU_SWIFT_BUFFER)
 
 } // namespace WebGPU
 
