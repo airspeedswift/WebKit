@@ -121,6 +121,13 @@ public:
     Device& device() const { return m_device; }
     bool isDestroyed() const { return state() == State::Destroyed; }
 
+#if ENABLE(WEBGPU_SWIFT)
+    // Handed to the Swift thunks alongside the buffer, so the Swift side reads the
+    // storage's fields directly instead of through the accessors above, which each
+    // forward to this same object.
+    BufferState& storage() const;
+#endif
+
     void setCommandEncoder(CommandEncoder&, bool mayModifyBuffer = false) const;
     std::span<uint8_t> getBufferContents();
 

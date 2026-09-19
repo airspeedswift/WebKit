@@ -36,10 +36,11 @@ typealias String = Swift.String
 func commandEncoderClearBuffer(
     _ commandEncoder: WebGPU.CommandEncoder,
     buffer: WebGPU.Buffer,
+    bufferStorage: BufferState,
     offset: UInt64,
     size: inout UInt64
 ) {
-    commandEncoder.clearBuffer(buffer: buffer, offset: offset, size: &size)
+    commandEncoder.clearBuffer(buffer: buffer, bufferStorage: bufferStorage, offset: offset, size: &size)
 }
 
 @_expose(Cxx)
@@ -49,6 +50,7 @@ func commandEncoderResolveQuerySet(
     firstQuery: UInt32,
     queryCount: UInt32,
     destination: WebGPU.Buffer,
+    destinationStorage: BufferState,
     destinationOffset: UInt64
 ) {
     commandEncoder.resolveQuerySet(
@@ -56,6 +58,7 @@ func commandEncoderResolveQuerySet(
         firstQuery: firstQuery,
         queryCount: queryCount,
         destination: destination,
+        destinationStorage: destinationStorage,
         destinationOffset: destinationOffset
     )
 }
@@ -94,15 +97,19 @@ func commandEncoderCopyTextureToTexture(
 func commandEncoderCopyBufferToBuffer(
     _ commandEncoder: WebGPU.CommandEncoder,
     source: WebGPU.Buffer,
+    sourceStorage: BufferState,
     sourceOffset: UInt64,
     destination: WebGPU.Buffer,
+    destinationStorage: BufferState,
     destinationOffset: UInt64,
     size: UInt64
 ) {
     commandEncoder.copyBufferToBuffer(
         source: source,
+        sourceStorage: sourceStorage,
         sourceOffset: sourceOffset,
         destination: destination,
+        destinationStorage: destinationStorage,
         destinationOffset: destinationOffset,
         size: size
     )
@@ -594,31 +601,33 @@ extension WebGPU.CommandEncoder {
 
     private func errorValidatingCopyBufferToBuffer(
         source: WebGPU.Buffer,
+        sourceStorage: BufferState,
         sourceOffset: UInt64,
         destination: WebGPU.Buffer,
+        destinationStorage: BufferState,
         destinationOffset: UInt64,
         size: UInt64
     ) -> String? {
         func errorString(_ format: String) -> String {
             "GPUCommandEncoder.copyBufferToBuffer: \(format)"
         }
-        if !source.isDestroyed() && !CxxBridging.isValidToUseWithBufferCommandEncoder(source, self) {
+        if !sourceStorage.isDestroyed && !CxxBridging.isValidToUseWithBufferCommandEncoder(source, self) {
             return errorString("source buffer is not valid")
         }
 
-        if !destination.isDestroyed() && !CxxBridging.isValidToUseWithBufferCommandEncoder(destination, self) {
+        if !destinationStorage.isDestroyed && !CxxBridging.isValidToUseWithBufferCommandEncoder(destination, self) {
             return errorString("destination buffer is not valid")
         }
 
-        if source.usage() & WGPUBufferUsage_CopySrc.rawValue == 0 {
+        if sourceStorage.usage & WGPUBufferUsage_CopySrc.rawValue == 0 {
             return errorString("source usage does not have COPY_SRC")
         }
 
-        if destination.usage() & WGPUBufferUsage_CopyDst.rawValue == 0 {
+        if destinationStorage.usage & WGPUBufferUsage_CopyDst.rawValue == 0 {
             return errorString("destination usage does not have COPY_DST")
         }
 
-        if destination.state() == WebGPU.Buffer.State.MappingPending || source.state() == WebGPU.Buffer.State.MappingPending {
+        if destinationStorage.isMappingPending || sourceStorage.isMappingPending {
             return errorString("destination state is not unmapped or source state is not unmapped")
         }
 
@@ -645,11 +654,11 @@ extension WebGPU.CommandEncoder {
             return errorString("destination size + offset overflows")
         }
 
-        if source.initialSize() < sourceEnd {
+        if sourceStorage.initialSize < sourceEnd {
             return errorString("source size + offset overflows")
         }
 
-        if destination.initialSize() < destinationEnd {
+        if destinationStorage.initialSize < destinationEnd {
             return errorString("destination size + offset overflows")
         }
         // FIXME: rdar://138415945
@@ -1530,8 +1539,10 @@ extension WebGPU.CommandEncoder {
 
     func copyBufferToBuffer(
         source: WebGPU.Buffer,
+        sourceStorage: BufferState,
         sourceOffset: UInt64,
         destination: WebGPU.Buffer,
+        destinationStorage: BufferState,
         destinationOffset: UInt64,
         size: UInt64,
     ) {
@@ -1543,8 +1554,10 @@ extension WebGPU.CommandEncoder {
 
         if let error = self.errorValidatingCopyBufferToBuffer(
             source: source,
+            sourceStorage: sourceStorage,
             sourceOffset: sourceOffset,
             destination: destination,
+            destinationStorage: destinationStorage,
             destinationOffset: destinationOffset,
             size: size
         ) {
@@ -1556,17 +1569,20 @@ extension WebGPU.CommandEncoder {
         source.setCommandEncoder(self, false)
         destination.setCommandEncoder(self, false)
         destination.indirectBufferInvalidated(self)
-        guard size != 0, !source.isDestroyed() && !destination.isDestroyed() else {
+        guard size != 0, !sourceStorage.isDestroyed && !destinationStorage.isDestroyed else {
             return
         }
 
-        guard let blitCommandEncoder = ensureBlitCommandEncoder() else {
+        guard let blitCommandEncoder = ensureBlitCommandEncoder(),
+            let sourceAllocation = sourceStorage.metalBuffer,
+            let destinationAllocation = destinationStorage.metalBuffer
+        else {
             return
         }
         blitCommandEncoder.copy(
-            from: source.buffer(),
+            from: sourceAllocation,
             sourceOffset: Int(sourceOffset),
-            to: destination.buffer(),
+            to: destinationAllocation,
             destinationOffset: Int(destinationOffset),
             size: Int(size)
         )
@@ -2228,13 +2244,13 @@ extension WebGPU.CommandEncoder {
         }
     }
 
-    func clearBuffer(buffer: WebGPU.Buffer, offset: UInt64, size: inout UInt64) {
+    func clearBuffer(buffer: WebGPU.Buffer, bufferStorage: BufferState, offset: UInt64, size: inout UInt64) {
         guard self.prepareTheEncoderState() else {
             self.generateInvalidEncoderStateError()
             return
         }
         if size == .max {
-            let initialSize = buffer.initialSize()
+            let initialSize = bufferStorage.initialSize
             let (subtractionResult, didOverflow) = initialSize.subtractingReportingOverflow(offset)
             if didOverflow {
                 self.m_device.ptr().generateAValidationError("CommandEncoder::clearBuffer(): offset > buffer.size")
@@ -2254,13 +2270,13 @@ extension WebGPU.CommandEncoder {
             return
         }
         let range = offsetInt..<(offsetInt + sizeInt)
-        if buffer.isDestroyed() || sizeInt == 0 || range.upperBound > buffer.buffer().length {
+        if bufferStorage.isDestroyed || sizeInt == 0 || range.upperBound > (bufferStorage.metalBuffer?.length ?? 0) {
             return
         }
-        guard let blitCommandEncoder = ensureBlitCommandEncoder() else {
+        guard let blitCommandEncoder = ensureBlitCommandEncoder(), let allocation = bufferStorage.metalBuffer else {
             return
         }
-        blitCommandEncoder.fill(buffer: buffer.buffer(), range: range, value: 0)
+        blitCommandEncoder.fill(buffer: allocation, range: range, value: 0)
     }
 
     func resolveQuerySet(
@@ -2268,6 +2284,7 @@ extension WebGPU.CommandEncoder {
         firstQuery: UInt32,
         queryCount: UInt32,
         destination: WebGPU.Buffer,
+        destinationStorage: BufferState,
         destinationOffset: UInt64
     ) {
         guard self.prepareTheEncoderState() else {
@@ -2279,7 +2296,7 @@ extension WebGPU.CommandEncoder {
             querySet: querySet,
             firstQuery: firstQuery,
             queryCount: queryCount,
-            destination: destination,
+            destinationStorage: destinationStorage,
             destinationOffset: destinationOffset
         )
 
@@ -2297,7 +2314,7 @@ extension WebGPU.CommandEncoder {
         destination.setCommandEncoder(self, false)
         destination.indirectBufferInvalidated(self)
 
-        if querySet.isDestroyed() || destination.isDestroyed() || queryCount == 0 {
+        if querySet.isDestroyed() || destinationStorage.isDestroyed || queryCount == 0 {
             return
         }
 
@@ -2308,14 +2325,15 @@ extension WebGPU.CommandEncoder {
             guard
                 let sourceOffset = Int(exactly: 8 * firstQuery),
                 let destinationOffsetChecked = Int(exactly: destinationOffset),
-                let size = Int(exactly: 8 * queryCount)
+                let size = Int(exactly: 8 * queryCount),
+                let destinationAllocation = destinationStorage.metalBuffer
             else {
                 return
             }
             blitCommandEncoder.copy(
                 from: querySet.visibilityBuffer(),
                 sourceOffset: sourceOffset,
-                to: destination.buffer(),
+                to: destinationAllocation,
                 destinationOffset: destinationOffsetChecked,
                 size: size
             )
@@ -2332,7 +2350,7 @@ extension WebGPU.CommandEncoder {
                 return
             }
             let counterSampleBuffer = querySet.counterSampleBufferWithOffset()
-            guard let buffer = counterSampleBuffer.buffer else {
+            guard let buffer = counterSampleBuffer.buffer, let destinationAllocation = destinationStorage.metalBuffer else {
                 return
             }
 
@@ -2340,7 +2358,7 @@ extension WebGPU.CommandEncoder {
                 .resolveCounters(
                     buffer,
                     range: Int(firstQuery + counterSampleBuffer.offset)..<Int(firstQuery + counterSampleBuffer.offset + queryCount),
-                    destinationBuffer: destination.buffer(),
+                    destinationBuffer: destinationAllocation,
                     destinationOffset: Int(destinationOffset)
                 )
         }
@@ -2350,16 +2368,16 @@ extension WebGPU.CommandEncoder {
         querySet: WebGPU.QuerySet,
         firstQuery: UInt32,
         queryCount: UInt32,
-        destination: WebGPU.Buffer,
+        destinationStorage: BufferState,
         destinationOffset: UInt64
     ) -> Bool {
         if !querySet.isDestroyed() && !querySet.isValid() {
             return false
         }
-        if !destination.isDestroyed() && !destination.isValid() {
+        if !destinationStorage.isDestroyed && !destinationStorage.isValid {
             return false
         }
-        if (destination.usage() & WGPUBufferUsage_QueryResolve.rawValue) == 0 {
+        if (destinationStorage.usage & WGPUBufferUsage_QueryResolve.rawValue) == 0 {
             return false
         }
 
@@ -2382,7 +2400,7 @@ extension WebGPU.CommandEncoder {
         }
 
         let (countTimes8PlusOffset, didOverflowSum) = destinationOffset.addingReportingOverflow(UInt64(queryCountTimes8))
-        if didOverflowSum || countTimes8PlusOffset > destination.initialSize() {
+        if didOverflowSum || countTimes8PlusOffset > destinationStorage.initialSize {
             return false
         }
 

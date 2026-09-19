@@ -231,6 +231,17 @@ final class BufferState {
         rawState == MapState.destroyed.rawValue || allocation != nil
     }
 
+    /// Matches `Buffer::isDestroyed`.
+    var isDestroyed: Bool {
+        rawState == MapState.destroyed.rawValue
+    }
+
+    /// Whether a `mapAsync` is outstanding, which a copy in either direction
+    /// rejects the buffer for.
+    var isMappingPending: Bool {
+        rawState == MapState.mappingPending.rawValue
+    }
+
     /// The length of the current allocation, which is what the buffer reports as
     /// its current size.
     var currentSize: UInt64 {

@@ -240,6 +240,11 @@ id<MTLBuffer> Buffer::buffer() const
     return m_storage->getMetalBuffer();
 }
 
+BufferState& Buffer::storage() const
+{
+    return *m_storage;
+}
+
 uint64_t Buffer::initialSize() const
 {
     return m_storage->getInitialSize();
