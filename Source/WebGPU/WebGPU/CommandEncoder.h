@@ -44,6 +44,9 @@
 
 IGNORE_CLANG_WARNINGS_BEGIN("nullability-completeness")
 
+#if !ENABLE(WEBGPU_SWIFT)
+// The Swift path holds the clear attachments in TexturesToClear, so nothing under
+// ENABLE(WEBGPU_SWIFT) constructs or reads one of these.
 @interface TextureAndClearColor : NSObject
 - (instancetype)initWithTexture:(id<MTLTexture> _Nonnull)texture NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
@@ -51,6 +54,7 @@ IGNORE_CLANG_WARNINGS_BEGIN("nullability-completeness")
 @property (nonatomic) MTLClearColor clearColor;
 @property (nonatomic) NSUInteger depthPlane;
 @end
+#endif
 
 struct WGPUCommandEncoderImpl {
 };
@@ -67,6 +71,12 @@ class RenderPassEncoder;
 class Sampler;
 class Texture;
 class TextureView;
+
+#if ENABLE(WEBGPU_SWIFT)
+// Defined in CommandEncoder.swift and reached through WebGPUSwift-Generated.h, which this header
+// cannot include: that header names this directory's types in the signatures of its thunks.
+class TexturesToClear;
+#endif
 
 // https://gpuweb.github.io/gpuweb/#gpucommandencoder
 class CommandEncoder : public CommandsMixin, public RefCountedAndCanMakeWeakPtr<CommandEncoder>, public WGPUCommandEncoderImpl {
@@ -95,7 +105,11 @@ public:
     void copyBufferToTexture(const WGPUImageCopyBuffer& source, const WGPUImageCopyTexture& destination, const WGPUExtent3D& copySize) HAS_SWIFTCXX_THUNK;
     void copyTextureToBuffer(const WGPUImageCopyTexture& source, const WGPUImageCopyBuffer& destination, const WGPUExtent3D& copySize) HAS_SWIFTCXX_THUNK;
     void copyTextureToTexture(const WGPUImageCopyTexture& source, const WGPUImageCopyTexture& destination, const WGPUExtent3D& copySize) HAS_SWIFTCXX_THUNK;
+#if ENABLE(WEBGPU_SWIFT)
+    void runClearEncoder(TexturesToClear& attachmentsToClear, id<MTLTexture> depthStencilAttachmentToClear, bool depthAttachmentToClear, bool stencilAttachmentToClear, float depthClearValue = 0, uint32_t stencilClearValue = 0, id<MTLRenderCommandEncoder> existingEncoder = nil) HAS_SWIFTCXX_THUNK;
+#else
     void runClearEncoder(NSMutableDictionary<NSNumber*, TextureAndClearColor*> *attachmentsToClear, id<MTLTexture> depthStencilAttachmentToClear, bool depthAttachmentToClear, bool stencilAttachmentToClear, float depthClearValue = 0, uint32_t stencilClearValue = 0, id<MTLRenderCommandEncoder> existingEncoder = nil) HAS_SWIFTCXX_THUNK;
+#endif
     void clearBuffer(Buffer&, uint64_t offset, uint64_t size);
     Ref<CommandBuffer> finish(const WGPUCommandBufferDescriptor&) HAS_SWIFTCXX_THUNK;
     void insertDebugMarker(String&& markerLabel);

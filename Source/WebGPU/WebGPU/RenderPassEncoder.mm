@@ -43,6 +43,14 @@
 #import <wtf/StdLibExtras.h>
 #import <wtf/TZoneMallocInlines.h>
 
+#if ENABLE(WEBGPU_SWIFT)
+#import "CxxBridging.h"
+#import <WebGPU/CxxBridgingPublic.h>
+#import <WebGPU/WGPUTextureImpl.h>
+#import <WebGPU/WebGPU.h>
+#import "WebGPUSwift-Generated.h"
+#endif
+
 namespace WebGPU {
 
 #define RETURN_IF_FINISHED() \
@@ -118,6 +126,9 @@ RenderPassEncoder::RenderPassEncoder(id<MTLRenderCommandEncoder> renderCommandEn
     , m_stencilReadOnly(stencilReadOnly)
     , m_parentEncoder(rawParentEncoder)
     , m_visibilityResultBuffer(visibilityResultBuffer)
+#if ENABLE(WEBGPU_SWIFT)
+    , m_attachmentsToClear(makeUniqueWithoutFastMallocCheck<TexturesToClear>(TexturesToClear::init()))
+#endif
     , m_descriptor(descriptor)
     , m_descriptorColorAttachments(descriptor.colorAttachmentCount ? Vector<WGPURenderPassColorAttachment>(unsafeMakeSpan(descriptor.colorAttachments, descriptor.colorAttachmentCount)) : Vector<WGPURenderPassColorAttachment>())
     , m_descriptorDepthStencilAttachment(descriptor.depthStencilAttachment ? *descriptor.depthStencilAttachment : WGPURenderPassDepthStencilAttachment())
@@ -142,7 +153,9 @@ RenderPassEncoder::RenderPassEncoder(id<MTLRenderCommandEncoder> renderCommandEn
 
     m_parentEncoder->lock(true);
 
+#if !ENABLE(WEBGPU_SWIFT)
     m_attachmentsToClear = [NSMutableDictionary dictionary];
+#endif
     for (auto [ i, attachment ] : indexedRange(colorAttachments)) {
         if (!attachment.view && !attachment.texture)
             continue;
@@ -167,6 +180,16 @@ RenderPassEncoder::RenderPassEncoder(id<MTLRenderCommandEncoder> renderCommandEn
         m_renderTargetHeight = textureToClear.height;
         if (!textureToClear)
             continue;
+#if ENABLE(WEBGPU_SWIFT)
+        // Recorded only on the load-and-discard path below, so the clear colour is computed first
+        // and the attachment is entered into the set at the one point that path is taken.
+        MTLClearColor clearColor = MTLClearColorMake(0, 0, 0, 0);
+        if (attachment.storeOp != WGPUStoreOp_Discard) {
+            auto& c = attachment.clearValue;
+            clearColor = MTLClearColorMake(c.r, c.g, c.b, c.a);
+        } else if (attachment.loadOp == WGPULoadOp_Load)
+            m_attachmentsToClear->setAttachment(i, textureToClear, clearColor, texture.isDestroyed() ? 0 : attachment.depthSlice.value_or(0));
+#else
         TextureAndClearColor *textureWithClearColor = [[TextureAndClearColor alloc] initWithTexture:textureToClear];
         if (attachment.storeOp != WGPUStoreOp_Discard) {
             auto& c = attachment.clearValue;
@@ -177,6 +200,7 @@ RenderPassEncoder::RenderPassEncoder(id<MTLRenderCommandEncoder> renderCommandEn
         }
 
         textureWithClearColor.depthPlane = texture.isDestroyed() ? 0 : attachment.depthSlice.value_or(0);
+#endif
     }
 
     if (const auto* attachment = descriptor.depthStencilAttachment) {
@@ -224,6 +248,9 @@ double RenderPassEncoder::quantizedDepthValue(double depthClearValue, WGPUTextur
 RenderPassEncoder::RenderPassEncoder(CommandEncoder& parentEncoder, Device& device, NSString* errorString)
     : m_device(device)
     , m_parentEncoder(parentEncoder)
+#if ENABLE(WEBGPU_SWIFT)
+    , m_attachmentsToClear(makeUniqueWithoutFastMallocCheck<TexturesToClear>(TexturesToClear::init()))
+#endif
     , m_lastErrorString(errorString)
 {
     m_parentEncoder->lock(true);
@@ -1335,11 +1362,19 @@ void RenderPassEncoder::endPass()
     auto endEncoder = ^{
         m_parentEncoder->endEncoding(m_renderCommandEncoder);
     };
+#if ENABLE(WEBGPU_SWIFT)
+    bool hasTexturesToClear = !m_attachmentsToClear->isEmpty() || (m_depthStencilAttachmentToClear && (m_clearDepthAttachment || m_clearStencilAttachment));
+#else
     bool hasTexturesToClear = m_attachmentsToClear.count || (m_depthStencilAttachmentToClear && (m_clearDepthAttachment || m_clearStencilAttachment));
+#endif
 
     if (hasTexturesToClear) {
         endEncoder();
+#if ENABLE(WEBGPU_SWIFT)
+        m_parentEncoder->runClearEncoder(*m_attachmentsToClear, m_depthStencilAttachmentToClear, m_clearDepthAttachment, m_clearStencilAttachment, m_depthClearValue, m_stencilClearValue, nil);
+#else
         m_parentEncoder->runClearEncoder(m_attachmentsToClear, m_depthStencilAttachmentToClear, m_clearDepthAttachment, m_clearStencilAttachment, m_depthClearValue, m_stencilClearValue, nil);
+#endif
     } else
         endEncoder();
 

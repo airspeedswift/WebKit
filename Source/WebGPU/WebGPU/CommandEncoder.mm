@@ -47,6 +47,7 @@
 #import <wtf/IndexedRange.h>
 #import <wtf/TZoneMallocInlines.h>
 
+#if !ENABLE(WEBGPU_SWIFT)
 @implementation TextureAndClearColor
 - (instancetype)initWithTexture:(id<MTLTexture>)texture
 {
@@ -59,6 +60,7 @@
     return self;
 }
 @end
+#endif
 
 namespace WebGPU {
 
@@ -451,11 +453,14 @@ static std::pair<id<MTLRenderPipelineState>, id<MTLDepthStencilState>> createSim
 }
 #endif
 
+#if ENABLE(WEBGPU_SWIFT)
+void CommandEncoder::runClearEncoder(TexturesToClear& attachmentsToClear, id<MTLTexture> depthStencilAttachmentToClear, bool depthAttachmentToClear, bool stencilAttachmentToClear, float depthClearValue, uint32_t stencilClearValue, id<MTLRenderCommandEncoder> existingEncoder)
+{
+    commandEncoderRunClearEncoder(this, attachmentsToClear, depthStencilAttachmentToClear, depthAttachmentToClear, stencilAttachmentToClear, depthClearValue, stencilClearValue, existingEncoder);
+}
+#else
 void CommandEncoder::runClearEncoder(NSMutableDictionary<NSNumber*, TextureAndClearColor*> *attachmentsToClear, id<MTLTexture> depthStencilAttachmentToClear, bool depthAttachmentToClear, bool stencilAttachmentToClear, float depthClearValue, uint32_t stencilClearValue, id<MTLRenderCommandEncoder> existingEncoder)
 {
-#if ENABLE(WEBGPU_SWIFT)
-    commandEncoderRunClearEncoder(this, attachmentsToClear, depthStencilAttachmentToClear, depthAttachmentToClear, stencilAttachmentToClear, depthClearValue, stencilClearValue, existingEncoder);
-#else
     if (!attachmentsToClear.count && !depthAttachmentToClear && !stencilAttachmentToClear) {
         endEncoding(existingEncoder);
         return;
@@ -531,8 +536,8 @@ void CommandEncoder::runClearEncoder(NSMutableDictionary<NSNumber*, TextureAndCl
     [clearRenderCommandEncoder drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1 instanceCount:1 baseInstance:0];
     m_device->getQueue()->endEncoding(clearRenderCommandEncoder, m_commandBuffer);
     setExistingEncoder(nil);
-#endif
 }
+#endif
 
 #if !ENABLE(WEBGPU_SWIFT)
 static bool isMultisampleTexture(id<MTLTexture> texture)

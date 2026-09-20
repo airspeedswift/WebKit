@@ -33,9 +33,8 @@ import WebGPU_Private.WebGPU
 typealias String = Swift.String
 
 // A colour attachment's texture and the colour to clear it to. `depthPlane` is the plane of a 3D
-// texture the attachment addresses. The defaults are the ones `TextureAndClearColor`'s designated
-// initializer leaves behind, which is what the render-pass setup path relies on when it names only
-// the texture.
+// texture the attachment addresses. An attachment reaches the clear set only on the load-and-discard
+// path, which clears to transparent black, so the defaults are what that path records.
 struct TextureToClear {
     var texture: any MTLTexture
     var clearColor: MTLClearColor = MTLClearColorMake(0, 0, 0, 0)
@@ -46,10 +45,17 @@ struct TextureToClear {
 // parallel to `MTLRenderPassDescriptor.colorAttachments`. A render pass descriptor with more than
 // `capacity` colour attachments is rejected as invalid before reaching here, so an attachment
 // number is always a slot.
-struct TexturesToClear {
+//
+// A class rather than a value because `RenderPassEncoder` builds one attachment at a time while
+// setting up the pass and reads it back when the pass ends, holding it by pointer across that span:
+// the set-up writes and the end-of-pass read are the same object.
+@_expose(Cxx)
+final class TexturesToClear {
     static let capacity = 8
 
     private var slots: [TextureToClear?] = Array(repeating: nil, count: capacity)
+
+    init() {}
 
     subscript(attachmentIndex: Int) -> TextureToClear? {
         get { slots[attachmentIndex] }
@@ -69,6 +75,19 @@ struct TexturesToClear {
         slots.enumerated().compactMap { attachmentIndex, textureToClear in
             textureToClear.map { (attachmentIndex, $0) }
         }
+    }
+
+    // Records one attachment. Spelled out as three parameters rather than crossing as a subscript
+    // over an optional struct, because neither crosses `@_expose(Cxx)`; the caller has the three
+    // fields to hand at the point it would have built the value.
+    func setAttachment(_ attachmentIndex: Int, texture: any MTLTexture, clearColor: MTLClearColor, depthPlane: Int) {
+        slots[attachmentIndex] = TextureToClear(texture: texture, clearColor: clearColor, depthPlane: depthPlane)
+    }
+
+    // Sets the depth plane of an attachment already recorded, so the caller that learns it after
+    // recording the texture does not have to keep the other two fields itself.
+    func setDepthPlane(_ attachmentIndex: Int, _ depthPlane: Int) {
+        slots[attachmentIndex]?.depthPlane = depthPlane
     }
 }
 
@@ -186,7 +205,7 @@ func commandEncoderBeginComputePass(
 @_expose(Cxx)
 func commandEncoderRunClearEncoder(
     _ commandEncoder: WebGPU.CommandEncoder,
-    attachmentsToClear: NSMutableDictionary,
+    attachmentsToClear: TexturesToClear,
     depthStencilAttachmentToClear: inout (any MTLTexture)?,
     depthAttachmentToClear: Bool,
     stencilAttachmentToClear: Bool,
@@ -194,20 +213,8 @@ func commandEncoderRunClearEncoder(
     stencilClearValue: UInt32,
     existingEncoder: (any MTLRenderCommandEncoder)?
 ) {
-    guard let dInput = attachmentsToClear as? [NSNumber: TextureAndClearColor] else {
-        preconditionFailure("Dictionary not convertible")
-    }
-
-    var nativeAttachmentsToClear = TexturesToClear()
-    for (key, textureAndClearColor) in dInput {
-        nativeAttachmentsToClear[key.intValue] = TextureToClear(
-            texture: textureAndClearColor.texture,
-            clearColor: textureAndClearColor.clearColor,
-            depthPlane: Int(textureAndClearColor.depthPlane))
-    }
-
     return commandEncoder.runClearEncoder(
-        attachmentsToClear: nativeAttachmentsToClear,
+        attachmentsToClear: attachmentsToClear,
         depthStencilAttachmentToClear: &depthStencilAttachmentToClear,
         depthAttachmentToClear: depthAttachmentToClear,
         stencilAttachmentToClear: stencilAttachmentToClear,

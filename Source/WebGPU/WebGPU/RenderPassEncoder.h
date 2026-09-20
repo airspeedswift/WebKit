@@ -41,7 +41,21 @@
 #import <wtf/Vector.h>
 #import <wtf/WeakPtr.h>
 
+#if ENABLE(WEBGPU_SWIFT)
+#import <memory>
+#endif
+
+#if !ENABLE(WEBGPU_SWIFT)
 @class TextureAndClearColor;
+#endif
+
+namespace WebGPU {
+#if ENABLE(WEBGPU_SWIFT)
+// Defined in CommandEncoder.swift and reached through WebGPUSwift-Generated.h, which this header
+// cannot include: that header names this directory's types in the signatures of its thunks.
+class TexturesToClear;
+#endif
+}
 
 struct WGPURenderPassEncoderImpl {
 };
@@ -204,7 +218,14 @@ private:
     uint32_t m_renderTargetHeight { 0 };
     uint32_t m_rasterSampleCount { 1 };
     uint32_t m_memoryBarrierCount { 0 };
+#if ENABLE(WEBGPU_SWIFT)
+    // The colour attachments this pass clears before it begins. Held by pointer because a
+    // forward-declared Swift type cannot be held by value; destroying it needs the complete type,
+    // so the destructor is out of line in RenderPassEncoder.mm.
+    const std::unique_ptr<TexturesToClear> m_attachmentsToClear;
+#else
     NSMutableDictionary<NSNumber*, TextureAndClearColor*> *m_attachmentsToClear { nil };
+#endif
     id<MTLTexture> m_depthStencilAttachmentToClear { nil };
     WGPURenderPassDescriptor m_descriptor;
     Vector<WGPURenderPassColorAttachment> m_descriptorColorAttachments;
