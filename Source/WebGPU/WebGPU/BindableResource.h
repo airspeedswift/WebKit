@@ -204,6 +204,13 @@ public:
     void removeEncoder(uint64_t identifier) const;
     void clearEncoders() const;
 
+#if ENABLE(WEBGPU_SWIFT)
+    // The set itself, for a Swift caller. A Swift object a C++ class holds reaches
+    // Swift only as a parameter, so the holder hands it on rather than the caller
+    // fetching it.
+    TrackedEncoders& encoders() const;
+#endif
+
     // Leaves the set empty, so a caller acting on every encoder cannot act on one
     // twice.
     TrackedResourceContainer takeEncoders() const;

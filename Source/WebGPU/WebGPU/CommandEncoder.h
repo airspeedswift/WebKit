@@ -34,6 +34,7 @@
 #import <wtf/FastMalloc.h>
 #import <wtf/Function.h>
 #import <wtf/Ref.h>
+#import <memory>
 #import <wtf/RefCountedAndCanMakeWeakPtr.h>
 #import <wtf/SwiftBridging.h>
 #import <wtf/SwiftCXXThunk.h>
@@ -75,10 +76,19 @@ class TextureView;
 #if ENABLE(WEBGPU_SWIFT)
 // Defined in CommandEncoder.swift and reached through WebGPUSwift-Generated.h, which this header
 // cannot include: that header names this directory's types in the signatures of its thunks.
+class CommandEncoderState;
 class TexturesToClear;
 #endif
 
 // https://gpuweb.github.io/gpuweb/#gpucommandencoder
+//
+// Under ENABLE(WEBGPU_SWIFT) the storage lives in Swift, in CommandEncoderState, and this class
+// holds it. It is a C++ class either way because a Swift class cannot inherit from a C++ class and
+// every holder relies on three C++ bases: CommandsMixin, the refcount and weak pointer, and the
+// WGPUCommandEncoderImpl the C API hands out (rdar://163102366).
+//
+// The member declarations below are the same in both configurations. Only the storage fields and
+// the accessors that reach them are selected by the gate.
 class CommandEncoder : public CommandsMixin, public RefCountedAndCanMakeWeakPtr<CommandEncoder>, public WGPUCommandEncoderImpl {
     WTF_MAKE_TZONE_ALLOCATED(CommandEncoder);
 public:
@@ -148,7 +158,7 @@ public:
     bool waitForCommandBufferCompletion();
     void recordGPUExecutionWindowOnCanvasTextures(double startTime, double endTime) const;
     bool encoderIsCurrent(id<MTLCommandEncoder>) const;
-    bool submitWillBeInvalid() const { return m_makeSubmitInvalid; }
+    bool submitWillBeInvalid() const;
     void addBuffer(id<MTLBuffer>);
     void addBuffer(id<MTLCounterSampleBuffer>);
     void addICB(id<MTLIndirectCommandBuffer>);
@@ -167,8 +177,8 @@ public:
     void trackEncoderForQuerySet(const QuerySet&);
     static void trackEncoder(CommandEncoder&, const TrackedEncoderSet&);
     static size_t computeSize(const TrackedEncoderSet&, const Device&);
-    uint64_t uniqueId() const { return m_uniqueId; }
-    NSMutableSet<id<MTLCounterSampleBuffer>> * _Nullable timestampBuffers() const { return m_retainedTimestampBuffers; };
+    uint64_t uniqueId() const;
+    NSMutableSet<id<MTLCounterSampleBuffer>> * _Nullable timestampBuffers() const;
     void addOnCommitHandler(Function<bool(CommandBuffer&, CommandEncoder&)>&&);
 #if ENABLE(WEBGPU_BY_DEFAULT)
     bool useResidencySet(id<MTLResidencySet>);
@@ -194,41 +204,78 @@ private:
     void discardCommandBuffer();
     void retainTimestampsForOneUpdateLoop();
 
+    // The storage accessors. The member bodies above are written against these, so that only the
+    // accessors are selected by the gate.
+    uint64_t debugGroupStackSize() const;
+    void setDebugGroupStackSize(uint64_t);
+    int bufferMapCount() const;
+    void setBufferMapCount(int);
+    void setSubmitWillBeInvalid();
+
+#if ENABLE(WEBGPU_SWIFT)
+    // Handed to the Swift thunks alongside the encoder, so the Swift side reads the storage's
+    // fields directly instead of through the accessors above, which each forward to this same
+    // object.
+    CommandEncoderState& storage() const;
+#endif
+
     id<MTLCommandBuffer> _Nullable m_commandBuffer { nil };
     id<MTLCommandEncoder> _Nullable m_existingCommandEncoder { nil };
     id<MTLBlitCommandEncoder> _Nullable m_blitCommandEncoder { nil };
     NSString* _Nullable m_lastErrorString { nil };
-    uint64_t m_debugGroupStackSize { 0 };
     ThreadSafeWeakPtr<CommandBuffer> m_cachedCommandBuffer;
+#if ENABLE(WEBGPU_SWIFT)
+    const std::unique_ptr<CommandEncoderState> m_storage;
+#else
+    uint64_t m_debugGroupStackSize { 0 };
 #if CPU(X86_64) && (PLATFORM(MAC) || PLATFORM(MACCATALYST))
     NSMutableSet<id<MTLTexture>> * _Nullable m_managedTextures { nil };
     NSMutableSet<id<MTLBuffer>> * _Nullable m_managedBuffers { nil };
 #endif // CPU(X86_64) && (PLATFORM(MAC) || PLATFORM(MACCATALYST))
-private:
     NSMutableSet<id<MTLIndirectCommandBuffer>> * _Nullable m_retainedICBs { nil };
     NSMutableSet<id<MTLTexture>> * _Nullable m_retainedTextures { nil };
     NSMutableSet<id<MTLBuffer>> * _Nullable m_retainedBuffers { nil };
-    HashSet<RefPtr<const Sampler>> m_retainedSamplers;
     NSMutableSet<id<MTLCounterSampleBuffer>> * _Nullable m_retainedTimestampBuffers { nil };
-    Vector<Function<bool(CommandBuffer&, CommandEncoder&)>> m_onCommitHandlers;
-    HashMap<uint64_t, Vector<std::pair<DrawIndexCacheContainerValue, uint32_t>>, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_skippedDrawIndexedValidationKeys;
-    Vector<Ref<const BindGroup>> m_bindGroups;
     Vector<Ref<const Buffer>> m_trackedBuffers;
     Vector<Ref<const Texture>> m_trackedTextures;
-    Vector<Ref<const TextureView>> m_trackedTextureViews;
-    Vector<Ref<const ExternalTexture>> m_trackedExternalTextures;
-    Vector<Ref<const QuerySet>> m_trackedQuerySets;
-
     int m_bufferMapCount { 0 };
     bool m_makeSubmitInvalid { false };
     id<MTLSharedEvent> _Nullable m_sharedEvent { nil };
     uint64_t m_sharedEventSignalValue { 0 };
+    uint64_t m_uniqueId { 0 };
+#endif // ENABLE(WEBGPU_SWIFT)
+private:
+    HashSet<RefPtr<const Sampler>> m_retainedSamplers;
+    Vector<Function<bool(CommandBuffer&, CommandEncoder&)>> m_onCommitHandlers;
+    HashMap<uint64_t, Vector<std::pair<DrawIndexCacheContainerValue, uint32_t>>, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_skippedDrawIndexedValidationKeys;
+    Vector<Ref<const BindGroup>> m_bindGroups;
+    Vector<Ref<const TextureView>> m_trackedTextureViews;
+    Vector<Ref<const ExternalTexture>> m_trackedExternalTextures;
+    Vector<Ref<const QuerySet>> m_trackedQuerySets;
+
     const Ref<Device> m_device;
-    uint64_t m_uniqueId;
 #if ENABLE(WEBGPU_BY_DEFAULT)
     uint32_t m_currentResidencySetCount { 0 };
 #endif
 } SWIFT_SHARED_REFERENCE(refCommandEncoder, derefCommandEncoder) SWIFT_PRIVATE_FILEID("WebGPU/CommandEncoder.swift") SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
+
+#if !ENABLE(WEBGPU_SWIFT)
+
+// The storage accessors over CommandEncoder's own C++ fields. Declared in the class body so that
+// the declarations read the same in both configurations; inline so that the field reads stay as
+// cheap as the direct reads they replace. The ENABLE(WEBGPU_SWIFT) counterparts are in
+// CommandEncoder.mm, where CommandEncoderState is a complete type.
+
+inline uint64_t CommandEncoder::uniqueId() const { return m_uniqueId; }
+inline NSMutableSet<id<MTLCounterSampleBuffer>> * _Nullable CommandEncoder::timestampBuffers() const { return m_retainedTimestampBuffers; }
+inline bool CommandEncoder::submitWillBeInvalid() const { return m_makeSubmitInvalid; }
+inline uint64_t CommandEncoder::debugGroupStackSize() const { return m_debugGroupStackSize; }
+inline void CommandEncoder::setDebugGroupStackSize(uint64_t size) { m_debugGroupStackSize = size; }
+inline int CommandEncoder::bufferMapCount() const { return m_bufferMapCount; }
+inline void CommandEncoder::setBufferMapCount(int count) { m_bufferMapCount = count; }
+inline void CommandEncoder::setSubmitWillBeInvalid() { m_makeSubmitInvalid = true; }
+
+#endif // !ENABLE(WEBGPU_SWIFT)
 
 } // namespace WebGPU
 

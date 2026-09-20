@@ -131,11 +131,70 @@ Ref<CommandEncoder> Device::createCommandEncoder(const WGPUCommandEncoderDescrip
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CommandEncoder);
 
+#if ENABLE(WEBGPU_SWIFT)
+
+// The storage accessors over CommandEncoderState. Out of line because CommandEncoder.h may not
+// include the generated header that completes CommandEncoderState: that header names
+// WebGPU::CommandEncoder in the signatures of the island's thunks. The !ENABLE(WEBGPU_SWIFT)
+// counterparts are inline in CommandEncoder.h.
+
+CommandEncoderState& CommandEncoder::storage() const
+{
+    return *m_storage;
+}
+
+uint64_t CommandEncoder::uniqueId() const
+{
+    return m_storage->getUniqueId();
+}
+
+NSMutableSet<id<MTLCounterSampleBuffer>> * _Nullable CommandEncoder::timestampBuffers() const
+{
+    return m_storage->getTimestampBuffers();
+}
+
+bool CommandEncoder::submitWillBeInvalid() const
+{
+    return m_storage->getMakeSubmitInvalid();
+}
+
+uint64_t CommandEncoder::debugGroupStackSize() const
+{
+    return m_storage->getDebugGroupStackSize();
+}
+
+void CommandEncoder::setDebugGroupStackSize(uint64_t size)
+{
+    m_storage->setDebugGroupStackSize(size);
+}
+
+int CommandEncoder::bufferMapCount() const
+{
+    return m_storage->getBufferMapCount();
+}
+
+void CommandEncoder::setBufferMapCount(int count)
+{
+    m_storage->setBufferMapCount(count);
+}
+
+void CommandEncoder::setSubmitWillBeInvalid()
+{
+    m_storage->setMakeSubmitInvalid(true);
+}
+
+#endif // ENABLE(WEBGPU_SWIFT)
+
 CommandEncoder::CommandEncoder(id<MTLCommandBuffer> commandBuffer, Device& device, uint64_t uniqueId)
     : m_commandBuffer(commandBuffer)
-    , m_device(device)
+#if ENABLE(WEBGPU_SWIFT)
+    , m_storage(makeUniqueWithoutFastMallocCheck<CommandEncoderState>(CommandEncoderState::init(uniqueId, device.isShaderValidationEnabled())))
+#else
     , m_uniqueId(uniqueId)
+#endif
+    , m_device(device)
 {
+#if !ENABLE(WEBGPU_SWIFT)
 #if CPU(X86_64) && (PLATFORM(MAC) || PLATFORM(MACCATALYST))
     m_managedTextures = [NSMutableSet set];
     m_managedBuffers = [NSMutableSet set];
@@ -146,6 +205,7 @@ CommandEncoder::CommandEncoder(id<MTLCommandBuffer> commandBuffer, Device& devic
         m_retainedICBs = [NSMutableSet set];
     }
     m_retainedTimestampBuffers = [NSMutableSet set];
+#endif
 
     addOnCommitHandler([](CommandBuffer& commandBuffer, CommandEncoder& commandEncoder) {
         for (auto& [bufferIdentifier, skippedDrawIndexedValidationKeys] : commandEncoder.m_skippedDrawIndexedValidationKeys) {
@@ -173,14 +233,18 @@ CommandEncoder::CommandEncoder(id<MTLCommandBuffer> commandBuffer, Device& devic
 }
 
 CommandEncoder::CommandEncoder(Device& device)
-    : m_device(device)
+    : 
+#if ENABLE(WEBGPU_SWIFT)
+    m_storage(makeUniqueWithoutFastMallocCheck<CommandEncoderState>(CommandEncoderState::init(0, false))),
+#endif
+    m_device(device)
 {
 }
 
 void CommandEncoder::retainTimestampsForOneUpdateLoop()
 {
     // Workaround for rdar://143905417
-    m_device->getQueue()->retainTimestampsForOneUpdate(m_retainedTimestampBuffers);
+    m_device->getQueue()->retainTimestampsForOneUpdate(timestampBuffers());
 }
 
 CommandEncoder::~CommandEncoder()
@@ -190,7 +254,7 @@ CommandEncoder::~CommandEncoder()
     retainTimestampsForOneUpdateLoop();
     m_commandBuffer = nil; // Do not remove, this is needed to workaround rdar://143905417
     clearTracking();
-    m_device->removeCommandEncoder(m_uniqueId);
+    m_device->removeCommandEncoder(uniqueId());
 }
 
 id<MTLBlitCommandEncoder> CommandEncoder::ensureBlitCommandEncoder()
@@ -912,18 +976,18 @@ NSString* CommandEncoder::errorValidatingCopyBufferToBuffer(const Buffer& source
 
 void CommandEncoder::incrementBufferMapCount()
 {
-    ++m_bufferMapCount;
+    setBufferMapCount(bufferMapCount() + 1);
     if (RefPtr commandBuffer = m_cachedCommandBuffer.get())
-        commandBuffer->setBufferMapCount(m_bufferMapCount);
+        commandBuffer->setBufferMapCount(bufferMapCount());
 }
 
 void CommandEncoder::decrementBufferMapCount()
 {
-    if (m_bufferMapCount <= 0)
+    if (bufferMapCount() <= 0)
         return;
-    --m_bufferMapCount;
+    setBufferMapCount(bufferMapCount() - 1);
     if (RefPtr commandBuffer = m_cachedCommandBuffer.get())
-        commandBuffer->setBufferMapCount(m_bufferMapCount);
+        commandBuffer->setBufferMapCount(bufferMapCount());
 }
 
 void CommandEncoder::copyBufferToBuffer(const Buffer& source, uint64_t sourceOffset, Buffer& destination, uint64_t destinationOffset, uint64_t size)
@@ -1486,10 +1550,14 @@ bool CommandEncoder::waitForCommandBufferCompletion()
 
 void CommandEncoder::recordGPUExecutionWindowOnCanvasTextures(double startTime, double endTime) const
 {
+#if ENABLE(WEBGPU_SWIFT)
+    m_storage->recordGPUExecutionWindowOnCanvasTextures(startTime, endTime);
+#else
     for (auto& texture : m_trackedTextures) {
         if (texture->isCanvasBacking())
             texture->recordGPUExecutionWindow(startTime, endTime);
     }
+#endif
 }
 
 bool CommandEncoder::encoderIsCurrent(id<MTLCommandEncoder> commandEncoder) const
@@ -1515,18 +1583,29 @@ void CommandEncoder::makeInvalid(NSString* errorString)
 
 void CommandEncoder::addICB(id<MTLIndirectCommandBuffer> icb)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    m_storage->addICB(icb);
+#else
     if (!icb)
         return;
     [m_retainedICBs addObject:icb];
+#endif
 }
 void CommandEncoder::addBuffer(id<MTLCounterSampleBuffer> buffer)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    m_storage->addCounterSampleBuffer(buffer);
+#else
     if (!buffer)
         return;
     [m_retainedTimestampBuffers addObject:buffer];
+#endif
 }
 void CommandEncoder::addBuffer(id<MTLBuffer> buffer)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    m_storage->addBuffer(buffer);
+#else
     if (!buffer)
         return;
 
@@ -1538,9 +1617,13 @@ void CommandEncoder::addBuffer(id<MTLBuffer> buffer)
     ALLOW_DEPRECATED_DECLARATIONS_END
 #endif
         [m_retainedBuffers addObject:buffer];
+#endif // ENABLE(WEBGPU_SWIFT)
 }
 void CommandEncoder::addTexture(id<MTLTexture> texture)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    m_storage->addTexture(texture);
+#else
     if (!texture)
         return;
 
@@ -1552,6 +1635,7 @@ void CommandEncoder::addTexture(id<MTLTexture> texture)
     ALLOW_DEPRECATED_DECLARATIONS_END
 #endif
         [m_retainedTextures addObject:texture];
+#endif // ENABLE(WEBGPU_SWIFT)
 }
 
 void CommandEncoder::addTexture(const Texture& baseTexture)
@@ -1559,8 +1643,12 @@ void CommandEncoder::addTexture(const Texture& baseTexture)
     addTexture(baseTexture.texture());
 
     if (id<MTLSharedEvent> event = baseTexture.sharedEvent()) {
+#if ENABLE(WEBGPU_SWIFT)
+        m_storage->setSharedEvent(event, baseTexture.sharedEventSignalValue());
+#else
         m_sharedEvent = event;
         m_sharedEventSignalValue = baseTexture.sharedEventSignalValue();
+#endif
     }
 }
 
@@ -1571,7 +1659,7 @@ void CommandEncoder::addSampler(const Sampler& sampler)
 
 void CommandEncoder::makeSubmitInvalid(NSString* errorString)
 {
-    m_makeSubmitInvalid = true;
+    setSubmitWillBeInvalid();
     if (RefPtr commandBuffer = m_cachedCommandBuffer.get())
         commandBuffer->makeInvalid(errorString ?: m_lastErrorString);
 }
@@ -2147,8 +2235,8 @@ NSString* CommandEncoder::validateFinishError() const
     if (m_state != EncoderState::Open)
         return [NSString stringWithFormat:@"GPUCommandEncoder.finish: encoder state is '%@', expected 'Open'", encoderStateName()];
 
-    if (m_debugGroupStackSize)
-        return [NSString stringWithFormat:@"GPUCommandEncoder.finish: encoder stack size '%llu'", m_debugGroupStackSize];
+    if (debugGroupStackSize())
+        return [NSString stringWithFormat:@"GPUCommandEncoder.finish: encoder stack size '%llu'", debugGroupStackSize()];
 
     // FIXME: "Every usage scope contained in this must satisfy the usage scope validation."
 
@@ -2159,7 +2247,7 @@ NSString* CommandEncoder::validateFinishError() const
 Ref<CommandBuffer> CommandEncoder::finish(const WGPUCommandBufferDescriptor& descriptor)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    return commandEncoderFinish(this, descriptor);
+    return commandEncoderFinish(this, storage(), descriptor);
 #else
     if (!isValid() || (m_existingCommandEncoder && m_existingCommandEncoder != m_blitCommandEncoder)) {
         m_state = EncoderState::Ended;
@@ -2231,7 +2319,7 @@ void CommandEncoder::insertDebugMarker(String&& markerLabel)
 
 bool CommandEncoder::validatePopDebugGroup() const
 {
-    if (!m_debugGroupStackSize)
+    if (!debugGroupStackSize())
         return false;
 
     return true;
@@ -2253,7 +2341,7 @@ void CommandEncoder::popDebugGroup()
 
     finalizeBlitCommandEncoder();
 
-    --m_debugGroupStackSize;
+    setDebugGroupStackSize(debugGroupStackSize() - 1);
     [m_commandBuffer popDebugGroup];
 }
 
@@ -2268,7 +2356,7 @@ void CommandEncoder::pushDebugGroup(String&& groupLabel)
     
     finalizeBlitCommandEncoder();
 
-    ++m_debugGroupStackSize;
+    setDebugGroupStackSize(debugGroupStackSize() + 1);
     [m_commandBuffer pushDebugGroup:groupLabel.createNSString().get()];
 }
 
@@ -2392,6 +2480,9 @@ size_t CommandEncoder::computeSize(const TrackedEncoderSet& encoders, const Devi
 
 void CommandEncoder::clearTracking()
 {
+#if ENABLE(WEBGPU_SWIFT)
+    m_storage->clearTracking();
+#else
     auto identifier = uniqueId();
     for (auto& resource : m_trackedBuffers)
         resource->removeEncoder(identifier);
@@ -2409,19 +2500,28 @@ void CommandEncoder::clearTracking()
     m_trackedTextureViews.clear();
     m_trackedExternalTextures.clear();
     m_trackedQuerySets.clear();
+#endif
 }
 
 bool CommandEncoder::trackEncoderForBuffer(const Buffer& buffer)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    return m_storage->trackBuffer(const_cast<Buffer*>(&buffer), buffer.encoders());
+#else
     bool isNewEntry = buffer.addEncoder(uniqueId());
     if (isNewEntry)
         m_trackedBuffers.append(buffer);
     return isNewEntry;
+#endif
 }
 void CommandEncoder::trackEncoderForTexture(const Texture& texture)
 {
+#if ENABLE(WEBGPU_SWIFT)
+    m_storage->trackTexture(const_cast<Texture*>(&texture), texture.encoders());
+#else
     if (texture.addEncoder(uniqueId()))
         m_trackedTextures.append(texture);
+#endif
 }
 #if !ENABLE(WEBGPU_SWIFT)
 void CommandEncoder::trackEncoderForTextureView(const TextureView& textureView)

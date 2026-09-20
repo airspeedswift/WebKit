@@ -65,6 +65,11 @@ void TrackedEncoderSet::clearEncoders() const
     m_encoders->clear();
 }
 
+TrackedEncoders& TrackedEncoderSet::encoders() const
+{
+    return *m_encoders;
+}
+
 static TrackedResourceContainer asContainer(const swift::Array<uint64_t>& identifiers)
 {
     TrackedResourceContainer result;

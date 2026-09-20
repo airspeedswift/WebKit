@@ -27,6 +27,7 @@ import WebGPU_Internal.Buffer
 import WebGPU_Internal.CommandEncoder
 import WebGPU_Internal.CxxBridging
 import WebGPU_Internal.QuerySet
+import WebGPU_Internal.Texture
 import WebGPU_Internal.TextureOrTextureView
 import WebGPU_Private.WebGPU
 
@@ -88,6 +89,202 @@ final class TexturesToClear {
     // recording the texture does not have to keep the other two fields itself.
     func setDepthPlane(_ attachmentIndex: Int, _ depthPlane: Int) {
         slots[attachmentIndex]?.depthPlane = depthPlane
+    }
+}
+
+/// The storage a `CommandEncoder` owns: the resources it has tracked or retained for as long as the
+/// command buffer it is building, the shared event a canvas-backed texture asks that command buffer
+/// to signal, and the counters `finish` reads back.
+///
+/// What a `CommandEncoder` has that is deliberately not here: its `Device`, a C++ `Ref`; the encoder
+/// state, which lives in `CommandsMixin`, a base it shares with the pass encoders; the on-commit
+/// handlers, which are `WTF::Function`s; and the weak pointer to the `CommandBuffer`, a
+/// `ThreadSafeWeakPtr`. The last two have no representation across `@_expose(Cxx)`. The tracked bind
+/// groups, external textures and samplers stay in C++ for a narrower reason: `BindGroup`,
+/// `ExternalTexture` and `Sampler` carry no `SWIFT_SHARED_REFERENCE`, so holding one in Swift means
+/// first asserting its ownership contract.
+///
+/// A class, not a value, because the encoder writes this while building the command buffer and the
+/// command buffer reads it back at `finish`, through separate holders of the same encoder.
+@_expose(Cxx)
+final class CommandEncoderState {
+    /// The encoder's identifier, which is what a tracked resource records rather than the encoder
+    /// itself: an encoder outlives the record only through `Device`, where the identifier resolves.
+    let uniqueId: UInt64
+
+    /// The resources holding this encoder's identifier, each with the set holding it, kept alive so
+    /// that the identifier can be taken back out when the encoder is done with them.
+    ///
+    /// The set comes in beside the resource because a Swift object a C++ class holds reaches Swift
+    /// only as a parameter: `Buffer` and `Texture` own theirs through `TrackedEncoderSet`.
+    private var trackedBuffers: [(buffer: WebGPU.Buffer, encoders: TrackedEncoders)] = []
+    private var trackedTextures: [(texture: WebGPU.Texture, encoders: TrackedEncoders)] = []
+
+    /// The Metal objects the command buffer uses, retained until it commits.
+    ///
+    /// `NSMutableSet` rather than a Swift `Set`: these are identity sets over Metal protocol
+    /// objects, which is what `-hash` and `-isEqual:` give without a wrapper, and
+    /// `Queue.retainTimestampsForOneUpdate` takes the timestamp set as one.
+    ///
+    /// Absent rather than empty when shader validation is off, which is what decides whether the
+    /// buffers, textures and indirect command buffers are retained at all.
+    private let retainedICBs: NSMutableSet?
+    private let retainedTextures: NSMutableSet?
+    private let retainedBuffers: NSMutableSet?
+    private let retainedTimestampBuffers: NSMutableSet
+
+    #if arch(x86_64) && (WTF_PLATFORM_MAC || WTF_PLATFORM_MACCATALYST)
+    /// The managed-storage resources `finish` synchronizes before the command buffer is handed over.
+    private let managedTextures = NSMutableSet()
+    private let managedBuffers = NSMutableSet()
+    #endif
+
+    /// The shared event the last canvas-backed texture added to this encoder signals on, and the
+    /// value it signals. The command buffer takes both at `finish`.
+    private(set) var sharedEvent: (any MTLSharedEvent)?
+    private(set) var sharedEventSignalValue: UInt64 = 0
+
+    /// The depth of the debug group stack, which `finish` requires to be zero.
+    var debugGroupStackSize: UInt64 = 0
+
+    /// How many of the buffers this encoder uses are mapped. The command buffer is told the count at
+    /// `finish` and cannot be submitted while it is non-zero.
+    var bufferMapCount: Int32 = 0
+
+    /// Whether submitting the command buffer this encoder produces must fail.
+    var makeSubmitInvalid = false
+
+    init(uniqueId: UInt64, shaderValidationEnabled: Bool) {
+        self.uniqueId = uniqueId
+        self.retainedTimestampBuffers = NSMutableSet()
+        if shaderValidationEnabled {
+            self.retainedICBs = NSMutableSet()
+            self.retainedTextures = NSMutableSet()
+            self.retainedBuffers = NSMutableSet()
+        } else {
+            self.retainedICBs = nil
+            self.retainedTextures = nil
+            self.retainedBuffers = nil
+        }
+    }
+
+    /// Records this encoder in `buffer`'s encoder set, and reports whether it was not already there.
+    func trackBuffer(_ buffer: WebGPU.Buffer, encoders: TrackedEncoders) -> Bool {
+        let isNewEntry = encoders.add(uniqueId)
+        if isNewEntry {
+            trackedBuffers.append((buffer, encoders))
+        }
+        return isNewEntry
+    }
+
+    /// Records this encoder in `texture`'s encoder set.
+    func trackTexture(_ texture: WebGPU.Texture, encoders: TrackedEncoders) {
+        if encoders.add(uniqueId) {
+            trackedTextures.append((texture, encoders))
+        }
+    }
+
+    /// Takes this encoder's identifier back out of every resource holding it.
+    func clearTracking() {
+        for tracked in trackedBuffers {
+            tracked.encoders.remove(uniqueId)
+        }
+        for tracked in trackedTextures {
+            tracked.encoders.remove(uniqueId)
+        }
+        trackedBuffers.removeAll()
+        trackedTextures.removeAll()
+    }
+
+    /// Reports the window in which the GPU ran this encoder's work to the canvas-backed textures it
+    /// touched, which are the ones a presentation timestamp is asked of.
+    func recordGPUExecutionWindowOnCanvasTextures(startTime: Double, endTime: Double) {
+        for tracked in trackedTextures where tracked.texture.isCanvasBacking() {
+            tracked.texture.recordGPUExecutionWindow(startTime, endTime)
+        }
+    }
+
+    func addICB(_ icb: (any MTLIndirectCommandBuffer)?) {
+        guard let icb else {
+            return
+        }
+        retainedICBs?.add(icb)
+    }
+
+    func addCounterSampleBuffer(_ buffer: (any MTLCounterSampleBuffer)?) {
+        guard let buffer else {
+            return
+        }
+        retainedTimestampBuffers.add(buffer)
+    }
+
+    func addBuffer(_ buffer: (any MTLBuffer)?) {
+        guard let buffer else {
+            return
+        }
+        #if arch(x86_64) && (WTF_PLATFORM_MAC || WTF_PLATFORM_MACCATALYST)
+        if buffer.storageMode == .managed {
+            managedBuffers.add(buffer)
+            return
+        }
+        #endif
+        retainedBuffers?.add(buffer)
+    }
+
+    func addTexture(_ texture: (any MTLTexture)?) {
+        guard let texture else {
+            return
+        }
+        #if arch(x86_64) && (WTF_PLATFORM_MAC || WTF_PLATFORM_MACCATALYST)
+        if texture.storageMode == .managed {
+            managedTextures.add(texture)
+            return
+        }
+        #endif
+        retainedTextures?.add(texture)
+    }
+
+    /// The timestamp buffers, which the queue retains for one update loop past this encoder
+    /// (rdar://143905417).
+    var timestampBuffers: NSMutableSet {
+        retainedTimestampBuffers
+    }
+
+    func setSharedEvent(_ event: any MTLSharedEvent, signalValue: UInt64) {
+        sharedEvent = event
+        sharedEventSignalValue = signalValue
+    }
+
+    /// Hands the shared event to the command buffer being finished: the encoder signals it once and
+    /// does not keep it afterwards.
+    func takeSharedEvent() -> (any MTLSharedEvent)? {
+        let event = sharedEvent
+        sharedEvent = nil
+        return event
+    }
+
+    /// Synchronizes the managed-storage resources the command buffer wrote, which is what makes
+    /// their contents visible to the CPU on the platforms that have them.
+    func synchronizeManagedResources(_ commandBuffer: (any MTLCommandBuffer)?) {
+        #if arch(x86_64) && (WTF_PLATFORM_MAC || WTF_PLATFORM_MACCATALYST)
+        if managedBuffers.count == 0 && managedTextures.count == 0 {
+            return
+        }
+        let blitCommandEncoder = commandBuffer?.makeBlitCommandEncoder()
+        for buffer in managedBuffers {
+            guard let buffer = buffer as? any MTLBuffer else {
+                continue
+            }
+            blitCommandEncoder?.synchronize(resource: buffer)
+        }
+        for texture in managedTextures {
+            guard let texture = texture as? any MTLTexture else {
+                continue
+            }
+            blitCommandEncoder?.synchronize(resource: texture)
+        }
+        blitCommandEncoder?.endEncoding()
+        #endif
     }
 }
 
@@ -227,9 +424,10 @@ func commandEncoderRunClearEncoder(
 @_expose(Cxx)
 func commandEncoderFinish(
     _ commandEncoder: WebGPU.CommandEncoder,
+    encoderStorage: CommandEncoderState,
     descriptor: WGPUCommandBufferDescriptor
 ) -> CxxBridging.RefCommandBuffer {
-    commandEncoder.finish(descriptor: descriptor)
+    commandEncoder.finish(encoderStorage: encoderStorage, descriptor: descriptor)
 }
 
 extension WebGPU.TextureOrTextureView {
@@ -263,7 +461,7 @@ extension WebGPU.TextureOrTextureView {
 }
 
 extension WebGPU.CommandEncoder {
-    private func validateFinishError() -> String? {
+    private func validateFinishError(encoderStorage: CommandEncoderState) -> String? {
         if !isValid() {
             return "GPUCommandEncoder.finish: encoder is not valid"
         }
@@ -272,8 +470,8 @@ extension WebGPU.CommandEncoder {
             return "GPUCommandEncoder.finish: encoder state is '\(encoderStateName() ?? "")', expected 'Open'"
         }
 
-        if m_debugGroupStackSize != 0 {
-            return "GPUCommandEncoder.finish: encoder stack size '\(m_debugGroupStackSize)'"
+        if encoderStorage.debugGroupStackSize != 0 {
+            return "GPUCommandEncoder.finish: encoder stack size '\(encoderStorage.debugGroupStackSize)'"
         }
 
         // FIXME: "Every usage scope contained in this must satisfy the usage scope validation."
@@ -281,7 +479,7 @@ extension WebGPU.CommandEncoder {
         return nil
     }
 
-    func finish(descriptor: WGPUCommandBufferDescriptor) -> CxxBridging.RefCommandBuffer {
+    func finish(encoderStorage: CommandEncoderState, descriptor: WGPUCommandBufferDescriptor) -> CxxBridging.RefCommandBuffer {
         if !isValid() || (m_existingCommandEncoder != nil && m_existingCommandEncoder !== m_blitCommandEncoder) {
             setEncoderState(WebGPU.CommandsMixin.EncoderState.Ended)
             discardCommandBuffer()
@@ -291,7 +489,7 @@ extension WebGPU.CommandEncoder {
         }
 
         // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-finish
-        let validationFailedError = validateFinishError()
+        let validationFailedError = validateFinishError(encoderStorage: encoderStorage)
 
         _ = getEncoderState()
 
@@ -311,39 +509,17 @@ extension WebGPU.CommandEncoder {
 
         commandBuffer?.label = CxxBridging.convertWTFStringToNSString(descriptor.label)
 
-        #if arch(x86_64) && (WTF_PLATFORM_MAC || WTF_PLATFORM_MACCATALYST)
-        if (m_managedBuffers?.count ?? 0) != 0 || (m_managedTextures?.count ?? 0) != 0 {
-            let blitCommandEncoder = commandBuffer?.makeBlitCommandEncoder()
+        encoderStorage.synchronizeManagedResources(commandBuffer)
 
-            // swift-format-ignore: AlwaysUseLowerCamelCase
-            if let m_managedBuffers {
-                for buffer in m_managedBuffers {
-                    // FIXME: `NSSet` should not be used, and then this cast will not be needed.
-                    // This is safe because `m_managedBuffers` is a `NSMutableSet<id<MTLBuffer>>`.
-                    // swift-format-ignore: NeverForceUnwrap
-                    blitCommandEncoder?.synchronize(resource: buffer as! any MTLBuffer)
-                }
-            }
-
-            // swift-format-ignore: AlwaysUseLowerCamelCase
-            if let m_managedTextures {
-                for texture in m_managedTextures {
-                    // FIXME: `NSSet` should not be used, and then this cast will not be needed.
-                    // This is safe because `m_managedTextures` is a `NSMutableSet<id<MTLTexture>>`.
-                    // swift-format-ignore: NeverForceUnwrap
-                    blitCommandEncoder?.synchronize(resource: texture as! any MTLTexture)
-                }
-            }
-
-            blitCommandEncoder?.endEncoding()
-        }
-        #endif // arch(x86_64) && (WTF_PLATFORM_MAC || WTF_PLATFORM_MACCATALYST)
-
-        let result = createCommandBuffer(commandBuffer, m_device.ptr(), m_sharedEvent, m_sharedEventSignalValue)
-        m_sharedEvent = nil
+        let result = createCommandBuffer(
+            commandBuffer,
+            m_device.ptr(),
+            encoderStorage.takeSharedEvent(),
+            encoderStorage.sharedEventSignalValue
+        )
         m_cachedCommandBuffer = CxxBridging.commandBufferThreadSafeWeakPtr(result.ptr())
-        result.ptr().setBufferMapCount(m_bufferMapCount)
-        if m_makeSubmitInvalid {
+        result.ptr().setBufferMapCount(encoderStorage.bufferMapCount)
+        if encoderStorage.makeSubmitInvalid {
             result.ptr().makeInvalid(m_lastErrorString as? String ?? "Invalid CommandEncoder")
         }
 
