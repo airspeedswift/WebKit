@@ -40,6 +40,11 @@
 #import <wtf/Vector.h>
 #import <wtf/WeakPtr.h>
 
+#if ENABLE(WEBGPU_SWIFT)
+#import <memory>
+#import <wtf/StdLibExtras.h>
+#endif
+
 namespace WebGPU {
 
 class Buffer;
@@ -166,59 +171,134 @@ using DrawIndexCacheContainerIterator = DrawIndexCacheContainer::const_iterator;
 
 using TrackedResourceContainer = HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>;
 
+#if ENABLE(WEBGPU_SWIFT)
+// Defined in TrackedEncoders.swift and reached through WebGPUSwift-Generated.h,
+// which this header cannot include: that header names the island's types in the
+// signatures of its thunks.
+class TrackedEncoders;
+#endif
+
 // A set of command encoders, by identifier. The set is reached through these
 // operations rather than by handing the container out, because the encoders that
 // write it belong to CommandEncoder and Device while the set belongs to whoever
 // holds it.
+//
+// Under ENABLE(WEBGPU_SWIFT) the set lives in Swift, in TrackedEncoders, and this
+// class holds it. It stays a C++ class because TrackedResource below derives from
+// it and five C++ classes derive from that, and a C++ class cannot inherit from a
+// Swift class (rdar://163102366).
+//
+// The member declarations are the same in both configurations. Only the storage
+// and the bodies that reach it are selected by the gate. The two members that take
+// a callable are declared here and defined in BindableResource.mm, where the
+// generated header completes TrackedEncoders.
 class TrackedEncoderSet {
 public:
+#if ENABLE(WEBGPU_SWIFT)
+    TrackedEncoderSet();
+    ~TrackedEncoderSet();
+#endif
+
     // Whether the encoder was not already in the set.
-    bool addEncoder(uint64_t identifier) const
-    {
-        return m_commandEncoders.add(identifier).isNewEntry;
-    }
-
-    void removeEncoder(uint64_t identifier) const
-    {
-        m_commandEncoders.remove(identifier);
-    }
-
-    void clearEncoders() const
-    {
-        m_commandEncoders.clear();
-    }
+    bool addEncoder(uint64_t identifier) const;
+    void removeEncoder(uint64_t identifier) const;
+    void clearEncoders() const;
 
     // Leaves the set empty, so a caller acting on every encoder cannot act on one
     // twice.
-    TrackedResourceContainer takeEncoders() const
-    {
-        return std::exchange(m_commandEncoders, { });
-    }
+    TrackedResourceContainer takeEncoders() const;
 
-    std::optional<uint64_t> firstEncoder() const
-    {
-        if (m_commandEncoders.isEmpty())
-            return std::nullopt;
-        return *m_commandEncoders.begin();
-    }
+    std::optional<uint64_t> firstEncoder() const;
 
     template<typename Predicate>
     size_t removeEncodersAndCount(NOESCAPE Predicate&& predicate) const
     {
+#if ENABLE(WEBGPU_SWIFT)
+        // The predicate is evaluated here rather than crossing into Swift: a C++
+        // template over a callable does not cross @_expose(Cxx), and neither does
+        // WTF::Function. The Swift side hands out its identifiers, this side selects
+        // the stale ones, and the Swift side drops exactly those and reports what is
+        // left.
+        return removeStaleEncodersAndCount(staleEncoders(std::forward<Predicate>(predicate)));
+#else
         m_commandEncoders.removeIf(std::forward<Predicate>(predicate));
         return m_commandEncoders.size();
+#endif
     }
 
     template<typename Callback>
     void forEachEncoder(NOESCAPE Callback&& callback) const
     {
+#if ENABLE(WEBGPU_SWIFT)
+        for (auto identifier : encoderIdentifiers())
+            callback(identifier);
+#else
         for (auto identifier : m_commandEncoders)
             callback(identifier);
+#endif
     }
 
 private:
+#if ENABLE(WEBGPU_SWIFT)
+    // The identifiers currently in the set, copied out so the two template members
+    // above can drive a C++ callable over them.
+    TrackedResourceContainer encoderIdentifiers() const;
+    size_t removeStaleEncodersAndCount(const TrackedResourceContainer&) const;
+
+    template<typename Predicate>
+    TrackedResourceContainer staleEncoders(NOESCAPE Predicate&& predicate) const
+    {
+        TrackedResourceContainer stale;
+        for (auto identifier : encoderIdentifiers()) {
+            if (predicate(identifier))
+                stale.add(identifier);
+        }
+        return stale;
+    }
+
+    // Held by pointer because a forward-declared Swift type cannot be held by
+    // value, and const because the set's own operations are all const: what they
+    // mutate is the Swift object, not this handle.
+    const std::unique_ptr<TrackedEncoders> m_encoders;
+#else
     mutable TrackedResourceContainer m_commandEncoders;
+#endif
 };
+
+#if !ENABLE(WEBGPU_SWIFT)
+
+// The accessors over TrackedEncoderSet's own container. Inline here because there
+// is no Swift object to complete; the ENABLE(WEBGPU_SWIFT) counterparts are in
+// BindableResource.mm.
+
+inline bool TrackedEncoderSet::addEncoder(uint64_t identifier) const
+{
+    return m_commandEncoders.add(identifier).isNewEntry;
+}
+
+inline void TrackedEncoderSet::removeEncoder(uint64_t identifier) const
+{
+    m_commandEncoders.remove(identifier);
+}
+
+inline void TrackedEncoderSet::clearEncoders() const
+{
+    m_commandEncoders.clear();
+}
+
+inline TrackedResourceContainer TrackedEncoderSet::takeEncoders() const
+{
+    return std::exchange(m_commandEncoders, { });
+}
+
+inline std::optional<uint64_t> TrackedEncoderSet::firstEncoder() const
+{
+    if (m_commandEncoders.isEmpty())
+        return std::nullopt;
+    return *m_commandEncoders.begin();
+}
+
+#endif // !ENABLE(WEBGPU_SWIFT)
 
 // The command encoders reading a resource. A base of Buffer, Texture,
 // TextureView, QuerySet and ExternalTexture, which is the set CommandEncoder
