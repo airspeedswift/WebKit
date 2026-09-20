@@ -32,6 +32,46 @@ import WebGPU_Private.WebGPU
 
 typealias String = Swift.String
 
+// A colour attachment's texture and the colour to clear it to. `depthPlane` is the plane of a 3D
+// texture the attachment addresses. The defaults are the ones `TextureAndClearColor`'s designated
+// initializer leaves behind, which is what the render-pass setup path relies on when it names only
+// the texture.
+struct TextureToClear {
+    var texture: any MTLTexture
+    var clearColor: MTLClearColor = MTLClearColorMake(0, 0, 0, 0)
+    var depthPlane: Int = 0
+}
+
+// The colour attachments a render pass clears before it begins, indexed by attachment number and
+// parallel to `MTLRenderPassDescriptor.colorAttachments`. A render pass descriptor with more than
+// `capacity` colour attachments is rejected as invalid before reaching here, so an attachment
+// number is always a slot.
+struct TexturesToClear {
+    static let capacity = 8
+
+    private var slots: [TextureToClear?] = Array(repeating: nil, count: capacity)
+
+    subscript(attachmentIndex: Int) -> TextureToClear? {
+        get { slots[attachmentIndex] }
+        set { slots[attachmentIndex] = newValue }
+    }
+
+    var isEmpty: Bool {
+        !slots.contains { $0 != nil }
+    }
+
+    var count: Int {
+        slots.lazy.filter { $0 != nil }.count
+    }
+
+    // The occupied slots, as attachment number and texture pairs.
+    var attachments: [(attachmentIndex: Int, textureToClear: TextureToClear)] {
+        slots.enumerated().compactMap { attachmentIndex, textureToClear in
+            textureToClear.map { (attachmentIndex, $0) }
+        }
+    }
+}
+
 @_expose(Cxx)
 func commandEncoderClearBuffer(
     _ commandEncoder: WebGPU.CommandEncoder,
@@ -146,8 +186,16 @@ func commandEncoderRunClearEncoder(
         preconditionFailure("Dictionary not convertible")
     }
 
+    var nativeAttachmentsToClear = TexturesToClear()
+    for (key, textureAndClearColor) in dInput {
+        nativeAttachmentsToClear[key.intValue] = TextureToClear(
+            texture: textureAndClearColor.texture,
+            clearColor: textureAndClearColor.clearColor,
+            depthPlane: Int(textureAndClearColor.depthPlane))
+    }
+
     return commandEncoder.runClearEncoder(
-        attachmentsToClear: dInput,
+        attachmentsToClear: nativeAttachmentsToClear,
         depthStencilAttachmentToClear: &depthStencilAttachmentToClear,
         depthAttachmentToClear: depthAttachmentToClear,
         stencilAttachmentToClear: stencilAttachmentToClear,
@@ -427,7 +475,7 @@ extension WebGPU.CommandEncoder {
     }
 
     func runClearEncoder(
-        attachmentsToClear: [NSNumber: TextureAndClearColor],
+        attachmentsToClear: TexturesToClear,
         depthStencilAttachmentToClear: inout (any MTLTexture)?,
         depthAttachmentToClear: Bool,
         stencilAttachmentToClear: Bool,
@@ -436,7 +484,7 @@ extension WebGPU.CommandEncoder {
         existingEncoder: (any MTLRenderCommandEncoder)?
     ) {
         func createSimplePso(
-            attachmentsToClear: [NSNumber: TextureAndClearColor],
+            attachmentsToClear: TexturesToClear,
             depthStencilAttachmentToClear: (any MTLTexture)?,
             depthAttachmentToClear: Bool,
             stencilAttachmentToClear: Bool,
@@ -446,11 +494,11 @@ extension WebGPU.CommandEncoder {
 
             var sampleCount: UInt = 0
             var depthStencilDescriptor: MTLDepthStencilDescriptor? = nil
-            for (key, textureAndClearColor) in attachmentsToClear {
-                let t = textureAndClearColor.texture
+            for (attachmentIndex, textureToClear) in attachmentsToClear.attachments {
+                let t = textureToClear.texture
                 sampleCount = UInt(t.sampleCount)
 
-                let mtlColorAttachment = mtlRenderPipelineDescriptor.colorAttachments[key.intValue]
+                let mtlColorAttachment = mtlRenderPipelineDescriptor.colorAttachments[attachmentIndex]
                 mtlColorAttachment?.pixelFormat = t.pixelFormat
                 mtlColorAttachment?.isBlendingEnabled = false
             }
@@ -545,16 +593,16 @@ extension WebGPU.CommandEncoder {
                 clearDescriptor.renderTargetWidth = depthStencilAttachmentToClear.width
                 clearDescriptor.renderTargetHeight = depthStencilAttachmentToClear.height
             }
-            for (key, textureAndClearColor) in attachmentsToClear {
-                let t = textureAndClearColor.texture
-                let mtlAttachment = clearDescriptor.colorAttachments[key.intValue]
+            for (attachmentIndex, textureToClear) in attachmentsToClear.attachments {
+                let t = textureToClear.texture
+                let mtlAttachment = clearDescriptor.colorAttachments[attachmentIndex]
                 mtlAttachment?.loadAction = .clear
                 mtlAttachment?.storeAction = .store
-                mtlAttachment?.clearColor = textureAndClearColor.clearColor
+                mtlAttachment?.clearColor = textureToClear.clearColor
                 mtlAttachment?.texture = t
                 mtlAttachment?.level = 0
                 mtlAttachment?.slice = 0
-                mtlAttachment?.depthPlane = Int(textureAndClearColor.depthPlane)
+                mtlAttachment?.depthPlane = textureToClear.depthPlane
             }
             clearRenderCommandEncoder = m_commandBuffer?.makeRenderCommandEncoder(descriptor: clearDescriptor)
             setExistingEncoder(clearRenderCommandEncoder)
@@ -1114,7 +1162,7 @@ extension WebGPU.CommandEncoder {
 
         finalizeBlitCommandEncoder()
 
-        var attachmentsToClear: [NSNumber: TextureAndClearColor] = [:]
+        var attachmentsToClear = TexturesToClear()
         var zeroColorTargets = true
         var bytesPerSample: UInt32 = 0
         let maxColorAttachmentBytesPerSample = m_device.ptr().limitsCopy().maxColorAttachmentBytesPerSample
@@ -1288,8 +1336,7 @@ extension WebGPU.CommandEncoder {
 
                 // FIXME: (rdar://170907318) This should be changed to `if let` when possible.
                 if var textureToClear {
-                    let textureWithResolve = TextureAndClearColor(texture: textureToClear)
-                    attachmentsToClear[i as NSNumber] = textureWithResolve
+                    attachmentsToClear[i] = TextureToClear(texture: textureToClear)
                     texture.setPreviouslyCleared()
                     // FIXME: (rdar://170907318) This should be changed to `if let` when possible.
                     if var resolveTarget = attachment.resolveTarget {
