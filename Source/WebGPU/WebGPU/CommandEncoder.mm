@@ -1043,7 +1043,7 @@ NSString* CommandEncoder::errorValidatingCopyBufferToTexture(const WGPUImageCopy
 void CommandEncoder::copyBufferToTexture(const WGPUImageCopyBuffer& source, const WGPUImageCopyTexture& destination, const WGPUExtent3D& copySize)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    commandEncoderCopyBufferToTexture(this, source, destination, copySize);
+    commandEncoderCopyBufferToTexture(this, source, fromAPI(source.buffer).storage(), destination, copySize);
 #else
     // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copybuffertotexture
 
@@ -1590,7 +1590,7 @@ static bool NODELETE hasValidDimensions(WGPUTextureDimension dimension, NSUInteg
 void CommandEncoder::copyTextureToBuffer(const WGPUImageCopyTexture& source, const WGPUImageCopyBuffer& destination, const WGPUExtent3D& copySize)
 {
 #if ENABLE(WEBGPU_SWIFT)
-    commandEncoderCopyTextureToBuffer(this, source, destination, copySize);
+    commandEncoderCopyTextureToBuffer(this, source, destination, fromAPI(destination.buffer).storage(), copySize);
 #else
     // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copytexturetobuffer
 

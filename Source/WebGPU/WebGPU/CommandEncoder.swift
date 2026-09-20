@@ -107,10 +107,16 @@ func commandEncoderResolveQuerySet(
 func commandEncoderCopyBufferToTexture(
     _ commandEncoder: WebGPU.CommandEncoder,
     source: WGPUImageCopyBuffer,
+    sourceStorage: BufferState,
     destination: WGPUImageCopyTexture,
     copySize: WGPUExtent3D
 ) {
-    commandEncoder.copyBufferToTexture(source: source, destination: destination, copySize: copySize)
+    commandEncoder.copyBufferToTexture(
+        source: source,
+        sourceStorage: sourceStorage,
+        destination: destination,
+        copySize: copySize
+    )
 }
 
 @_expose(Cxx)
@@ -118,9 +124,15 @@ func commandEncoderCopyTextureToBuffer(
     commandEncoder: WebGPU.CommandEncoder,
     source: WGPUImageCopyTexture,
     destination: WGPUImageCopyBuffer,
+    destinationStorage: BufferState,
     copySize: WGPUExtent3D
 ) {
-    commandEncoder.copyTextureToBuffer(source: source, destination: destination, copySize: copySize)
+    commandEncoder.copyTextureToBuffer(
+        source: source,
+        destination: destination,
+        destinationStorage: destinationStorage,
+        copySize: copySize
+    )
 }
 
 @_expose(Cxx)
@@ -834,6 +846,7 @@ extension WebGPU.CommandEncoder {
     private func errorValidatingCopyTextureToBuffer(
         source: WGPUImageCopyTexture,
         destination: WGPUImageCopyBuffer,
+        destinationStorage: BufferState,
         copySize: WGPUExtent3D
     ) -> String? {
         func errorString(_ error: String) -> String {
@@ -875,7 +888,7 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if WebGPU.fromAPI(destination.buffer).usage() & WGPUBufferUsage_CopyDst.rawValue == 0 {
+        if destinationStorage.usage & WGPUBufferUsage_CopyDst.rawValue == 0 {
             return errorString("destination buffer usage does not contain CopyDst")
         }
 
@@ -898,7 +911,7 @@ extension WebGPU.CommandEncoder {
 
         if let error = WebGPU.Texture.errorValidatingLinearTextureData(
             destination.layout,
-            WebGPU.fromAPI(destination.buffer).initialSize(),
+            destinationStorage.initialSize,
             aspectSpecificFormat,
             copySize
         ) {
@@ -923,6 +936,7 @@ extension WebGPU.CommandEncoder {
 
     private func errorValidatingCopyBufferToTexture(
         source: WGPUImageCopyBuffer,
+        sourceStorage: BufferState,
         destination: WGPUImageCopyTexture,
         copySize: WGPUExtent3D
     ) -> String? {
@@ -930,13 +944,12 @@ extension WebGPU.CommandEncoder {
             "GPUCommandEncoder.copyBufferToTexture: \(error)"
         }
         let destinationTexture = WebGPU.fromAPI(destination.texture)
-        let sourceBuffer = WebGPU.fromAPI(source.buffer)
 
         if let error = errorValidatingImageCopyBuffer(imageCopyBuffer: source) {
             return errorString(error)
         }
 
-        if sourceBuffer.usage() & WGPUBufferUsage_CopySrc.rawValue == 0 {
+        if sourceStorage.usage & WGPUBufferUsage_CopySrc.rawValue == 0 {
             return errorString("source usage does not contain CopySrc")
         }
 
@@ -989,7 +1002,7 @@ extension WebGPU.CommandEncoder {
 
         if let error = WebGPU.Texture.errorValidatingLinearTextureData(
             source.layout,
-            WebGPU.fromAPI(source.buffer).initialSize(),
+            sourceStorage.initialSize,
             aspectSpecificFormat,
             copySize
         ) {
@@ -1630,7 +1643,12 @@ extension WebGPU.CommandEncoder {
         )
     }
 
-    func copyTextureToBuffer(source: WGPUImageCopyTexture, destination: WGPUImageCopyBuffer, copySize: WGPUExtent3D) {
+    func copyTextureToBuffer(
+        source: WGPUImageCopyTexture,
+        destination: WGPUImageCopyBuffer,
+        destinationStorage: BufferState,
+        copySize: WGPUExtent3D
+    ) {
         // https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-copytexturetobuffer
 
         guard prepareTheEncoderState() else {
@@ -1639,7 +1657,12 @@ extension WebGPU.CommandEncoder {
         }
 
         let sourceTexture = WebGPU.fromAPI(source.texture)
-        if let error = errorValidatingCopyTextureToBuffer(source: source, destination: destination, copySize: copySize) {
+        if let error = errorValidatingCopyTextureToBuffer(
+            source: source,
+            destination: destination,
+            destinationStorage: destinationStorage,
+            copySize: copySize
+        ) {
             makeInvalid(error)
             return
         }
@@ -1648,7 +1671,7 @@ extension WebGPU.CommandEncoder {
         sourceTexture.setCommandEncoder(self)
         apiDestinationBuffer.setCommandEncoder(self, false)
         apiDestinationBuffer.indirectBufferInvalidated(self)
-        guard !sourceTexture.isDestroyed() && !apiDestinationBuffer.isDestroyed() else {
+        guard !sourceTexture.isDestroyed() && !destinationStorage.isDestroyed else {
             return
         }
 
@@ -1673,7 +1696,7 @@ extension WebGPU.CommandEncoder {
             logicalSize.depthOrArrayLayers < source.origin.z
             ? 0 : min(copySize.depthOrArrayLayers, logicalSize.depthOrArrayLayers - source.origin.z)
 
-        guard let destinationBuffer = apiDestinationBuffer.buffer() else {
+        guard let destinationBuffer = destinationStorage.metalBuffer else {
             return
         }
         var destinationBytesPerRow = UInt(destination.layout.bytesPerRow)
@@ -1788,6 +1811,7 @@ extension WebGPU.CommandEncoder {
                     self.copyTextureToBuffer(
                         source: newSource,
                         destination: newDestination,
+                        destinationStorage: destinationStorage,
                         copySize: WGPUExtent3D(
                             width: copySize.width,
                             height: blockHeight,
@@ -1940,14 +1964,24 @@ extension WebGPU.CommandEncoder {
         }
     }
 
-    func copyBufferToTexture(source: WGPUImageCopyBuffer, destination: WGPUImageCopyTexture, copySize: WGPUExtent3D) {
+    func copyBufferToTexture(
+        source: WGPUImageCopyBuffer,
+        sourceStorage: BufferState,
+        destination: WGPUImageCopyTexture,
+        copySize: WGPUExtent3D
+    ) {
         guard prepareTheEncoderState() else {
             generateInvalidEncoderStateError()
             return
         }
         let destinationTexture = WebGPU.fromAPI(destination.texture)
 
-        if let error = errorValidatingCopyBufferToTexture(source: source, destination: destination, copySize: copySize) {
+        if let error = errorValidatingCopyBufferToTexture(
+            source: source,
+            sourceStorage: sourceStorage,
+            destination: destination,
+            copySize: copySize
+        ) {
             makeInvalid(error)
             return
         }
@@ -1957,7 +1991,7 @@ extension WebGPU.CommandEncoder {
 
         guard
             copySize.width != 0 || copySize.height != 0 || copySize.depthOrArrayLayers != 0,
-            !apiBuffer.isDestroyed(),
+            !sourceStorage.isDestroyed,
             !destinationTexture.isDestroyed()
         else {
             return
@@ -1967,7 +2001,7 @@ extension WebGPU.CommandEncoder {
             return
         }
         var sourceBytesPerRow = UInt(source.layout.bytesPerRow)
-        guard let sourceBuffer = apiBuffer.buffer() else {
+        guard let sourceBuffer = sourceStorage.metalBuffer else {
             return
         }
         if sourceBytesPerRow == WGPU_COPY_STRIDE_UNDEFINED {
@@ -2134,6 +2168,7 @@ extension WebGPU.CommandEncoder {
                     )
                     copyBufferToTexture(
                         source: newSource,
+                        sourceStorage: sourceStorage,
                         destination: newDestination,
                         copySize: WGPUExtent3D(width: copySize.width, height: blockHeight, depthOrArrayLayers: 1),
                     )
