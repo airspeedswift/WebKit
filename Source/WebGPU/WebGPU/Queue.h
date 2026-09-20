@@ -90,7 +90,7 @@ public:
     void makeInvalid();
     void setCommittedSignalEvent(id<MTLSharedEvent>, size_t frameIndex);
 
-    const Device& device() const SWIFT_RETURNS_INDEPENDENT_VALUE;
+    const Device& device() const;
     void clearTextureIfNeeded(const WGPUImageCopyTexture&, NSUInteger);
     id<MTLCommandBuffer> _Nullable commandBufferWithDescriptor(MTLCommandBufferDescriptor*);
     void commitMTLCommandBuffer(id<MTLCommandBuffer>);
