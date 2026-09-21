@@ -100,6 +100,7 @@ list(APPEND WebKit_SOURCES
     Shared/API/Cocoa/WKMain.mm
 
     Shared/Cocoa/DefaultWebBrowserChecks.mm
+    Shared/Cocoa/WKKeyedCoder.swift
     Shared/Cocoa/XPCEndpoint.mm
     Shared/Cocoa/XPCEndpointClient.mm
 
@@ -1199,7 +1200,15 @@ file(WRITE "${CMAKE_BINARY_DIR}/swift-vfs-overlay.yaml"
 set(WebKit_CMAKE_MODULEMAP_DIR "${CMAKE_BINARY_DIR}/WebKit/SwiftModules/Internal")
 file(MAKE_DIRECTORY "${WebKit_CMAKE_MODULEMAP_DIR}")
 file(WRITE "${WebKit_CMAKE_MODULEMAP_DIR}/module.modulemap"
-"module WebKit_Internal [system] {
+"module WebKit_KeyedCoder [system] {
+    module WKKeyedCoder {
+        requires objc
+        header \"${WEBKIT_DIR}/Shared/Cocoa/WKKeyedCoder.h\"
+        export *
+    }
+}
+
+module WebKit_Internal [system] {
     module WKMaterialHostingSupport {
         requires objc
         header \"${WEBKIT_DIR}/Platform/cocoa/WKMaterialHostingSupport.h\"

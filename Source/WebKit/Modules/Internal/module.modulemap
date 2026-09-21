@@ -449,3 +449,16 @@ module WebKit_Internal [system] {
         requires cplusplus20
     }
 }
+
+// WKKeyedCoder.swift implements WKKeyedCoder with @objc @implementation. Its members
+// override public Foundation declarations, so Swift requires them to be public, which in
+// turn requires the module declaring WKKeyedCoder to be imported publicly. Importing
+// WebKit_Internal publicly would make every header in it part of WebKit's public Swift
+// interface, so WKKeyedCoder.h is declared as its own small module instead.
+module WebKit_KeyedCoder [system] {
+    module WKKeyedCoder {
+        requires objc
+        header "../../Shared/Cocoa/WKKeyedCoder.h"
+        export *
+    }
+}

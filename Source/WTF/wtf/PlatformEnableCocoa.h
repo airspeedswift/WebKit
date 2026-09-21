@@ -1233,6 +1233,12 @@
 #define ENABLE_COOKIE_STORE_API_BY_DEFAULT 1
 #endif
 
+/* WKKeyedCoder's implementation is written in Swift when this is enabled. Off by
+   default: flip it on locally to select the Swift implementation. */
+#if !defined(ENABLE_KEYED_CODER_SWIFT)
+#define ENABLE_KEYED_CODER_SWIFT 0
+#endif
+
 #if !defined(ENABLE_DRAG_SOURCE_CUSTOMIZATION) && PLATFORM(MAC) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 270000
 #define ENABLE_DRAG_SOURCE_CUSTOMIZATION 1
 #endif

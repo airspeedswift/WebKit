@@ -25,7 +25,11 @@
 
 #pragma once
 
+#import <wtf/Platform.h>
+
 #ifdef __OBJC__
+
+#import <Foundation/Foundation.h>
 
 // WKKeyedCoder is an NSCoder meant to work with `encodeWithCoder:` and `initWithCoder:` for
 // certain classes we need to serialize.
@@ -41,10 +45,34 @@
 // This is an implementation detail of IPC that should only be used for the SupportWKKeyedCoder
 // keyword in a *.serialization.in file, and its use should only be declining.
 
+NS_ASSUME_NONNULL_BEGIN
+
+#if ENABLE(KEYED_CODER_SWIFT)
+// Defined in WKKeyedCoder.mm, so the Swift implementation can reach
+// IPC::isSerializableValue, which is a free function in a C++ namespace.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool WKKeyedCoderIsSerializableValue(id);
+#ifdef __cplusplus
+}
+#endif
+#endif
+
 @interface WKKeyedCoder : NSCoder
 - (instancetype)init;
-- (instancetype)initWithDictionary:(NSDictionary *)dictionary;
-- (NSDictionary *)accumulatedDictionary;
+- (instancetype)initWithDictionary:(NSDictionary<NSString *, id> *)dictionary;
+- (NSDictionary<NSString *, id> *)accumulatedDictionary;
+
+#if ENABLE(KEYED_CODER_SWIFT)
+// -decodeObjectOfClass:forKey: cannot be implemented in Swift: the Foundation overlay
+// claims that selector for a generic decodeObject(of:forKey:) which is not overridable,
+// so the Swift implementation is spelled under this name and the ObjC category in
+// WKKeyedCoder.mm forwards the NSCoder selector to it.
+- (nullable id)decodeObjectAllowingClass:(Class)aClass forKey:(NSString *)key;
+#endif
 @end
+
+NS_ASSUME_NONNULL_END
 
 #endif // __OBJC__

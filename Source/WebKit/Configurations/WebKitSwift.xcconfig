@@ -47,7 +47,9 @@ FRAMEWORK_LDFLAGS_xros = -framework AVKit;
 FRAMEWORK_LDFLAGS_xrsimulator = -framework AVKit;
 
 // Use handwritten SPI modules on public SDKs.
-SWIFT_INCLUDE_PATHS = $(SWIFT_INCLUDE_PATHS_$(USE_INTERNAL_SDK));
+// Modules/Internal is on the path because WebKit's Swift module publicly depends on
+// WebKit_KeyedCoder, declared in that directory's modulemap; see WKKeyedCoder.swift.
+SWIFT_INCLUDE_PATHS = $(SRCROOT)/Modules/Internal $(SWIFT_INCLUDE_PATHS_$(USE_INTERNAL_SDK));
 SWIFT_INCLUDE_PATHS_ = $(SRCROOT)/Platform/spi/visionos $(SRCROOT)/Platform/spi/ios $(SRCROOT)/Platform/spi/Cocoa $(SRCROOT)/Platform/spi/Cocoa/Modules $(inherited);
 
 USER_HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)/Platform/spi/Cocoa/Modules;

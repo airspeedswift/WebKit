@@ -2554,6 +2554,7 @@
 		E49D40D71AD3FB170066B7B9 /* NetworkCacheBlobStorage.h in Headers */ = {isa = PBXBuildFile; fileRef = E49D40D61AD3FB170066B7B9 /* NetworkCacheBlobStorage.h */; };
 		E4D54D0421F1D72D007E3C36 /* ScrollingTreeFrameScrollingNodeRemoteIOS.h in Headers */ = {isa = PBXBuildFile; fileRef = E40C1F9321F0B96E00530718 /* ScrollingTreeFrameScrollingNodeRemoteIOS.h */; };
 		E4E57F6B21A83B1200345F3C /* RemoteLayerTreeNode.h in Headers */ = {isa = PBXBuildFile; fileRef = E4E57F6A21A83B1100345F3C /* RemoteLayerTreeNode.h */; };
+		51KC00022B21395A009119F9 /* WKKeyedCoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51KC00012B21395A009119F9 /* WKKeyedCoder.swift */; };
 		E502E4F82D4810EA00C3D56D /* WKMaterialHostingSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E502E4F72D4810EA00C3D56D /* WKMaterialHostingSupport.swift */; };
 		E502E4FA2D48113B00C3D56D /* WKMaterialHostingSupport.h in Headers */ = {isa = PBXBuildFile; fileRef = E502E4F92D48110200C3D56D /* WKMaterialHostingSupport.h */; };
 		E50620922542102000C43091 /* ContactsUISPI.h in Headers */ = {isa = PBXBuildFile; fileRef = E50620912542102000C43091 /* ContactsUISPI.h */; };
@@ -6363,6 +6364,7 @@
 		51E399051D6F54C5009C8831 /* UIGamepadProviderCocoa.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = UIGamepadProviderCocoa.mm; sourceTree = "<group>"; };
 		51E8284B2B2036DD009119F9 /* CoreIPCAVOutputContext.serialization.in */ = {isa = PBXFileReference; lastKnownFileType = text; path = CoreIPCAVOutputContext.serialization.in; sourceTree = "<group>"; };
 		51E8284C2B213954009119F9 /* WKKeyedCoder.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = WKKeyedCoder.h; sourceTree = "<group>"; };
+		51KC00012B21395A009119F9 /* WKKeyedCoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WKKeyedCoder.swift; sourceTree = "<group>"; };
 		51E8284D2B213955009119F9 /* WKKeyedCoder.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = WKKeyedCoder.mm; sourceTree = "<group>"; };
 		51E8B68D1E712873001B7132 /* WebURLSchemeTask.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = WebURLSchemeTask.cpp; sourceTree = "<group>"; };
 		51E9049827BCB9D100929E7E /* LaunchServicesSPI.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LaunchServicesSPI.h; sourceTree = "<group>"; };
@@ -13612,6 +13614,7 @@
 				517B5F98275EC600002DC22D /* WebPushMessageCocoa.mm */,
 				51E8284C2B213954009119F9 /* WKKeyedCoder.h */,
 				51E8284D2B213955009119F9 /* WKKeyedCoder.mm */,
+				51KC00012B21395A009119F9 /* WKKeyedCoder.swift */,
 				37C4C0921814B3AF003688B9 /* WKNSArray.h */,
 				37C4C0911814B3AF003688B9 /* WKNSArray.mm */,
 				373CEAD4185417AE008C363D /* WKNSData.h */,
@@ -22769,6 +22772,7 @@
 				078074F93029A874005492F5 /* WKDOMDoubleClickGestureRecognizer.swift in Sources */,
 				637281A321ADC744009E0DE6 /* WKDownloadProgress.mm in Sources */,
 				07F0337C30107D3900B69551 /* WKFastScrollTracker.swift in Sources */,
+				51KC00022B21395A009119F9 /* WKKeyedCoder.swift in Sources */,
 				5CE9120D2293C219005BEC78 /* WKMain.mm in Sources */,
 				E502E4F82D4810EA00C3D56D /* WKMaterialHostingSupport.swift in Sources */,
 				07FEBC9A2E035A8B004A6D5D /* WKMouseDeviceObserver.swift in Sources */,

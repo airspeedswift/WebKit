@@ -26,6 +26,8 @@
 #import "config.h"
 #import "ArgumentCodersCocoa.h"
 
+#if !ENABLE(KEYED_CODER_SWIFT)
+
 @implementation WKKeyedCoder {
     RetainPtr<NSMutableDictionary> m_dictionary;
     bool m_failedDecoding;
@@ -149,3 +151,27 @@
 }
 
 @end // @implementation WKKeyedCoder
+
+#else // ENABLE(KEYED_CODER_SWIFT)
+
+// The implementation lives in WKKeyedCoder.swift. Two things it cannot do itself:
+
+// IPC::isSerializableValue is a free function in a C++ namespace, which Swift cannot call.
+extern "C" bool WKKeyedCoderIsSerializableValue(id value)
+{
+    return IPC::isSerializableValue(value);
+}
+
+// The Foundation overlay claims -decodeObjectOfClass:forKey: for a generic that cannot be
+// overridden, so the Swift side implements -decodeObjectAllowingClass:forKey: instead and
+// this forwards the NSCoder selector to it.
+@implementation WKKeyedCoder (DecodeObjectOfClass)
+
+- (id)decodeObjectOfClass:(Class)aClass forKey:(NSString *)key
+{
+    return [self decodeObjectAllowingClass:aClass forKey:key];
+}
+
+@end
+
+#endif // ENABLE(KEYED_CODER_SWIFT)
