@@ -63,9 +63,19 @@ extension WKKeyedCoder {
         super.init()
     }
 
-    public init(dictionary: [Swift.String: Any]) {
+    // The parameter is [AnyHashable: Any] rather than [Swift.String: Any] because the ObjC
+    // declaration is a bare NSDictionary: its generic parameters are unchecked documentation, so a
+    // caller can hand this a dictionary with a non-NSString key. Binding that to [Swift.String: Any]
+    // bridges eagerly and traps on such a key, where the ObjC implementation tolerated it -- the
+    // entry was simply never matched by a lookup. Filtering reproduces that. No caller in this tree
+    // can reach it today: all nine build the dictionary locally with literal keys.
+    public init(dictionary: [AnyHashable: Any]) {
         let storage = KeyedCoderStorage()
-        storage.dictionary = dictionary
+        for (key, value) in dictionary {
+            if let key = key.base as? Swift.String {
+                storage.dictionary[key] = value
+            }
+        }
         self.backingStorage = storage
         super.init()
     }

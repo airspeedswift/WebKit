@@ -1233,10 +1233,17 @@
 #define ENABLE_COOKIE_STORE_API_BY_DEFAULT 1
 #endif
 
-/* WKKeyedCoder's implementation is written in Swift when this is enabled. Off by
-   default: flip it on locally to select the Swift implementation. */
-#if !defined(ENABLE_KEYED_CODER_SWIFT)
-#define ENABLE_KEYED_CODER_SWIFT 0
+/* WKKeyedCoder's implementation is written in Swift when this is enabled; see
+   Source/WebKit/Shared/Cocoa/WKKeyedCoder.swift. The condition is a build-time SDK check
+   rather than a deployment-target one, following ENABLE_IPC_TESTING_SWIFT: the Swift
+   implementation uses no API newer than the C++ it replaces, so nothing here depends on the
+   OS it runs on -- what it needs is a toolchain that supports @objc @implementation and
+   access-level-on-import, and an SDK whose NSCoder is the one it was verified against.
+   macOS only because macOS is the only platform on which the Swift arm has been built and
+   run; widen it per platform as each is verified, not ahead of that. */
+#if !defined(ENABLE_KEYED_CODER_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_KEYED_CODER_SWIFT 1
 #endif
 
 #if !defined(ENABLE_DRAG_SOURCE_CUSTOMIZATION) && PLATFORM(MAC) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 270000

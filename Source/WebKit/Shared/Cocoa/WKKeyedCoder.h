@@ -61,7 +61,7 @@ bool WKKeyedCoderIsSerializableValue(id);
 
 @interface WKKeyedCoder : NSCoder
 - (instancetype)init;
-- (instancetype)initWithDictionary:(NSDictionary<NSString *, id> *)dictionary;
+- (instancetype)initWithDictionary:(NSDictionary *)dictionary;
 - (NSDictionary<NSString *, id> *)accumulatedDictionary;
 
 #if ENABLE(KEYED_CODER_SWIFT)
