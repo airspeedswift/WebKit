@@ -26,12 +26,18 @@
 #ifndef WebActionDisablingCALayerDelegate_h
 #define WebActionDisablingCALayerDelegate_h
 
+#import <QuartzCore/CALayer.h>
+#import <WebCore/PlatformExportMacros.h>
 #import <pal/spi/cocoa/QuartzCoreSPI.h>
+
+NS_ASSUME_NONNULL_BEGIN
 
 WEBCORE_EXPORT @interface WebActionDisablingCALayerDelegate : NSObject <CALayerDelegate>
 
 + (instancetype)shared;
 
 @end
+
+NS_ASSUME_NONNULL_END
 
 #endif // WebActionDisablingCALayerDelegate_h

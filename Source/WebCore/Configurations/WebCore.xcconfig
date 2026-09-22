@@ -251,7 +251,12 @@ MODULE_VERIFIER_SUPPORTED_LANGUAGES = objective-c++;
 MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = c++23;
 MODULE_VERIFIER_KIND = builtin;
 
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b;
+// The response file is emitted by the "Generate <wtf/Platform.h> args" phase, which this
+// target has always run without anything consuming its output. Without it, no ENABLE()/HAVE()
+// macro reaches swiftc, so a `#if ENABLE_X` in a WebCore Swift source is silently false while
+// the same gate is true for the C++ beside it -- which compiles the C++ out and the Swift away,
+// and removes the class from the framework.
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b @$(BUILT_PRODUCTS_DIR)/DerivedSources/WebCore/platform-enabled-swift-args.$(arch).resp;
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;

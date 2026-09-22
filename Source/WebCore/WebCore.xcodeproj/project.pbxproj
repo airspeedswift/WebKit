@@ -69,6 +69,7 @@
 		0208E1832D213D9900BECD3D /* BackForwardFrameItemIdentifier.h in Headers */ = {isa = PBXBuildFile; fileRef = 0208E1822D213D9100BECD3D /* BackForwardFrameItemIdentifier.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		021D763629C2A24F00063684 /* ScrollbarsControllerMac.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F02245426F15D75000265C3 /* ScrollbarsControllerMac.h */; };
 		021D763929C2A43B00063684 /* ScrollbarsController.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F02245226F15D5F000265C3 /* ScrollbarsController.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		AA02WADS0001000000000002 /* WebActionDisablingCALayerDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02WADS0001000000000001 /* WebActionDisablingCALayerDelegate.swift */; };
 		021D763A29C2AC6B00063684 /* ScrollbarsControllerMac.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0F02245326F15D75000265C3 /* ScrollbarsControllerMac.mm */; };
 		0223E06D2AAECC2200AF30FB /* HandleUserInputEventResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E06C2AAEBBCF00AF30FB /* HandleUserInputEventResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0223E0742AAED62200AF30FB /* RemoteUserInputEventData.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E0732AAED62200AF30FB /* RemoteUserInputEventData.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -22041,6 +22042,7 @@
 		DD17C080286EC51B00D60B58 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = "<group>"; };
 		DD308A2C2A82F684000A2687 /* AbstractLineBuilder.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AbstractLineBuilder.h; sourceTree = "<group>"; };
 		DD4B9CF62C80E8E8001A6830 /* LineClampUpdater.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LineClampUpdater.h; sourceTree = "<group>"; };
+		AA02WADS0001000000000001 /* WebActionDisablingCALayerDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/WebActionDisablingCALayerDelegate.swift; sourceTree = SOURCE_ROOT; };
 		DD5697F72DC1302B00050321 /* rdar150228472.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rdar150228472.swift; sourceTree = "<group>"; };
 		DD5ACFD62B14DAD600B36C57 /* LayoutIntegrationBoxGeometryUpdater.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayoutIntegrationBoxGeometryUpdater.cpp; sourceTree = "<group>"; };
 		DD5ACFD72B14DADE00B36C57 /* LayoutIntegrationBoxGeometryUpdater.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LayoutIntegrationBoxGeometryUpdater.h; sourceTree = "<group>"; };
@@ -52130,6 +52132,7 @@
 				A14832B9187F63D500DA63A6 /* WAKView.mm in Sources */,
 				DE5F861E1FA281FD006DB63A /* WebAccessibilityObjectWrapperBase.mm in Sources */,
 				DE5F861D1FA2815B006DB63A /* WebAccessibilityObjectWrapperMac.mm in Sources */,
+				AA02WADS0001000000000002 /* WebActionDisablingCALayerDelegate.swift in Sources */,
 				A1F1C8722AF20E0E001B27E6 /* WebAVContentKeyGroup.mm in Sources */,
 				511D6701286C1D70008C2AED /* WebAVPlayerLayer.mm in Sources */,
 				CD0445E22992F1740059B997 /* WebAVPlayerLayerView.mm in Sources */,

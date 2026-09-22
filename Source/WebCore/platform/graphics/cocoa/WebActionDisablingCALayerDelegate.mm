@@ -28,6 +28,8 @@
 #import "WebActionDisablingCALayerDelegate.h"
 #import <QuartzCore/QuartzCore.h>
 
+#if !ENABLE(ACTION_DISABLING_DELEGATE_SWIFT)
+
 @implementation WebActionDisablingCALayerDelegate
 
 + (instancetype)shared
@@ -44,3 +46,5 @@
 }
 
 @end
+
+#endif // !ENABLE(ACTION_DISABLING_DELEGATE_SWIFT)

@@ -1233,6 +1233,16 @@
 #define ENABLE_COOKIE_STORE_API_BY_DEFAULT 1
 #endif
 
+/* WebActionDisablingCALayerDelegate's implementation is written in Swift when this is
+   enabled; see Source/WebCore/platform/graphics/cocoa/WebActionDisablingCALayerDelegate.swift.
+   This is the first Swift source compiled into the WebCore target proper, so the gate also
+   guards that: turning it off returns WebCore to compiling no Swift of its own. Same
+   reasoning as ENABLE_KEYED_CODER_SWIFT for the SDK check and for macOS alone. */
+#if !defined(ENABLE_ACTION_DISABLING_DELEGATE_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_ACTION_DISABLING_DELEGATE_SWIFT 1
+#endif
+
 /* WKKeyedCoder's implementation is written in Swift when this is enabled; see
    Source/WebKit/Shared/Cocoa/WKKeyedCoder.swift. The condition is a build-time SDK check
    rather than a deployment-target one, following ENABLE_IPC_TESTING_SWIFT: the Swift
