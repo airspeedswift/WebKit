@@ -41,6 +41,35 @@
 namespace WebCore {
 
 // https://w3c.github.io/uievents-key/
+#if ENABLE(KEY_EVENT_TABLES_SWIFT)
+
+// The tables are in KeyEventCocoa.swift. WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO and
+// declares no SWIFT_OBJC_INTERFACE_HEADER_NAME, so C++ cannot name a Swift declaration and
+// the boundary is @_cdecl, which cannot carry a WTF::String. Each entry point therefore
+// returns a pointer into static storage, or null when the tables do not name the code.
+//
+// Both fallbacks stay here rather than moving to Swift. keyForCharCode's is the input code
+// unit itself, which may be an unpaired surrogate: no Swift.String can hold one, and
+// WTF::String can, so the case Swift cannot represent never crosses the boundary.
+extern "C" const char* WebCoreKeyNameForCharCode(uint16_t);
+extern "C" const char* WebCoreKeyIdentifierNameForCharCode(uint16_t);
+
+String keyForCharCode(unichar charCode)
+{
+    if (const char* name = WebCoreKeyNameForCharCode(charCode))
+        return String::fromLatin1(name);
+    return singleElementSpan(*reinterpret_cast<const char16_t*>(&charCode));
+}
+
+String keyIdentifierForCharCode(unichar charCode)
+{
+    if (const char* name = WebCoreKeyIdentifierNameForCharCode(charCode))
+        return String::fromLatin1(name);
+    return makeString("U+"_s, hex(toASCIIUpper(charCode), 4));
+}
+
+#else
+
 String keyForCharCode(unichar charCode)
 {
     switch (charCode) {
@@ -484,5 +513,7 @@ String keyIdentifierForCharCode(unichar charCode)
             return makeString("U+"_s, hex(toASCIIUpper(charCode), 4));
     }
 }
+
+#endif // ENABLE(KEY_EVENT_TABLES_SWIFT)
 
 }

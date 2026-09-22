@@ -1233,6 +1233,21 @@
 #define ENABLE_COOKIE_STORE_API_BY_DEFAULT 1
 #endif
 
+/* WebCore::fromCVPixelFormat / toCVPixelFormat are written in Swift when this is enabled;
+   see Source/WebCore/platform/graphics/cocoa/ShareableCVPixelFormat.swift. Same SDK-check
+   reasoning and same macOS-only breadth as ENABLE_KEYED_CODER_SWIFT. */
+#if !defined(ENABLE_SHAREABLE_CV_PIXEL_FORMAT_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_SHAREABLE_CV_PIXEL_FORMAT_SWIFT 1
+#endif
+
+/* WebCore::keyForCharCode / keyIdentifierForCharCode are written in Swift when this is
+   enabled; see Source/WebCore/platform/cocoa/KeyEventCocoa.swift. Same reasoning again. */
+#if !defined(ENABLE_KEY_EVENT_TABLES_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_KEY_EVENT_TABLES_SWIFT 1
+#endif
+
 /* WebActionDisablingCALayerDelegate's implementation is written in Swift when this is
    enabled; see Source/WebCore/platform/graphics/cocoa/WebActionDisablingCALayerDelegate.swift.
    This is the first Swift source compiled into the WebCore target proper, so the gate also

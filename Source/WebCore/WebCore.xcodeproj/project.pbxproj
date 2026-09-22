@@ -70,6 +70,8 @@
 		021D763629C2A24F00063684 /* ScrollbarsControllerMac.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F02245426F15D75000265C3 /* ScrollbarsControllerMac.h */; };
 		021D763929C2A43B00063684 /* ScrollbarsController.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F02245226F15D5F000265C3 /* ScrollbarsController.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		AA02WADS0001000000000002 /* WebActionDisablingCALayerDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02WADS0001000000000001 /* WebActionDisablingCALayerDelegate.swift */; };
+		AA03CVPF0001000000000002 /* ShareableCVPixelFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA03CVPF0001000000000001 /* ShareableCVPixelFormat.swift */; };
+		AA04KEYT0001000000000002 /* KeyEventCocoa.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA04KEYT0001000000000001 /* KeyEventCocoa.swift */; };
 		021D763A29C2AC6B00063684 /* ScrollbarsControllerMac.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0F02245326F15D75000265C3 /* ScrollbarsControllerMac.mm */; };
 		0223E06D2AAECC2200AF30FB /* HandleUserInputEventResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E06C2AAEBBCF00AF30FB /* HandleUserInputEventResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0223E0742AAED62200AF30FB /* RemoteUserInputEventData.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E0732AAED62200AF30FB /* RemoteUserInputEventData.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -22043,6 +22045,8 @@
 		DD308A2C2A82F684000A2687 /* AbstractLineBuilder.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AbstractLineBuilder.h; sourceTree = "<group>"; };
 		DD4B9CF62C80E8E8001A6830 /* LineClampUpdater.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LineClampUpdater.h; sourceTree = "<group>"; };
 		AA02WADS0001000000000001 /* WebActionDisablingCALayerDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/WebActionDisablingCALayerDelegate.swift; sourceTree = SOURCE_ROOT; };
+		AA03CVPF0001000000000001 /* ShareableCVPixelFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/ShareableCVPixelFormat.swift; sourceTree = SOURCE_ROOT; };
+		AA04KEYT0001000000000001 /* KeyEventCocoa.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/cocoa/KeyEventCocoa.swift; sourceTree = SOURCE_ROOT; };
 		DD5697F72DC1302B00050321 /* rdar150228472.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rdar150228472.swift; sourceTree = "<group>"; };
 		DD5ACFD62B14DAD600B36C57 /* LayoutIntegrationBoxGeometryUpdater.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayoutIntegrationBoxGeometryUpdater.cpp; sourceTree = "<group>"; };
 		DD5ACFD72B14DADE00B36C57 /* LayoutIntegrationBoxGeometryUpdater.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LayoutIntegrationBoxGeometryUpdater.h; sourceTree = "<group>"; };
@@ -51368,6 +51372,7 @@
 				EE042903F1A0DE0100A1B2C3 /* JSDOMBindingFacade.cpp in Sources */,
 				2D1CE026F32F4DD98F662746 /* JSDOMWindow.cpp in Sources */,
 				AE9D0D864E151BAC3ECB750E /* JSDOMWindowConstructorAttributes.cpp in Sources */,
+				AA04KEYT0001000000000002 /* KeyEventCocoa.swift in Sources */,
 				935C477009AC4D7300A6AAB4 /* KeyEventMac.mm in Sources */,
 				CDA98E0B1603CD6000FEA3B1 /* LegacyCDM.cpp in Sources */,
 				CDE8B5EC1A69777300B4B66A /* LegacyCDMPrivateClearKey.cpp in Sources */,
@@ -51427,6 +51432,7 @@
 				5CFC9C842B71AE1800F8D289 /* SerializedPlatformDataCueValue.mm in Sources */,
 				7CD58DFD1F9565A800112791 /* Settings.cpp in Sources */,
 				46C963C82B6CA1BC002F46D1 /* ShareableBitmapCG.mm in Sources */,
+				AA03CVPF0001000000000002 /* ShareableCVPixelFormat.swift in Sources */,
 				B6F201102EAC22B200BBF4AA /* ShareableSpatialImage.cpp in Sources */,
 				41DF2D5E27A9452A00F25A21 /* SharedVideoFrameInfo.mm in Sources */,
 				A100D94F2AB251C400E00D67 /* SourceBufferParserAVFObjC.mm in Sources */,
