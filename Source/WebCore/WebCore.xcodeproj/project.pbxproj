@@ -72,6 +72,7 @@
 		AA02WADS0001000000000002 /* WebActionDisablingCALayerDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02WADS0001000000000001 /* WebActionDisablingCALayerDelegate.swift */; };
 		AA03CVPF0001000000000002 /* ShareableCVPixelFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA03CVPF0001000000000001 /* ShareableCVPixelFormat.swift */; };
 		AA04KEYT0001000000000002 /* KeyEventCocoa.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA04KEYT0001000000000001 /* KeyEventCocoa.swift */; };
+		AA05NSAS0001000000000002 /* WebNSAttributedStringExtras.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA05NSAS0001000000000001 /* WebNSAttributedStringExtras.swift */; };
 		021D763A29C2AC6B00063684 /* ScrollbarsControllerMac.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0F02245326F15D75000265C3 /* ScrollbarsControllerMac.mm */; };
 		0223E06D2AAECC2200AF30FB /* HandleUserInputEventResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E06C2AAEBBCF00AF30FB /* HandleUserInputEventResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0223E0742AAED62200AF30FB /* RemoteUserInputEventData.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E0732AAED62200AF30FB /* RemoteUserInputEventData.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -22047,6 +22048,7 @@
 		AA02WADS0001000000000001 /* WebActionDisablingCALayerDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/WebActionDisablingCALayerDelegate.swift; sourceTree = SOURCE_ROOT; };
 		AA03CVPF0001000000000001 /* ShareableCVPixelFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/ShareableCVPixelFormat.swift; sourceTree = SOURCE_ROOT; };
 		AA04KEYT0001000000000001 /* KeyEventCocoa.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/cocoa/KeyEventCocoa.swift; sourceTree = SOURCE_ROOT; };
+		AA05NSAS0001000000000001 /* WebNSAttributedStringExtras.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/cocoa/WebNSAttributedStringExtras.swift; sourceTree = SOURCE_ROOT; };
 		DD5697F72DC1302B00050321 /* rdar150228472.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rdar150228472.swift; sourceTree = "<group>"; };
 		DD5ACFD62B14DAD600B36C57 /* LayoutIntegrationBoxGeometryUpdater.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayoutIntegrationBoxGeometryUpdater.cpp; sourceTree = "<group>"; };
 		DD5ACFD72B14DADE00B36C57 /* LayoutIntegrationBoxGeometryUpdater.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LayoutIntegrationBoxGeometryUpdater.h; sourceTree = "<group>"; };
@@ -52156,6 +52158,7 @@
 				2D06214F1DA63A9100A7FB26 /* WebKitMediaKeySession.cpp in Sources */,
 				7C48A6D0191C9D6500026674 /* WebKitNamespace.cpp in Sources */,
 				07F5CFF62582A52900662EF5 /* WebMAudioUtilitiesCocoa.mm in Sources */,
+				AA05NSAS0001000000000002 /* WebNSAttributedStringExtras.swift in Sources */,
 				1CAF34820A6C405200ABE06E /* WebScriptObject.mm in Sources */,
 				CECDC93C21F2972900976BD1 /* WebVideoFullscreenControllerAVKit.mm in Sources */,
 				A14832C2187F65C700DA63A6 /* WKUtilities.cpp in Sources */,

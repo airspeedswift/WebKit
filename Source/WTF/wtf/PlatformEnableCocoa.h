@@ -1248,6 +1248,15 @@
 #define ENABLE_KEY_EVENT_TABLES_SWIFT 1
 #endif
 
+/* WebCore::attributedStringByStrippingAttachmentCharacters is written in Swift when this is
+   enabled; see Source/WebCore/platform/cocoa/WebNSAttributedStringExtras.swift. Same reasoning
+   again. This one is the first boundary here to return an Objective-C object across @_cdecl,
+   so the C++ wrapper keeps the exported signature and the +0 autoreleased result unchanged. */
+#if !defined(ENABLE_ATTRIBUTED_STRING_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_ATTRIBUTED_STRING_SWIFT 1
+#endif
+
 /* WebActionDisablingCALayerDelegate's implementation is written in Swift when this is
    enabled; see Source/WebCore/platform/graphics/cocoa/WebActionDisablingCALayerDelegate.swift.
    This is the first Swift source compiled into the WebCore target proper, so the gate also
