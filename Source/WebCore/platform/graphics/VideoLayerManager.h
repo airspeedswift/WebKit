@@ -33,6 +33,7 @@ namespace WebCore {
 
 class FloatRect;
 class IntSize;
+class TextTrackRepresentation;
 
 class VideoLayerManager {
 public:
@@ -51,7 +52,7 @@ public:
     virtual void updateVideoFullscreenInlineImage(PlatformImagePtr) = 0;
 #endif
 
-    virtual void setTextTrackRepresentationLayer(PlatformLayer*) = 0;
+    virtual void setTextTrackRepresentation(TextTrackRepresentation*) = 0;
     virtual void syncTextTrackBounds() = 0;
 };
 
