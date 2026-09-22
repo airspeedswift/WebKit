@@ -39,7 +39,6 @@ namespace WebCore {
 class TextTrackRepresentationCocoa;
 }
 
-@class WebCoreTextTrackRepresentationCocoaHelper;
 
 namespace WebCore {
 
@@ -58,6 +57,10 @@ public:
 
     WEBCORE_EXPORT void setBounds(const IntRect&) override;
     WEBCORE_EXPORT IntRect bounds() const override;
+
+    // Called by whoever writes the layer's geometry behind setBounds()'s back, to notify the
+    // client that bounds() has changed. VideoLayerManagerObjC::syncTextTrackBounds() sets the
+    // layer's frame directly, because it carries a position and setBounds() does not.
     void boundsChanged();
 
     using TextTrackRepresentationFactory = WTF::Function<std::unique_ptr<TextTrackRepresentation>(TextTrackRepresentationClient&, HTMLMediaElement&)>;
@@ -74,7 +77,6 @@ protected:
 
 private:
     RetainPtr<CALayer> m_layer;
-    RetainPtr<WebCoreTextTrackRepresentationCocoaHelper> m_delegate;
 };
 
 }

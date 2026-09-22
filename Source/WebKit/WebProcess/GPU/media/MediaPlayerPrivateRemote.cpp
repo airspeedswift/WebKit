@@ -1436,8 +1436,7 @@ void MediaPlayerPrivateRemote::setShouldContinueAfterKeyNeeded(bool should)
 void MediaPlayerPrivateRemote::setTextTrackRepresentation(WebCore::TextTrackRepresentation* representation)
 {
 #if PLATFORM(COCOA)
-    auto* representationLayer = representation ? representation->platformLayer() : nil;
-    m_videoLayerManager->setTextTrackRepresentationLayer(representationLayer);
+    m_videoLayerManager->setTextTrackRepresentation(representation);
 #endif
 }
 

@@ -35,10 +35,13 @@
 #include <wtf/Noncopyable.h>
 #include <wtf/RetainPtr.h>
 #include <wtf/TZoneMalloc.h>
+#include <wtf/WeakPtr.h>
 
 OBJC_CLASS WebVideoContainerLayer;
 
 namespace WebCore {
+
+class TextTrackRepresentationCocoa;
 
 class VideoLayerManagerObjC final
     : public VideoLayerManager
@@ -72,7 +75,7 @@ public:
     WEBCORE_EXPORT void updateVideoFullscreenInlineImage(PlatformImagePtr) final;
 #endif
 
-    WEBCORE_EXPORT void setTextTrackRepresentationLayer(PlatformLayer*) final;
+    WEBCORE_EXPORT void setTextTrackRepresentation(TextTrackRepresentation*) final;
     WEBCORE_EXPORT void syncTextTrackBounds() final;
 
 private:
@@ -93,6 +96,7 @@ private:
     FloatRect m_videoFullscreenFrame;
 #endif
     RetainPtr<PlatformLayer> m_textTrackRepresentationLayer;
+    WeakPtr<TextTrackRepresentationCocoa> m_textTrackRepresentation;
 
     RetainPtr<PlatformLayer> m_videoLayer;
 };

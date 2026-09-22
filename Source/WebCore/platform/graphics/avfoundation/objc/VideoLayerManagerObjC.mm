@@ -29,6 +29,7 @@
 #import "Color.h"
 #import "Logging.h"
 #import "TextTrackRepresentation.h"
+#import "TextTrackRepresentationCocoa.h"
 #import "WebCoreCALayerExtras.h"
 #import "WebVideoContainerLayer.h"
 #import <mach/mach_init.h>
@@ -98,7 +99,7 @@ void VideoLayerManagerObjC::didDestroyVideoLayer()
     ALWAYS_LOG(LOGIDENTIFIER);
 
 #if ENABLE(VIDEO_PRESENTATION_MODE)
-    setTextTrackRepresentationLayer(nil);
+    setTextTrackRepresentation(nullptr);
 #endif
     [m_videoLayer removeFromSuperlayer];
 
@@ -200,17 +201,35 @@ void VideoLayerManagerObjC::syncTextTrackBounds()
     [m_textTrackRepresentationLayer setFrame:m_videoFullscreenFrame];
 
     [CATransaction commit];
+
+    // setFrame: carries a position, which TextTrackRepresentation::setBounds() cannot, so the
+    // frame is written directly here and the representation is told its bounds changed. This is
+    // what the layer's KVO observation on `bounds` used to do.
+    // A raw pointer, not a CheckedPtr: boundsChanged() notifies the client, which can destroy the
+    // representation, and on iOS it does so synchronously. See TextTrackRepresentationCocoa.
+    if (auto* textTrackRepresentation = m_textTrackRepresentation.get())
+        textTrackRepresentation->boundsChanged();
 #endif
 }
 
-void VideoLayerManagerObjC::setTextTrackRepresentationLayer(PlatformLayer* representationLayer)
+void VideoLayerManagerObjC::setTextTrackRepresentation(TextTrackRepresentation* representation)
 {
 #if !ENABLE(VIDEO_PRESENTATION_MODE)
-    UNUSED_PARAM(representationLayer);
+    UNUSED_PARAM(representation);
 #else
     ALWAYS_LOG(LOGIDENTIFIER);
 
+    RetainPtr representationLayer = representation ? representation->platformLayer() : nil;
+
+    // On Cocoa every TextTrackRepresentation is a TextTrackRepresentationCocoa: the only
+    // TextTrackRepresentation::create() compiled here returns one, or the WebKit subclass of one,
+    // and the cross-platform NullTextTrackRepresentation is compiled out. The derived type is
+    // needed because WeakPtr requires a type offering CheckedPtr, which the base does not. There
+    // is no discriminator on the base to make this a downcast<>.
+    auto* representationCocoa = static_cast<TextTrackRepresentationCocoa*>(representation);
+
     if (representationLayer == m_textTrackRepresentationLayer) {
+        m_textTrackRepresentation = representationCocoa;
         syncTextTrackBounds();
         return;
     }
@@ -221,7 +240,8 @@ void VideoLayerManagerObjC::setTextTrackRepresentationLayer(PlatformLayer* repre
     if (m_textTrackRepresentationLayer)
         [m_textTrackRepresentationLayer removeFromSuperlayer];
 
-    m_textTrackRepresentationLayer = representationLayer;
+    m_textTrackRepresentationLayer = WTF::move(representationLayer);
+    m_textTrackRepresentation = representationCocoa;
 
     if (m_videoFullscreenLayer && m_textTrackRepresentationLayer) {
         syncTextTrackBounds();

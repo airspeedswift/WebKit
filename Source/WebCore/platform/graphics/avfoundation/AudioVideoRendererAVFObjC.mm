@@ -1052,8 +1052,7 @@ void AudioVideoRendererAVFObjC::setVideoFullscreenFrame(const FloatRect& frame)
 
 void AudioVideoRendererAVFObjC::setTextTrackRepresentation(TextTrackRepresentation* representation)
 {
-    RetainPtr representationLayer = representation ? representation->platformLayer() : nil;
-    m_videoLayerManager->setTextTrackRepresentationLayer(representationLayer.get());
+    m_videoLayerManager->setTextTrackRepresentation(representation);
 }
 
 void AudioVideoRendererAVFObjC::syncTextTrackBounds()

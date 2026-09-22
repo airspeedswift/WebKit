@@ -38,74 +38,11 @@
 #import "WebCoreThreadRun.h"
 #endif
 
+#import "WebActionDisablingCALayerDelegate.h"
 #import <pal/spi/cocoa/QuartzCoreSPI.h>
+#import <wtf/BlockPtr.h>
 #import <wtf/TZoneMallocInlines.h>
 
-
-@interface WebCoreTextTrackRepresentationCocoaHelper : NSObject <CALayerDelegate> {
-    CheckedPtr<WebCore::TextTrackRepresentationCocoa> _parent;
-}
-- (id)initWithParent:(WebCore::TextTrackRepresentationCocoa*)parent;
-@property (assign) WebCore::TextTrackRepresentationCocoa* parent;
-@end
-
-@implementation WebCoreTextTrackRepresentationCocoaHelper
-- (id)initWithParent:(WebCore::TextTrackRepresentationCocoa*)parent
-{
-    if (!(self = [super init]))
-        return nil;
-
-    self.parent = parent;
-
-    return self;
-}
-
-- (void)dealloc
-{
-    self.parent = nullptr;
-    [super dealloc];
-}
-
-- (void)setParent:(WebCore::TextTrackRepresentationCocoa*)parent
-{
-    if (_parent)
-        [_parent->platformLayer() removeObserver:self forKeyPath:@"bounds"];
-
-    _parent = parent;
-
-    if (_parent)
-        [_parent->platformLayer() addObserver:self forKeyPath:@"bounds" options:0 context:0];
-}
-
-- (WebCore::TextTrackRepresentationCocoa*)parent
-{
-    return _parent.get();
-}
-
-- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
-{
-    UNUSED_PARAM(change);
-    UNUSED_PARAM(context);
-#if PLATFORM(IOS_FAMILY)
-    WebThreadRun(^{
-        if (_parent && [keyPath isEqual:@"bounds"] && object == _parent->platformLayer())
-            _parent->client().textTrackRepresentationBoundsChanged(_parent->bounds());
-    });
-#else
-    if (_parent && [keyPath isEqual:@"bounds"] && object == _parent->platformLayer())
-        CheckedPtr { _parent }->boundsChanged();
-#endif
-}
-
-- (id)actionForLayer:(CALayer *)layer forKey:(NSString *)event
-{
-    UNUSED_PARAM(layer);
-    UNUSED_PARAM(event);
-    // Returning a NSNull from this delegate method disables all implicit CALayer actions.
-    return [NSNull null];
-}
-
-@end
 
 namespace WebCore {
 
@@ -127,9 +64,10 @@ TextTrackRepresentationCocoa::TextTrackRepresentationFactory& TextTrackRepresent
 TextTrackRepresentationCocoa::TextTrackRepresentationCocoa(TextTrackRepresentationClient& client)
     : m_client(client)
     , m_layer(adoptNS([[CALayer alloc] init]))
-    , m_delegate(adoptNS([[WebCoreTextTrackRepresentationCocoaHelper alloc] initWithParent:this]))
 {
-    [m_layer setDelegate:m_delegate.get()];
+    // Disables every implicit CALayer action on this layer. Was a bespoke delegate whose only
+    // other job was a back-pointer for a KVO observation that no longer exists.
+    [m_layer setDelegate:[WebActionDisablingCALayerDelegate shared]];
     [m_layer setContentsGravity:kCAGravityBottom];
 
     [m_layer setName:@"TextTrackRepresentation"];
@@ -138,7 +76,6 @@ TextTrackRepresentationCocoa::TextTrackRepresentationCocoa(TextTrackRepresentati
 TextTrackRepresentationCocoa::~TextTrackRepresentationCocoa()
 {
     [m_layer setDelegate:nil];
-    [m_delegate setParent:nullptr];
 }
 
 void TextTrackRepresentationCocoa::update()
@@ -159,7 +96,11 @@ void TextTrackRepresentationCocoa::setHidden(bool hidden) const
 
 void TextTrackRepresentationCocoa::setBounds(const IntRect& bounds)
 {
+    if (this->bounds() == bounds)
+        return;
+
     [m_layer setBounds:FloatRect(bounds)];
+    boundsChanged();
 }
 
 IntRect TextTrackRepresentationCocoa::bounds() const
@@ -169,10 +110,21 @@ IntRect TextTrackRepresentationCocoa::bounds() const
 
 void TextTrackRepresentationCocoa::boundsChanged()
 {
-    callOnMainThread([weakThis = WeakPtr { *this }] {
-        if (CheckedPtr checkedThis = weakThis)
-            checkedThis->client().textTrackRepresentationBoundsChanged(checkedThis->bounds());
-    });
+    // A raw pointer, not a CheckedPtr: textTrackRepresentationBoundsChanged() can destroy this
+    // object -- MediaControlTextTrackContainerElement clears its representation from that handler
+    // -- and on iOS this lambda runs inline, because WebThreadRun() calls the block directly when
+    // the WebThread is disabled. A CheckedPtr outstanding across that destruction would take the
+    // zombie branch and then crash in crashDueToCheckedPtrToDeadObject().
+    auto notifyClient = [weakThis = WeakPtr { *this }] {
+        if (auto* protectedThis = weakThis.get())
+            protectedThis->client().textTrackRepresentationBoundsChanged(protectedThis->bounds());
+    };
+
+#if PLATFORM(IOS_FAMILY)
+    WebThreadRun(makeBlockPtr(WTF::move(notifyClient)).get());
+#else
+    callOnMainThread(WTF::move(notifyClient));
+#endif
 }
 
 } // namespace WebCore

@@ -2658,8 +2658,7 @@ void MediaPlayerPrivateAVFoundationObjC::syncTextTrackBounds()
 
 void MediaPlayerPrivateAVFoundationObjC::setTextTrackRepresentation(TextTrackRepresentation* representation)
 {
-    RetainPtr representationLayer = representation ? representation->platformLayer() : nil;
-    m_videoLayerManager->setTextTrackRepresentationLayer(representationLayer.get());
+    m_videoLayerManager->setTextTrackRepresentation(representation);
 }
 
 #if ENABLE(WEB_AUDIO) && USE(MEDIATOOLBOX)
