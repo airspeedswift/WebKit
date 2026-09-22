@@ -30,7 +30,31 @@
 
 #include <CoreVideo/CoreVideo.h>
 
+#if ENABLE(SHAREABLE_CV_PIXEL_FORMAT_SWIFT)
+// Implemented in ShareableCVPixelFormat.swift. WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO
+// and declares no SWIFT_OBJC_INTERFACE_HEADER_NAME, so there is no generated Swift interface
+// header to include and no way for C++ to name a Swift declaration. The boundary is therefore
+// @_cdecl, and the enum crosses as its underlying uint8_t. Keep these in sync with the
+// @_cdecl names.
+extern "C" uint8_t WebCoreShareableCVPixelFormatFromCVPixelFormat(OSType);
+extern "C" OSType WebCoreShareableCVPixelFormatToCVPixelFormat(uint8_t);
+#endif
+
 namespace WebCore {
+
+#if ENABLE(SHAREABLE_CV_PIXEL_FORMAT_SWIFT)
+
+ShareableCVPixelFormat fromCVPixelFormat(OSType pixelFormat)
+{
+    return static_cast<ShareableCVPixelFormat>(WebCoreShareableCVPixelFormatFromCVPixelFormat(pixelFormat));
+}
+
+OSType toCVPixelFormat(ShareableCVPixelFormat pixelFormat)
+{
+    return WebCoreShareableCVPixelFormatToCVPixelFormat(static_cast<uint8_t>(pixelFormat));
+}
+
+#else
 
 ShareableCVPixelFormat fromCVPixelFormat(OSType pixelFormat)
 {
@@ -440,6 +464,8 @@ OSType toCVPixelFormat(ShareableCVPixelFormat pixelFormat)
         return kCVPixelFormatType_Lossy_422YpCbCr10PackedBiPlanarVideoRange;
     }
 }
+
+#endif // ENABLE(SHAREABLE_CV_PIXEL_FORMAT_SWIFT)
 
 } // namespace WebCore
 
