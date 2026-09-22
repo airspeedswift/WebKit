@@ -52,7 +52,7 @@ static NSString *externalOutputDevicePickedKeyName = @"externalOutputDevicePicke
 
 - (instancetype)initWithCallback:(AVOutputDeviceMenuControllerTargetPicker&)callback;
 - (void)clearCallback;
-- (void)observeValueForKeyPath:(id)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context;
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context;
 @end
 
 namespace WebCore {
@@ -175,7 +175,7 @@ AVOutputContext * AVOutputDeviceMenuControllerTargetPicker::outputContext()
     m_callback = nil;
 }
 
-- (void)observeValueForKeyPath:(id)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
 {
     UNUSED_PARAM(object);
     UNUSED_PARAM(change);
