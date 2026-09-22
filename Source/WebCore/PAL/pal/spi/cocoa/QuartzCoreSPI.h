@@ -25,9 +25,6 @@
 
 #pragma once
 
-// FIXME: Remove the `__has_feature(modules)` condition when possible.
-#if !__has_feature(modules)
-
 #include <wtf/Compiler.h>
 #include <wtf/Platform.h>
 
@@ -305,8 +302,6 @@ bool CARenderServerSnapshot(mach_port_t, NSDictionary *);
 #endif
 
 WTF_EXTERN_C_END
-
-#endif // !__has_feature(modules)
 
 extern NSString * const kCAFilterColorInvert;
 extern NSString * const kCAFilterColorMatrix;
