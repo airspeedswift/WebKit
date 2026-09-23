@@ -26,8 +26,11 @@
 #import "config.h"
 #import "WebCoreCALayerExtras.h"
 
-#import "DynamicContentScalingTypes.h"
 #import "TransformationMatrix.h"
+
+#if !ENABLE(CALAYER_EXTRAS_SWIFT)
+
+#import "DynamicContentScalingTypes.h"
 #import <pal/spi/cocoa/QuartzCoreSPI.h>
 #import <wtf/cocoa/TypeCastsCocoa.h>
 
@@ -147,6 +150,8 @@
 #endif
 
 @end
+
+#endif // !ENABLE(CALAYER_EXTRAS_SWIFT)
 
 namespace WebCore {
 

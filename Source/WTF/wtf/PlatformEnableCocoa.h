@@ -1268,6 +1268,15 @@
 #define ENABLE_FULLSCREEN_WINDOW_SWIFT 1
 #endif
 
+/* The CALayer (WebCoreCALayerExtras) category is written in Swift when this is enabled; see
+   Source/WebCore/platform/graphics/cocoa/WebCoreCALayerExtras.swift. The hit-testing functions
+   declared by the same header stay in WebCoreCALayerExtras.mm. Same reasoning as
+   ENABLE_KEY_EVENT_TABLES_SWIFT. */
+#if !defined(ENABLE_CALAYER_EXTRAS_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_CALAYER_EXTRAS_SWIFT 1
+#endif
+
 /* WebCore::attributedStringByStrippingAttachmentCharacters is written in Swift when this is
    enabled; see Source/WebCore/platform/cocoa/WebNSAttributedStringExtras.swift. Same reasoning
    again. This one is the first boundary here to return an Objective-C object across @_cdecl,
