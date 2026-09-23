@@ -28,13 +28,23 @@
 
 #if PLATFORM(MAC)
 
-#import "KeyEventCocoa.h"
 #import "Logging.h"
-#import "WindowsKeyboardCodes.h"
 #import <Carbon/Carbon.h>
 #import <wtf/MainThread.h>
 
+#if !ENABLE(KEY_EVENT_TABLES_SWIFT)
+#import "KeyEventCocoa.h"
+#import "WindowsKeyboardCodes.h"
+#endif
+
 namespace WebCore {
+
+// The tables are in KeyEventMac.swift. Neither function has a caller outside this file and
+// PlatformEventFactoryMac.mm on this platform, and both of those callers are in Swift with the
+// gate on, so nothing is left here to declare: the Swift definitions are private to their file
+// and cross no boundary. The iOS definitions in platform/ios/KeyEventIOS.mm, which
+// KeyEventCocoa.h also declares, are unaffected.
+#if !ENABLE(KEY_EVENT_TABLES_SWIFT)
 
 int windowsKeyCodeForKeyCode(uint16_t keyCode)
 {
@@ -231,6 +241,8 @@ int NODELETE windowsKeyCodeForCharCode(unichar charCode)
     }
     return 0;
 }
+
+#endif // !ENABLE(KEY_EVENT_TABLES_SWIFT)
 
 void PlatformKeyboardEvent::disambiguateKeyDownEvent(Type type, bool backwardCompatibilityMode)
 {

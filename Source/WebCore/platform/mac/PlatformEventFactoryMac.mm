@@ -300,6 +300,38 @@ String keyForKeyEvent(NSEvent *event)
 }
 
 // https://w3c.github.io/uievents-code/
+#if ENABLE(KEY_EVENT_TABLES_SWIFT)
+
+// codeForKeyEvent, isKeypadEvent and windowsKeyCodeForKeyEvent are in KeyEventMac.swift, along
+// with the two key-code tables they consult, which have no caller outside these two files and
+// so stay private to that file. WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO and declares no
+// SWIFT_OBJC_INTERFACE_HEADER_NAME, so C++ cannot name a Swift declaration and the boundary is
+// @_cdecl, which cannot carry a WTF::String. Every value the code table produces is a fixed
+// ASCII literal, "Unidentified" included, so it comes back as a pointer into static storage and
+// a length rather than through a caller-owned buffer. The NSEvent crosses at +0.
+extern "C" const char* WebCoreCodeForKeyEvent(NSEvent *, size_t*);
+extern "C" bool WebCoreIsKeypadEvent(NSEvent *);
+extern "C" int WebCoreWindowsKeyCodeForKeyEvent(NSEvent *);
+
+String codeForKeyEvent(NSEvent *event)
+{
+    size_t length = 0;
+    const char* code = WebCoreCodeForKeyEvent(event, &length);
+    return String::fromLatin1(unsafeMakeSpan(code, length));
+}
+
+bool isKeypadEvent(NSEvent *event)
+{
+    return WebCoreIsKeypadEvent(event);
+}
+
+int windowsKeyCodeForKeyEvent(NSEvent *event)
+{
+    return WebCoreWindowsKeyCodeForKeyEvent(event);
+}
+
+#else
+
 String codeForKeyEvent(NSEvent *event)
 {
     switch ([event keyCode]) {
@@ -511,6 +543,8 @@ String codeForKeyEvent(NSEvent *event)
     }
 }
 
+#endif // ENABLE(KEY_EVENT_TABLES_SWIFT)
+
 String keyIdentifierForKeyEvent(NSEvent* event)
 {
     if ([event type] == NSEventTypeFlagsChanged) {
@@ -547,6 +581,8 @@ String keyIdentifierForKeyEvent(NSEvent* event)
     }
     return keyIdentifierForCharCode([string characterAtIndex:0]);
 }
+
+#if !ENABLE(KEY_EVENT_TABLES_SWIFT)
 
 bool isKeypadEvent(NSEvent *event)
 {
@@ -615,6 +651,8 @@ int windowsKeyCodeForKeyEvent(NSEvent* event)
     // E.g. the key next to Caps Lock has the same Event.keyCode on U.S. keyboard ('A') and on Russian keyboard (CYRILLIC LETTER EF).
     return windowsKeyCodeForKeyCode([event keyCode]);
 }
+
+#endif // !ENABLE(KEY_EVENT_TABLES_SWIFT)
 
 bool isKeyUpEvent(NSEvent *event)
 {

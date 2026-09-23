@@ -73,6 +73,7 @@
 		AA03CVPF0001000000000002 /* ShareableCVPixelFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA03CVPF0001000000000001 /* ShareableCVPixelFormat.swift */; };
 		AA04KEYT0001000000000002 /* KeyEventCocoa.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA04KEYT0001000000000001 /* KeyEventCocoa.swift */; };
 		AA05NSAS0001000000000002 /* WebNSAttributedStringExtras.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA05NSAS0001000000000001 /* WebNSAttributedStringExtras.swift */; };
+		AA06KEYM0001000000000002 /* KeyEventMac.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA06KEYM0001000000000001 /* KeyEventMac.swift */; };
 		021D763A29C2AC6B00063684 /* ScrollbarsControllerMac.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0F02245326F15D75000265C3 /* ScrollbarsControllerMac.mm */; };
 		0223E06D2AAECC2200AF30FB /* HandleUserInputEventResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E06C2AAEBBCF00AF30FB /* HandleUserInputEventResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0223E0742AAED62200AF30FB /* RemoteUserInputEventData.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E0732AAED62200AF30FB /* RemoteUserInputEventData.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -22049,6 +22050,7 @@
 		AA03CVPF0001000000000001 /* ShareableCVPixelFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/ShareableCVPixelFormat.swift; sourceTree = SOURCE_ROOT; };
 		AA04KEYT0001000000000001 /* KeyEventCocoa.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/cocoa/KeyEventCocoa.swift; sourceTree = SOURCE_ROOT; };
 		AA05NSAS0001000000000001 /* WebNSAttributedStringExtras.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/cocoa/WebNSAttributedStringExtras.swift; sourceTree = SOURCE_ROOT; };
+		AA06KEYM0001000000000001 /* KeyEventMac.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/mac/KeyEventMac.swift; sourceTree = SOURCE_ROOT; };
 		DD5697F72DC1302B00050321 /* rdar150228472.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rdar150228472.swift; sourceTree = "<group>"; };
 		DD5ACFD62B14DAD600B36C57 /* LayoutIntegrationBoxGeometryUpdater.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayoutIntegrationBoxGeometryUpdater.cpp; sourceTree = "<group>"; };
 		DD5ACFD72B14DADE00B36C57 /* LayoutIntegrationBoxGeometryUpdater.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LayoutIntegrationBoxGeometryUpdater.h; sourceTree = "<group>"; };
@@ -51376,6 +51378,7 @@
 				AE9D0D864E151BAC3ECB750E /* JSDOMWindowConstructorAttributes.cpp in Sources */,
 				AA04KEYT0001000000000002 /* KeyEventCocoa.swift in Sources */,
 				935C477009AC4D7300A6AAB4 /* KeyEventMac.mm in Sources */,
+				AA06KEYM0001000000000002 /* KeyEventMac.swift in Sources */,
 				CDA98E0B1603CD6000FEA3B1 /* LegacyCDM.cpp in Sources */,
 				CDE8B5EC1A69777300B4B66A /* LegacyCDMPrivateClearKey.cpp in Sources */,
 				CDCA98EB18B2C8EB00C12FF9 /* LegacyCDMPrivateMediaPlayer.cpp in Sources */,

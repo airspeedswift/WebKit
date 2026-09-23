@@ -1242,7 +1242,9 @@
 #endif
 
 /* WebCore::keyForCharCode / keyIdentifierForCharCode are written in Swift when this is
-   enabled; see Source/WebCore/platform/cocoa/KeyEventCocoa.swift. Same reasoning again. */
+   enabled; see Source/WebCore/platform/cocoa/KeyEventCocoa.swift. On Mac the same gate covers
+   the key-code tables and the three NSEvent entry points that consult them; see
+   Source/WebCore/platform/mac/KeyEventMac.swift. Same reasoning again. */
 #if !defined(ENABLE_KEY_EVENT_TABLES_SWIFT) \
     && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
 #define ENABLE_KEY_EVENT_TABLES_SWIFT 1

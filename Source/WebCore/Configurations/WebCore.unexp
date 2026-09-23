@@ -71,3 +71,12 @@ __ZNK3WTF9MediaTime18isPositiveInfiniteEv
 __ZNK3WTF9MediaTime7isValidEv
 __ZNK3WTF9MediaTime9timeScaleEv
 __ZNK3WTF9MediaTime9timeValueEv
+
+# @_cdecl thunks for Swift implementations of WebCore internals. The exported C++
+# entry points the thunks sit behind are the intended ABI surface; the thunks are
+# plumbing between the Swift object file and its ObjC++ wrapper in this framework.
+
+# Source/WebCore/platform/mac/KeyEventMac.swift
+_WebCoreCodeForKeyEvent
+_WebCoreIsKeypadEvent
+_WebCoreWindowsKeyCodeForKeyEvent
