@@ -1250,6 +1250,15 @@
 #define ENABLE_KEY_EVENT_TABLES_SWIFT 1
 #endif
 
+/* WebCore::Cursor::ensurePlatformCursor's table of NSCursors, and the WebCustomCursor class it
+   uses to name system cursors, are written in Swift when this is enabled; see
+   Source/WebCore/platform/mac/CursorMac.swift. Custom cursors, which are made from an Image,
+   stay in CursorMac.mm. Same reasoning as ENABLE_KEY_EVENT_TABLES_SWIFT. */
+#if !defined(ENABLE_CURSOR_MAC_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_CURSOR_MAC_SWIFT 1
+#endif
+
 /* WebCore::attributedStringByStrippingAttachmentCharacters is written in Swift when this is
    enabled; see Source/WebCore/platform/cocoa/WebNSAttributedStringExtras.swift. Same reasoning
    again. This one is the first boundary here to return an Objective-C object across @_cdecl,

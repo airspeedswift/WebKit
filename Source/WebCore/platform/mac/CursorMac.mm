@@ -35,11 +35,11 @@
 #import <wtf/BlockObjCExceptions.h>
 #import <wtf/StdLibExtras.h>
 
-#if HAVE(HISERVICES)
+#if HAVE(HISERVICES) && !ENABLE(CURSOR_MAC_SWIFT)
 #import <pal/spi/mac/HIServicesSPI.h>
 #endif
 
-#if HAVE(HISERVICES)
+#if HAVE(HISERVICES) && !ENABLE(CURSOR_MAC_SWIFT)
 
 @interface WebCustomCursor : NSCursor
 
@@ -72,7 +72,20 @@
 
 namespace WebCore {
 
-#if HAVE(HISERVICES)
+#if ENABLE(CURSOR_MAC_SWIFT)
+
+// Implemented in CursorMac.swift, along with WebCustomCursor and the system cursor it names.
+// WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO and declares no SWIFT_OBJC_INTERFACE_HEADER_NAME,
+// so C++ cannot name a Swift declaration and the boundary is @_cdecl. Nothing checks this
+// declaration against the Swift definition -- not the symbol name, not the return type, not the
+// convention -- so the two are kept in sync by hand.
+//
+// Takes the raw value of a PlatformCursorType other than Custom, and returns the NSCursor for it
+// autoreleased, at +0; the caller retains it by assigning it into m_platformCursor. Returns nil,
+// after asserting, for Custom, Invalid, or a value outside the enum.
+extern "C" NSCursor *WebCoreCursorMacPlatformCursor(uint8_t);
+
+#elif HAVE(HISERVICES)
 
 static RetainPtr<NSCursor> cursor(ASCIILiteral name)
 {
@@ -130,7 +143,7 @@ static RetainPtr<NSCursor> cursor(ASCIILiteral)
     return [NSCursor arrowCursor];
 }
 
-#endif // HAVE(HISERVICES)
+#endif // ENABLE(CURSOR_MAC_SWIFT)
 
 // Simple NSCursor calls shouldn't need protection,
 // but creating a cursor with a bad image might throw.
@@ -181,6 +194,20 @@ void Cursor::ensurePlatformCursor() const
     if (m_platformCursor)
         return;
 
+#if ENABLE(CURSOR_MAC_SWIFT)
+    if (m_type == Type::Custom) {
+#if ENABLE(CUSTOM_CURSOR_SUPPORT)
+#if ENABLE(MOUSE_CURSOR_SCALE)
+        m_platformCursor = createCustomCursor(m_image.get(), m_hotSpot, m_imageScaleFactor);
+#else
+        m_platformCursor = createCustomCursor(m_image.get(), m_hotSpot);
+#endif // ENABLE(MOUSE_CURSOR_SCALE)
+#endif // ENABLE(CUSTOM_CURSOR_SUPPORT)
+        return;
+    }
+
+    m_platformCursor = WebCoreCursorMacPlatformCursor(std::to_underlying(m_type));
+#else
     switch (m_type) {
     case Type::Pointer:
         m_platformCursor = [NSCursor arrowCursor];
@@ -345,6 +372,7 @@ void Cursor::ensurePlatformCursor() const
     default:
         ASSERT_NOT_REACHED();
     }
+#endif // ENABLE(CURSOR_MAC_SWIFT)
 }
 
 NSCursor *Cursor::platformCursor() const

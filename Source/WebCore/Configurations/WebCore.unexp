@@ -80,3 +80,6 @@ __ZNK3WTF9MediaTime9timeValueEv
 _WebCoreCodeForKeyEvent
 _WebCoreIsKeypadEvent
 _WebCoreWindowsKeyCodeForKeyEvent
+
+# Source/WebCore/platform/mac/CursorMac.swift
+_WebCoreCursorMacPlatformCursor

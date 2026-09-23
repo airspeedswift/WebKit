@@ -74,6 +74,7 @@
 		AA04KEYT0001000000000002 /* KeyEventCocoa.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA04KEYT0001000000000001 /* KeyEventCocoa.swift */; };
 		AA05NSAS0001000000000002 /* WebNSAttributedStringExtras.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA05NSAS0001000000000001 /* WebNSAttributedStringExtras.swift */; };
 		AA06KEYM0001000000000002 /* KeyEventMac.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA06KEYM0001000000000001 /* KeyEventMac.swift */; };
+		AA07CURS0001000000000002 /* CursorMac.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA07CURS0001000000000001 /* CursorMac.swift */; };
 		021D763A29C2AC6B00063684 /* ScrollbarsControllerMac.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0F02245326F15D75000265C3 /* ScrollbarsControllerMac.mm */; };
 		0223E06D2AAECC2200AF30FB /* HandleUserInputEventResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E06C2AAEBBCF00AF30FB /* HandleUserInputEventResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0223E0742AAED62200AF30FB /* RemoteUserInputEventData.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E0732AAED62200AF30FB /* RemoteUserInputEventData.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -22051,6 +22052,7 @@
 		AA04KEYT0001000000000001 /* KeyEventCocoa.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/cocoa/KeyEventCocoa.swift; sourceTree = SOURCE_ROOT; };
 		AA05NSAS0001000000000001 /* WebNSAttributedStringExtras.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/cocoa/WebNSAttributedStringExtras.swift; sourceTree = SOURCE_ROOT; };
 		AA06KEYM0001000000000001 /* KeyEventMac.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/mac/KeyEventMac.swift; sourceTree = SOURCE_ROOT; };
+		AA07CURS0001000000000001 /* CursorMac.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/mac/CursorMac.swift; sourceTree = SOURCE_ROOT; };
 		DD5697F72DC1302B00050321 /* rdar150228472.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rdar150228472.swift; sourceTree = "<group>"; };
 		DD5ACFD62B14DAD600B36C57 /* LayoutIntegrationBoxGeometryUpdater.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayoutIntegrationBoxGeometryUpdater.cpp; sourceTree = "<group>"; };
 		DD5ACFD72B14DADE00B36C57 /* LayoutIntegrationBoxGeometryUpdater.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LayoutIntegrationBoxGeometryUpdater.h; sourceTree = "<group>"; };
@@ -51350,6 +51352,7 @@
 				46C696CC1E7205FC00597937 /* CPUMonitor.cpp in Sources */,
 				1ABA76CA11D20E50004C201C /* CSSPropertyNames.cpp in Sources */,
 				2D22830323A8470700364B7E /* CursorMac.mm in Sources */,
+				AA07CURS0001000000000002 /* CursorMac.swift in Sources */,
 				5CBD59592280E926002B22AA /* CustomHeaderFields.cpp in Sources */,
 				07E4BDBF2A3A5FAB000D5509 /* DictationCaretAnimator.cpp in Sources */,
 				0749E9512E275A23009B912B /* EditingHTMLConverter.mm in Sources */,
