@@ -349,44 +349,71 @@ private func keyIdentifierNameForCharCode(_ charCode: Swift.UInt16) -> Swift.Sta
     }
 }
 
-/// Writes the `key` attribute value for `charCode` into `buffer` as UTF-16 and
-/// returns how many code units it wrote.
+/// Writes the DOM `key` value for `charCode` into `buffer` as UTF-16 and returns how many code
+/// units it wrote.
 ///
-/// The C++ caller turns that into a `WTF::String`. UTF-16 rather than UTF-8
-/// because the fallback result is the code unit itself, which may be an
-/// unpaired surrogate -- not representable in UTF-8, and not representable as a
-/// `Swift.String` either. `buffer` must have room for
-/// The DOM `key` name for `charCode`, or null when the tables do not name it.
-///
-/// Returns a pointer into static storage, valid for the process lifetime, rather than a
-/// string: WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO and declares no
-/// SWIFT_OBJC_INTERFACE_HEADER_NAME, so C++ cannot name a Swift declaration and the only
-/// boundary available is `@_cdecl`, which cannot carry a `Swift.String`.
-///
-/// The caller keeps the fallback. That is not tidiness: `keyForCharCode`'s fallback is the
-/// input code unit itself, which may be an unpaired surrogate, and no `Swift.String` can
-/// hold one -- `Unicode.Scalar(0xD800)` is nil -- while `WTF::String` holds it fine. Leaving
-/// both fallbacks in C++ keeps the case Swift cannot represent on the side that can.
-@_cdecl("WebCoreKeyNameForCharCode")
-public func webCoreKeyNameForCharCode(_ charCode: Swift.UInt16) -> Swift.UnsafePointer<Swift.CChar>? {
+/// WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO and declares no SWIFT_OBJC_INTERFACE_HEADER_NAME,
+/// so C++ cannot name a Swift declaration and the only boundary available is `@_cdecl`, which
+/// cannot carry a `WTF::String`. So the whole result, fallback included, is written as data and
+/// the C++ caller only wraps it. UTF-16 because the fallback is the input code unit itself, which
+/// may be an unpaired surrogate: no `Swift.String` can hold one, and a code unit in a buffer can.
+@_cdecl("WebCoreKeyForCharCode")
+public func webCoreKeyForCharCode(
+    _ charCode: Swift.UInt16,
+    _ buffer: Swift.UnsafeMutablePointer<Swift.UInt16>,
+    _ capacity: Swift.Int
+) -> Swift.Int {
     guard let name = keyNameForCharCode(charCode) else {
-        return nil
+        return unsafe write(Swift.CollectionOfOne(charCode), to: buffer, capacity: capacity)
     }
-    // The one unsafe operation in this file: a StaticString's utf8Start addresses static
-    // storage, so the pointer outlives every caller and no lifetime is being asserted.
-    return unsafe Swift.UnsafeRawPointer(name.utf8Start).assumingMemoryBound(to: Swift.CChar.self)
+    return unsafe write(name.utf8Codes, to: buffer, capacity: capacity)
 }
 
-/// The legacy `keyIdentifier` name for `charCode`, or null when the tables do not name it.
+/// Writes the legacy `keyIdentifier` value for `charCode` into `buffer` as Latin-1 and returns
+/// how many bytes it wrote: a table name, or `U+` and four uppercase hex digits.
 ///
-/// See `webCoreKeyNameForCharCode`. The caller formats the `U+XXXX` fallback, as it did
-/// before this table moved to Swift.
-@_cdecl("WebCoreKeyIdentifierNameForCharCode")
-public func webCoreKeyIdentifierNameForCharCode(_ charCode: Swift.UInt16) -> Swift.UnsafePointer<Swift.CChar>? {
-    guard let name = keyIdentifierNameForCharCode(charCode) else {
-        return nil
+/// See `webCoreKeyForCharCode` for the boundary. The hex fallback upper-cases the code as an ASCII
+/// character before formatting it, so 0x61 (`a`) is `U+0041`, matching the C++ this replaces.
+@_cdecl("WebCoreKeyIdentifierForCharCode")
+public func webCoreKeyIdentifierForCharCode(
+    _ charCode: Swift.UInt16,
+    _ buffer: Swift.UnsafeMutablePointer<Swift.UInt8>,
+    _ capacity: Swift.Int
+) -> Swift.Int {
+    if let name = keyIdentifierNameForCharCode(charCode) {
+        return unsafe write(name.utf8Codes, to: buffer, capacity: capacity)
     }
-    return unsafe Swift.UnsafeRawPointer(name.utf8Start).assumingMemoryBound(to: Swift.CChar.self)
+    let code = (0x61...0x7A).contains(charCode) ? charCode - 0x20 : charCode
+    let hexDigits: [Swift.UInt8] = Swift.Array("0123456789ABCDEF".utf8)
+    let identifier: [Swift.UInt8] = [0x55, 0x2B] + [12, 8, 4, 0].map { hexDigits[Swift.Int((code >> $0) & 0xF)] }
+    return unsafe write(identifier, to: buffer, capacity: capacity)
+}
+
+/// Copies `values` into the caller's buffer of `capacity` elements, trapping rather than
+/// truncating if they do not fit, and returns the count.
+private func write<Values: Swift.Collection, Element: Swift.FixedWidthInteger>(
+    _ values: Values,
+    to buffer: Swift.UnsafeMutablePointer<Element>,
+    capacity: Swift.Int
+) -> Swift.Int where Values.Element: Swift.FixedWidthInteger {
+    precondition(values.count <= capacity, "key-event value longer than the caller's buffer")
+    // SAFETY: the C++ caller passes a std::array's data() and size(), so `buffer` addresses
+    // `capacity` writable elements for the duration of this call, and the precondition keeps
+    // every write below `capacity`.
+    // Not provable today because @_cdecl cannot take a Span or MutableSpan parameter, so the
+    // bound crosses as a bare pointer and a count.
+    for (offset, value) in values.enumerated() {
+        unsafe (buffer + offset).initialize(to: Element(value))
+    }
+    return values.count
+}
+
+extension Swift.StaticString {
+    /// The table names are ASCII literals, so their UTF-8 bytes are also their Latin-1 bytes and,
+    /// widened, their UTF-16 code units.
+    fileprivate var utf8Codes: Swift.UnsafeBufferPointer<Swift.UInt8> {
+        unsafe Swift.UnsafeBufferPointer(start: utf8Start, count: utf8CodeUnitCount)
+    }
 }
 
 #endif // ENABLE_KEY_EVENT_TABLES_SWIFT

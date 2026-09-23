@@ -29,10 +29,13 @@
 #import "Logging.h"
 #import "PlatformKeyboardEvent.h"
 #import "WindowsKeyboardCodes.h"
+#import <wtf/MainThread.h>
+
+#if !ENABLE(KEY_EVENT_TABLES_SWIFT)
 #import <wtf/ASCIICType.h>
 #import <wtf/HexNumber.h>
-#import <wtf/MainThread.h>
 #import <wtf/text/MakeString.h>
+#endif
 
 #if PLATFORM(IOS_FAMILY)
 #import "KeyEventCodesIOS.h"
@@ -45,27 +48,23 @@ namespace WebCore {
 
 // The tables are in KeyEventCocoa.swift. WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO and
 // declares no SWIFT_OBJC_INTERFACE_HEADER_NAME, so C++ cannot name a Swift declaration and
-// the boundary is @_cdecl, which cannot carry a WTF::String. Each entry point therefore
-// returns a pointer into static storage, or null when the tables do not name the code.
-//
-// Both fallbacks stay here rather than moving to Swift. keyForCharCode's is the input code
-// unit itself, which may be an unpaired surrogate: no Swift.String can hold one, and
-// WTF::String can, so the case Swift cannot represent never crosses the boundary.
-extern "C" const char* WebCoreKeyNameForCharCode(uint16_t);
-extern "C" const char* WebCoreKeyIdentifierNameForCharCode(uint16_t);
+// the boundary is @_cdecl, which cannot carry a WTF::String. Each entry point writes the whole
+// result, fallback included, into a caller buffer and returns its length; these wrappers only
+// turn that into a String. The key value is UTF-16 because its fallback is the input code unit,
+// which may be an unpaired surrogate.
+extern "C" size_t WebCoreKeyForCharCode(uint16_t, char16_t*, size_t);
+extern "C" size_t WebCoreKeyIdentifierForCharCode(uint16_t, Latin1Character*, size_t);
 
 String keyForCharCode(unichar charCode)
 {
-    if (const char* name = WebCoreKeyNameForCharCode(charCode))
-        return String::fromLatin1(name);
-    return singleElementSpan(*reinterpret_cast<const char16_t*>(&charCode));
+    std::array<char16_t, 32> buffer;
+    return String(std::span<const char16_t> { buffer }.first(WebCoreKeyForCharCode(charCode, buffer.data(), buffer.size())));
 }
 
 String keyIdentifierForCharCode(unichar charCode)
 {
-    if (const char* name = WebCoreKeyIdentifierNameForCharCode(charCode))
-        return String::fromLatin1(name);
-    return makeString("U+"_s, hex(toASCIIUpper(charCode), 4));
+    std::array<Latin1Character, 32> buffer;
+    return String(std::span<const Latin1Character> { buffer }.first(WebCoreKeyIdentifierForCharCode(charCode, buffer.data(), buffer.size())));
 }
 
 #else
