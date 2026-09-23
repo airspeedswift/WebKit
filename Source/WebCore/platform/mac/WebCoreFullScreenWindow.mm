@@ -28,6 +28,9 @@
 #if !PLATFORM(IOS_FAMILY)
 
 #import "WebCoreFullScreenWindow.h"
+
+#if !ENABLE(FULLSCREEN_WINDOW_SWIFT)
+
 #import <wtf/cocoa/TypeCastsCocoa.h>
 
 // FIXME: This isn't really an NSWindowController method - it's a method that
@@ -101,5 +104,7 @@
         [self makeFirstResponder:savedFirstResponder.get()];
 }
 @end
+
+#endif // !ENABLE(FULLSCREEN_WINDOW_SWIFT)
 
 #endif // !PLATFORM(IOS_FAMILY)

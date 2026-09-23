@@ -1259,6 +1259,15 @@
 #define ENABLE_CURSOR_MAC_SWIFT 1
 #endif
 
+/* WebCoreFullScreenWindow, the NSWindow subclass that hosts full-screen content, is written in
+   Swift when this is enabled; see Source/WebCore/platform/mac/WebCoreFullScreenWindow.swift.
+   Every member is an NSWindow or NSResponder override, so no Objective-C remains in
+   WebCoreFullScreenWindow.mm. Same reasoning as ENABLE_KEY_EVENT_TABLES_SWIFT. */
+#if !defined(ENABLE_FULLSCREEN_WINDOW_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_FULLSCREEN_WINDOW_SWIFT 1
+#endif
+
 /* WebCore::attributedStringByStrippingAttachmentCharacters is written in Swift when this is
    enabled; see Source/WebCore/platform/cocoa/WebNSAttributedStringExtras.swift. Same reasoning
    again. This one is the first boundary here to return an Objective-C object across @_cdecl,

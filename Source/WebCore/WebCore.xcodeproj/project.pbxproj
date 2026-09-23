@@ -75,6 +75,7 @@
 		AA05NSAS0001000000000002 /* WebNSAttributedStringExtras.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA05NSAS0001000000000001 /* WebNSAttributedStringExtras.swift */; };
 		AA06KEYM0001000000000002 /* KeyEventMac.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA06KEYM0001000000000001 /* KeyEventMac.swift */; };
 		AA07CURS0001000000000002 /* CursorMac.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA07CURS0001000000000001 /* CursorMac.swift */; };
+		AA08FSWN0001000000000002 /* WebCoreFullScreenWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA08FSWN0001000000000001 /* WebCoreFullScreenWindow.swift */; };
 		021D763A29C2AC6B00063684 /* ScrollbarsControllerMac.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0F02245326F15D75000265C3 /* ScrollbarsControllerMac.mm */; };
 		0223E06D2AAECC2200AF30FB /* HandleUserInputEventResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E06C2AAEBBCF00AF30FB /* HandleUserInputEventResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0223E0742AAED62200AF30FB /* RemoteUserInputEventData.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E0732AAED62200AF30FB /* RemoteUserInputEventData.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -22053,6 +22054,7 @@
 		AA05NSAS0001000000000001 /* WebNSAttributedStringExtras.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/cocoa/WebNSAttributedStringExtras.swift; sourceTree = SOURCE_ROOT; };
 		AA06KEYM0001000000000001 /* KeyEventMac.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/mac/KeyEventMac.swift; sourceTree = SOURCE_ROOT; };
 		AA07CURS0001000000000001 /* CursorMac.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/mac/CursorMac.swift; sourceTree = SOURCE_ROOT; };
+		AA08FSWN0001000000000001 /* WebCoreFullScreenWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/mac/WebCoreFullScreenWindow.swift; sourceTree = SOURCE_ROOT; };
 		DD5697F72DC1302B00050321 /* rdar150228472.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rdar150228472.swift; sourceTree = "<group>"; };
 		DD5ACFD62B14DAD600B36C57 /* LayoutIntegrationBoxGeometryUpdater.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayoutIntegrationBoxGeometryUpdater.cpp; sourceTree = "<group>"; };
 		DD5ACFD72B14DADE00B36C57 /* LayoutIntegrationBoxGeometryUpdater.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LayoutIntegrationBoxGeometryUpdater.h; sourceTree = "<group>"; };
@@ -52152,6 +52154,7 @@
 				CD0445E22992F1740059B997 /* WebAVPlayerLayerView.mm in Sources */,
 				51F6CA3E2B4D14D400F273C8 /* WebAVSampleBufferListener.mm in Sources */,
 				A180AD5B219F81B000DC039A /* WebCoreAdditions.mm in Sources */,
+				AA08FSWN0001000000000002 /* WebCoreFullScreenWindow.swift in Sources */,
 				CD225C0B1C46FBF400140761 /* WebCoreNSURLSession.mm in Sources */,
 				1CCD81502231F83E0065FC2B /* WebCoreResourceHandleAsOperationQueueDelegate.mm in Sources */,
 				93F19B0708245E59001E9ABC /* WebCoreView.mm in Sources */,
