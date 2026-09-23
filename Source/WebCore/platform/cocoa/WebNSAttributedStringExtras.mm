@@ -39,33 +39,19 @@ namespace WebCore {
 #if ENABLE(ATTRIBUTED_STRING_SWIFT)
 
 // Implemented in WebNSAttributedStringExtras.swift. WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO
-// and declares no SWIFT_OBJC_INTERFACE_HEADER_NAME, so there is no generated Swift interface
-// header to include and no way for C++ to name a Swift declaration. The boundary is therefore
-// @_cdecl, and nothing checks this declaration against the Swift definition -- not the symbol
-// name, not the return type, not the convention. The two are kept in sync by hand.
+// and declares no SWIFT_OBJC_INTERFACE_HEADER_NAME, so C++ cannot name a Swift declaration and
+// the boundary is @_cdecl. Nothing checks this declaration against the Swift definition -- not
+// the symbol name, not the return type, not the convention -- so the two are kept in sync by hand.
 //
-// Ownership, since this is the first OBJECT to cross that boundary rather than a scalar or a
-// pointer into static storage. The argument crosses at +0: @_cdecl takes a class parameter as a
-// guaranteed unretained reference, which is what passing it straight through relies on. The
-// result crosses at +1, spelled Unmanaged.passRetained(...).toOpaque() on the Swift side, and
-// the adoptNS below is what consumes that retain. The NS_RETURNS_RETAINED is documentation and
-// nothing more: this file is @nonARC (SourcesCocoa.txt), where the attribute has no codegen
-// effect, and its one consumer -- clang's retain-count checker -- cannot see a Swift definition
-// in any case. The correctness lives in the adoptNS.
-//
-// A null return means "unchanged", not "no result". The C++ this replaces returned its argument
-// untouched when there was nothing to strip; returning the argument here, rather than a
-// retained-and-autoreleased copy of it, keeps that exactly, so the common path still needs no
-// autorelease pool. It folds in nil-in-nil-out as the same branch. The exported contract is
-// therefore unchanged, which matters: this is WEBCORE_EXPORT, the three in-tree callers assign
-// into a RetainPtr, and out-of-tree callers were not enumerated.
-extern "C" NSAttributedString *WebCoreAttributedStringByStrippingAttachmentCharacters(NSAttributedString *) NS_RETURNS_RETAINED;
+// The Swift owns every case, and returns at +0 under the exported contract: the argument itself
+// when there is nothing to strip (so the common path needs no autorelease pool), nil for nil, and
+// an autoreleased copy otherwise. This function exists only to keep the C++ WEBCORE_EXPORT symbol
+// that WebKitLegacy links against.
+extern "C" NSAttributedString *WebCoreAttributedStringByStrippingAttachmentCharacters(NSAttributedString *);
 
 NSAttributedString *attributedStringByStrippingAttachmentCharacters(NSAttributedString *attributedString)
 {
-    if (RetainPtr strippedString = adoptNS(WebCoreAttributedStringByStrippingAttachmentCharacters(attributedString)))
-        return strippedString.autorelease();
-    return attributedString;
+    return WebCoreAttributedStringByStrippingAttachmentCharacters(attributedString);
 }
 
 #else

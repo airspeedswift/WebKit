@@ -41,20 +41,17 @@ import Foundation
 /// of pulling in a platform UI framework for one integer.
 private let attachmentCharacter = "\u{FFFC}"
 
-/// Returns a copy of `attributedString` with every attachment character removed, or null when
-/// there was nothing to strip and the caller should keep the string it already has.
+/// Returns a copy of `attributedString` with every attachment character removed, the argument
+/// itself when there is nothing to strip, or null for a null argument.
 ///
-/// The result is RETAINED (+1) when it is non-null. WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO
-/// and declares no SWIFT_OBJC_INTERFACE_HEADER_NAME, so C++ cannot name a Swift declaration and
-/// the only boundary available is `@_cdecl` -- a plain C function, whose signature says nothing
-/// about who owns a returned object. Rather than depend on whichever convention the emitted
-/// thunk picks, this returns an explicitly retained reference as an opaque pointer, and the C++
-/// wrapper in WebNSAttributedStringExtras.mm adopts it and autoreleases.
-///
-/// Null means UNCHANGED, and covers both the no-attachment case and a nil argument. The C++
-/// this replaces returned its argument untouched in both, so signalling "unchanged" instead of
-/// handing back a retained copy of the input keeps the old behaviour exactly, and keeps the
-/// common path off the autorelease pool.
+/// The result is at +0, the exported contract of the C++ this replaces. WebCore sets
+/// SWIFT_INSTALL_OBJC_HEADER = NO and declares no SWIFT_OBJC_INTERFACE_HEADER_NAME, so C++
+/// cannot name a Swift declaration and the only boundary available is `@_cdecl` -- a plain C
+/// function, whose signature says nothing about who owns a returned object. Rather than depend
+/// on whichever convention the emitted thunk picks, this returns an explicitly unretained or
+/// autoreleased reference as an opaque pointer, and the C++ wrapper in
+/// WebNSAttributedStringExtras.mm returns it unchanged. Returning the argument itself, not a
+/// copy, keeps the common path off the autorelease pool.
 ///
 /// Internal rather than public, unlike the `@_cdecl` functions in KeyEventCocoa.swift: those
 /// take and return only stdlib types, while this one names `NSAttributedString`, which arrives
@@ -74,7 +71,8 @@ func webCoreAttributedStringByStrippingAttachmentCharacters(
     // NSString-typed accessor -- and it happens once per call.
     var attachmentRange = (attributedString.string as NSString).range(of: attachmentCharacter)
     if attachmentRange.location == NSNotFound || attachmentRange.length == 0 {
-        return nil
+        // Nothing to strip: the argument itself, at +0, as the C++ this replaces returned it.
+        return unsafe Unmanaged.passUnretained(attributedString).toOpaque()
     }
 
     // `mutableCopy()` rather than `NSMutableAttributedString(attributedString:)`, which would
@@ -92,18 +90,19 @@ func webCoreAttributedStringByStrippingAttachmentCharacters(
         // tables were shaped to avoid.
         attachmentRange = strippedString.mutableString.range(of: attachmentCharacter)
     }
-    return unsafe retainedResult(strippedString)
+    return unsafe autoreleasedResult(strippedString)
 }
 
-/// Hands a +1 reference out as an opaque pointer.
+/// Hands a new object out at +0 as an opaque pointer: retained past this frame, with that
+/// retain given to the autorelease pool.
 ///
 /// It is unavoidable, because `@_cdecl` cannot carry an ARC-managed return whose ownership is
-/// stated rather than implied. What it asserts is only that the caller balances the retain,
-/// which the single caller does on the next line of C++, with `adoptNS`. Its call site needs
-/// an `unsafe` of its own: `UnsafeMutableRawPointer` is itself an unsafe type, so naming it in
-/// a signature makes calling the function unsafe, not just writing its body.
-private func retainedResult(_ attributedString: NSAttributedString) -> Swift.UnsafeMutableRawPointer {
-    unsafe Unmanaged.passRetained(attributedString).toOpaque()
+/// stated rather than implied. What it asserts is that the caller retains the result before the
+/// pool drains; every in-tree caller assigns it into a `RetainPtr`. Its call site needs an
+/// `unsafe` of its own: `UnsafeMutableRawPointer` is itself an unsafe type, so naming it in a
+/// signature makes calling the function unsafe, not just writing its body.
+private func autoreleasedResult(_ attributedString: NSAttributedString) -> Swift.UnsafeMutableRawPointer {
+    unsafe Unmanaged.passRetained(attributedString).autorelease().toOpaque()
 }
 
 #endif // ENABLE_ATTRIBUTED_STRING_SWIFT
