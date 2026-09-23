@@ -677,7 +677,7 @@ private func windowsKeyCodeForKeyEvent(_ event: AppKit.NSEvent) -> Swift.Int32 {
     //    but see comment in windowsKeyCodeForCharCode().
     if !isKeypadEvent(event) && (event.type == .keyDown || event.type == .keyUp) {
         // Cmd switches Roman letters for Dvorak-QWERTY layout, so try modified characters first.
-        if let charCode = event.characters?.utf16.first {
+        if let charCode = firstCodeUnit(event.characters as Foundation.NSString?) {
             let code = windowsKeyCodeForCharCode(charCode)
             if code != 0 {
                 return code
@@ -685,7 +685,7 @@ private func windowsKeyCodeForKeyEvent(_ event: AppKit.NSEvent) -> Swift.Int32 {
         }
 
         // Ctrl+A on an AZERTY keyboard would get VK_Q keyCode if we relied on -[NSEvent keyCode] below.
-        if let charCode = event.charactersIgnoringModifiers?.utf16.first {
+        if let charCode = firstCodeUnit(event.charactersIgnoringModifiers as Foundation.NSString?) {
             let code = windowsKeyCodeForCharCode(charCode)
             if code != 0 {
                 return code
@@ -696,6 +696,20 @@ private func windowsKeyCodeForKeyEvent(_ event: AppKit.NSEvent) -> Swift.Int32 {
     // Map Mac virtual key code directly to Windows one for any keys not handled above.
     // E.g. the key next to Caps Lock has the same Event.keyCode on U.S. keyboard ('A') and on Russian keyboard (CYRILLIC LETTER EF).
     return windowsKeyCodeForKeyCode(event.keyCode)
+}
+
+/// The first UTF-16 code unit of `string`, or nil if it is nil or empty, read as the C++ did
+/// with `-length` and `-characterAtIndex:`.
+///
+/// The callers pass `NSEvent`'s `String?` properties cast back to `NSString?`. At -O the
+/// compiler folds that bridge-and-cast pair away, so the `NSString` AppKit returned is read in
+/// place; `.utf16.first` on the `String` would instead bridge it on every call, which measured
+/// 2x the C++ original.
+private func firstCodeUnit(_ string: Foundation.NSString?) -> Swift.UInt16? {
+    guard let string, string.length > 0 else {
+        return nil
+    }
+    return string.character(at: 0)
 }
 
 /// The `code` attribute value for `event`, as a pointer to static storage plus its length in

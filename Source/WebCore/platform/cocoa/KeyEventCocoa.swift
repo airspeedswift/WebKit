@@ -384,9 +384,21 @@ public func webCoreKeyIdentifierForCharCode(
         return unsafe write(name.utf8Codes, to: buffer, capacity: capacity)
     }
     let code = (0x61...0x7A).contains(charCode) ? charCode - 0x20 : charCode
-    let hexDigits: [Swift.UInt8] = Swift.Array("0123456789ABCDEF".utf8)
-    let identifier: [Swift.UInt8] = [0x55, 0x2B] + [12, 8, 4, 0].map { hexDigits[Swift.Int((code >> $0) & 0xF)] }
+    // "U+" then four uppercase hex digits, as a lazy view so nothing is allocated per call.
+    let identifier = (0..<6).lazy.map { index -> Swift.UInt8 in
+        switch index {
+        case 0: return 0x55 // U
+        case 1: return 0x2B // +
+        default: return uppercaseHexDigit(code >> (4 * (5 - index)))
+        }
+    }
     return unsafe write(identifier, to: buffer, capacity: capacity)
+}
+
+/// The ASCII uppercase hex digit for the low four bits of `value`.
+private func uppercaseHexDigit(_ value: Swift.UInt16) -> Swift.UInt8 {
+    let nibble = Swift.UInt8(value & 0xF)
+    return nibble < 10 ? 0x30 + nibble : 0x37 + nibble
 }
 
 /// Copies `values` into the caller's buffer of `capacity` elements, trapping rather than
