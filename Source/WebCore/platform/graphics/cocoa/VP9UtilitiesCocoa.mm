@@ -122,6 +122,34 @@ bool VP9TestingOverrides::shouldEnableVP9Decoder() const
     return m_vp9DecoderEnabled;
 }
 
+#if ENABLE(VP9_CAPABILITIES_SWIFT)
+// Implemented in VP9CapabilitiesCocoa.swift, reached through @_cdecl because C++ cannot name a
+// Swift declaration in WebCore. The record and the video configuration cross as their addresses.
+// A capabilities result is 0 for std::nullopt; otherwise bit 7 is set and bits 0-2 hold
+// supported, smooth and powerEfficient.
+extern "C" bool WebCoreVP9IsCodecConfigurationRecordSupported(const void* record, uint8_t codecKind);
+extern "C" uint8_t WebCoreVP9ValidateParameters(const void* record, const void* configuration, uint8_t codecKind);
+extern "C" bool WebCoreVP9IsSoftwareDecoderSmooth(const void* configuration);
+extern "C" uint8_t WebCoreVP9ComputeParameters(const void* configuration, bool hardwareDecoderAvailable);
+
+static std::optional<PlatformMediaCapabilitiesInfo> capabilitiesInfo(uint8_t packed)
+{
+    if (!packed)
+        return std::nullopt;
+    return PlatformMediaCapabilitiesInfo { !!(packed & 1), !!(packed & 2), !!(packed & 4) };
+}
+
+// The record's codecName is a WTF::String, which Swift does not read: 0 is neither VP8 nor VP9,
+// 1 is VP8 and 2 is VP9.
+static uint8_t codecKind(const VPCodecConfigurationRecord& codecConfiguration)
+{
+    if (codecConfiguration.codecName == "vp08"_s || codecConfiguration.codecName == "vp8"_s)
+        return 1;
+    if (codecConfiguration.codecName == "vp09"_s || codecConfiguration.codecName == "vp9"_s)
+        return 2;
+    return 0;
+}
+#else
 enum class ResolutionCategory : uint8_t {
     R_480p,
     R_720p,
@@ -149,6 +177,7 @@ static ResolutionCategory NODELETE resolutionCategory(const FloatSize& size)
         return ResolutionCategory::R_720p;
     return ResolutionCategory::R_480p;
 }
+#endif // ENABLE(VP9_CAPABILITIES_SWIFT)
 
 void registerWebKitVP9Decoder()
 {
@@ -194,9 +223,23 @@ bool shouldEnableVP9Decoder()
     return VP9TestingOverrides::singleton().shouldEnableVP9Decoder();
 }
 
-static bool isSWDecodersAlwaysEnabled()
+bool isSWDecodersAlwaysEnabled()
 {
     return VP9TestingOverrides::singleton().swVPDecodersAlwaysEnabled();
+}
+
+// The largest area of an attached screen's rect scaled by its scale factor, or the scaled area of
+// the screen size and scale override when that is engaged. Callers categorize the area, which is
+// monotonic in it, so one number stands in for the whole set of screens.
+float largestScreenScaledArea()
+{
+    if (auto overrideForTesting = VP9TestingOverrides::singleton().vp9ScreenSizeAndScale())
+        return FloatSize(overrideForTesting->width, overrideForTesting->height).scaled(overrideForTesting->scale).area();
+    float largestArea = 0;
+    Ref screen = PlatformScreen::singleton();
+    for (auto& screenData : screen->screenDatas().values())
+        largestArea = std::max(largestArea, screenData.screenRect.size().scaled(screenData.scaleFactor).area());
+    return largestArea;
 }
 
 bool shouldEnableSWVP9Decoder()
@@ -251,6 +294,27 @@ bool vp9HardwareDecoderAvailableInProcess()
     return internalVP9HardwareDecoderAvailableInProcess();
 }
 
+#if ENABLE(VP9_CAPABILITIES_SWIFT)
+bool isVPCodecConfigurationRecordSupported(const VPCodecConfigurationRecord& codecConfiguration)
+{
+    return WebCoreVP9IsCodecConfigurationRecordSupported(&codecConfiguration, codecKind(codecConfiguration));
+}
+
+std::optional<PlatformMediaCapabilitiesInfo> validateVPParameters(const VPCodecConfigurationRecord& codecConfiguration, const PlatformMediaCapabilitiesVideoConfiguration& videoConfiguration)
+{
+    return capabilitiesInfo(WebCoreVP9ValidateParameters(&codecConfiguration, &videoConfiguration, codecKind(codecConfiguration)));
+}
+
+bool isVPSoftwareDecoderSmooth(const PlatformMediaCapabilitiesVideoConfiguration& videoConfiguration)
+{
+    return WebCoreVP9IsSoftwareDecoderSmooth(&videoConfiguration);
+}
+
+std::optional<PlatformMediaCapabilitiesInfo> computeVPParameters(const PlatformMediaCapabilitiesVideoConfiguration& videoConfiguration, bool vp9HardwareDecoderAvailable)
+{
+    return capabilitiesInfo(WebCoreVP9ComputeParameters(&videoConfiguration, vp9HardwareDecoderAvailable));
+}
+#else
 static bool isVP9CodecConfigurationRecordSupported(const VPCodecConfigurationRecord& codecConfiguration)
 {
     if (!isVP9DecoderAvailable())
@@ -440,6 +504,7 @@ std::optional<PlatformMediaCapabilitiesInfo> computeVPParameters(const PlatformM
     info.supported = true;
     return info;
 }
+#endif // ENABLE(VP9_CAPABILITIES_SWIFT)
 
 static uint8_t NODELETE convertToColorPrimaries(const Primaries& coefficients)
 {

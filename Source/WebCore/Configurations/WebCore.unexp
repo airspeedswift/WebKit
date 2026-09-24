@@ -115,6 +115,12 @@ _WebCoreDoViParseDecoderConfigurationRecord
 _WebCoreHEVCParseCodecParameters
 _WebCoreHEVCParseDecoderConfigurationRecord
 
+# Source/WebCore/platform/graphics/cocoa/VP9CapabilitiesCocoa.swift
+_WebCoreVP9ComputeParameters
+_WebCoreVP9IsCodecConfigurationRecordSupported
+_WebCoreVP9IsSoftwareDecoderSmooth
+_WebCoreVP9ValidateParameters
+
 # Source/WebCore/platform/graphics/avfoundation/FormatDescriptionUtilities.swift
 _WebCoreFormatDescriptionColorSpace
 _WebCoreFormatDescriptionFieldCount

@@ -1312,6 +1312,14 @@
 #define ENABLE_CODEC_CAPABILITIES_SWIFT 1
 #endif
 
+/* The VP8 and VP9 decoder capability checks of isVPCodecConfigurationRecordSupported,
+   validateVPParameters, isVPSoftwareDecoderSmooth and computeVPParameters are written in Swift
+   when this is enabled; see
+   Source/WebCore/platform/graphics/cocoa/VP9CapabilitiesCocoa.swift. */
+#if !defined(ENABLE_VP9_CAPABILITIES_SWIFT) && ENABLE(CODEC_CAPABILITIES_SWIFT) && ENABLE(VP9)
+#define ENABLE_VP9_CAPABILITIES_SWIFT 1
+#endif
+
 /* forEachSample, copySampleBufferForRange, the colour-space conversions of
    attachColorSpaceToPixelBuffer and computeVideoFrameColorSpace, and the colour extensions of
    createFormatDescriptionFromTrackInfo are written in Swift when this is enabled; see
