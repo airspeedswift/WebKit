@@ -88,6 +88,10 @@ _WebCoreWindowsKeyCodeForKeyEvent
 # Source/WebCore/platform/mac/CursorMac.swift
 _WebCoreCursorMacPlatformCursor
 
+# Source/WebCore/platform/graphics/AV1Utilities.swift
+_WebCoreAV1ParseDecoderConfigurationRecord
+_WebCoreAV1ParseSequenceHeader
+
 # Source/WebCore/platform/graphics/avfoundation/FormatDescriptionUtilities.swift
 _WebCoreFormatDescriptionColorSpace
 _WebCoreFormatDescriptionFieldCount

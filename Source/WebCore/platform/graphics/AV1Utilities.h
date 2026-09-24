@@ -184,7 +184,9 @@ WEBCORE_EXPORT bool NODELETE validateAV1ConfigurationRecord(const AV1CodecConfig
 WEBCORE_EXPORT bool validateAV1PerLevelConstraints(const AV1CodecConfigurationRecord&, const PlatformMediaCapabilitiesVideoConfiguration&);
 
 std::optional<AV1CodecConfigurationRecord> parseAV1DecoderConfigurationRecord(std::span<const uint8_t>);
+#if !ENABLE(AV1_UTILITIES_SWIFT)
 std::optional<AV1CodecConfigurationRecord> parseSequenceHeaderOBU(std::span<const uint8_t>);
+#endif
 WEBCORE_EXPORT PlatformVideoColorSpace createPlatformVideoColorSpaceFromAV1CodecConfigurationRecord(const AV1CodecConfigurationRecord&);
 WEBCORE_EXPORT RefPtr<VideoInfo> createVideoInfoFromAV1Stream(std::span<const uint8_t>, std::optional<FloatSize> = std::nullopt, const std::optional<PlatformVideoColorSpace>& colorSpaceOverride = std::nullopt);
 

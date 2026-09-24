@@ -182,6 +182,15 @@ template<> bool NODELETE isValidEnum<WebCore::AV1ConfigurationMatrixCoefficients
 
 namespace WebCore {
 
+#if ENABLE(AV1_UTILITIES_SWIFT)
+// Implemented in AV1Utilities.swift, reached through @_cdecl because C++ cannot name a Swift
+// declaration in WebCore. The record crosses as the address of a default-constructed
+// AV1CodecConfigurationRecord that the Swift fills in, except for codecName.
+extern "C" bool WebCoreAV1ParseDecoderConfigurationRecord(const uint8_t*, size_t, void* record);
+// On success also writes the offset and size of the whole sequence header OBU within the input.
+extern "C" bool WebCoreAV1ParseSequenceHeader(const uint8_t*, size_t, void* record, size_t* sequenceHeaderOBU);
+#endif
+
 std::optional<AV1CodecConfigurationRecord> parseAV1CodecParameters(StringView codecView)
 {
     // Ref: https://aomediacodec.github.io/av1-isobmff/#codecsparam
@@ -527,6 +536,13 @@ bool validateAV1PerLevelConstraints(const AV1CodecConfigurationRecord& record, c
 
 std::optional<AV1CodecConfigurationRecord> parseAV1DecoderConfigurationRecord(std::span<const uint8_t> buffer)
 {
+#if ENABLE(AV1_UTILITIES_SWIFT)
+    AV1CodecConfigurationRecord record;
+    if (!WebCoreAV1ParseDecoderConfigurationRecord(buffer.data(), buffer.size(), &record))
+        return std::nullopt;
+    record.codecName = "av01"_s;
+    return record;
+#else
     // Ref: https://aomediacodec.github.io/av1-isobmff/
     // Section 2.3: AV1 Codec Configuration Box
 
@@ -646,8 +662,10 @@ std::optional<AV1CodecConfigurationRecord> parseAV1DecoderConfigurationRecord(st
     record.codecName = "av01"_s;
 
     return record;
+#endif
 }
 
+#if !ENABLE(AV1_UTILITIES_SWIFT)
 std::optional<AV1CodecConfigurationRecord> parseSequenceHeaderOBU(std::span<const uint8_t> data)
 {
     AV1CodecConfigurationRecord record;
@@ -1150,6 +1168,7 @@ std::optional<AV1CodecConfigurationRecord> parseSequenceHeaderOBU(std::span<cons
 
     return record;
 }
+#endif // !ENABLE(AV1_UTILITIES_SWIFT)
 
 PlatformVideoColorSpace createPlatformVideoColorSpaceFromAV1CodecConfigurationRecord(const AV1CodecConfigurationRecord& record)
 {
@@ -1304,6 +1323,7 @@ static Ref<VideoInfo> createVideoInfoFromAV1CodecConfigurationRecord(const AV1Co
     });
 }
 
+#if !ENABLE(AV1_UTILITIES_SWIFT)
 static size_t NODELETE readULEBSize(std::span<const uint8_t> data, size_t& index)
 {
     size_t value = 0;
@@ -1356,9 +1376,18 @@ static std::optional<std::pair<std::span<const uint8_t>, std::span<const uint8_t
     } while (true);
     return std::nullopt;
 }
+#endif // !ENABLE(AV1_UTILITIES_SWIFT)
 
 RefPtr<VideoInfo> createVideoInfoFromAV1Stream(std::span<const uint8_t> data, std::optional<FloatSize> displaySize, const std::optional<PlatformVideoColorSpace>& colorSpaceOverride)
 {
+#if ENABLE(AV1_UTILITIES_SWIFT)
+    AV1CodecConfigurationRecord record;
+    std::array<size_t, 2> sequenceHeaderOBU;
+    if (!WebCoreAV1ParseSequenceHeader(data.data(), data.size(), &record, sequenceHeaderOBU.data()))
+        return { };
+    record.codecName = "av01"_s;
+    return createVideoInfoFromAV1CodecConfigurationRecord(record, data.subspan(sequenceHeaderOBU[0], sequenceHeaderOBU[1]), displaySize, colorSpaceOverride);
+#else
     auto sequenceHeaderData = getSequenceHeaderOBU(data);
     if (!sequenceHeaderData)
         return { };
@@ -1368,6 +1397,7 @@ RefPtr<VideoInfo> createVideoInfoFromAV1Stream(std::span<const uint8_t> data, st
         return { };
 
     return createVideoInfoFromAV1CodecConfigurationRecord(*record, sequenceHeaderData->first, displaySize, colorSpaceOverride);
+#endif
 }
 
 }
