@@ -1052,6 +1052,13 @@ Vector<CMSampleTimingInfo> getSampleTimingInfoArray(CMSampleBufferRef sampleBuff
     return timings;
 }
 
+#if ENABLE(CM_UTILITIES_SWIFT)
+// Implemented in CMUtilities.swift, reached through @_cdecl because C++ cannot name a Swift
+// declaration in WebCore. The callback crosses as a C function pointer and a context; the result
+// of the copy is +1 and adopted here.
+extern "C" OSStatus WebCoreCMForEachSample(CMSampleBufferRef, OSStatus (*)(CMSampleBufferRef, CMItemCount, void*), void* context);
+extern "C" CMSampleBufferRef WebCoreCMCopySampleBufferForRange(CMSampleBufferRef, CFIndex location, CFIndex length);
+#else
 static bool sampleBufferHasNoSampleSizes(CMSampleBufferRef sampleBuffer)
 {
     return PAL::CMSampleBufferGetSampleSizeArray(sampleBuffer, 0, nullptr, nullptr) == kCMSampleBufferError_BufferHasNoSampleSizes;
@@ -1079,9 +1086,15 @@ static RetainPtr<CMSampleBufferRef> createSinglePacketSampleBuffer(CMBlockBuffer
         return nullptr;
     return adoptCF(rawSample);
 }
+#endif // !ENABLE(CM_UTILITIES_SWIFT)
 
 OSStatus forEachSample(CMSampleBufferRef sampleBuffer, NOESCAPE const Function<OSStatus(CMSampleBufferRef, CMItemCount)>& callback)
 {
+#if ENABLE(CM_UTILITIES_SWIFT)
+    return WebCoreCMForEachSample(sampleBuffer, [](CMSampleBufferRef subSample, CMItemCount index, void* context) -> OSStatus {
+        return (*static_cast<const Function<OSStatus(CMSampleBufferRef, CMItemCount)>*>(context))(subSample, index);
+    }, const_cast<void*>(static_cast<const void*>(&callback)));
+#else
     if (!sampleBufferHasNoSampleSizes(sampleBuffer)) {
         return PAL::CMSampleBufferCallBlockForEachSample(sampleBuffer, [&](CMSampleBufferRef subSample, CMItemCount index) -> OSStatus {
             return callback(subSample, index);
@@ -1126,10 +1139,14 @@ OSStatus forEachSample(CMSampleBufferRef sampleBuffer, NOESCAPE const Function<O
             return status;
     }
     return noErr;
+#endif
 }
 
 RetainPtr<CMSampleBufferRef> copySampleBufferForRange(CMSampleBufferRef sampleBuffer, CFRange range)
 {
+#if ENABLE(CM_UTILITIES_SWIFT)
+    return adoptCF(WebCoreCMCopySampleBufferForRange(sampleBuffer, range.location, range.length));
+#else
     if (!sampleBufferHasNoSampleSizes(sampleBuffer)) {
         CMSampleBufferRef rawCopy = nullptr;
         if (PAL::CMSampleBufferCopySampleBufferForRange(kCFAllocatorDefault, sampleBuffer, range, &rawCopy) != noErr || !rawCopy)
@@ -1197,6 +1214,7 @@ RetainPtr<CMSampleBufferRef> copySampleBufferForRange(CMSampleBufferRef sampleBu
     if (PAL::CMSampleBufferCreateReady(kCFAllocatorDefault, subBlock.get(), formatDescription.get(), range.length, timingEntries, timingArray, sampleSizes.size(), sampleSizes.span().data(), &rawSample) != noErr || !rawSample)
         return nullptr;
     return adoptCF(rawSample);
+#endif
 }
 
 RetainPtr<CMBlockBufferRef> ensureContiguousBlockBuffer(CMBlockBufferRef rawBlockBuffer)

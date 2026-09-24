@@ -95,6 +95,10 @@ _WebCoreAV1ParseSequenceHeader
 _WebCoreAV1ValidateConfigurationRecord
 _WebCoreAV1ValidatePerLevelConstraints
 
+# Source/WebCore/platform/graphics/cocoa/CMUtilities.swift
+_WebCoreCMCopySampleBufferForRange
+_WebCoreCMForEachSample
+
 # Source/WebCore/platform/graphics/cocoa/CodecCapabilitiesCocoa.swift
 _WebCoreAV1ValidateParameters
 _WebCoreDoViValidateParameters

@@ -81,6 +81,7 @@
 		AA11AV1U0001000000000002 /* AV1Utilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11AV1U0001000000000001 /* AV1Utilities.swift */; };
 		AA12HEVC0001000000000002 /* HEVCUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA12HEVC0001000000000001 /* HEVCUtilities.swift */; };
 		AA13CCAP0001000000000002 /* CodecCapabilitiesCocoa.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA13CCAP0001000000000001 /* CodecCapabilitiesCocoa.swift */; };
+		AA14CMUT0001000000000002 /* CMUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA14CMUT0001000000000001 /* CMUtilities.swift */; };
 		021D763A29C2AC6B00063684 /* ScrollbarsControllerMac.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0F02245326F15D75000265C3 /* ScrollbarsControllerMac.mm */; };
 		0223E06D2AAECC2200AF30FB /* HandleUserInputEventResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E06C2AAEBBCF00AF30FB /* HandleUserInputEventResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0223E0742AAED62200AF30FB /* RemoteUserInputEventData.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E0732AAED62200AF30FB /* RemoteUserInputEventData.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -22065,6 +22066,7 @@
 		AA11AV1U0001000000000001 /* AV1Utilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/AV1Utilities.swift; sourceTree = SOURCE_ROOT; };
 		AA12HEVC0001000000000001 /* HEVCUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/HEVCUtilities.swift; sourceTree = SOURCE_ROOT; };
 		AA13CCAP0001000000000001 /* CodecCapabilitiesCocoa.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/CodecCapabilitiesCocoa.swift; sourceTree = SOURCE_ROOT; };
+		AA14CMUT0001000000000001 /* CMUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/CMUtilities.swift; sourceTree = SOURCE_ROOT; };
 		DD5697F72DC1302B00050321 /* rdar150228472.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rdar150228472.swift; sourceTree = "<group>"; };
 		DD5ACFD62B14DAD600B36C57 /* LayoutIntegrationBoxGeometryUpdater.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayoutIntegrationBoxGeometryUpdater.cpp; sourceTree = "<group>"; };
 		DD5ACFD72B14DADE00B36C57 /* LayoutIntegrationBoxGeometryUpdater.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LayoutIntegrationBoxGeometryUpdater.h; sourceTree = "<group>"; };
@@ -51359,6 +51361,7 @@
 				CDB7045B1F7465A1003923DF /* CDMFairPlayStreaming.cpp in Sources */,
 				CDC224281F756966005F077B /* CDMInstanceFairPlayStreamingAVFObjC.mm in Sources */,
 				5150B5DF27CDF499004FC81E /* CMUtilities.mm in Sources */,
+				AA14CMUT0001000000000002 /* CMUtilities.swift in Sources */,
 				AA13CCAP0001000000000002 /* CodecCapabilitiesCocoa.swift in Sources */,
 				A14090FB1AA51E1D0091191A /* ContentFilterUnblockHandlerCocoa.mm in Sources */,
 				418BC5E02C5CBDB600152089 /* CoreAudioCaptureUnit.mm in Sources */,

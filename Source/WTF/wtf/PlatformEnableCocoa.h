@@ -1312,6 +1312,13 @@
 #define ENABLE_CODEC_CAPABILITIES_SWIFT 1
 #endif
 
+/* forEachSample and copySampleBufferForRange are written in Swift when this is enabled; see
+   Source/WebCore/platform/graphics/cocoa/CMUtilities.swift. The rest of CMUtilities.mm stays C++. */
+#if !defined(ENABLE_CM_UTILITIES_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_CM_UTILITIES_SWIFT 1
+#endif
+
 /* WebCore::attributedStringByStrippingAttachmentCharacters is written in Swift when this is
    enabled; see Source/WebCore/platform/cocoa/WebNSAttributedStringExtras.swift. Same reasoning
    again. This one is the first boundary here to return an Objective-C object across @_cdecl,
