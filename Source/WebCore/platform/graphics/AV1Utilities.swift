@@ -543,12 +543,12 @@ private func getSequenceHeaderOBU(_ data: Span<UInt8>) -> (fullObu: Range<Int>, 
 // MARK: - Codecs parameter string
 
 /// The code units of a Latin-1 or UTF-16 string, compared by code point.
-private typealias CodeUnit = FixedWidthInteger & UnsignedInteger
+internal typealias CodeUnit = FixedWidthInteger & UnsignedInteger
 
 /// StringView::split on '.': returns the range of the next non-empty element at or after `index`
 /// and advances `index` past it, or nil when none remain. Empty elements are skipped, so
 /// "av01..0" has two elements.
-private func nextElement<Unit: CodeUnit>(_ characters: Span<Unit>, _ index: inout Int) -> Range<Int>? {
+internal func nextElement<Unit: CodeUnit>(_ characters: Span<Unit>, _ index: inout Int) -> Range<Int>? {
     while index < characters.count && characters[index] == 0x2E {
         index += 1
     }
@@ -564,7 +564,7 @@ private func nextElement<Unit: CodeUnit>(_ characters: Span<Unit>, _ index: inou
 
 /// parseInteger<uint8_t>: optional leading and trailing whitespace (space, \t, \n, \v, \f, \r),
 /// an optional '+', then one or more decimal digits. Anything else, or a value above 255, fails.
-private func parseUInt8<Unit: CodeUnit>(_ characters: Span<Unit>, _ range: Range<Int>) -> UInt8? {
+internal func parseUInt8<Unit: CodeUnit>(_ characters: Span<Unit>, _ range: Range<Int>) -> UInt8? {
     func isWhitespace(_ character: Unit) -> Bool {
         character == 0x20 || (0x09...0x0D).contains(character)
     }
@@ -789,7 +789,7 @@ private func validateAV1PerLevelConstraints(_ record: RecordFields, width: UInt3
 // MARK: - Boundary
 
 /// The parsers read the caller's buffer in place for the duration of the call.
-private func withBytes(_ bytes: UnsafePointer<UInt8>?, _ count: Int, _ body: (Span<UInt8>) -> Bool) -> Bool {
+internal func withBytes(_ bytes: UnsafePointer<UInt8>?, _ count: Int, _ body: (Span<UInt8>) -> Bool) -> Bool {
     // SAFETY: the caller passes `count` readable bytes at `bytes`, which is null only when
     // `count` is 0, and does not modify or free them until this call returns.
     let buffer = unsafe UnsafeBufferPointer(start: bytes, count: bytes == nil ? 0 : count)

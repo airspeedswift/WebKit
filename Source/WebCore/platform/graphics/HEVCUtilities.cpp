@@ -38,8 +38,29 @@
 
 namespace WebCore {
 
+#if ENABLE(HEVC_UTILITIES_SWIFT)
+// Implemented in HEVCUtilities.swift, reached through @_cdecl because C++ cannot name a Swift
+// declaration in WebCore. Each parameters struct crosses as the address of a default-constructed
+// struct that the Swift fills in; HEVCParameters::generalConstraintIndicatorFlags crosses
+// separately as the address of its six bytes. The characters are Latin-1 when is8Bit is true and
+// UTF-16 otherwise.
+extern "C" bool WebCoreAVCParseCodecParameters(const void* characters, size_t length, bool is8Bit, void* parameters);
+extern "C" bool WebCoreAVCParseDecoderConfigurationRecord(const uint8_t*, size_t, void* parameters);
+extern "C" bool WebCoreHEVCParseCodecParameters(const void* characters, size_t length, bool is8Bit, void* parameters, uint8_t* constraintFlags);
+extern "C" bool WebCoreHEVCParseDecoderConfigurationRecord(uint32_t codecCode, const uint8_t*, size_t, void* parameters, uint8_t* constraintFlags);
+extern "C" bool WebCoreDoViParseCodecParameters(const void* characters, size_t length, bool is8Bit, void* parameters);
+extern "C" bool WebCoreDoViParseDecoderConfigurationRecord(const uint8_t*, size_t, void* parameters);
+#endif
+
 std::optional<AVCParameters> parseAVCCodecParameters(StringView codecString)
 {
+#if ENABLE(HEVC_UTILITIES_SWIFT)
+    AVCParameters parameters;
+    bool is8Bit = codecString.is8Bit();
+    if (!WebCoreAVCParseCodecParameters(is8Bit ? static_cast<const void*>(codecString.span8().data()) : codecString.span16().data(), codecString.length(), is8Bit, &parameters))
+        return std::nullopt;
+    return parameters;
+#else
     // The format of the 'avc1' codec string is specified in ISO/IEC 14496-15:2014, Annex E2.
     StringView codecView(codecString);
     auto codecSplit = codecView.split('.');
@@ -70,6 +91,7 @@ std::optional<AVCParameters> parseAVCCodecParameters(StringView codecString)
     parameters.levelIDC = *profileFlagsAndLevel & 0xFF;
 
     return parameters;
+#endif
 }
 
 String createAVCCodecParametersString(const AVCParameters& parameters)
@@ -83,6 +105,13 @@ String createAVCCodecParametersString(const AVCParameters& parameters)
 
 std::optional<AVCParameters> parseAVCDecoderConfigurationRecord(const SharedBuffer& buffer)
 {
+#if ENABLE(HEVC_UTILITIES_SWIFT)
+    AVCParameters parameters;
+    auto span = buffer.span();
+    if (!WebCoreAVCParseDecoderConfigurationRecord(span.data(), span.size(), &parameters))
+        return std::nullopt;
+    return parameters;
+#else
     // ISO/IEC 14496-10:2014
     // 7.3.2.1.1 Sequence parameter set data syntax
 
@@ -118,10 +147,18 @@ std::optional<AVCParameters> parseAVCDecoderConfigurationRecord(const SharedBuff
         return std::nullopt;
 
     return parameters;
+#endif
 }
 
 std::optional<HEVCParameters> parseHEVCCodecParameters(StringView codecString)
 {
+#if ENABLE(HEVC_UTILITIES_SWIFT)
+    HEVCParameters parameters;
+    bool is8Bit = codecString.is8Bit();
+    if (!WebCoreHEVCParseCodecParameters(is8Bit ? static_cast<const void*>(codecString.span8().data()) : codecString.span16().data(), codecString.length(), is8Bit, &parameters, parameters.generalConstraintIndicatorFlags.mutableSpan().data()))
+        return std::nullopt;
+    return parameters;
+#else
     // The format of the 'hevc' codec string is specified in ISO/IEC 14496-15:2014, Annex E.3.
     StringView codecView(codecString);
     auto codecSplit = codecView.split('.');
@@ -199,6 +236,7 @@ std::optional<HEVCParameters> parseHEVCCodecParameters(StringView codecString)
     }
 
     return parameters;
+#endif
 }
 
 String createHEVCCodecParametersString(const HEVCParameters& parameters)
@@ -234,6 +272,13 @@ String createHEVCCodecParametersString(const HEVCParameters& parameters)
 
 std::optional<HEVCParameters> parseHEVCDecoderConfigurationRecord(FourCC codecCode, const SharedBuffer& buffer)
 {
+#if ENABLE(HEVC_UTILITIES_SWIFT)
+    HEVCParameters parameters;
+    auto span = buffer.span();
+    if (!WebCoreHEVCParseDecoderConfigurationRecord(codecCode.value, span.data(), span.size(), &parameters, parameters.generalConstraintIndicatorFlags.mutableSpan().data()))
+        return std::nullopt;
+    return parameters;
+#else
     // ISO/IEC 14496-15:2014
     // 8.3.3.1 HEVC decoder configuration record
 
@@ -287,8 +332,10 @@ std::optional<HEVCParameters> parseHEVCDecoderConfigurationRecord(FourCC codecCo
         return std::nullopt;
 
     return parameters;
+#endif
 }
 
+#if !ENABLE(HEVC_UTILITIES_SWIFT)
 static std::optional<DoViParameters::Codec> parseDoViCodecType(StringView string)
 {
     static constexpr SortedArrayMap typesMap { WTF::toArray<std::pair<PackedLettersLiteral<uint32_t>, DoViParameters::Codec>>({
@@ -346,9 +393,17 @@ static bool NODELETE isValidProfileIDForCodec(uint16_t profileID, DoViParameters
         return codec == DoViParameters::Codec::AVC1 || codec == DoViParameters::Codec::AVC3;
     return codec == DoViParameters::Codec::HVC1 || codec == DoViParameters::Codec::HEV1;
 }
+#endif // !ENABLE(HEVC_UTILITIES_SWIFT)
 
 std::optional<DoViParameters> parseDoViCodecParameters(StringView codecView)
 {
+#if ENABLE(HEVC_UTILITIES_SWIFT)
+    DoViParameters parameters;
+    bool is8Bit = codecView.is8Bit();
+    if (!WebCoreDoViParseCodecParameters(is8Bit ? static_cast<const void*>(codecView.span8().data()) : codecView.span16().data(), codecView.length(), is8Bit, &parameters))
+        return std::nullopt;
+    return parameters;
+#else
     // The format of the DoVi codec string is specified in "Dolby Vision Profiles and Levels Version 1.3.2"
     auto codecSplit = codecView.split('.');
     auto nextElement = codecSplit.begin();
@@ -402,10 +457,18 @@ std::optional<DoViParameters> parseDoViCodecParameters(StringView codecView)
         return std::nullopt;
 
     return parameters;
+#endif
 }
 
 std::optional<DoViParameters> parseDoViDecoderConfigurationRecord(const SharedBuffer& buffer)
 {
+#if ENABLE(HEVC_UTILITIES_SWIFT)
+    DoViParameters parameters;
+    auto span = buffer.span();
+    if (!WebCoreDoViParseDecoderConfigurationRecord(span.data(), span.size(), &parameters))
+        return std::nullopt;
+    return parameters;
+#else
     // The format of the DoVi Configuration Record is contained in "Dolby Vision Streams Within
     // the ISO Base Media File Format, Version 2.0"
 
@@ -438,6 +501,7 @@ std::optional<DoViParameters> parseDoViDecoderConfigurationRecord(const SharedBu
     parameters.bitstreamProfileID = (profileLevelAndFlags & 0b1111111000000000) >> 9;
     parameters.bitstreamLevelID = (profileLevelAndFlags & 0b0000000111111000) >> 3;
     return parameters;
+#endif
 }
 
 String createDoViCodecParametersString(const DoViParameters& parameters)

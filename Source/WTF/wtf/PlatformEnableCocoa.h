@@ -1298,6 +1298,13 @@
 #define ENABLE_AV1_UTILITIES_SWIFT 1
 #endif
 
+/* The AVC, HEVC and Dolby Vision codecs-parameter and decoder configuration record parsers are
+   written in Swift when this is enabled; see Source/WebCore/platform/graphics/HEVCUtilities.swift,
+   which shares the codecs-string scanning in AV1Utilities.swift. */
+#if !defined(ENABLE_HEVC_UTILITIES_SWIFT) && ENABLE(AV1_UTILITIES_SWIFT)
+#define ENABLE_HEVC_UTILITIES_SWIFT 1
+#endif
+
 /* WebCore::attributedStringByStrippingAttachmentCharacters is written in Swift when this is
    enabled; see Source/WebCore/platform/cocoa/WebNSAttributedStringExtras.swift. Same reasoning
    again. This one is the first boundary here to return an Objective-C object across @_cdecl,
