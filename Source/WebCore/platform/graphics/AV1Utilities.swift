@@ -51,20 +51,20 @@ private typealias AV1ConfigurationRange = WebCore_Private.WebCore.AV1Configurati
 /// WebCore::BitReader: reads MSB-first. `read(0)` does not return 0: the count is decremented
 /// before it is tested, so it wraps and the read consumes the rest of the data and fails. Bits
 /// shifted past 64 are dropped. A failed read leaves the bits it consumed consumed.
-private struct BitReader {
-    private let data: ArraySlice<UInt8>
-    private var index: Int
+private struct BitReader: ~Escapable {
+    private let data: Span<UInt8>
+    private var index = 0
     private var currentByte: UInt8 = 0
     private var remainingBits = 0
 
-    init(_ data: ArraySlice<UInt8>) {
+    @_lifetime(copy data)
+    init(_ data: Span<UInt8>) {
         self.data = data
-        self.index = data.startIndex
     }
 
     mutating func readBit() -> Bool? {
         if remainingBits == 0 {
-            if index >= data.endIndex {
+            if index >= data.count {
                 return nil
             }
             currentByte = data[index]
@@ -172,7 +172,7 @@ private func store(_ parsed: ParsedRecord, into rawRecord: UnsafeMutableRawPoint
 // MARK: - av1C
 
 /// Ref: https://aomediacodec.github.io/av1-isobmff/ Section 2.3: AV1 Codec Configuration Box.
-private func parseAV1DecoderConfigurationRecord(_ buffer: ArraySlice<UInt8>) -> ParsedRecord? {
+private func parseAV1DecoderConfigurationRecord(_ buffer: Span<UInt8>) -> ParsedRecord? {
     // AV1CodecConfigurationRecord is at least 4 bytes long.
     if buffer.count < 4 {
         return nil
@@ -220,7 +220,7 @@ private func parseAV1DecoderConfigurationRecord(_ buffer: ArraySlice<UInt8>) -> 
 
 // MARK: - Sequence header OBU
 
-private func parseSequenceHeaderOBU(_ data: ArraySlice<UInt8>) -> ParsedRecord? {
+private func parseSequenceHeaderOBU(_ data: Span<UInt8>) -> ParsedRecord? {
     var record = ParsedRecord()
     var bitReader = BitReader(data)
 
@@ -484,7 +484,7 @@ private func parseSequenceHeaderOBU(_ data: ArraySlice<UInt8>) -> ParsedRecord? 
 /// leb128(), limited to 8 bytes. Returns 0 when the data runs out or the value reaches
 /// UINT32_MAX, having advanced `index` past the bytes it read; a zero size is indistinguishable
 /// from a failure.
-private func readULEBSize(_ data: [UInt8], _ index: inout Int) -> Int {
+private func readULEBSize(_ data: Span<UInt8>, _ index: inout Int) -> Int {
     var value: UInt = 0
     for cptr in 0..<8 {
         if index >= data.count {
@@ -504,7 +504,7 @@ private func readULEBSize(_ data: [UInt8], _ index: inout Int) -> Int {
 }
 
 /// Finds the first sequence header OBU. Returns the range of the whole OBU and of its payload.
-private func getSequenceHeaderOBU(_ data: [UInt8]) -> (fullObu: Range<Int>, obuData: Range<Int>)? {
+private func getSequenceHeaderOBU(_ data: Span<UInt8>) -> (fullObu: Range<Int>, obuData: Range<Int>)? {
     var index = 0
     while true {
         if index >= data.count {
@@ -542,100 +542,135 @@ private func getSequenceHeaderOBU(_ data: [UInt8]) -> (fullObu: Range<Int>, obuD
 
 // MARK: - Codecs parameter string
 
+/// The code units of a Latin-1 or UTF-16 string, compared by code point.
+private typealias CodeUnit = FixedWidthInteger & UnsignedInteger
+
+/// StringView::split on '.': returns the range of the next non-empty element at or after `index`
+/// and advances `index` past it, or nil when none remain. Empty elements are skipped, so
+/// "av01..0" has two elements.
+private func nextElement<Unit: CodeUnit>(_ characters: Span<Unit>, _ index: inout Int) -> Range<Int>? {
+    while index < characters.count && characters[index] == 0x2E {
+        index += 1
+    }
+    if index == characters.count {
+        return nil
+    }
+    let start = index
+    while index < characters.count && characters[index] != 0x2E {
+        index += 1
+    }
+    return start..<index
+}
+
 /// parseInteger<uint8_t>: optional leading and trailing whitespace (space, \t, \n, \v, \f, \r),
 /// an optional '+', then one or more decimal digits. Anything else, or a value above 255, fails.
-private func parseUInt8(_ characters: ArraySlice<UInt16>) -> UInt8? {
-    func isWhitespace(_ character: UInt16) -> Bool {
+private func parseUInt8<Unit: CodeUnit>(_ characters: Span<Unit>, _ range: Range<Int>) -> UInt8? {
+    func isWhitespace(_ character: Unit) -> Bool {
         character == 0x20 || (0x09...0x0D).contains(character)
     }
-    func isDigit(_ character: UInt16) -> Bool {
+    func isDigit(_ character: Unit) -> Bool {
         (0x30...0x39).contains(character)
     }
 
-    var rest = characters.drop(while: isWhitespace)
-    if rest.first == 0x2B {
-        rest = rest.dropFirst()
+    var index = range.lowerBound
+    while index < range.upperBound && isWhitespace(characters[index]) {
+        index += 1
     }
-    let digits = rest.prefix(while: isDigit)
-    if digits.isEmpty || !rest.dropFirst(digits.count).allSatisfy(isWhitespace) {
+    if index < range.upperBound && characters[index] == 0x2B {
+        index += 1
+    }
+    let digitsStart = index
+    var value = 0
+    var overflowed = false
+    while index < range.upperBound && isDigit(characters[index]) {
+        value = value * 10 + Int(characters[index] - 0x30)
+        if value > Int(UInt8.max) {
+            // Keep scanning: trailing garbage and overflow both fail, so the order does not matter.
+            overflowed = true
+            value = 0
+        }
+        index += 1
+    }
+    if index == digitsStart {
         return nil
     }
-
-    var value = 0
-    for digit in digits {
-        value = value * 10 + Int(digit - 0x30)
-        if value > Int(UInt8.max) {
+    while index < range.upperBound {
+        if !isWhitespace(characters[index]) {
             return nil
         }
+        index += 1
     }
-    return UInt8(value)
+    return overflowed ? nil : UInt8(value)
 }
 
 /// Ref: https://aomediacodec.github.io/av1-isobmff/#codecsparam Section 5: Codecs Parameter String.
 /// <4CC>.<profile>.<level><tier>.<bitDepth>[.<monochrome>[.<chromaSubsampling>[.<colorPrimaries>
 /// [.<transferCharacteristics>[.<matrixCoefficients>.<videoFullRangeFlag>]]]]]
-private func parseAV1CodecParameters(_ characters: [UInt16]) -> ParsedRecord? {
-    // StringView::split: empty elements are skipped, so "av01..0" has two elements.
-    let elements = characters.split(separator: 0x2E)
-    guard elements.count >= 4, elements[0].elementsEqual("av01".utf16) else { return nil }
+///
+/// Every failure returns nil and every success returns the whole record, so reading the elements
+/// one at a time is equivalent to splitting the string first and checking the element count.
+private func parseAV1CodecParameters<Unit: CodeUnit>(_ characters: Span<Unit>) -> ParsedRecord? {
+    var index = 0
+    guard let fourCC = nextElement(characters, &index), fourCC.count == 4,
+        characters[fourCC.lowerBound] == 0x61, // 'a'
+        characters[fourCC.lowerBound + 1] == 0x76, // 'v'
+        characters[fourCC.lowerBound + 2] == 0x30, // '0'
+        characters[fourCC.lowerBound + 3] == 0x31 // '1'
+    else { return nil }
+
+    guard let profileElement = nextElement(characters, &index),
+        let levelTier = nextElement(characters, &index),
+        let bitDepthElement = nextElement(characters, &index)
+    else { return nil }
 
     var record = ParsedRecord()
 
-    guard let profile = parseUInt8(elements[1]), isValidProfile(UInt64(profile)) else { return nil }
+    guard let profile = parseUInt8(characters, profileElement), isValidProfile(UInt64(profile)) else { return nil }
     record.profile = AV1ConfigurationProfile(rawValue: profile)
 
     // The last character is the tier; the ones before it are the level.
-    let levelTier = elements[2]
     if levelTier.count < 3 {
         return nil
     }
-    guard let level = parseUInt8(levelTier.dropLast()), isValidLevel(UInt64(level)) else { return nil }
+    guard let level = parseUInt8(characters, levelTier.dropLast()), isValidLevel(UInt64(level)) else { return nil }
     record.level = AV1ConfigurationLevel(rawValue: level)
-    switch levelTier.last {
-    case 0x4D?: // 'M'
+    switch characters[levelTier.upperBound - 1] {
+    case 0x4D: // 'M'
         record.tier = .Main
-    case 0x48?: // 'H'
+    case 0x48: // 'H'
         record.tier = .High
     default:
         return nil
     }
 
-    guard let bitDepth = parseUInt8(elements[3]), bitDepth <= 12 else { return nil }
+    guard let bitDepth = parseUInt8(characters, bitDepthElement), bitDepth <= 12 else { return nil }
     record.bitDepth = bitDepth
 
     // An omitted optional field keeps the record default, which is the value the specification assumes.
-    if elements.count == 4 {
-        return record
-    }
-    guard let monochrome = parseUInt8(elements[4]), monochrome <= 1 else { return nil }
+    guard let monochromeElement = nextElement(characters, &index) else { return record }
+    guard let monochrome = parseUInt8(characters, monochromeElement), monochrome <= 1 else { return nil }
     record.monochrome = monochrome
 
-    if elements.count == 5 {
-        return record
-    }
-    guard let chromaSubsampling = parseUInt8(elements[5]), isValidChromaSubsampling(chromaSubsampling) else { return nil }
+    guard let chromaSubsamplingElement = nextElement(characters, &index) else { return record }
+    guard let chromaSubsampling = parseUInt8(characters, chromaSubsamplingElement), isValidChromaSubsampling(chromaSubsampling) else { return nil }
     record.chromaSubsampling = chromaSubsampling
 
-    if elements.count == 6 {
-        return record
-    }
-    guard let colorPrimaries = parseUInt8(elements[6]), isValidColorPrimaries(colorPrimaries) else { return nil }
+    guard let colorPrimariesElement = nextElement(characters, &index) else { return record }
+    guard let colorPrimaries = parseUInt8(characters, colorPrimariesElement), isValidColorPrimaries(colorPrimaries) else { return nil }
     record.colorPrimaries = colorPrimaries
 
-    if elements.count == 7 {
-        return record
-    }
-    guard let transferCharacteristics = parseUInt8(elements[7]), isValidTransferCharacteristics(transferCharacteristics) else { return nil }
+    guard let transferCharacteristicsElement = nextElement(characters, &index) else { return record }
+    guard let transferCharacteristics = parseUInt8(characters, transferCharacteristicsElement), isValidTransferCharacteristics(transferCharacteristics) else { return nil }
     record.transferCharacteristics = transferCharacteristics
 
-    if elements.count == 8 {
-        return record
-    }
-    guard let matrixCoefficients = parseUInt8(elements[8]), isValidMatrixCoefficients(matrixCoefficients) else { return nil }
+    guard let matrixCoefficientsElement = nextElement(characters, &index) else { return record }
+    guard let matrixCoefficients = parseUInt8(characters, matrixCoefficientsElement), isValidMatrixCoefficients(matrixCoefficients) else { return nil }
     record.matrixCoefficients = matrixCoefficients
 
     // videoFullRangeFlag must follow matrixCoefficients and ends the string.
-    guard elements.count == 10, let range = parseUInt8(elements[9]), isValidRange(range) else { return nil }
+    guard let rangeElement = nextElement(characters, &index), nextElement(characters, &index) == nil,
+        let range = parseUInt8(characters, rangeElement), isValidRange(range)
+    else { return nil }
     record.videoFullRangeFlag = AV1ConfigurationRange(rawValue: range)
     return record
 }
@@ -651,20 +686,21 @@ private struct RecordFields {
     var monochrome: UInt8
     var chromaSubsampling: UInt8
 
-    init(_ record: borrowing AV1CodecConfigurationRecord) {
-        profile = record.profile.rawValue
-        level = record.level
-        tier = record.tier.rawValue
-        bitDepth = record.bitDepth
-        monochrome = record.monochrome
-        chromaSubsampling = record.chromaSubsampling
+    /// Reads the fields in place: copying the whole record would copy its codecName String too.
+    init(_ record: UnsafePointer<AV1CodecConfigurationRecord>) {
+        profile = unsafe record.pointee.profile.rawValue
+        level = unsafe record.pointee.level
+        tier = unsafe record.pointee.tier.rawValue
+        bitDepth = unsafe record.pointee.bitDepth
+        monochrome = unsafe record.pointee.monochrome
+        chromaSubsampling = unsafe record.pointee.chromaSubsampling
     }
 }
 
 private func loadFields(from rawRecord: UnsafeRawPointer) -> RecordFields {
     // SAFETY: the caller passes the address of a live AV1CodecConfigurationRecord and does not
     // modify it until this call returns.
-    unsafe RecordFields(rawRecord.assumingMemoryBound(to: AV1CodecConfigurationRecord.self).pointee)
+    unsafe RecordFields(rawRecord.assumingMemoryBound(to: AV1CodecConfigurationRecord.self))
 }
 
 /// Ref: https://aomediacodec.github.io/av1-spec/av1-spec.pdf
@@ -752,50 +788,51 @@ private func validateAV1PerLevelConstraints(_ record: RecordFields, width: UInt3
 
 // MARK: - Boundary
 
-private func copyBytes(_ bytes: UnsafePointer<UInt8>?, _ count: Int) -> [UInt8] {
+/// The parsers read the caller's buffer in place for the duration of the call.
+private func withBytes(_ bytes: UnsafePointer<UInt8>?, _ count: Int, _ body: (Span<UInt8>) -> Bool) -> Bool {
     // SAFETY: the caller passes `count` readable bytes at `bytes`, which is null only when
-    // `count` is 0; they are copied out before this call returns.
-    unsafe bytes.map { unsafe Array(UnsafeBufferPointer(start: $0, count: count)) } ?? []
+    // `count` is 0, and does not modify or free them until this call returns.
+    let buffer = unsafe UnsafeBufferPointer(start: bytes, count: bytes == nil ? 0 : count)
+    return body(unsafe buffer.span)
 }
 
 @_cdecl("WebCoreAV1ParseDecoderConfigurationRecord")
 internal func webCoreAV1ParseDecoderConfigurationRecord(_ bytes: UnsafePointer<UInt8>?, _ count: Int, _ rawRecord: UnsafeMutableRawPointer) -> Bool {
-    let data = unsafe copyBytes(bytes, count)
-    guard let parsed = parseAV1DecoderConfigurationRecord(data[...]) else {
-        return false
+    unsafe withBytes(bytes, count) { data in
+        guard let parsed = parseAV1DecoderConfigurationRecord(data) else {
+            return false
+        }
+        unsafe store(parsed, into: rawRecord)
+        return true
     }
-    unsafe store(parsed, into: rawRecord)
-    return true
 }
 
 @_cdecl("WebCoreAV1ParseSequenceHeader")
 internal func webCoreAV1ParseSequenceHeader(_ bytes: UnsafePointer<UInt8>?, _ count: Int, _ rawRecord: UnsafeMutableRawPointer, _ obuOffsetAndSize: UnsafeMutablePointer<Int>) -> Bool {
-    let data = unsafe copyBytes(bytes, count)
-    guard let obu = getSequenceHeaderOBU(data), let parsed = parseSequenceHeaderOBU(data[obu.obuData]) else {
-        return false
-    }
-    unsafe store(parsed, into: rawRecord)
-    // SAFETY: the caller passes room for two Ints at `obuOffsetAndSize`.
-    unsafe (obuOffsetAndSize[0], obuOffsetAndSize[1]) = (obu.fullObu.lowerBound, obu.fullObu.count)
-    return true
-}
-
-/// Latin-1 characters widen to the UTF-16 code units of the same code points.
-private func copyCharacters(_ characters: UnsafeRawPointer?, _ length: Int, _ is8Bit: Bool) -> [UInt16] {
-    // SAFETY: the caller passes `length` Latin-1 bytes if `is8Bit`, else `length` UTF-16 code units,
-    // at `characters`, which is null only when `length` is 0; they are copied out before this call returns.
-    unsafe characters.map { base in
-        if is8Bit {
-            return unsafe UnsafeBufferPointer(start: base.assumingMemoryBound(to: UInt8.self), count: length).map(UInt16.init)
+    unsafe withBytes(bytes, count) { data in
+        guard let obu = getSequenceHeaderOBU(data), let parsed = parseSequenceHeaderOBU(data.extracting(obu.obuData)) else {
+            return false
         }
-        return unsafe Array(UnsafeBufferPointer(start: base.assumingMemoryBound(to: UInt16.self), count: length))
-    } ?? []
+        unsafe store(parsed, into: rawRecord)
+        // SAFETY: the caller passes room for two Ints at `obuOffsetAndSize`.
+        unsafe (obuOffsetAndSize[0], obuOffsetAndSize[1]) = (obu.fullObu.lowerBound, obu.fullObu.count)
+        return true
+    }
 }
 
+/// Latin-1 characters are compared as the code points they are, the same as UTF-16 code units.
 @_cdecl("WebCoreAV1ParseCodecParameters")
 internal func webCoreAV1ParseCodecParameters(_ characters: UnsafeRawPointer?, _ length: Int, _ is8Bit: Bool, _ rawRecord: UnsafeMutableRawPointer) -> Bool {
-    let string = unsafe copyCharacters(characters, length, is8Bit)
-    guard let parsed = parseAV1CodecParameters(string) else {
+    // SAFETY: the caller passes `length` Latin-1 bytes if `is8Bit`, else `length` UTF-16 code units,
+    // at `characters`, which is null only when `length` is 0, and does not modify or free them
+    // until this call returns.
+    let count = unsafe characters == nil ? 0 : length
+    let parsed = if is8Bit {
+        parseAV1CodecParameters(unsafe UnsafeBufferPointer(start: characters?.assumingMemoryBound(to: UInt8.self), count: count).span)
+    } else {
+        parseAV1CodecParameters(unsafe UnsafeBufferPointer(start: characters?.assumingMemoryBound(to: UInt16.self), count: count).span)
+    }
+    guard let parsed else {
         return false
     }
     unsafe store(parsed, into: rawRecord)
