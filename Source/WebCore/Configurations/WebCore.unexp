@@ -95,6 +95,11 @@ _WebCoreAV1ParseSequenceHeader
 _WebCoreAV1ValidateConfigurationRecord
 _WebCoreAV1ValidatePerLevelConstraints
 
+# Source/WebCore/platform/graphics/cocoa/CodecCapabilitiesCocoa.swift
+_WebCoreAV1ValidateParameters
+_WebCoreDoViValidateParameters
+_WebCoreHEVCValidateParameters
+
 # Source/WebCore/platform/graphics/HEVCUtilities.swift
 _WebCoreAVCParseCodecParameters
 _WebCoreAVCParseDecoderConfigurationRecord

@@ -40,9 +40,27 @@
 #import <pal/cocoa/AVFoundationSoftLink.h>
 
 namespace WebCore {
+#if ENABLE(CODEC_CAPABILITIES_SWIFT)
+// Implemented in CodecCapabilitiesCocoa.swift, reached through @_cdecl because C++ cannot name a
+// Swift declaration in WebCore. The parameters cross as their address. The result is 0 for
+// std::nullopt; otherwise bit 7 is set and bits 0-2 hold supported, smooth and powerEfficient.
+extern "C" uint8_t WebCoreHEVCValidateParameters(const void* parameters, bool hasAlphaChannel, bool hdrSupport);
+extern "C" uint8_t WebCoreDoViValidateParameters(const void* parameters, bool hasAlphaChannel, bool hdrSupport);
+
+static std::optional<PlatformMediaCapabilitiesInfo> capabilitiesInfo(uint8_t packed)
+{
+    if (!packed)
+        return std::nullopt;
+    return PlatformMediaCapabilitiesInfo { !!(packed & 1), !!(packed & 2), !!(packed & 4) };
+}
+#endif
+
 
 std::optional<PlatformMediaCapabilitiesInfo> validateHEVCParameters(const HEVCParameters& parameters, bool hasAlphaChannel, bool hdrSupport)
 {
+#if ENABLE(CODEC_CAPABILITIES_SWIFT)
+    return capabilitiesInfo(WebCoreHEVCValidateParameters(&parameters, hasAlphaChannel, hdrSupport));
+#else
     CMVideoCodecType codec = kCMVideoCodecType_HEVC;
     if (hasAlphaChannel) {
         if (!PAL::isAVFoundationFrameworkAvailable() || !PAL::canLoad_AVFoundation_AVVideoCodecTypeHEVCWithAlpha())
@@ -122,8 +140,10 @@ std::optional<PlatformMediaCapabilitiesInfo> validateHEVCParameters(const HEVCPa
     }
 
     return info;
+#endif
 }
 
+#if !ENABLE(CODEC_CAPABILITIES_SWIFT)
 static CMVideoCodecType NODELETE codecType(DoViParameters::Codec codec)
 {
     switch (codec) {
@@ -151,9 +171,13 @@ static std::optional<Vector<uint16_t>> parseStringArrayFromDictionaryToUInt16Vec
         return std::nullopt;
     return result;
 }
+#endif // !ENABLE(CODEC_CAPABILITIES_SWIFT)
 
 std::optional<PlatformMediaCapabilitiesInfo> validateDoViParameters(const DoViParameters& parameters, bool hasAlphaChannel, bool hdrSupport)
 {
+#if ENABLE(CODEC_CAPABILITIES_SWIFT)
+    return capabilitiesInfo(WebCoreDoViValidateParameters(&parameters, hasAlphaChannel, hdrSupport));
+#else
     if (hasAlphaChannel)
         return std::nullopt;
 
@@ -198,6 +222,7 @@ std::optional<PlatformMediaCapabilitiesInfo> validateDoViParameters(const DoViPa
         return std::nullopt;
 
     return { { true, true, isHardwareAccelerated } };
+#endif
 }
 
 }

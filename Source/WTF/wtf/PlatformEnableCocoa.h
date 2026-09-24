@@ -1305,6 +1305,13 @@
 #define ENABLE_HEVC_UTILITIES_SWIFT 1
 #endif
 
+/* The VideoToolbox decoder-capability checks of validateAV1Parameters, validateHEVCParameters and
+   validateDoViParameters are written in Swift when this is enabled; see
+   Source/WebCore/platform/graphics/cocoa/CodecCapabilitiesCocoa.swift. */
+#if !defined(ENABLE_CODEC_CAPABILITIES_SWIFT) && ENABLE(HEVC_UTILITIES_SWIFT)
+#define ENABLE_CODEC_CAPABILITIES_SWIFT 1
+#endif
+
 /* WebCore::attributedStringByStrippingAttachmentCharacters is written in Swift when this is
    enabled; see Source/WebCore/platform/cocoa/WebNSAttributedStringExtras.swift. Same reasoning
    again. This one is the first boundary here to return an Objective-C object across @_cdecl,

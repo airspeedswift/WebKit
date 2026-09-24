@@ -43,6 +43,19 @@
 
 namespace WebCore {
 
+#if ENABLE(CODEC_CAPABILITIES_SWIFT)
+// Implemented in CodecCapabilitiesCocoa.swift, reached through @_cdecl because C++ cannot name a
+// Swift declaration in WebCore. The record crosses as its address. The result is 0 for
+// std::nullopt; otherwise bit 7 is set and bits 0-2 hold supported, smooth and powerEfficient.
+extern "C" uint8_t WebCoreAV1ValidateParameters(const void* record);
+
+static std::optional<PlatformMediaCapabilitiesInfo> capabilitiesInfo(uint8_t packed)
+{
+    if (!packed)
+        return std::nullopt;
+    return PlatformMediaCapabilitiesInfo { !!(packed & 1), !!(packed & 2), !!(packed & 4) };
+}
+#else
 static bool NODELETE isConfigurationRecordHDR(const AV1CodecConfigurationRecord& record)
 {
     if (record.bitDepth < 10)
@@ -64,6 +77,7 @@ static bool NODELETE isConfigurationRecordHDR(const AV1CodecConfigurationRecord&
 
     return true;
 }
+#endif // ENABLE(CODEC_CAPABILITIES_SWIFT)
 
 std::optional<PlatformMediaCapabilitiesInfo> validateAV1Parameters(const AV1CodecConfigurationRecord& record, const PlatformMediaCapabilitiesVideoConfiguration& configuration)
 {
@@ -73,6 +87,9 @@ std::optional<PlatformMediaCapabilitiesInfo> validateAV1Parameters(const AV1Code
     if (!validateAV1PerLevelConstraints(record, configuration))
         return std::nullopt;
 
+#if ENABLE(CODEC_CAPABILITIES_SWIFT)
+    return capabilitiesInfo(WebCoreAV1ValidateParameters(&record));
+#else
     if (!canLoad_VideoToolbox_VTCopyAV1DecoderCapabilitiesDictionary()
         || !canLoad_VideoToolbox_kVTDecoderCodecCapability_SupportedProfiles()
         || !canLoad_VideoToolbox_kVTDecoderCodecCapability_PerProfileSupport()
@@ -174,6 +191,7 @@ std::optional<PlatformMediaCapabilitiesInfo> validateAV1Parameters(const AV1Code
     }
 
     return info;
+#endif
 }
 
 static std::optional<bool> s_av1HardwareDecoderAvailable = { };
