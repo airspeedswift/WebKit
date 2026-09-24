@@ -25,9 +25,6 @@
 
 #pragma once
 
-// FIXME: Remove the `__has_feature(modules)` condition when possible.
-#if !__has_feature(modules)
-
 #include <wtf/Compiler.h>
 #include <wtf/Platform.h>
 
@@ -64,5 +61,3 @@ void FigThreadUnregisterAbortAction(FigThreadAbortActionToken);
 WTF_EXTERN_C_END
 
 #endif // PLATFORM(COCOA)
-
-#endif // !__has_feature(modules)
