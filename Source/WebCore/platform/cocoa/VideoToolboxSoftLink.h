@@ -25,6 +25,7 @@
 
 #pragma once
 
+// Private so that WebCore's Swift can reach these soft links through WebCore_Private.
 #include <VideoToolbox/VideoToolbox.h>
 #include <wtf/SoftLinking.h>
 
