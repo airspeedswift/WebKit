@@ -1277,6 +1277,17 @@
 #define ENABLE_CALAYER_EXTRAS_SWIFT 1
 #endif
 
+/* typeFromFormatDescription, presentationSizeFromFormatDescription,
+   colorSpaceFromFormatDescription, fieldCountFromFormatDescription,
+   fieldDetailFromFormatDescription and formatDescriptionIsProtected are written in Swift when this
+   is enabled; see Source/WebCore/platform/graphics/avfoundation/FormatDescriptionUtilities.swift.
+   The rest of FormatDescriptionUtilities.cpp stays C++. Same reasoning as
+   ENABLE_KEY_EVENT_TABLES_SWIFT. */
+#if !defined(ENABLE_FORMAT_DESCRIPTION_UTILITIES_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_FORMAT_DESCRIPTION_UTILITIES_SWIFT 1
+#endif
+
 /* WebCore::attributedStringByStrippingAttachmentCharacters is written in Swift when this is
    enabled; see Source/WebCore/platform/cocoa/WebNSAttributedStringExtras.swift. Same reasoning
    again. This one is the first boundary here to return an Objective-C object across @_cdecl,

@@ -87,3 +87,11 @@ _WebCoreWindowsKeyCodeForKeyEvent
 
 # Source/WebCore/platform/mac/CursorMac.swift
 _WebCoreCursorMacPlatformCursor
+
+# Source/WebCore/platform/graphics/avfoundation/FormatDescriptionUtilities.swift
+_WebCoreFormatDescriptionColorSpace
+_WebCoreFormatDescriptionFieldCount
+_WebCoreFormatDescriptionFieldDetail
+_WebCoreFormatDescriptionIsProtected
+_WebCoreFormatDescriptionPresentationSize
+_WebCoreFormatDescriptionTrackType

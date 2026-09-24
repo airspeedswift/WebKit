@@ -77,6 +77,7 @@
 		AA07CURS0001000000000002 /* CursorMac.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA07CURS0001000000000001 /* CursorMac.swift */; };
 		AA08FSWN0001000000000002 /* WebCoreFullScreenWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA08FSWN0001000000000001 /* WebCoreFullScreenWindow.swift */; };
 		AA09CALX0001000000000002 /* WebCoreCALayerExtras.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA09CALX0001000000000001 /* WebCoreCALayerExtras.swift */; };
+		AA10FDUT0001000000000002 /* FormatDescriptionUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10FDUT0001000000000001 /* FormatDescriptionUtilities.swift */; };
 		021D763A29C2AC6B00063684 /* ScrollbarsControllerMac.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0F02245326F15D75000265C3 /* ScrollbarsControllerMac.mm */; };
 		0223E06D2AAECC2200AF30FB /* HandleUserInputEventResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E06C2AAEBBCF00AF30FB /* HandleUserInputEventResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0223E0742AAED62200AF30FB /* RemoteUserInputEventData.h in Headers */ = {isa = PBXBuildFile; fileRef = 0223E0732AAED62200AF30FB /* RemoteUserInputEventData.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -22057,6 +22058,7 @@
 		AA07CURS0001000000000001 /* CursorMac.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/mac/CursorMac.swift; sourceTree = SOURCE_ROOT; };
 		AA08FSWN0001000000000001 /* WebCoreFullScreenWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/mac/WebCoreFullScreenWindow.swift; sourceTree = SOURCE_ROOT; };
 		AA09CALX0001000000000001 /* WebCoreCALayerExtras.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/cocoa/WebCoreCALayerExtras.swift; sourceTree = SOURCE_ROOT; };
+		AA10FDUT0001000000000001 /* FormatDescriptionUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = platform/graphics/avfoundation/FormatDescriptionUtilities.swift; sourceTree = SOURCE_ROOT; };
 		DD5697F72DC1302B00050321 /* rdar150228472.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rdar150228472.swift; sourceTree = "<group>"; };
 		DD5ACFD62B14DAD600B36C57 /* LayoutIntegrationBoxGeometryUpdater.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LayoutIntegrationBoxGeometryUpdater.cpp; sourceTree = "<group>"; };
 		DD5ACFD72B14DADE00B36C57 /* LayoutIntegrationBoxGeometryUpdater.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LayoutIntegrationBoxGeometryUpdater.h; sourceTree = "<group>"; };
@@ -51361,6 +51363,7 @@
 				07E4BDBF2A3A5FAB000D5509 /* DictationCaretAnimator.cpp in Sources */,
 				0749E9512E275A23009B912B /* EditingHTMLConverter.mm in Sources */,
 				7CE6CBFD187F394900D46BF5 /* FormatConverter.cpp in Sources */,
+				AA10FDUT0001000000000002 /* FormatDescriptionUtilities.swift in Sources */,
 				4667EA3E2968D9DA00BAB1E2 /* GameControllerHapticEffect.mm in Sources */,
 				46FE73D32968E52000B8064C /* GameControllerHapticEngines.mm in Sources */,
 				5130F2F624AEA60A00E1D0A0 /* GameControllerSoftLink.mm in Sources */,

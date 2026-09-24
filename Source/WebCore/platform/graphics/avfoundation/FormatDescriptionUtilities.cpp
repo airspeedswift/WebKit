@@ -53,9 +53,36 @@ static std::optional<RetainPtr<CFDictionaryRef>> makeVectorElement(const RetainP
 #endif
 
 namespace WebCore {
+#if ENABLE(FORMAT_DESCRIPTION_UTILITIES_SWIFT)
+// Implemented in FormatDescriptionUtilities.swift. WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO and
+// declares no SWIFT_OBJC_INTERFACE_HEADER_NAME, so C++ cannot name a Swift declaration and the
+// boundary is @_cdecl. Nothing checks these declarations against the Swift definitions, so the two
+// are kept in sync by hand. Enums cross as their raw values.
+extern "C" uint8_t WebCoreFormatDescriptionTrackType(CMFormatDescriptionRef);
+extern "C" CGSize WebCoreFormatDescriptionPresentationSize(CMFormatDescriptionRef);
+// 0 for nullopt. Otherwise bit 63 is set and bytes 0-4 hold primaries, transfer, matrix, fullRange
+// and chromaLocation, each 0 when disengaged and the raw value plus one otherwise.
+extern "C" uint64_t WebCoreFormatDescriptionColorSpace(CMFormatDescriptionRef);
+// 0 for nullopt; PlatformVideoFieldCount has no zero enumerator.
+extern "C" uint8_t WebCoreFormatDescriptionFieldCount(CMFormatDescriptionRef);
+// 0xFF for nullopt.
+extern "C" uint8_t WebCoreFormatDescriptionFieldDetail(CMFormatDescriptionRef);
+extern "C" bool WebCoreFormatDescriptionIsProtected(CMFormatDescriptionRef);
+
+template<typename T> static std::optional<T> colorSpaceField(uint64_t packed, unsigned byte)
+{
+    uint8_t value = (packed >> (8 * byte)) & 0xFF;
+    if (!value)
+        return std::nullopt;
+    return static_cast<T>(value - 1);
+}
+#endif // ENABLE(FORMAT_DESCRIPTION_UTILITIES_SWIFT)
 
 TrackInfoTrackType typeFromFormatDescription(CMFormatDescriptionRef formatDescription)
 {
+#if ENABLE(FORMAT_DESCRIPTION_UTILITIES_SWIFT)
+    return static_cast<TrackInfoTrackType>(WebCoreFormatDescriptionTrackType(formatDescription));
+#else
     auto mediaType = PAL::CMFormatDescriptionGetMediaType(formatDescription);
     switch (mediaType) {
     case kCMMediaType_Video:
@@ -69,18 +96,35 @@ TrackInfoTrackType typeFromFormatDescription(CMFormatDescriptionRef formatDescri
     default:
         return TrackInfoTrackType::Unknown;
     }
+#endif
 }
 
 FloatSize presentationSizeFromFormatDescription(CMFormatDescriptionRef formatDescription)
 {
+#if ENABLE(FORMAT_DESCRIPTION_UTILITIES_SWIFT)
+    return FloatSize(WebCoreFormatDescriptionPresentationSize(formatDescription));
+#else
     if (!formatDescription)
         return { };
 
     return FloatSize(PAL::CMVideoFormatDescriptionGetPresentationDimensions(formatDescription, true, true));
+#endif
 }
 
 std::optional<PlatformVideoColorSpace> colorSpaceFromFormatDescription(CMFormatDescriptionRef formatDescription)
 {
+#if ENABLE(FORMAT_DESCRIPTION_UTILITIES_SWIFT)
+    uint64_t packed = WebCoreFormatDescriptionColorSpace(formatDescription);
+    if (!packed)
+        return std::nullopt;
+    return PlatformVideoColorSpace {
+        colorSpaceField<PlatformVideoColorPrimaries>(packed, 0),
+        colorSpaceField<PlatformVideoTransferCharacteristics>(packed, 1),
+        colorSpaceField<PlatformVideoMatrixCoefficients>(packed, 2),
+        colorSpaceField<bool>(packed, 3),
+        colorSpaceField<PlatformVideoChromaLocation>(packed, 4),
+    };
+#else
     if (!formatDescription)
         return std::nullopt;
 
@@ -189,10 +233,16 @@ std::optional<PlatformVideoColorSpace> colorSpaceFromFormatDescription(CMFormatD
     }
 
     return colorSpace;
+#endif
 }
 
 std::optional<PlatformVideoFieldCount> fieldCountFromFormatDescription(CMFormatDescriptionRef formatDescription)
 {
+#if ENABLE(FORMAT_DESCRIPTION_UTILITIES_SWIFT)
+    if (uint8_t value = WebCoreFormatDescriptionFieldCount(formatDescription))
+        return static_cast<PlatformVideoFieldCount>(value);
+    return std::nullopt;
+#else
     if (!formatDescription)
         return { };
 
@@ -212,10 +262,17 @@ std::optional<PlatformVideoFieldCount> fieldCountFromFormatDescription(CMFormatD
     }
 
     return { };
+#endif
 }
 
 std::optional<PlatformVideoFieldDetail> fieldDetailFromFormatDescription(CMFormatDescriptionRef formatDescription)
 {
+#if ENABLE(FORMAT_DESCRIPTION_UTILITIES_SWIFT)
+    uint8_t value = WebCoreFormatDescriptionFieldDetail(formatDescription);
+    if (value == 0xFF)
+        return std::nullopt;
+    return static_cast<PlatformVideoFieldDetail>(value);
+#else
     if (!formatDescription)
         return { };
 
@@ -233,6 +290,7 @@ std::optional<PlatformVideoFieldDetail> fieldDetailFromFormatDescription(CMForma
         return PlatformVideoFieldDetail::SpatialFirstLineLate;
 
     return { };
+#endif
 }
 
 String codecFromFormatDescription(CMFormatDescriptionRef formatDescription)
@@ -337,6 +395,9 @@ String codecFromFormatDescription(CMFormatDescriptionRef formatDescription)
 
 bool formatDescriptionIsProtected(CMFormatDescriptionRef formatDescription)
 {
+#if ENABLE(FORMAT_DESCRIPTION_UTILITIES_SWIFT)
+    return WebCoreFormatDescriptionIsProtected(formatDescription);
+#else
     if (!formatDescription)
         return false;
 
@@ -349,6 +410,7 @@ bool formatDescriptionIsProtected(CMFormatDescriptionRef formatDescription)
     }
 
     return false;
+#endif
 }
 
 #if HAVE(IMMERSIVE_VIDEO_METADATA_SUPPORT)
