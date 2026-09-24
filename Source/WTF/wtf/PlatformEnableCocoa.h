@@ -1312,7 +1312,9 @@
 #define ENABLE_CODEC_CAPABILITIES_SWIFT 1
 #endif
 
-/* forEachSample and copySampleBufferForRange are written in Swift when this is enabled; see
+/* forEachSample, copySampleBufferForRange, the colour-space conversions of
+   attachColorSpaceToPixelBuffer and computeVideoFrameColorSpace, and the colour extensions of
+   createFormatDescriptionFromTrackInfo are written in Swift when this is enabled; see
    Source/WebCore/platform/graphics/cocoa/CMUtilities.swift. The rest of CMUtilities.mm stays C++. */
 #if !defined(ENABLE_CM_UTILITIES_SWIFT) \
     && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)

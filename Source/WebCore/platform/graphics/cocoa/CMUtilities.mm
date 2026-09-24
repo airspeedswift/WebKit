@@ -316,6 +316,13 @@ static RetainPtr<CMFormatDescriptionRef> createAudioFormatDescription(const Audi
     return adoptCF(format);
 }
 
+#if ENABLE(CM_UTILITIES_SWIFT)
+// Implemented in CMUtilities.swift, reached through @_cdecl. A PlatformVideoColorSpace crosses as
+// its address. fieldCount and fieldDetail are 0 for std::nullopt and the raw value plus one otherwise.
+extern "C" void WebCoreCMAddColorExtensions(CFMutableDictionaryRef, const void* colorSpace, uint16_t fieldCount, uint16_t fieldDetail);
+extern "C" void WebCoreCMAttachColorSpaceToPixelBuffer(const void* colorSpace, CVPixelBufferRef);
+extern "C" void WebCoreCMComputePixelBufferColorSpace(CVPixelBufferRef, void* colorSpace);
+#else
 static CFStringRef convertToCMColorPrimaries(PlatformVideoColorPrimaries primaries)
 {
     switch (primaries) {
@@ -420,6 +427,7 @@ static CFStringRef convertToCMFieldDetail(PlatformVideoFieldDetail fieldDetail)
     ASSERT_NOT_REACHED();
     return nullptr;
 }
+#endif // !ENABLE(CM_UTILITIES_SWIFT)
 
 RetainPtr<CMFormatDescriptionRef> createFormatDescriptionFromTrackInfo(const TrackInfo& info)
 {
@@ -458,13 +466,20 @@ RetainPtr<CMFormatDescriptionRef> createFormatDescriptionFromTrackInfo(const Tra
     auto& videoInfo = downcast<const VideoInfo>(info);
     RetainPtr extensions = createExtensionsDictionary(info);
 
+#if ENABLE(CM_UTILITIES_SWIFT)
+    WebCoreCMAddColorExtensions(extensions.get(), &videoInfo.colorSpace(),
+        videoInfo.fieldCount() ? uint16_t(std::to_underlying(*videoInfo.fieldCount())) + 1 : 0,
+        videoInfo.fieldDetail() ? uint16_t(std::to_underlying(*videoInfo.fieldDetail())) + 1 : 0);
+#else
     if (videoInfo.colorSpace().fullRange.value_or(false))
         CFDictionaryAddValue(extensions.get(), PAL::kCMFormatDescriptionExtension_FullRangeVideo, kCFBooleanTrue);
+#endif
 
     int bitDepth = videoInfo.bitDepth();
     RetainPtr bitsPerComponent = adoptCF(CFNumberCreate(nullptr, kCFNumberIntType, &bitDepth));
     CFDictionaryAddValue(extensions.get(), PAL::kCMFormatDescriptionExtension_BitsPerComponent, bitsPerComponent.get());
 
+#if !ENABLE(CM_UTILITIES_SWIFT)
     if (videoInfo.colorSpace().primaries) {
         if (RetainPtr cmColorPrimaries = convertToCMColorPrimaries(*videoInfo.colorSpace().primaries))
             CFDictionaryAddValue(extensions.get(), kCVImageBufferColorPrimariesKey, cmColorPrimaries.get());
@@ -497,6 +512,7 @@ RetainPtr<CMFormatDescriptionRef> createFormatDescriptionFromTrackInfo(const Tra
         if (RetainPtr cmFieldDetail = convertToCMFieldDetail(*videoInfo.fieldDetail()))
             CFDictionaryAddValue(extensions.get(), kCVImageBufferFieldDetailKey, cmFieldDetail.get());
     }
+#endif
 
     if (!videoInfo.size().isEmpty() && !videoInfo.displaySize().isEmpty() && videoInfo.size() != videoInfo.displaySize()) {
         // The two spacings are the numerator and denominator of a single fraction, as stored in
@@ -786,6 +802,9 @@ UniqueRef<MediaSamplesBlock> samplesBlockFromCMSampleBuffer(CMSampleBufferRef cm
 
 void attachColorSpaceToPixelBuffer(const PlatformVideoColorSpace& colorSpace, CVPixelBufferRef pixelBuffer)
 {
+#if ENABLE(CM_UTILITIES_SWIFT)
+    WebCoreCMAttachColorSpaceToPixelBuffer(&colorSpace, pixelBuffer);
+#else
     ASSERT(pixelBuffer);
     if (!pixelBuffer)
         return;
@@ -808,10 +827,16 @@ void attachColorSpaceToPixelBuffer(const PlatformVideoColorSpace& colorSpace, CV
             CVBufferSetAttachment(pixelBuffer, kCVImageBufferChromaLocationBottomFieldKey, cmChromaLocation.get(), kCVAttachmentMode_ShouldPropagate);
         }
     }
+#endif
 }
 
 PlatformVideoColorSpace computeVideoFrameColorSpace(CVPixelBufferRef pixelBuffer)
 {
+#if ENABLE(CM_UTILITIES_SWIFT)
+    PlatformVideoColorSpace colorSpace;
+    WebCoreCMComputePixelBufferColorSpace(pixelBuffer, &colorSpace);
+    return colorSpace;
+#else
     ASSERT(pixelBuffer);
     if (!pixelBuffer)
         return { };
@@ -894,6 +919,7 @@ PlatformVideoColorSpace computeVideoFrameColorSpace(CVPixelBufferRef pixelBuffer
         chromaLocation = PlatformVideoChromaLocation::Dv420;
 
     return { .primaries = primaries, .transfer = transfer, .matrix = matrix, .fullRange = isFullRange, .chromaLocation = chromaLocation };
+#endif
 }
 
 PacketDurationParser::PacketDurationParser(const AudioInfo& info)
