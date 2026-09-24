@@ -189,10 +189,22 @@ namespace WebCore {
 extern "C" bool WebCoreAV1ParseDecoderConfigurationRecord(const uint8_t*, size_t, void* record);
 // On success also writes the offset and size of the whole sequence header OBU within the input.
 extern "C" bool WebCoreAV1ParseSequenceHeader(const uint8_t*, size_t, void* record, size_t* sequenceHeaderOBU);
+// The characters are Latin-1 when is8Bit is true and UTF-16 otherwise.
+extern "C" bool WebCoreAV1ParseCodecParameters(const void* characters, size_t length, bool is8Bit, void* record);
+extern "C" bool WebCoreAV1ValidateConfigurationRecord(const void* record);
+extern "C" bool WebCoreAV1ValidatePerLevelConstraints(const void* record, uint32_t width, uint32_t height, uint64_t bitrate, double framerate);
 #endif
 
 std::optional<AV1CodecConfigurationRecord> parseAV1CodecParameters(StringView codecView)
 {
+#if ENABLE(AV1_UTILITIES_SWIFT)
+    AV1CodecConfigurationRecord configuration;
+    bool is8Bit = codecView.is8Bit();
+    if (!WebCoreAV1ParseCodecParameters(is8Bit ? static_cast<const void*>(codecView.span8().data()) : codecView.span16().data(), codecView.length(), is8Bit, &configuration))
+        return std::nullopt;
+    configuration.codecName = "av01"_s;
+    return configuration;
+#else
     // Ref: https://aomediacodec.github.io/av1-isobmff/#codecsparam
     // Section 5: Codecs Parameter String
     auto codecSplit = codecView.split('.');
@@ -338,6 +350,7 @@ std::optional<AV1CodecConfigurationRecord> parseAV1CodecParameters(StringView co
         return std::nullopt;
 
     return configuration;
+#endif
 }
 
 String createAV1CodecParametersString(const AV1CodecConfigurationRecord& configuration)
@@ -439,6 +452,7 @@ String createAV1CodecParametersString(const AV1CodecConfigurationRecord& configu
     return builder.toString();
 }
 
+#if !ENABLE(AV1_UTILITIES_SWIFT)
 struct AV1PerLevelConstraints {
     uint32_t maxPicSize;
     uint32_t maxWidth;
@@ -471,9 +485,13 @@ static const AV1PerLevelConstraintsMap& perLevelConstraints()
     };
     return perLevelConstraints;
 }
+#endif // !ENABLE(AV1_UTILITIES_SWIFT)
 
 bool validateAV1ConfigurationRecord(const AV1CodecConfigurationRecord& record)
 {
+#if ENABLE(AV1_UTILITIES_SWIFT)
+    return WebCoreAV1ValidateConfigurationRecord(&record);
+#else
     // Ref: https://aomediacodec.github.io/av1-spec/av1-spec.pdf
 
     // 6.4.1.General sequence header OBU semantics
@@ -516,10 +534,14 @@ bool validateAV1ConfigurationRecord(const AV1CodecConfigurationRecord& record)
         return false;
 
     return true;
+#endif
 }
 
 bool validateAV1PerLevelConstraints(const AV1CodecConfigurationRecord& record, const PlatformMediaCapabilitiesVideoConfiguration& configuration)
 {
+#if ENABLE(AV1_UTILITIES_SWIFT)
+    return WebCoreAV1ValidatePerLevelConstraints(&record, configuration.width, configuration.height, configuration.bitrate, configuration.framerate);
+#else
     // Check that VideoConfiguration is within the specified profile and level from the configuration record:
     auto findIter = perLevelConstraints().find(record.level);
     if (findIter == perLevelConstraints().end())
@@ -532,6 +554,7 @@ bool validateAV1PerLevelConstraints(const AV1CodecConfigurationRecord& record, c
         && configuration.width * configuration.height <= levelConstraints.maxPicSize
         && configuration.framerate <= levelConstraints.maxFramerate
         && configuration.bitrate <= maxBitrate;
+#endif
 }
 
 std::optional<AV1CodecConfigurationRecord> parseAV1DecoderConfigurationRecord(std::span<const uint8_t> buffer)

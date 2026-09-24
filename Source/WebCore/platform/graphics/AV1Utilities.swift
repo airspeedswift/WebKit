@@ -23,8 +23,9 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// The AV1 bitstream readers of AV1Utilities.cpp, in Swift: the av1C decoder configuration record
-// and the sequence header OBU. Every input is handled here, including truncated or malformed data.
+// The AV1 bitstream readers of AV1Utilities.cpp, in Swift: the av1C decoder configuration record,
+// the sequence header OBU and the codecs parameter string, plus the record validators. Every input
+// is handled here, including truncated or malformed data.
 //
 // The boundary is @_cdecl because WebCore sets SWIFT_INSTALL_OBJC_HEADER = NO, so C++ cannot
 // name a Swift declaration. The C++ caller passes the bytes and the address of a default-
@@ -100,6 +101,31 @@ private func isValidProfile(_ value: UInt64) -> Bool {
 /// isValidEnum<AV1ConfigurationLevel>: Level_2_0 (0) through Level_7_3 (23), and Level_Maximum (31).
 private func isValidLevel(_ value: UInt64) -> Bool {
     value <= 23 || value == 31
+}
+
+/// isValidEnum<AV1ConfigurationChromaSubsampling>: subsampling_x, subsampling_y, chroma_sample_position.
+private func isValidChromaSubsampling(_ value: UInt8) -> Bool {
+    value == 0 || value == 100 || value == 110 || value == 111 || value == 112
+}
+
+/// isValidEnum<AV1ConfigurationColorPrimaries>.
+private func isValidColorPrimaries(_ value: UInt8) -> Bool {
+    value == 1 || value == 2 || (4...12).contains(value) || value == 22
+}
+
+/// isValidEnum<AV1ConfigurationTransferCharacteristics>.
+private func isValidTransferCharacteristics(_ value: UInt8) -> Bool {
+    value == 1 || value == 2 || (4...18).contains(value)
+}
+
+/// isValidEnum<AV1ConfigurationMatrixCoefficients>.
+private func isValidMatrixCoefficients(_ value: UInt8) -> Bool {
+    value <= 2 || (4...14).contains(value)
+}
+
+/// isValidEnum<AV1ConfigurationRange>.
+private func isValidRange(_ value: UInt8) -> Bool {
+    value <= 1
 }
 
 // MARK: - Parsed fields
@@ -514,6 +540,216 @@ private func getSequenceHeaderOBU(_ data: [UInt8]) -> (fullObu: Range<Int>, obuD
     }
 }
 
+// MARK: - Codecs parameter string
+
+/// parseInteger<uint8_t>: optional leading and trailing whitespace (space, \t, \n, \v, \f, \r),
+/// an optional '+', then one or more decimal digits. Anything else, or a value above 255, fails.
+private func parseUInt8(_ characters: ArraySlice<UInt16>) -> UInt8? {
+    func isWhitespace(_ character: UInt16) -> Bool {
+        character == 0x20 || (0x09...0x0D).contains(character)
+    }
+    func isDigit(_ character: UInt16) -> Bool {
+        (0x30...0x39).contains(character)
+    }
+
+    var rest = characters.drop(while: isWhitespace)
+    if rest.first == 0x2B {
+        rest = rest.dropFirst()
+    }
+    let digits = rest.prefix(while: isDigit)
+    if digits.isEmpty || !rest.dropFirst(digits.count).allSatisfy(isWhitespace) {
+        return nil
+    }
+
+    var value = 0
+    for digit in digits {
+        value = value * 10 + Int(digit - 0x30)
+        if value > Int(UInt8.max) {
+            return nil
+        }
+    }
+    return UInt8(value)
+}
+
+/// Ref: https://aomediacodec.github.io/av1-isobmff/#codecsparam Section 5: Codecs Parameter String.
+/// <4CC>.<profile>.<level><tier>.<bitDepth>[.<monochrome>[.<chromaSubsampling>[.<colorPrimaries>
+/// [.<transferCharacteristics>[.<matrixCoefficients>.<videoFullRangeFlag>]]]]]
+private func parseAV1CodecParameters(_ characters: [UInt16]) -> ParsedRecord? {
+    // StringView::split: empty elements are skipped, so "av01..0" has two elements.
+    let elements = characters.split(separator: 0x2E)
+    guard elements.count >= 4, elements[0].elementsEqual("av01".utf16) else { return nil }
+
+    var record = ParsedRecord()
+
+    guard let profile = parseUInt8(elements[1]), isValidProfile(UInt64(profile)) else { return nil }
+    record.profile = AV1ConfigurationProfile(rawValue: profile)
+
+    // The last character is the tier; the ones before it are the level.
+    let levelTier = elements[2]
+    if levelTier.count < 3 {
+        return nil
+    }
+    guard let level = parseUInt8(levelTier.dropLast()), isValidLevel(UInt64(level)) else { return nil }
+    record.level = AV1ConfigurationLevel(rawValue: level)
+    switch levelTier.last {
+    case 0x4D?: // 'M'
+        record.tier = .Main
+    case 0x48?: // 'H'
+        record.tier = .High
+    default:
+        return nil
+    }
+
+    guard let bitDepth = parseUInt8(elements[3]), bitDepth <= 12 else { return nil }
+    record.bitDepth = bitDepth
+
+    // An omitted optional field keeps the record default, which is the value the specification assumes.
+    if elements.count == 4 {
+        return record
+    }
+    guard let monochrome = parseUInt8(elements[4]), monochrome <= 1 else { return nil }
+    record.monochrome = monochrome
+
+    if elements.count == 5 {
+        return record
+    }
+    guard let chromaSubsampling = parseUInt8(elements[5]), isValidChromaSubsampling(chromaSubsampling) else { return nil }
+    record.chromaSubsampling = chromaSubsampling
+
+    if elements.count == 6 {
+        return record
+    }
+    guard let colorPrimaries = parseUInt8(elements[6]), isValidColorPrimaries(colorPrimaries) else { return nil }
+    record.colorPrimaries = colorPrimaries
+
+    if elements.count == 7 {
+        return record
+    }
+    guard let transferCharacteristics = parseUInt8(elements[7]), isValidTransferCharacteristics(transferCharacteristics) else { return nil }
+    record.transferCharacteristics = transferCharacteristics
+
+    if elements.count == 8 {
+        return record
+    }
+    guard let matrixCoefficients = parseUInt8(elements[8]), isValidMatrixCoefficients(matrixCoefficients) else { return nil }
+    record.matrixCoefficients = matrixCoefficients
+
+    // videoFullRangeFlag must follow matrixCoefficients and ends the string.
+    guard elements.count == 10, let range = parseUInt8(elements[9]), isValidRange(range) else { return nil }
+    record.videoFullRangeFlag = AV1ConfigurationRange(rawValue: range)
+    return record
+}
+
+// MARK: - Validation
+
+/// The record fields the validators read.
+private struct RecordFields {
+    var profile: UInt8
+    var level: AV1ConfigurationLevel
+    var tier: UInt8
+    var bitDepth: UInt8
+    var monochrome: UInt8
+    var chromaSubsampling: UInt8
+
+    init(_ record: borrowing AV1CodecConfigurationRecord) {
+        profile = record.profile.rawValue
+        level = record.level
+        tier = record.tier.rawValue
+        bitDepth = record.bitDepth
+        monochrome = record.monochrome
+        chromaSubsampling = record.chromaSubsampling
+    }
+}
+
+private func loadFields(from rawRecord: UnsafeRawPointer) -> RecordFields {
+    // SAFETY: the caller passes the address of a live AV1CodecConfigurationRecord and does not
+    // modify it until this call returns.
+    unsafe RecordFields(rawRecord.assumingMemoryBound(to: AV1CodecConfigurationRecord.self).pointee)
+}
+
+/// Ref: https://aomediacodec.github.io/av1-spec/av1-spec.pdf
+private func validateAV1ConfigurationRecord(_ record: RecordFields) -> Bool {
+    // 6.4.1. General sequence header OBU semantics
+    let chromaSubsampling = record.chromaSubsampling
+    if !isValidChromaSubsampling(chromaSubsampling) {
+        return false
+    }
+    let is444 = chromaSubsampling == 0
+    let is420 = chromaSubsampling == 110 || chromaSubsampling == 111 || chromaSubsampling == 112
+    let is8Or10Bit = record.bitDepth == 8 || record.bitDepth == 10
+
+    switch record.profile {
+    case AV1ConfigurationProfile.Main.rawValue:
+        if !is8Or10Bit || !is420 {
+            return false
+        }
+    case AV1ConfigurationProfile.High.rawValue:
+        if !is8Or10Bit || record.monochrome != 0 || !is444 {
+            return false
+        }
+    case AV1ConfigurationProfile.Professional.rawValue:
+        if is8Or10Bit ? !is444 : record.bitDepth != 12 {
+            return false
+        }
+    default:
+        break
+    }
+
+    // 6.4.2. Color config semantics: monochrome requires 4:2:0 with CSP_UNKNOWN.
+    return record.monochrome == 0 || chromaSubsampling == 110
+}
+
+private struct PerLevelConstraints {
+    var maxPicSize: UInt32
+    var maxWidth: UInt32
+    var maxHeight: UInt32
+    var maxFramerate: Double
+    var mainMaxBitrate: UInt32
+    var highMaxBitrate: UInt32
+
+    init(_ maxPicSize: UInt32, _ maxWidth: UInt32, _ maxHeight: UInt32, _ maxFramerate: Double, _ mainMaxBitrate: UInt32, _ highMaxBitrate: UInt32) {
+        self.maxPicSize = maxPicSize
+        self.maxWidth = maxWidth
+        self.maxHeight = maxHeight
+        self.maxFramerate = maxFramerate
+        self.mainMaxBitrate = mainMaxBitrate
+        self.highMaxBitrate = highMaxBitrate
+    }
+}
+
+/// Derived from "AV1 Bitstream & Decoding Process Specification", Version 1.0.0 with Errata 1,
+/// Annex A: Profiles and levels. A level without an entry fails validation.
+private func perLevelConstraints(_ level: AV1ConfigurationLevel) -> PerLevelConstraints? {
+    switch level {
+    case .Level_2_0: PerLevelConstraints(147456, 2048, 1152, 30, 1572864, 0)
+    case .Level_2_1: PerLevelConstraints(278784, 2816, 1584, 30, 3145728, 0)
+    case .Level_3_0: PerLevelConstraints(665856, 4352, 2448, 30, 6291456, 0)
+    case .Level_3_1: PerLevelConstraints(1065024, 5504, 3096, 30, 10485760, 0)
+    case .Level_4_0: PerLevelConstraints(2359296, 6144, 3456, 30, 12582912, 31457280)
+    case .Level_4_1: PerLevelConstraints(2359296, 6144, 3456, 60, 20971520, 52428800)
+    case .Level_5_0: PerLevelConstraints(8912896, 8192, 4352, 30, 31457280, 104857600)
+    case .Level_5_1: PerLevelConstraints(8912896, 8192, 4352, 60, 41943040, 167772160)
+    case .Level_5_2: PerLevelConstraints(8912896, 8192, 4352, 120, 62914560, 251658240)
+    case .Level_5_3: PerLevelConstraints(8912896, 8192, 4352, 120, 62914560, 251658240)
+    case .Level_6_0: PerLevelConstraints(35651584, 16384, 8704, 30, 62914560, 251658240)
+    case .Level_6_1: PerLevelConstraints(35651584, 16384, 8704, 60, 104857600, 503316480)
+    case .Level_6_2: PerLevelConstraints(35651584, 16384, 8704, 120, 167772160, 838860800)
+    case .Level_6_3: PerLevelConstraints(35651584, 16384, 8704, 120, 167772160, 838860800)
+    default: nil
+    }
+}
+
+private func validateAV1PerLevelConstraints(_ record: RecordFields, width: UInt32, height: UInt32, bitrate: UInt64, framerate: Double) -> Bool {
+    guard let constraints = perLevelConstraints(record.level) else { return false }
+    let maxBitrate = record.tier == AV1ConfigurationTier.Main.rawValue ? constraints.mainMaxBitrate : constraints.highMaxBitrate
+    // The picture size is computed modulo 2^32; a NaN framerate fails.
+    return width <= constraints.maxWidth
+        && height <= constraints.maxHeight
+        && width &* height <= constraints.maxPicSize
+        && framerate <= constraints.maxFramerate
+        && bitrate <= UInt64(maxBitrate)
+}
+
 // MARK: - Boundary
 
 private func copyBytes(_ bytes: UnsafePointer<UInt8>?, _ count: Int) -> [UInt8] {
@@ -542,6 +778,38 @@ internal func webCoreAV1ParseSequenceHeader(_ bytes: UnsafePointer<UInt8>?, _ co
     // SAFETY: the caller passes room for two Ints at `obuOffsetAndSize`.
     unsafe (obuOffsetAndSize[0], obuOffsetAndSize[1]) = (obu.fullObu.lowerBound, obu.fullObu.count)
     return true
+}
+
+/// Latin-1 characters widen to the UTF-16 code units of the same code points.
+private func copyCharacters(_ characters: UnsafeRawPointer?, _ length: Int, _ is8Bit: Bool) -> [UInt16] {
+    // SAFETY: the caller passes `length` Latin-1 bytes if `is8Bit`, else `length` UTF-16 code units,
+    // at `characters`, which is null only when `length` is 0; they are copied out before this call returns.
+    unsafe characters.map { base in
+        if is8Bit {
+            return unsafe UnsafeBufferPointer(start: base.assumingMemoryBound(to: UInt8.self), count: length).map(UInt16.init)
+        }
+        return unsafe Array(UnsafeBufferPointer(start: base.assumingMemoryBound(to: UInt16.self), count: length))
+    } ?? []
+}
+
+@_cdecl("WebCoreAV1ParseCodecParameters")
+internal func webCoreAV1ParseCodecParameters(_ characters: UnsafeRawPointer?, _ length: Int, _ is8Bit: Bool, _ rawRecord: UnsafeMutableRawPointer) -> Bool {
+    let string = unsafe copyCharacters(characters, length, is8Bit)
+    guard let parsed = parseAV1CodecParameters(string) else {
+        return false
+    }
+    unsafe store(parsed, into: rawRecord)
+    return true
+}
+
+@_cdecl("WebCoreAV1ValidateConfigurationRecord")
+internal func webCoreAV1ValidateConfigurationRecord(_ rawRecord: UnsafeRawPointer) -> Bool {
+    validateAV1ConfigurationRecord(unsafe loadFields(from: rawRecord))
+}
+
+@_cdecl("WebCoreAV1ValidatePerLevelConstraints")
+internal func webCoreAV1ValidatePerLevelConstraints(_ rawRecord: UnsafeRawPointer, _ width: UInt32, _ height: UInt32, _ bitrate: UInt64, _ framerate: Double) -> Bool {
+    validateAV1PerLevelConstraints(unsafe loadFields(from: rawRecord), width: width, height: height, bitrate: bitrate, framerate: framerate)
 }
 
 #endif // ENABLE_AV1_UTILITIES_SWIFT

@@ -1288,8 +1288,9 @@
 #define ENABLE_FORMAT_DESCRIPTION_UTILITIES_SWIFT 1
 #endif
 
-/* parseAV1DecoderConfigurationRecord and the AV1 sequence header OBU parsing behind
-   createVideoInfoFromAV1Stream are written in Swift when this is enabled; see
+/* The AV1 parsers (parseAV1CodecParameters, parseAV1DecoderConfigurationRecord and the sequence
+   header OBU parsing behind createVideoInfoFromAV1Stream) and the AV1 configuration record validators
+   are written in Swift when this is enabled; see
    Source/WebCore/platform/graphics/AV1Utilities.swift. The rest of AV1Utilities.cpp stays C++.
    Same reasoning as ENABLE_KEY_EVENT_TABLES_SWIFT. */
 #if !defined(ENABLE_AV1_UTILITIES_SWIFT) \

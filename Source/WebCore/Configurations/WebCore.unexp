@@ -89,8 +89,11 @@ _WebCoreWindowsKeyCodeForKeyEvent
 _WebCoreCursorMacPlatformCursor
 
 # Source/WebCore/platform/graphics/AV1Utilities.swift
+_WebCoreAV1ParseCodecParameters
 _WebCoreAV1ParseDecoderConfigurationRecord
 _WebCoreAV1ParseSequenceHeader
+_WebCoreAV1ValidateConfigurationRecord
+_WebCoreAV1ValidatePerLevelConstraints
 
 # Source/WebCore/platform/graphics/avfoundation/FormatDescriptionUtilities.swift
 _WebCoreFormatDescriptionColorSpace
