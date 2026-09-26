@@ -34,7 +34,8 @@ internal import WebCore_Private.Core
 // The <angle> conversion constants, which plain `import wtf` does not see.
 internal import wtf.Core.MathExtras
 
-// calc() simplification in Swift, used when WebCore is built with WK_USE_SWIFT_CSS.
+// calc() simplification and parsing in Swift, used when WebCore is built with WK_USE_SWIFT_CSS, in
+// which the C++ parser is not compiled.
 //
 // Simplification copies the `CSSCalc::Child` tree once into an owned `CalcNode` tree
 // (`calcBuildNode`), simplifies it in place by a recursive post-order walk (`CalcFold.simplify`),
@@ -42,7 +43,8 @@ internal import wtf.Core.MathExtras
 // the builder's operand stack (`calcEmit`). The operand stack has no pop, so nothing is pushed until
 // the whole tree has simplified. A tree that cannot be simplified is refused whole:
 // `isSimplifiableAlternative` refuses an arity `rebuildFrom` could not fill, and a fold that cannot
-// derive its answer sets `CalcFold.declined`.
+// derive its answer sets `CalcFold.declined`. The grammar builds `CalcNode`s directly and folds them
+// as it builds them.
 
 /// What simplification did with a tree.
 @c
@@ -1927,6 +1929,57 @@ private struct CalcBuildReport {
     }
 }
 
+/// What `emitParsed` can materialise, as two masks over the alternative index.
+private enum CalcParsedEmitCoverage {
+    /// Every leaf alternative, all of which `pushLeaf` serves.
+    static var leafMask: UInt64 {
+        CalcCoverage.bit(.Number)
+            | CalcCoverage.bit(.Percentage)
+            | CalcCoverage.bit(.CanonicalDimension)
+            | CalcCoverage.bit(.NonCanonicalDimension)
+            | CalcCoverage.bit(.SiblingCount)
+            | CalcCoverage.bit(.SiblingIndex)
+            | CalcCoverage.bit(.Symbol)
+    }
+
+    /// The operations `buildOperation` constructs from operands alone.
+    ///
+    /// The `none` bounds of `Clamp` travel in `noneMask`; for `round()` and `log()` the optional second
+    /// slot's presence is the operand count.
+    static var operationMask: UInt64 {
+        CalcCoverage.bit(.Clamp)
+            | CalcCoverage.bit(.RoundNearest)
+            | CalcCoverage.bit(.RoundUp)
+            | CalcCoverage.bit(.RoundDown)
+            | CalcCoverage.bit(.RoundToZero)
+            | CalcCoverage.bit(.Log)
+            | CalcCoverage.bit(.Hypot)
+            | CalcCoverage.bit(.Mod)
+            | CalcCoverage.bit(.Rem)
+            | CalcCoverage.bit(.Atan2)
+            | CalcCoverage.bit(.Pow)
+            | CalcCoverage.bit(.Progress)
+            | CalcCoverage.bit(.ProgressNoClamp)
+            | CalcCoverage.bit(.Sum)
+            | CalcCoverage.bit(.Product)
+            | CalcCoverage.bit(.Min)
+            | CalcCoverage.bit(.Max)
+            | CalcCoverage.bit(.Negate)
+            | CalcCoverage.bit(.Invert)
+            | CalcCoverage.bit(.Deg2Rad)
+            | CalcCoverage.bit(.Sin)
+            | CalcCoverage.bit(.Cos)
+            | CalcCoverage.bit(.Tan)
+            | CalcCoverage.bit(.Asin)
+            | CalcCoverage.bit(.Acos)
+            | CalcCoverage.bit(.Atan)
+            | CalcCoverage.bit(.Sqrt)
+            | CalcCoverage.bit(.Exp)
+            | CalcCoverage.bit(.Abs)
+            | CalcCoverage.bit(.Sign)
+    }
+}
+
 // MARK: - The owned tree
 
 /// One node of the calc tree the Swift simplifier works on, owning its children.
@@ -3358,6 +3411,300 @@ private func calcEmit(
     return builder.buildOperation(node.alternative, pushed, node.type, isRoot)
 }
 
+// MARK: The owned tree's parse-time simplifier and emit
+
+/// A tree the grammar built differs from one built from an original tree:
+///
+/// - `origin` is a payload table index on `Anchor`, `AnchorSize`, `Random` and a `calc-mix()` weight
+///   that is a math function (`CalcNodeFlags.calcMixWeightIsCalc`), and `calcNoPayload` elsewhere.
+/// - A `calc-mix()`'s children alternate: value, weight carrier, value, weight carrier, ...
+/// - There is no original tree to read back from.
+extension CalcFold {
+    /// `copyAndSimplify` over a parsed tree. With `skipAnchorSides`, an `anchor()`'s `<anchor-side>`
+    /// is copied without being simplified, as `copyAndSimplifyChildren` does.
+    fileprivate mutating func simplifyParsed(_ node: inout CalcNode, _ skipAnchorSides: Bool) -> Bool {
+        var k = 0
+        while k < node.children.count {
+            if !skipAnchorSides || node.children[k].flags & CalcNodeFlags.insideAnchorSide == 0 {
+                guard simplifyParsed(&node.children[k], skipAnchorSides) else {
+                    return false
+                }
+            }
+            k &+= 1
+        }
+        return simplifyParsedNode(&node)
+    }
+
+    /// One node of `simplifyParsed`.
+    ///
+    /// False refuses the tree.
+    @inline(always)
+    fileprivate mutating func simplifyParsedNode(_ node: inout CalcNode) -> Bool {
+        if node.flags & CalcNodeFlags.foldedAtConstruction != 0 {
+            return true
+        }
+        switch node.alternative {
+        case .Negate: calcFoldNegate(&node)
+        case .Invert: calcFoldInvert(&node)
+        case .Sum: foldSum(&node)
+        case .Product: foldProduct(&node)
+        case .Min: foldMinMax(&node, false)
+        case .Max: foldMinMax(&node, true)
+        case .NonCanonicalDimension: foldNonCanonicalDimension(&node)
+        case .Number, .Percentage, .CanonicalDimension: break
+        case .SiblingCount, .SiblingIndex: break
+        case .Symbol: foldSymbol(&node)
+        default:
+            guard simplifyParsedFunction(&node) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    @inline(never)
+    fileprivate mutating func simplifyParsedFunction(_ node: inout CalcNode) -> Bool {
+        switch node.alternative {
+        case .CalcMix:
+            foldParsedCalcMix(&node)
+            return true
+        case .Anchor, .AnchorSize, .Random:
+            return true
+        default:
+            return foldFunction(&node)
+        }
+    }
+
+    /// `simplify(CalcMix&)` for a parsed tree, whose weights are the interleaved carriers.
+    @inline(never)
+    fileprivate mutating func foldParsedCalcMix(_ node: inout CalcNode) {
+        let pairs = node.children.count
+        let itemCount = UInt32(truncatingIfNeeded: pairs / 2)
+        guard itemCount > 0, pairs % 2 == 0 else {
+            declined = true
+            return
+        }
+
+        var survey = CalcMixWeightSurvey()
+        var w = 1
+        while w < pairs {
+            if node.children[w].flags & CalcNodeFlags.calcMixWeightPresent == 0 {
+                survey.numberOfOmittedWeights &+= 1
+            } else if node.children[w].flags & CalcNodeFlags.calcMixWeightIsCalc != 0 {
+                survey.canNormalize = false
+            } else {
+                if node.children[w].value == 0 {
+                    survey.numberOfKnownZeroWeights &+= 1
+                }
+                survey.total += node.children[w].value
+            }
+            w &+= 2
+        }
+
+        if !survey.canNormalize {
+            if survey.numberOfKnownZeroWeights != 0, itemCount == survey.numberOfKnownZeroWeights {
+                calcMixFoldToZero(&node)
+                return
+            }
+        } else if survey.total < 100 {
+            if survey.numberOfKnownZeroWeights > 0, survey.numberOfOmittedWeights == 0,
+                itemCount == survey.numberOfKnownZeroWeights
+            {
+                calcMixFoldToZero(&node)
+                return
+            }
+        }
+
+        // Keep the surviving pairs, writing the planned weight into each survivor's carrier.
+        var v = 0
+        while v &+ 1 < node.children.count {
+            let present = node.children[v &+ 1].flags & CalcNodeFlags.calcMixWeightPresent != 0
+            let isCalc = node.children[v &+ 1].flags & CalcNodeFlags.calcMixWeightIsCalc != 0
+            let plan = calcMixItemPlan(
+                WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight(
+                    value: node.children[v &+ 1].value,
+                    present: present,
+                    isRaw: present && !isCalc
+                ),
+                survey
+            )
+            if plan.survives {
+                if plan.replaceWeight {
+                    node.children[v &+ 1].value = plan.weight
+                    node.children[v &+ 1].flags |= CalcNodeFlags.calcMixWeightPresent
+                    node.children[v &+ 1].flags &= ~CalcNodeFlags.calcMixWeightIsCalc
+                }
+                v &+= 2
+            } else {
+                node.dropChild(v &+ 1)
+                node.dropChild(v)
+            }
+        }
+
+        guard survey.canNormalize else {
+            return
+        }
+
+        // Phase 4, the weighted sum, using the weights the carriers now hold.
+        var accumulated: NumericLeaf? = nil
+        v = 0
+        while v &+ 1 < node.children.count {
+            guard let leaf = node.children[v].numericLeaf else {
+                return
+            }
+            let scaled = node.children[v &+ 1].value / 100.0
+            v &+= 2
+            guard let current = accumulated else {
+                accumulated = leaf.withValue(leaf.value * scaled)
+                continue
+            }
+            guard options.calcMixAccumulatorAgrees(current, leaf) else {
+                return
+            }
+            accumulated = current.withValue(current.value + leaf.value * scaled)
+        }
+        guard let result = accumulated else {
+            return
+        }
+        node.setLeaf(result)
+    }
+}
+
+/// `getType(const Child&)` for a node `calcEmitParsed` has established is a leaf.
+@inline(always)
+private func calcParsedLeafType(_ node: borrowing CalcNode) -> CalcType? {
+    guard let leaf = node.numericLeaf else {
+        guard node.alternative == .Symbol else {
+            return CalcType()
+        }
+        guard let unit = WebCore.CSSUnitType(rawValue: node.unitType) else {
+            return nil
+        }
+        return CalcType.determineType(unit)
+    }
+    return calcLeafType(leaf)
+}
+
+/// `calcEmit` for a tree the grammar built.
+private func calcEmitParsed(
+    _ node: borrowing CalcNode,
+    _ isRoot: Bool,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> Bool {
+    let alternativeBit = CalcCoverage.bit(node.alternative)
+
+    if alternativeBit & CalcParsedEmitCoverage.leafMask != 0 {
+        guard let leaf = node.numericLeaf else {
+            guard let nonNumeric = node.nonNumericLeaf else {
+                return false
+            }
+            return builder.pushLeaf(nonNumeric, isRoot)
+        }
+        return builder.pushLeaf(leaf.boundaryLeaf, isRoot)
+    }
+
+    guard alternativeBit & CalcParsedEmitCoverage.operationMask != 0 else {
+        switch node.alternative {
+        case .CalcMix: return calcEmitParsedCalcMix(node, isRoot, &builder)
+        case .Anchor, .AnchorSize: return calcEmitParsedAnchor(node, isRoot, &builder)
+        case .Random: return calcEmitParsedRandom(node, isRoot, &builder)
+        default: return false
+        }
+    }
+
+    var k = 0
+    while k < node.children.count {
+        guard calcEmitParsed(node.children[k], false, &builder) else { return false }
+        k &+= 1
+    }
+    return builder.buildOperation(
+        node.alternative,
+        UInt32(truncatingIfNeeded: k),
+        node.type,
+        isRoot,
+        UInt8(truncatingIfNeeded: node.flags & CalcNodeFlags.clampNoneMask)
+    )
+}
+
+@inline(never)
+private func calcEmitParsedCalcMix(
+    _ node: borrowing CalcNode,
+    _ isRoot: Bool,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> Bool {
+    let count = node.children.count
+    guard count != 0, count % 2 == 0 else { return false }
+    var v = 0
+    while v < count {
+        guard calcEmitParsed(node.children[v], false, &builder) else { return false }
+        let flags = node.children[v &+ 1].flags
+        if flags & CalcNodeFlags.calcMixWeightIsCalc != 0 {
+            guard builder.pushCalcMixItemWeight(0, 0, false, node.children[v &+ 1].origin) else { return false }
+        } else {
+            _ = builder.pushCalcMixItemWeight(
+                0,
+                node.children[v &+ 1].value,
+                flags & CalcNodeFlags.calcMixWeightPresent != 0,
+                calcNoPayload
+            )
+        }
+        v &+= 2
+    }
+    return builder.buildOperation(.CalcMix, UInt32(truncatingIfNeeded: count / 2), node.type, isRoot, 0)
+}
+
+/// A parsed `random()`. `origin` indexes its `Random::Sharing` in the payload table.
+@inline(never)
+private func calcEmitParsedRandom(
+    _ node: borrowing CalcNode,
+    _ isRoot: Bool,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> Bool {
+    var k = 0
+    while k < node.children.count {
+        guard calcEmitParsed(node.children[k], false, &builder) else { return false }
+        k &+= 1
+    }
+    return builder.buildRandom(UInt32(truncatingIfNeeded: k), node.type, isRoot, node.origin)
+}
+
+/// A parsed `anchor()` or `anchor-size()`.
+///
+/// A slot written as a math function that simplified to a leaf gets its `calc()` wrapper back, as
+/// `anchorSlotKeepingPrefix` does.
+@inline(never)
+private func calcEmitParsedAnchor(
+    _ node: borrowing CalcNode,
+    _ isRoot: Bool,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> Bool {
+    let sideSlots = node.alternative == .Anchor && node.valueID == 0 ? 1 : 0
+    var k = 0
+    while k < node.children.count {
+        guard calcEmitParsed(node.children[k], false, &builder) else { return false }
+        let prefixBit =
+            k < sideSlots
+            ? CalcNodeFlags.anchorSideWasFunction
+            : CalcNodeFlags.anchorFallbackWasFunction
+        if node.flags & prefixBit != 0,
+            CalcCoverage.bit(node.children[k].alternative) & CalcParsedEmitCoverage.leafMask != 0
+        {
+            guard let leafType = calcParsedLeafType(node.children[k]),
+                builder.buildOperation(.Sum, 1, leafType, false, 0)
+            else { return false }
+        }
+        k &+= 1
+    }
+    return builder.buildAnchor(
+        node.alternative,
+        UInt32(truncatingIfNeeded: k),
+        node.type,
+        isRoot,
+        node.valueID,
+        node.origin
+    )
+}
+
 // MARK: The owned tree's entry
 
 /// Build, simplify and emit a tree that is not a single numeric leaf.
@@ -3394,4 +3741,2170 @@ private func calcSimplifyOwnedTree(
         outcome: CSSCalcSwiftSimplificationOutcome.simplified.rawValue,
         declineAlternative: noDeclineAlternative
     )
+}
+
+// MARK: - The calc grammar in Swift
+
+/// `<calc-sum>` over `<calc-product>` over `<calc-value>`, for the leaf grammar.
+///
+/// Parses the math functions `calcParseFunctionAlternative` lists, under the context conditions the
+/// C++ applies to each. The three payloads a `CalcNode` cannot hold (a `<random-key>`, an
+/// `<anchor-element>` and a `calc-mix()` weight that is a second `CSSCalc::Value`) are resolved by
+/// the C++ consumer when it accepts them, and the node names the result by its index in the payload
+/// table.
+///
+/// Invalid input and a refusal are separate outcomes. `calc(1px +2px)` is invalid CSS and fails.
+/// `state.declined` is set only for input the grammar does not handle.
+///
+/// `CalcTokens` is `~Escapable` and depends on a stack buffer that dies before `cssCalcParseSwift`
+/// returns, which is what keeps `CSSCalcSwiftParseCursor`'s `SWIFT_SAFE` claim true.
+
+/// The C++ parser's `maxExpressionDepth`.
+///
+/// The C++ `static_assert` checks only its own constant, so this literal must be edited with it.
+private let calcMaxExpressionDepth: Int32 = 100
+
+/// The parse options, formed once per parse.
+private struct CalcParseOptions {
+    /// `Type::determinePercentHint(options.category)`.
+    var percentageLeafHint: UInt8
+    let absoluteLengthUnitsOnly: Bool
+    /// Whether `ParserOptions::allowedSymbols` has any entry. `var`, because an `<anchor-side>`
+    /// parses with `allowedSymbols = { }` and clears it for the duration.
+    var hasAllowedSymbols: Bool
+    let treeCountingAllowed: Bool
+    let calcMixEnabled: Bool
+    /// `CSSPropertyParserOptions::anchorPolicy` / `::anchorSizePolicy`, each already `== Allow`.
+    var anchorAllowed: Bool
+    var anchorSizeAllowed: Bool
+    /// The four gate clauses of `consumeRandom`, already ANDed.
+    ///
+    /// Clear makes `random()` invalid input.
+    let randomAllowed: Bool
+    let unitlessZeroLengthAllowed: Bool
+    let rootFunctionId: UInt16
+    /// The entry is `parseAndSimplifyCalcSum` rather than `parseAndSimplify`.
+    ///
+    /// See `CSSCalcSwiftParseOptions::bareCalcSum` for the three things it selects.
+    let bareCalcSum: Bool
+
+    @inline(always)
+    init(_ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions) {
+        self.percentageLeafHint = percentHintRawValue(CalcType.determinePercentHint(options.category))
+        self.absoluteLengthUnitsOnly = options.absoluteLengthUnitsOnly
+        self.hasAllowedSymbols = options.hasAllowedSymbols
+        self.treeCountingAllowed = options.treeCountingAllowed
+        self.calcMixEnabled = options.cssCalcMixEnabled
+        self.anchorAllowed = options.anchorAllowed
+        self.anchorSizeAllowed = options.anchorSizeAllowed
+        self.randomAllowed = options.randomAllowed
+        self.unitlessZeroLengthAllowed = options.unitlessZeroLengthAllowed
+        self.rootFunctionId = options.rootFunctionId
+        self.bareCalcSum = options.bareCalcSum
+    }
+}
+
+/// Mutable state threaded through the descent.
+///
+/// Separate from the return value because both a success and a refusal can set
+/// `requiresConversionData`.
+private struct CalcParseState: ~Copyable {
+    var options: CalcParseOptions
+
+    init(_ options: CalcParseOptions) {
+        self.options = options
+    }
+
+    var requiresConversionData = false
+    var declineReason = WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None
+    /// Set when the grammar hit something it does not handle, as opposed to invalid input.
+    var declined = false
+
+    /// Whether a fold that needs `options.conversionData` would run on this parse, in which case
+    /// the grammar refuses every node whose fold it cannot reproduce.
+    var conversionDataFoldsRun = false
+
+    /// Whether the grammar built an `anchor()` whose `<anchor-side>` is a subtree, the only shape
+    /// that sets `CalcNodeFlags.insideAnchorSide`.
+    var hasAnchorSide = false
+
+    /// Whether `simplifyParsed` will run over the node being built, so its folds can be made at
+    /// construction.
+    ///
+    /// Cleared inside an `<anchor-side>`, which the pass does not descend into.
+    var foldAtConstruction = false
+
+    /// What `simplifyParsed` will fold with.
+    ///
+    /// Meaningful only while `foldAtConstruction` is set.
+    var simplification = CalcSimplification(
+        percentageResolveToDimension: false,
+        allowZeroValueLengthRemovalFromSum: false,
+        category: 0,
+        hasConversionData: false
+    )
+
+    /// One emptied children buffer from an operation that collapsed at construction, reused by the
+    /// next operation.
+    ///
+    /// One slot suffices because the grammar builds post-order.
+    var spare = UniqueArray<CalcNode>()
+
+    @inline(always)
+    mutating func takeOperandBuffer() -> UniqueArray<CalcNode> {
+        takeBuffer(calcOperandListCapacity)
+    }
+
+    /// The spare if it has room for `capacity`, or a new allocation of exactly `capacity`.
+    @inline(always)
+    mutating func takeBuffer(_ capacity: Int) -> UniqueArray<CalcNode> {
+        if spare.capacity >= capacity {
+            var buffer = UniqueArray<CalcNode>()
+            swap(&buffer, &spare)
+            return buffer
+        }
+        return UniqueArray(capacity: capacity)
+    }
+
+    @inline(always)
+    mutating func operation(
+        _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
+        only child: consuming CalcNode,
+        _ type: CalcType
+    ) -> CalcNode {
+        var children = takeBuffer(1)
+        children.append(child)
+        return calcParseOperation(alternative, children, type)
+    }
+
+    /// Keep the children buffer of `node` if it is empty and larger than the spare.
+    @inline(always)
+    mutating func recycleEmptyBuffer(_ node: inout CalcNode) {
+        if node.children.isEmpty && node.children.capacity > spare.capacity {
+            swap(&node.children, &spare)
+            node.children.removeAll()
+            if node.children.capacity > 0 {
+                node.children = UniqueArray()
+            }
+        }
+    }
+}
+
+/// `simplify(Sum&)`, `simplify(Product&)`, `simplify(Min&)` and `simplify(Max&)` at construction,
+/// as `parseCalcSum`, `parseCalcProduct` and `consumeOneOrMoreArguments` call them.
+///
+/// Only over children that are all `Number`, `Percentage` or `CanonicalDimension` leaves, which
+/// `simplifyParsed` does not change, so the pass would fold this node over the same operands.
+/// Folding the result again is a no-op. Any other child can change in the pass, so its parent is
+/// left to it.
+@inline(always)
+private func calcFoldAtConstruction(
+    _ node: inout CalcNode,
+    _ state: inout CalcParseState
+) {
+    guard state.foldAtConstruction else {
+        return
+    }
+    var k = 0
+    while k < node.children.count {
+        switch node.children[k].alternative {
+        case .Number, .Percentage, .CanonicalDimension:
+            k &+= 1
+        default:
+            return
+        }
+    }
+    let fold = CalcFold(options: state.simplification, builder: nil, keepsBuffers: true)
+    switch node.alternative {
+    case .Sum: fold.foldSum(&node)
+    case .Product: fold.foldProduct(&node)
+    case .Min: fold.foldMinMax(&node, false)
+    case .Max: fold.foldMinMax(&node, true)
+    default: return
+    }
+    switch node.alternative {
+    case .Sum, .Product, .Min, .Max: node.flags |= CalcNodeFlags.foldedAtConstruction
+    default: break
+    }
+    state.recycleEmptyBuffer(&node)
+}
+
+/// The calc range's tokens, copied into Swift once per parse by
+/// `CSSCalcSwiftParseCursor::fillTokens`, and the C++ cursor for the upcalls that need the range
+/// itself (a symbol lookup, a `<random-key>`, a `calc-mix()` weight, an `<anchor-element>`).
+///
+/// Reading the C++ token vector in place would need a bounds-carrying view of C++ storage
+/// (rdar://186723514).
+///
+/// `~Escapable` because `tokens` is a `Span` over the caller's stack buffer.
+private struct CalcTokens: ~Escapable {
+    let cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor
+    /// `tokenCount() + 1` tokens: the range, then the `EOFToken` `CSSParserTokenRange::peek`
+    /// returns past its end.
+    let tokens: Span<WebCore.CSSCalc.CSSCalcSwiftToken>
+
+    @inline(always)
+    @_lifetime(copy tokens)
+    init(_ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor, _ tokens: Span<WebCore.CSSCalc.CSSCalcSwiftToken>) {
+        self.cursor = cursor
+        self.tokens = tokens
+    }
+
+    /// The token at `index`, or the EOF token at or past the end of the range, as `peek` answers.
+    @inline(always)
+    func token(_ index: UInt32) -> WebCore.CSSCalc.CSSCalcSwiftToken {
+        let last = tokens.count &- 1
+        let i = Int(index)
+        return tokens[i < last ? i : last]
+    }
+
+    @inline(always)
+    func tokenCount() -> UInt32 { UInt32(truncatingIfNeeded: tokens.count &- 1) }
+    @inline(always)
+    func lookupSymbol(_ valueID: UInt16) -> WebCore.CSSCalc.CSSCalcSwiftSymbolResult {
+        cursor.lookupSymbol(valueID)
+    }
+    @inline(always)
+    func consumeRandomKey(_ index: UInt32) -> WebCore.CSSCalc.CSSCalcSwiftConsumedPayload {
+        cursor.consumeRandomKey(index)
+    }
+    @inline(always)
+    func consumeCalcMixWeightAt(_ index: UInt32) -> WebCore.CSSCalc.CSSCalcSwiftConsumedPayload {
+        cursor.consumeCalcMixWeightAt(index)
+    }
+    @inline(always)
+    func resolveDashedIdentAt(_ index: UInt32) -> UInt32 {
+        cursor.resolveDashedIdentAt(index)
+    }
+}
+
+/// `body` over the range's tokens, in a `withTemporaryAllocation` buffer.
+@inline(always)
+private func withCalcTokens<R>(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ body: (borrowing CalcTokens) -> R
+) -> R {
+    let count = Int(cursor.tokenCount()) &+ 1
+    return withTemporaryAllocation(of: WebCore.CSSCalc.CSSCalcSwiftToken.self, capacity: count) { buffer in
+        // Initialised before C++ writes it, because `MutableSpan` covers initialised elements only.
+        while !buffer.isFull {
+            buffer.append(WebCore.CSSCalc.CSSCalcSwiftToken())
+        }
+        var slots = buffer.mutableSpan
+        cursor.fillTokens(&slots)
+        _ = consume slots
+        return body(CalcTokens(cursor, buffer.span))
+    }
+}
+
+@inline(always)
+private func calcToken(
+    _ cursor: borrowing CalcTokens,
+    _ state: inout CalcParseState,
+    _ index: UInt32
+) -> WebCore.CSSCalc.CSSCalcSwiftToken {
+    cursor.token(index)
+}
+
+@inline(always)
+private func calcTokenIsWhitespace(_ type: WebCore.CSSParserTokenType) -> Bool {
+    type == WebCore.NonNewlineWhitespaceToken || type == WebCore.NewlineToken
+}
+
+private func calcSkipWhitespace(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState
+) {
+    while index < end && calcTokenIsWhitespace(calcToken(cursor, &state, index).type) {
+        index += 1
+    }
+}
+
+/// The index of the `BlockEnd` matching the `BlockStart` at `start`, or nil if the range ends
+/// first.
+private func calcFindBlockEnd(
+    _ cursor: borrowing CalcTokens,
+    _ state: inout CalcParseState,
+    _ start: UInt32,
+    _ end: UInt32
+) -> UInt32? {
+    var depth = 0
+    var i = start
+    while i < end {
+        let blockType = calcToken(cursor, &state, i).blockType
+        if blockType == calcBlockStart {
+            depth += 1
+        } else if blockType == calcBlockEnd {
+            depth -= 1
+            if depth == 0 { return i }
+        }
+        i += 1
+    }
+    return nil
+}
+
+/// `CSSParserToken::BlockType`, pinned on the C++ side one enumerator per line.
+private let calcBlockStart: UInt8 = 1
+private let calcBlockEnd: UInt8 = 2
+
+// MARK: The grammar's output: `CalcNode`s, not `Child`s
+
+/// One parsed subtree, owned, and the `Type` the grammar computed for it.
+private struct CalcParsed: ~Copyable {
+    var node: CalcNode
+    let type: CalcType
+}
+
+/// A numeric leaf, or nil if its unit does not fit the node's `unitType`.
+@inline(always)
+private func calcParseLeaf(
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
+    _ value: Double,
+    _ unitType: UInt16,
+    _ percentHint: UInt8,
+    _ flags: UInt16 = 0,
+    _ origin: UInt32 = calcNoPayload
+) -> CalcNode? {
+    // No `CSSUnitType` enumerator fails this, but a silent truncation would be a wrong unit.
+    guard let narrowUnit = UInt8(exactly: unitType) else {
+        return nil
+    }
+    return CalcNode(
+        value: value,
+        type: CalcType(),
+        // `calcNoPayload`: a parsed node has no original tree to index. The exception is a
+        // `calc-mix()` weight carrier with `CalcNodeFlags.calcMixWeightIsCalc`, which stores its
+        // payload-table index; it is never emitted as a node (`calcEmitParsedCalcMix` steps past
+        // it).
+        origin: origin,
+        valueID: 0,
+        unitType: narrowUnit,
+        alternative: alternative,
+        percentHint: percentHint,
+        flags: flags,
+        children: UniqueArray()
+    )
+}
+
+/// An operation over `children`, which it takes ownership of in order.
+@inline(always)
+private func calcParseOperation(
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
+    _ children: consuming UniqueArray<CalcNode>,
+    _ type: CalcType,
+    _ flags: UInt16 = 0,
+    _ valueID: UInt16 = 0,
+    _ origin: UInt32 = calcNoPayload
+) -> CalcNode {
+    CalcNode(
+        value: 0,
+        // The type the grammar computed: `copyAndSimplify` ends at `makeChild(..., getType(root))`,
+        // and a fresh `toType` over simplified operands can differ.
+        type: type,
+        // `calcNoPayload`, except on a parsed `Anchor`, `AnchorSize` or `Random`, where it is the
+        // payload-table index of the `<anchor-element>` or `<random-key>` that `buildAnchor` and
+        // `buildRandom` read back.
+        origin: origin,
+        valueID: valueID,
+        unitType: 0,
+        alternative: alternative,
+        percentHint: 0,
+        flags: flags,
+        children: children
+    )
+}
+
+/// An operation over exactly one child: the wrappers (`Negate`, `Invert`, `Deg2Rad`) and every
+/// one-argument function.
+@inline(always)
+private func calcParseOperation(
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
+    only child: consuming CalcNode,
+    _ type: CalcType
+) -> CalcNode {
+    var children = UniqueArray<CalcNode>(capacity: 1)
+    children.append(child)
+    return calcParseOperation(alternative, children, type)
+}
+
+/// The first capacity of the children buffer of a `Sum`, a `Product` or an argument list.
+///
+/// `UniqueArray` grows 0, 1, 2, 3, 5 from empty, so four holds any list of up to four operands in
+/// one allocation.
+private let calcOperandListCapacity = 4
+
+/// The operand of a `-` in a `<calc-sum>`: `Negate { operand }`, or with the wrapper already
+/// folded.
+///
+/// `parseCalcSum` simplifies each `Negate` as it builds it. For a `Number`, `Percentage` or
+/// `CanonicalDimension` operand the fold is `calcFoldNegate`'s first case, and these leaves have no
+/// fold of their own that would run first. A `NonCanonicalDimension` is left to the pass, which
+/// runs `foldNonCanonicalDimension` before the wrapper's fold.
+@inline(always)
+private func calcParseNegate(
+    _ operand: consuming CalcNode,
+    _ type: CalcType,
+    _ state: borrowing CalcParseState
+) -> CalcNode {
+    if state.foldAtConstruction {
+        switch operand.alternative {
+        case .Number, .Percentage, .CanonicalDimension:
+            // The unary minus, as `calcFoldNegate`: `-(+0)` is `-0`.
+            operand.value = -operand.value
+            return operand
+        default:
+            break
+        }
+    }
+    return calcParseOperation(.Negate, only: operand, type)
+}
+
+/// The operand of a `/` in a `<calc-product>`.
+///
+/// The reasoning of `calcParseNegate`, for the first case of `calcFoldInvert`, which is a `Number`
+/// leaf only.
+@inline(always)
+private func calcParseInvert(
+    _ operand: consuming CalcNode,
+    _ type: CalcType,
+    _ state: borrowing CalcParseState
+) -> CalcNode {
+    if state.foldAtConstruction, operand.alternative == .Number {
+        operand.value = CalcExecutor.invert(operand.value)
+        return operand
+    }
+    return calcParseOperation(.Invert, only: operand, type)
+}
+
+/// Mark `node` and every node below it as inside the `<anchor-side>` of an `anchor()`.
+private func calcMarkInsideAnchorSide(_ node: inout CalcNode) {
+    node.flags |= CalcNodeFlags.insideAnchorSide
+    var k = 0
+    while k < node.children.count {
+        calcMarkInsideAnchorSide(&node.children[k])
+        k &+= 1
+    }
+}
+
+/// `<calc-value>` = `<number>` | `<dimension>` | `<percentage>` | `<calc-keyword>` | `( <calc-sum>
+/// )`.
+private func calcParseValue(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    if index >= end { return nil }
+
+    let token = calcToken(cursor, &state, index)
+
+    if token.blockType == calcBlockStart {
+        return calcParseBlock(cursor, &index, end, depth, &state, token)
+    }
+
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    switch token.type {
+    case WebCore.NumberToken:
+        guard
+            let me = calcParseLeaf(
+                .Number,
+                token.numericValue,
+                UInt16(WebCore.CSSUnitType.Number.rawValue),
+                0
+            )
+        else { return nil }
+        return CalcParsed(node: me, type: CalcType())
+
+    case WebCore.PercentageToken:
+        // `parseCalcPercentage`: the hint comes from the category, not from the token. An
+        // `<anchor-side>` parses at `CSS::Category::Percentage` and overrides it.
+        let hint = state.options.percentageLeafHint
+        guard
+            let me = calcParseLeaf(
+                .Percentage,
+                token.numericValue,
+                UInt16(WebCore.CSSUnitType.Percentage.rawValue),
+                hint
+            )
+        else { return nil }
+        var percentType = CalcType()
+        percentType.percent = 1
+        if let unwrapped = percentHintFromRawValue(hint) {
+            percentType = percentType.withPercentHintApplied(unwrapped)
+        }
+        return CalcParsed(node: me, type: percentType)
+
+    case WebCore.DimensionToken:
+        if token.unit == WebCore.CSSUnitType.Unknown { return nil }
+        if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenUnitNeedsConversionData != 0 {
+            // `absoluteLengthUnitsOnly` makes this invalid input.
+            if state.options.absoluteLengthUnitsOnly { return nil }
+            state.requiresConversionData = true
+        }
+        guard
+            let alternative = calcNumericAlternativeForLeafKind(
+                WebCore.CSSCalc.cssCalcSwiftLeafKindForUnit(UInt16(token.unit.rawValue))
+            )
+        else { return nil }
+        guard
+            let me = calcParseLeaf(
+                alternative,
+                token.numericValue,
+                UInt16(token.unit.rawValue),
+                0
+            )
+        else { return nil }
+        return CalcParsed(node: me, type: CalcType.determineType(token.unit))
+
+    case WebCore.IdentToken:
+        return calcParseKeyword(cursor, &state, token)
+
+    default:
+        return nil
+    }
+}
+
+/// `parseCalcKeyword`, in its order: the symbol table first, then the five `<calc-keyword>`
+/// constants, so an id present in both resolves as a `Symbol`.
+///
+/// With `hasAllowedSymbols` clear (no symbols, or inside an `<anchor-side>`) the table lookup is
+/// skipped. Any other ident is invalid input.
+@inline(never)
+private func calcParseKeyword(
+    _ cursor: borrowing CalcTokens,
+    _ state: inout CalcParseState,
+    _ token: WebCore.CSSCalc.CSSCalcSwiftToken
+) -> CalcParsed? {
+    if state.options.hasAllowedSymbols {
+        let symbol = cursor.lookupSymbol(token.id)
+        if symbol.resolved {
+            if symbol.needsConversionData {
+                if state.options.absoluteLengthUnitsOnly { return nil }
+                state.requiresConversionData = true
+            }
+            guard let unit = WebCore.CSSUnitType(rawValue: UInt8(truncatingIfNeeded: symbol.unitType)) else {
+                // Never taken: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
+                return nil
+            }
+            // From the symbol's unit, not its value: the value is not known until simplification.
+            let type = CalcType.determineType(unit)
+            guard let me = calcParseSymbol(token.id, symbol.unitType) else { return nil }
+            return CalcParsed(node: me, type: type)
+        }
+    }
+
+    let constant = WebCore.CSSCalc.cssCalcSwiftLookupConstantNumber(token.id)
+    guard constant.resolved else { return nil }
+    guard
+        let me = calcParseLeaf(
+            .Number,
+            constant.value,
+            UInt16(WebCore.CSSUnitType.Number.rawValue),
+            0
+        )
+    else { return nil }
+    return CalcParsed(node: me, type: CalcType())
+}
+
+/// A `Symbol` leaf, or nil if its unit does not fit.
+@inline(always)
+private func calcParseSymbol(
+    _ valueID: UInt16,
+    _ unitType: UInt16
+) -> CalcNode? {
+    guard let narrowUnit = UInt8(exactly: unitType) else {
+        return nil
+    }
+    return CalcNode(
+        value: 0,
+        type: CalcType(),
+        origin: calcNoPayload,
+        valueID: valueID,
+        unitType: narrowUnit,
+        alternative: .Symbol,
+        percentHint: 0,
+        flags: 0,
+        children: UniqueArray()
+    )
+}
+
+/// Which of the four numeric alternatives a `CSSCalcSwiftNodeKind` leaf answer names.
+@inline(always)
+private func calcNumericAlternativeForLeafKind(_ kind: UInt8) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
+    switch kind {
+    case WebCore.CSSCalc.CSSCalcSwiftNodeKind.Number.rawValue: return .Number
+    case WebCore.CSSCalc.CSSCalcSwiftNodeKind.Percentage.rawValue: return .Percentage
+    case WebCore.CSSCalc.CSSCalcSwiftNodeKind.CanonicalDimension.rawValue: return .CanonicalDimension
+    case WebCore.CSSCalc.CSSCalcSwiftNodeKind.NonCanonicalDimension.rawValue: return .NonCanonicalDimension
+    default: return nil
+    }
+}
+
+/// The block case of `<calc-value>`, kept out of line.
+@inline(never)
+private func calcParseBlock(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState,
+    _ token: WebCore.CSSCalc.CSSCalcSwiftToken
+) -> CalcParsed? {
+    // `parseCalcValue`'s `findBlock`: a `LeftParenthesisToken` or a `calc()` / `-webkit-calc()`
+    // function is a nested `<calc-sum>`. A math function not listed in
+    // `calcParseFunctionAlternative` is refused; any other function block is invalid input.
+    let isPlainCalc =
+        token.type == WebCore.LeftParenthesisToken
+        || token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsPlainCalcFunction != 0
+    if !isPlainCalc {
+        if let function = calcParseFunctionAlternative(token.functionId) {
+            return calcParseFunctionBlock(
+                cursor,
+                &index,
+                end,
+                depth,
+                &state,
+                function.alternative,
+                function.arguments
+            )
+        }
+        if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
+            state.declined = true
+            state.declineReason = calcParseDeclineReasonForFunction(token.functionId)
+        }
+        return nil
+    }
+
+    guard let blockEnd = calcFindBlockEnd(cursor, &state, index, end) else { return nil }
+
+    var inner = index + 1
+    calcSkipWhitespace(cursor, &inner, blockEnd, &state)
+    guard let innerParsed = calcParseSum(cursor, &inner, blockEnd, depth + 1, &state) else { return nil }
+    // Extraneous tokens inside the block are invalid input.
+    calcSkipWhitespace(cursor, &inner, blockEnd, &state)
+    if inner != blockEnd { return nil }
+
+    index = blockEnd + 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    // A parenthesised group contributes no node of its own.
+    return innerParsed
+}
+
+// MARK: The math functions
+
+/// Which `consume*Arguments` helper `parseCalcFunction` runs for a function: its argument grammar.
+private enum CalcFunctionArguments: UInt8 {
+    /// `<calc-sum>#`: `consumeOneOrMoreArguments`.
+    case oneOrMore
+    /// Exactly one `<calc-sum>`: `consumeExactlyOneArgument`.
+    case exactlyOne
+    /// `[ <calc-sum> | none ], <calc-sum>, [ <calc-sum> | none ]`: `consumeClamp`.
+    case clamp
+    /// `<calc-sum>, <calc-sum>?`: `consumeOneOrTwoArguments`. Only `log()`; `round()` has the same
+    /// shape but a different type rule.
+    case oneOrTwo
+    /// `<rounding-strategy>?, <calc-sum>, <calc-sum>?`: `consumeRound`.
+    case round
+    /// Two comma-separated `<calc-sum>`s: `consumeExactlyTwoArguments`.
+    case exactlyTwo
+    /// `no-clamp? <calc-sum>, <calc-sum>, <calc-sum>`: `consumeProgress`.
+    case progress
+    /// `consumeZeroArguments<Op>`: `sibling-count()` and `sibling-index()`.
+    case zeroArguments
+    /// `[ <calc-sum> <percentage [0,100]>? ]#`: `consumeCalcMix`.
+    case calcMix
+    /// `anchor( <anchor-element>? && <anchor-side>, <length-percentage>? )`: `consumeAnchor`.
+    case anchor
+    /// `anchor-size( [ <anchor-element> || <anchor-size> ]? , <length-percentage>? )`:
+    /// `consumeAnchorSize`.
+    case anchorSize
+    /// `random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )`: `consumeRandom`. The
+    /// `<random-key>` is not a child; see `calcParseRandom`.
+    case random
+}
+
+/// Which `CSSCalcSwiftParseDeclineReason` an unhandled `isCalcFunction` belongs to.
+@inline(never)
+private func calcParseDeclineReasonForFunction(
+    _ functionId: UInt16
+)
+    -> WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason
+{
+    switch functionId {
+    case WebCore.CSSValueSiblingCount.rawValue, WebCore.CSSValueSiblingIndex.rawValue:
+        return .TreeCounting
+    default:
+        return .MathFunction
+    }
+}
+
+/// Which `CSSCalcSwiftAlternative` the `CSSValueID` of a `FunctionToken` names, and how its
+/// arguments parse, or nil for a function this grammar does not handle.
+@inline(always)
+private func calcParseFunctionAlternative(
+    _ functionId: UInt16
+)
+    -> (alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative, arguments: CalcFunctionArguments)?
+{
+    switch functionId {
+    case WebCore.CSSValueMin.rawValue: return (.Min, .oneOrMore)
+    case WebCore.CSSValueMax.rawValue: return (.Max, .oneOrMore)
+    case WebCore.CSSValueSin.rawValue: return (.Sin, .exactlyOne)
+    case WebCore.CSSValueCos.rawValue: return (.Cos, .exactlyOne)
+    case WebCore.CSSValueTan.rawValue: return (.Tan, .exactlyOne)
+    case WebCore.CSSValueAsin.rawValue: return (.Asin, .exactlyOne)
+    case WebCore.CSSValueAcos.rawValue: return (.Acos, .exactlyOne)
+    case WebCore.CSSValueAtan.rawValue: return (.Atan, .exactlyOne)
+    case WebCore.CSSValueSqrt.rawValue: return (.Sqrt, .exactlyOne)
+    case WebCore.CSSValueExp.rawValue: return (.Exp, .exactlyOne)
+    case WebCore.CSSValueAbs.rawValue: return (.Abs, .exactlyOne)
+    case WebCore.CSSValueSign.rawValue: return (.Sign, .exactlyOne)
+    case WebCore.CSSValueClamp.rawValue: return (.Clamp, .clamp)
+    case WebCore.CSSValueRound.rawValue: return (.RoundNearest, .round)
+    case WebCore.CSSValueLog.rawValue: return (.Log, .oneOrTwo)
+    case WebCore.CSSValueHypot.rawValue: return (.Hypot, .oneOrMore)
+    case WebCore.CSSValueMod.rawValue: return (.Mod, .exactlyTwo)
+    case WebCore.CSSValueRem.rawValue: return (.Rem, .exactlyTwo)
+    case WebCore.CSSValueAtan2.rawValue: return (.Atan2, .exactlyTwo)
+    case WebCore.CSSValuePow.rawValue: return (.Pow, .exactlyTwo)
+    case WebCore.CSSValueProgress.rawValue: return (.Progress, .progress)
+    case WebCore.CSSValueSiblingCount.rawValue: return (.SiblingCount, .zeroArguments)
+    case WebCore.CSSValueSiblingIndex.rawValue: return (.SiblingIndex, .zeroArguments)
+    case WebCore.CSSValueCalcMix.rawValue: return (.CalcMix, .calcMix)
+    case WebCore.CSSValueAnchor.rawValue: return (.Anchor, .anchor)
+    case WebCore.CSSValueAnchorSize.rawValue: return (.AnchorSize, .anchorSize)
+    case WebCore.CSSValueRandom.rawValue: return (.Random, .random)
+    default: return nil
+    }
+}
+
+/// A math function as a nested `<calc-value>`: find the block, parse its arguments, step past.
+@inline(never)
+private func calcParseFunctionBlock(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
+    _ arguments: CalcFunctionArguments
+) -> CalcParsed? {
+    guard let blockEnd = calcFindBlockEnd(cursor, &state, index, end) else { return nil }
+
+    var inner = index + 1
+    let argumentsParsed: CalcParsed?
+    switch arguments {
+    case .oneOrMore:
+        argumentsParsed = calcParseArgumentList(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state,
+            alternative
+        )
+    case .exactlyOne:
+        argumentsParsed = calcParseUnaryFunction(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state,
+            alternative
+        )
+    case .clamp:
+        argumentsParsed = calcParseClamp(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state
+        )
+    case .oneOrTwo:
+        argumentsParsed = calcParseOneOrTwoArguments(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state,
+            alternative
+        )
+    case .round:
+        argumentsParsed = calcParseRound(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state
+        )
+    case .exactlyTwo:
+        argumentsParsed = calcParseTwoArguments(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state,
+            alternative
+        )
+    case .progress:
+        argumentsParsed = calcParseProgress(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state
+        )
+    case .zeroArguments:
+        argumentsParsed = calcParseZeroArguments(
+            cursor,
+            &inner,
+            blockEnd,
+            &state,
+            alternative
+        )
+    case .calcMix:
+        argumentsParsed = calcParseCalcMix(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state
+        )
+    case .anchor:
+        argumentsParsed = calcParseAnchor(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state
+        )
+    case .anchorSize:
+        argumentsParsed = calcParseAnchorSize(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state
+        )
+    case .random:
+        argumentsParsed = calcParseRandom(
+            cursor,
+            &inner,
+            blockEnd,
+            depth + 1,
+            &state
+        )
+    }
+    guard let parsed = consume argumentsParsed else { return nil }
+    if inner != blockEnd { return nil }
+
+    index = blockEnd + 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return parsed
+}
+
+/// `consumeZeroArguments<Op>` and the conditions guarding its two callers: `sibling-count()` and
+/// `sibling-index()`.
+///
+///   * `treeCountingAllowed` clear: invalid input, as the C++ returns `{ }`.
+///   * a fold would run (`CalcParseState.conversionDataFoldsRun`): refused with `.TreeCounting`,
+///     because the fold needs the original `CSSCalc::Child`.
+///   * otherwise: the leaf, unfolded, as `copyAndSimplify` leaves it.
+@inline(never)
+private func calcParseZeroArguments(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if !state.options.treeCountingAllowed {
+        return nil
+    }
+    if state.conversionDataFoldsRun {
+        state.declined = true
+        state.declineReason = .TreeCounting
+        return nil
+    }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+    state.requiresConversionData = true
+    guard let me = calcParseLeaf(alternative, 0, 0, 0) else { return nil }
+    return CalcParsed(node: me, type: CalcType())
+}
+
+/// `consumeExactlyOneArgument<Op>`: one `<calc-sum>`, its type checked against `Op::input`, the
+/// node's type `transformType<Op::output>` of it, and a `Deg2Rad` wrapper around an `<angle>`
+/// argument of the three trigonometric functions.
+private func calcParseUnaryFunction(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard let argument = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    var wrapInDeg2Rad = false
+    let outputType: CalcType
+
+    switch alternative {
+    case .Sin, .Cos, .Tan:
+        guard argument.type.matchesNumberOrAngle,
+            let transformed = CalcType.makeNumber().madeConsistent(with: argument.type)
+        else { return nil }
+        outputType = transformed
+
+        // Only an argument matching `<angle>` gets the wrapper (`sin(30deg)`, not `sin(0.5)`), and
+        // the wrapper's type is `Type { }`, not the angle's.
+        if argument.type.matchesAngle {
+            wrapInDeg2Rad = true
+        }
+
+    case .Asin, .Acos, .Atan:
+        guard argument.type.matchesNumber,
+            let transformed = CalcType.makeAngle().madeConsistent(with: argument.type)
+        else { return nil }
+        outputType = transformed
+
+    case .Sqrt, .Exp:
+        guard argument.type.matchesNumber,
+            let transformed = CalcType.makeNumber().madeConsistent(with: argument.type)
+        else { return nil }
+        outputType = transformed
+
+    case .Sign:
+        guard let transformed = CalcType.makeNumber().madeConsistent(with: argument.type) else { return nil }
+        outputType = transformed
+
+    case .Abs:
+        outputType = argument.type
+
+    default:
+        // Unreachable through `calcParseFunctionAlternative`'s `.exactlyOne` case.
+        return nil
+    }
+
+    var operand = argument.node
+    if wrapInDeg2Rad {
+        operand = calcParseOperation(.Deg2Rad, only: operand, CalcType())
+    }
+    return CalcParsed(node: state.operation(alternative, only: operand, outputType), type: outputType)
+}
+
+/// `consumeCommaIncludingWhitespace`: a comma and the whitespace after it.
+@inline(always)
+private func calcParseComma(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState
+) -> Bool {
+    guard index < end, calcToken(cursor, &state, index).type == WebCore.CommaToken else { return false }
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return true
+}
+
+/// One `[ <calc-sum> | none ]`: the subtree, or nil for `none`, whose type is `Type { }`.
+private struct CalcParsedSumOrNone: ~Copyable {
+    var node: CalcNode?
+    let type: CalcType
+    let isNone: Bool
+}
+
+/// `parseCalcSumOrNone`: the keyword `none`, or a `<calc-sum>`.
+@inline(always)
+private func calcParseSumOrNone(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsedSumOrNone? {
+    if index < end, calcToken(cursor, &state, index).id == UInt16(WebCore.CSSValueNone.rawValue) {
+        index += 1
+        calcSkipWhitespace(cursor, &index, end, &state)
+        return CalcParsedSumOrNone(node: nil, type: CalcType(), isNone: true)
+    }
+    guard let parsed = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    let type = parsed.type
+    return CalcParsedSumOrNone(node: parsed.node, type: type, isNone: false)
+}
+
+/// `consumeClamp`: `clamp( [ <calc-sum> | none ], <calc-sum>, [ <calc-sum> | none ] )`.
+///
+/// `computeType` merges only the bounds that are present, and `Type { }` is not an identity for
+/// `consistentType`, so the four cases are written out. All merges are `MergePolicy::Consistent`,
+/// with no input check and no output transform.
+private func calcParseClamp(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard var minimum = calcParseSumOrNone(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard let value = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard var maximum = calcParseSumOrNone(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    let noneMinimum = minimum.isNone
+    let noneMaximum = maximum.isNone
+
+    let outputType: CalcType
+    if noneMinimum && noneMaximum {
+        outputType = value.type
+    } else if noneMinimum {
+        guard let merged = value.type.consistentType(with: maximum.type) else { return nil }
+        outputType = merged
+    } else if noneMaximum {
+        guard let merged = minimum.type.consistentType(with: value.type) else { return nil }
+        outputType = merged
+    } else {
+        guard let lower = minimum.type.consistentType(with: value.type),
+            let merged = lower.consistentType(with: maximum.type)
+        else { return nil }
+        outputType = merged
+    }
+
+    // Min, val, max, over the bounds that exist: `buildOperation` fills its slots in list order,
+    // and the flags say which bound is absent.
+    var children = state.takeBuffer(3)
+    if let lower = minimum.node.take() {
+        children.append(lower)
+    }
+    children.append(value.node)
+    if let upper = maximum.node.take() {
+        children.append(upper)
+    }
+
+    var flags: UInt16 = 0
+    if noneMinimum { flags |= CalcNodeFlags.clampNoneMinimum }
+    if noneMaximum { flags |= CalcNodeFlags.clampNoneMaximum }
+
+    return CalcParsed(node: calcParseOperation(.Clamp, children, outputType, flags), type: outputType)
+}
+
+/// Which `<rounding-strategy>` an ident names, as the alternative it selects.
+@inline(always)
+private func calcRoundingStrategyAlternative(
+    _ id: UInt16
+)
+    -> WebCore.CSSCalc.CSSCalcSwiftAlternative?
+{
+    switch id {
+    case UInt16(WebCore.CSSValueNearest.rawValue): return .RoundNearest
+    case UInt16(WebCore.CSSValueUp.rawValue): return .RoundUp
+    case UInt16(WebCore.CSSValueDown.rawValue): return .RoundDown
+    case UInt16(WebCore.CSSValueToZero.rawValue): return .RoundToZero
+    default: return nil
+    }
+}
+
+/// `consumeRound`: `round( <rounding-strategy>?, <calc-sum>, <calc-sum>? )`.
+private func calcParseRound(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    // `calcParseFunctionBlock` hands over the range starting one token past `(`, so leading
+    // whitespace is still there.
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    var alternative = WebCore.CSSCalc.CSSCalcSwiftAlternative.RoundNearest
+    if index < end, let selected = calcRoundingStrategyAlternative(calcToken(cursor, &state, index).id) {
+        index += 1
+        calcSkipWhitespace(cursor, &index, end, &state)
+        guard calcParseComma(cursor, &index, end, &state) else { return nil }
+        alternative = selected
+    }
+    return calcParseRoundArguments(cursor, &index, end, depth, &state, alternative)
+}
+
+/// `consumeRoundArguments<Op>`: `<calc-sum>, <calc-sum>?` under the type rule of `round()`.
+private func calcParseRoundArguments(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let a = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    if index == end {
+        // `validateType<AllowedTypes::Number>`, not `Op::input`: `round(1.5px)` is invalid.
+        guard a.type.matchesNumber else { return nil }
+        let type = a.type
+        return CalcParsed(node: state.operation(alternative, only: a.node, type), type: type)
+    }
+
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let merged = a.type.consistentType(with: b.type) else { return nil }
+    var children = state.takeBuffer(2)
+    children.append(a.node)
+    children.append(b.node)
+    return CalcParsed(node: calcParseOperation(alternative, children, merged), type: merged)
+}
+
+/// `consumeOneOrTwoArguments<Op>`: `<calc-sum>, <calc-sum>?`.
+private func calcParseOneOrTwoArguments(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let a = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard a.type.matchesNumber else { return nil }
+
+    if index == end {
+        guard let transformed = CalcType.makeNumber().madeConsistent(with: a.type) else { return nil }
+        return CalcParsed(node: state.operation(alternative, only: a.node, transformed), type: transformed)
+    }
+
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard b.type.matchesNumber else { return nil }
+
+    guard let merged = a.type.consistentType(with: b.type),
+        let transformed = CalcType.makeNumber().madeConsistent(with: merged)
+    else { return nil }
+    var children = state.takeBuffer(2)
+    children.append(a.node)
+    children.append(b.node)
+    return CalcParsed(node: calcParseOperation(alternative, children, transformed), type: transformed)
+}
+
+/// `consumeExactlyTwoArguments<Op>`: `mod`, `rem`, `atan2`, `pow`.
+private func calcParseTwoArguments(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let a = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    if alternative == .Pow && !a.type.matchesNumber { return nil }
+
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+    guard let b = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    if alternative == .Pow && !b.type.matchesNumber { return nil }
+
+    guard let merged = a.type.consistentType(with: b.type) else { return nil }
+    let outputType: CalcType
+    switch alternative {
+    case .Atan2:
+        guard let transformed = CalcType.makeAngle().madeConsistent(with: merged) else { return nil }
+        outputType = transformed
+    case .Mod, .Rem, .Pow:
+        outputType = merged
+    default:
+        // Unreachable through `calcParseFunctionAlternative`'s `.exactlyTwo` case.
+        return nil
+    }
+
+    var children = state.takeBuffer(2)
+    children.append(a.node)
+    children.append(b.node)
+    return CalcParsed(node: calcParseOperation(alternative, children, outputType), type: outputType)
+}
+
+/// `consumeProgress`: `progress( no-clamp? <calc-sum>, <calc-sum>, <calc-sum> )`.
+private func calcParseProgress(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    var alternative = WebCore.CSSCalc.CSSCalcSwiftAlternative.Progress
+    if index < end, calcToken(cursor, &state, index).id == UInt16(WebCore.CSSValueNoClamp.rawValue) {
+        index += 1
+        calcSkipWhitespace(cursor, &index, end, &state)
+        alternative = .ProgressNoClamp
+    }
+
+    guard let value = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard let start = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard let finish = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let firstMerge = value.type.consistentType(with: start.type),
+        let merged = firstMerge.consistentType(with: finish.type),
+        let outputType = CalcType.makeNumber().madeConsistent(with: merged)
+    else { return nil }
+
+    var children = state.takeBuffer(3)
+    children.append(value.node)
+    children.append(start.node)
+    children.append(finish.node)
+    return CalcParsed(node: calcParseOperation(alternative, children, outputType), type: outputType)
+}
+
+/// `consumeOneOrMoreArguments<Op>`: `<calc-sum>#` over the whole range it is given.
+private func calcParseArgumentList(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState,
+    _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+
+    var mergedType = CalcType()
+    // Taken after the first argument is parsed, so an argument that collapsed at construction can
+    // hand its buffer on.
+    var children = UniqueArray<CalcNode>()
+
+    while index < end {
+        calcSkipWhitespace(cursor, &index, end, &state)
+        if children.count > 0 {
+            guard calcParseComma(cursor, &index, end, &state) else { return nil }
+        }
+
+        guard let argument = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+
+        if children.count == 0 {
+            children = state.takeOperandBuffer()
+            mergedType = argument.type
+        } else {
+            guard let merged = mergedType.consistentType(with: argument.type) else { return nil }
+            mergedType = merged
+        }
+        children.append(argument.node)
+    }
+
+    // `min()` is invalid input.
+    if children.count == 0 { return nil }
+    var operation = calcParseOperation(alternative, children, mergedType)
+    calcFoldAtConstruction(&operation, &state)
+    return CalcParsed(node: operation, type: mergedType)
+}
+
+// MARK: Parsing `calc-mix()`
+
+/// One `calc-mix()` item weight: `MetaConsumer<CalcMix::Item::Weight>::consume`.
+///
+/// A `<percentage>` token is decided here; a math function is resolved by the C++ consumer into
+/// the payload table (`CalcNodeFlags.calcMixWeightIsCalc`).
+@inline(never)
+private func calcParseCalcMixWeight(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState
+) -> CalcParsedCalcMixWeight? {
+    let token = calcToken(cursor, &state, index)
+    guard token.type == WebCore.PercentageToken else {
+        // A function is the only other token `MetaConsumer` accepts as a weight. It is validated
+        // and resolved in one call, so a weight the C++ rejects fails the whole `calc-mix()`.
+        guard token.type == WebCore.FunctionToken else { return nil }
+        let parsed = cursor.consumeCalcMixWeightAt(index)
+        guard parsed.consumed else { return nil }
+        index = parsed.nextIndex
+        calcSkipWhitespace(cursor, &index, end, &state)
+        return CalcParsedCalcMixWeight(value: 0, payload: parsed.payloadIndex)
+    }
+    let value = token.numericValue
+    guard value >= 0, value <= 100 else { return nil }
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return CalcParsedCalcMixWeight(value: value, payload: calcNoPayload)
+}
+
+/// One parsed `calc-mix()` item weight: a `<percentage>`, or the payload-table index of a math
+/// function weight.
+private struct CalcParsedCalcMixWeight {
+    let value: Double
+    /// `calcNoPayload` for a `<percentage>`.
+    let payload: UInt32
+}
+
+/// `consumeCalcMix`: `calc-mix( [ <calc-sum> <percentage [0,100]>? ]# )`.
+private func calcParseCalcMix(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    if !state.options.calcMixEnabled { return nil }
+
+    var mergedType = CalcType()
+    var itemCount: UInt32 = 0
+    // Interleaved: value, weight carrier, value, weight carrier, ...
+    var children = UniqueArray<CalcNode>()
+
+    while index < end {
+        calcSkipWhitespace(cursor, &index, end, &state)
+        if itemCount > 0 {
+            guard calcParseComma(cursor, &index, end, &state) else { return nil }
+        }
+
+        guard let value = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+        if itemCount == 0 {
+            mergedType = value.type
+        } else {
+            guard let merged = mergedType.consistentType(with: value.type) else { return nil }
+            mergedType = merged
+        }
+        children.append(value.node)
+
+        var weightValue = 0.0
+        var weightFlags: UInt16 = 0
+        var weightPayload = calcNoPayload
+        if index < end, calcToken(cursor, &state, index).type != WebCore.CommaToken {
+            guard let weight = calcParseCalcMixWeight(cursor, &index, end, &state) else { return nil }
+            weightValue = weight.value
+            weightFlags = CalcNodeFlags.calcMixWeightPresent
+            if weight.payload != calcNoPayload {
+                weightFlags |= CalcNodeFlags.calcMixWeightIsCalc
+                weightPayload = weight.payload
+            }
+        }
+        guard
+            let weightNode = calcParseLeaf(
+                .Percentage,
+                weightValue,
+                UInt16(WebCore.CSSUnitType.Percentage.rawValue),
+                0,
+                weightFlags,
+                weightPayload
+            )
+        else { return nil }
+        children.append(weightNode)
+        // `&+=`: bounded by the token count, since each item consumes at least one token.
+        itemCount &+= 1
+    }
+
+    // `calc-mix()` is invalid input.
+    if itemCount == 0 { return nil }
+    return CalcParsed(node: calcParseOperation(.CalcMix, children, mergedType), type: mergedType)
+}
+
+// MARK: Parsing `anchor()` and `anchor-size()`
+
+/// `consumeUnresolvedDashedIdent`, resolved into the payload table and answered as its index.
+///
+/// Only C++ can see a token's text, so the `CSS::CustomIdent` is resolved here.
+@inline(always)
+private func calcParseDashedIdent(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState
+) -> UInt32? {
+    guard index < end else { return nil }
+    guard calcToken(cursor, &state, index).type == WebCore.IdentToken else { return nil }
+    // The resolver checks the `--` prefix and returns `calcNoPayload` for an ident without it,
+    // which is invalid input.
+    let payload = cursor.resolveDashedIdentAt(index)
+    guard payload != calcNoPayload else { return nil }
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return payload
+}
+
+/// `consumeIdentRaw` over a keyword test: the id of the accepted `IdentToken`, consumed, or
+/// `CSSValueInvalid` with the index unchanged.
+@inline(always)
+private func calcParseAnchorKeyword(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ state: inout CalcParseState,
+    _ accepts: (UInt16) -> Bool
+) -> UInt16 {
+    guard index < end else { return 0 }
+    let token = calcToken(cursor, &state, index)
+    guard token.type == WebCore.IdentToken, token.id != 0, accepts(token.id) else { return 0 }
+    index += 1
+    calcSkipWhitespace(cursor, &index, end, &state)
+    return token.id
+}
+
+/// Whether `id` is one of the keywords of `<anchor-side>`.
+@inline(always)
+private func calcIsAnchorSideKeyword(_ id: UInt16) -> Bool {
+    switch id {
+    case WebCore.CSSValueInside.rawValue, WebCore.CSSValueOutside.rawValue,
+        WebCore.CSSValueTop.rawValue, WebCore.CSSValueLeft.rawValue,
+        WebCore.CSSValueRight.rawValue, WebCore.CSSValueBottom.rawValue,
+        WebCore.CSSValueStart.rawValue, WebCore.CSSValueEnd.rawValue,
+        WebCore.CSSValueSelfStart.rawValue, WebCore.CSSValueSelfEnd.rawValue,
+        WebCore.CSSValueCenter.rawValue:
+        return true
+    default:
+        return false
+    }
+}
+
+/// `<anchor-size> = width | height | block | inline | self-block | self-inline`.
+@inline(always)
+private func calcIsAnchorSizeKeyword(_ id: UInt16) -> Bool {
+    switch id {
+    case WebCore.CSSValueWidth.rawValue, WebCore.CSSValueHeight.rawValue,
+        WebCore.CSSValueBlock.rawValue, WebCore.CSSValueInline.rawValue,
+        WebCore.CSSValueSelfBlock.rawValue, WebCore.CSSValueSelfInline.rawValue:
+        return true
+    default:
+        return false
+    }
+}
+
+/// One parsed anchor slot: the subtree's root, and whether the author wrote a math function there.
+private struct CalcParsedAnchorSlot: ~Copyable {
+    var node: CalcNode
+    var type: CalcType
+    let wasFunction: Bool
+}
+
+/// `consumeValueWithoutSimplifyingRootCalc`.
+@inline(always)
+private func calcParseAnchorSlotValue(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsedAnchorSlot? {
+    guard index < end else { return nil }
+    let token = calcToken(cursor, &state, index)
+    // A bare parenthesised group is not a legal anchor slot.
+    if token.type == WebCore.LeftParenthesisToken { return nil }
+    let wasFunction = token.functionId != 0
+    guard let value = calcParseValue(cursor, &index, end, depth, &state) else { return nil }
+    let type = value.type
+    return CalcParsedAnchorSlot(node: value.node, type: type, wasFunction: wasFunction)
+}
+
+/// `consumeAnchorFallback`: the `<length-percentage>` an `anchor()` or `anchor-size()` falls back
+/// to, plus the unitless-zero case.
+///
+/// It consumes the token before it can fail, as `parseCalcValue` does; `calcParseAnchorSize`
+/// depends on that.
+///
+/// A unitless zero becomes a canonical `0px` length, in place. The test is on the `Number`
+/// alternative (`std::get_if<Number>`), not the type: `calc(0)` has number type but is rejected.
+@inline(always)
+private func calcParseAnchorFallback(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsedAnchorSlot? {
+    guard var slot = calcParseAnchorSlotValue(cursor, &index, end, depth, &state) else {
+        return nil
+    }
+    switch slot.type.anchorSlotCategory {
+    case .length, .lengthPercentage:
+        return slot
+
+    case .number:
+        guard state.options.unitlessZeroLengthAllowed else { return nil }
+        guard !slot.wasFunction, slot.node.alternative == .Number, slot.node.value == 0 else {
+            return nil
+        }
+        slot.node.value = 0
+        slot.node.unitType = UInt8(WebCore.CSSUnitType.Px.rawValue)
+        slot.node.alternative = .CanonicalDimension
+        slot.node.percentHint = 0
+        slot.type = CalcType.makeLength()
+        return slot
+
+    case .percentage, .other:
+        return nil
+    }
+}
+
+/// `consumeAnchor`: `anchor( <anchor-element>? && <anchor-side>, <length-percentage>? )`.
+private func calcParseAnchor(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    if !state.options.anchorAllowed { return nil }
+    // Refused rather than invalid: with conversion data the C++ evaluates the anchor, which needs
+    // the original `CSSCalc::Child`.
+    if state.conversionDataFoldsRun {
+        state.declined = true
+        state.declineReason = .AnchorEvaluation
+        return nil
+    }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+    var elementName = calcParseDashedIdent(cursor, &index, end, &state)
+
+    let sideKeyword = calcParseAnchorKeyword(cursor, &index, end, &state, calcIsAnchorSideKeyword)
+    var side: CalcParsedAnchorSlot? = nil
+    if sideKeyword == 0 {
+        guard let parsed = calcParseAnchorSide(cursor, &index, end, depth, &state) else {
+            return nil
+        }
+        side = consume parsed
+    }
+
+    if elementName == nil {
+        elementName = calcParseDashedIdent(cursor, &index, end, &state)
+    }
+
+    var type = CalcType.makeLength()
+    var flags: UInt16 = 0
+    // The side subtree first, when there is one, then the fallback.
+    var children = UniqueArray<CalcNode>(capacity: 2)
+    if let parsedSide = side.take() {
+        flags |= CalcNodeFlags.anchorSideIsSubtree
+        if parsedSide.wasFunction {
+            flags |= CalcNodeFlags.anchorSideWasFunction
+        }
+        children.append(parsedSide.node)
+    }
+
+    if calcParseComma(cursor, &index, end, &state) {
+        guard let fallback = calcParseAnchorFallback(cursor, &index, end, depth, &state) else {
+            return nil
+        }
+        if fallback.wasFunction {
+            flags |= CalcNodeFlags.anchorFallbackWasFunction
+        }
+        if fallback.type.anchorSlotCategory == .lengthPercentage {
+            type.percentHint = CalcType.PercentHintValue(.Length)
+        }
+        children.append(fallback.node)
+    }
+
+    state.requiresConversionData = true
+    return CalcParsed(
+        node: calcParseOperation(
+            .Anchor,
+            children,
+            type,
+            flags,
+            sideKeyword,
+            elementName ?? calcNoPayload
+        ),
+        type: type
+    )
+}
+
+/// An `<anchor-side>` subtree, parsed with the options `consumeAnchor` gives it.
+///
+///   * `category` is `CSS::Category::Percentage`, so a `<percentage>` leaf takes no percent hint.
+///   * `propertyOptions` is `{ }`, which forbids `anchor()` and `anchor-size()`, so
+///     `anchor(--a anchor(top))` is invalid.
+///   * `allowedSymbols` is `{ }`, so no ident resolves as a symbol.
+@inline(never)
+private func calcParseAnchorSide(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsedAnchorSlot? {
+    let saved = state.options
+    let savedFold = state.foldAtConstruction
+    state.options.percentageLeafHint = 0
+    state.options.anchorAllowed = false
+    state.options.anchorSizeAllowed = false
+    state.options.hasAllowedSymbols = false
+    state.foldAtConstruction = false
+    let parsed = calcParseAnchorSlotValue(cursor, &index, end, depth, &state)
+    state.options = saved
+    state.foldAtConstruction = savedFold
+
+    guard var slot = consume parsed, slot.type.anchorSlotCategory == .percentage else { return nil }
+
+    state.hasAnchorSide = true
+    calcMarkInsideAnchorSide(&slot.node)
+    return slot
+}
+
+/// `consumeAnchorSize`: `anchor-size( [ <anchor-element> || <anchor-size> ]? , <length-percentage>?
+/// )`.
+///
+/// With neither an element nor a size, the C++ calls `consumeAnchorFallback` and does not check the
+/// result. The fallback consumes the token before it fails, so `anchor-size(bogus)` parses as
+/// `anchor-size()` and `anchor-size(bogus bogus)` does not. This matches the C++ rather than the
+/// spec, so that validity does not depend on `WK_USE_SWIFT_CSS`.
+///
+/// FIXME: the C++ should reject a junk token here. Fixing it means dropping the unchecked call
+/// below and rejecting a failed fallback when neither an element nor a size was present.
+private func calcParseAnchorSize(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    if !state.options.anchorSizeAllowed { return nil }
+    if state.conversionDataFoldsRun {
+        state.declined = true
+        state.declineReason = .AnchorEvaluation
+        return nil
+    }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+    var elementName = calcParseDashedIdent(cursor, &index, end, &state)
+    let sizeKeyword = calcParseAnchorKeyword(cursor, &index, end, &state, calcIsAnchorSizeKeyword)
+    if sizeKeyword != 0, elementName == nil {
+        elementName = calcParseDashedIdent(cursor, &index, end, &state)
+    }
+
+    var children = UniqueArray<CalcNode>(capacity: 1)
+    var flags: UInt16 = 0
+    var type = CalcType.makeLength()
+    var fallback: CalcParsedAnchorSlot? = nil
+    if sizeKeyword != 0 || elementName != nil {
+        if calcParseComma(cursor, &index, end, &state) {
+            guard let parsed = calcParseAnchorFallback(cursor, &index, end, depth, &state) else {
+                return nil
+            }
+            fallback = consume parsed
+        }
+    } else {
+        fallback = calcParseAnchorFallback(cursor, &index, end, depth, &state)
+    }
+
+    if let parsed = fallback.take() {
+        if parsed.wasFunction {
+            flags |= CalcNodeFlags.anchorFallbackWasFunction
+        }
+        if parsed.type.anchorSlotCategory == .lengthPercentage {
+            type.percentHint = CalcType.PercentHintValue(.Length)
+        }
+        children.append(parsed.node)
+    }
+
+    state.requiresConversionData = true
+    return CalcParsed(
+        node: calcParseOperation(
+            .AnchorSize,
+            children,
+            type,
+            flags,
+            sizeKeyword,
+            elementName ?? calcNoPayload
+        ),
+        type: type
+    )
+}
+
+// MARK: Parsing `random()`
+
+/// `consumeRandom`: `random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )`.
+///
+/// `Random::Sharing` holds text a `CSSCalcSwiftToken` does not carry, so `cursor.consumeRandomKey`
+/// resolves the `<random-key>` in C++ into the payload table and `origin` holds the index.
+///
+/// `cssRandomFunctionCount` must be read and incremented in source order, before the arguments, so
+/// a nested `random()` sees the incremented value. `consumeRandomKey` does both at that point in
+/// the descent; nothing about the count is stored on the node. `cssCalcParseSwift` restores the
+/// count across a retried descent and across every refusal.
+///
+/// `randomAllowed` clear is invalid input, as for every other context condition here.
+private func calcParseRandom(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+    if !state.options.randomAllowed { return nil }
+    // Refused rather than invalid, as in `calcParseAnchor`: with conversion data
+    // `simplify(Random&)` evaluates the node through the original `CSSCalc::Child`.
+    if state.conversionDataFoldsRun {
+        state.declined = true
+        state.declineReason = .RandomEvaluation
+        return nil
+    }
+
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    // The `<random-key>` and its comma. An omitted key means `auto`.
+    let key = cursor.consumeRandomKey(index)
+    guard key.consumed else { return nil }
+    index = key.nextIndex
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    guard let minimum = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+    guard calcParseComma(cursor, &index, end, &state) else { return nil }
+
+    guard let maximum = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+    calcSkipWhitespace(cursor, &index, end, &state)
+
+    // `Op::input` is `AllowedTypes::Any` and `Op::output` is `OutputTransform::None`. `Op::merge`
+    // is `MergePolicy::Same`, not `Consistent`.
+    var stepNode: CalcNode? = nil
+    var mergedType: CalcType
+    if index >= end {
+        guard let merged = minimum.type.sameType(as: maximum.type) else { return nil }
+        mergedType = merged
+    } else {
+        guard calcParseComma(cursor, &index, end, &state) else { return nil }
+        guard let step = calcParseSum(cursor, &index, end, depth, &state) else { return nil }
+        calcSkipWhitespace(cursor, &index, end, &state)
+        // Checked here as well as in `calcParseFunctionBlock`, because this condition selects the
+        // form: `random(1px, 2px, 3px, 4px)` is invalid.
+        if index != end { return nil }
+        // In the C++'s order: min with max, then that with step.
+        guard let first = minimum.type.sameType(as: maximum.type),
+            let merged = first.sameType(as: step.type)
+        else { return nil }
+        mergedType = merged
+        let stepParsed = consume step
+        stepNode = .some(stepParsed.node)
+    }
+
+    var children = UniqueArray<CalcNode>(capacity: 3)
+    children.append(minimum.node)
+    children.append(maximum.node)
+    if let step = stepNode.take() {
+        children.append(step)
+    }
+    state.requiresConversionData = true
+
+    return CalcParsed(
+        node: calcParseOperation(
+            .Random,
+            children,
+            mergedType,
+            0,
+            0,
+            key.payloadIndex
+        ),
+        type: mergedType
+    )
+}
+
+/// Parses a `<calc-product>`.
+///
+/// `<calc-product> = <calc-value> [ [ '*' | '/' ] <calc-value> ]*`
+private func calcParseProduct(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+
+    guard let parsedFirst = calcParseValue(cursor, &index, end, depth, &state) else { return nil }
+    var productType = parsedFirst.type
+
+    // A product of one operand is not a node, so the first operand is held until a second arrives.
+    var first: CalcParsed? = parsedFirst
+    var second: CalcNode? = nil
+    var holdingSecond = false
+    var children = UniqueArray<CalcNode>()
+
+    while index < end {
+        let token = calcToken(cursor, &state, index)
+        let op = token.type == WebCore.DelimiterToken ? token.delimiter : 0
+        if op != 0x2A && op != 0x2F { break } // '*' and '/'
+        index += 1
+        calcSkipWhitespace(cursor, &index, end, &state)
+
+        guard let next = calcParseValue(cursor, &index, end, depth, &state) else { return nil }
+
+        let nextType = next.type
+        var operandType = nextType
+        var operand = next.node
+        if op == 0x2F {
+            operandType = nextType.inverted()
+            operand = calcParseInvert(operand, operandType, state)
+        }
+
+        guard let merged = productType.multiplied(by: operandType) else { return nil }
+        productType = merged
+
+        // The second operand is held too, so a product of two leaves can fold without a buffer
+        // (`calcFoldLeafProduct`).
+        if first != nil && !holdingSecond {
+            second = .some(consume operand)
+            holdingSecond = true
+            continue
+        }
+        if let head = first.take() {
+            children = state.takeOperandBuffer()
+            children.append(head.node)
+            if let pending = second.take() {
+                children.append(pending)
+            }
+        }
+        children.append(operand)
+    }
+
+    if let single = first.take() {
+        guard var pending = second.take() else { return single }
+        var head = single.node
+        if state.foldAtConstruction, calcFoldLeafProduct(&head, &pending) {
+            return CalcParsed(node: head, type: productType)
+        }
+        children = state.takeOperandBuffer()
+        children.append(head)
+        children.append(pending)
+    }
+    var product = calcParseOperation(.Product, children, productType)
+    calcFoldAtConstruction(&product, &state)
+    return CalcParsed(node: product, type: productType)
+}
+
+/// `foldProduct` over `Product { a, b }` of two `Number`, `Percentage` or `CanonicalDimension`
+/// leaves, in place on `a`.
+///
+/// The two shapes the spec's step 9.2 finishes:
+///
+/// - two numbers: `b * a`, as a number leaf;
+/// - a number and a percentage or dimension: the other leaf, its value `other * number`.
+///
+/// Anything else answers false with both untouched.
+@inline(always)
+private func calcFoldLeafProduct(_ a: inout CalcNode, _ b: inout CalcNode) -> Bool {
+    switch (a.alternative, b.alternative) {
+    case (.Number, .Number):
+        a.setLeaf(NumericLeaf.number(b.value * a.value))
+        return true
+    case (.Number, .Percentage), (.Number, .CanonicalDimension):
+        let scaled = b.value * a.value
+        swap(&a, &b)
+        a.value = scaled
+        return true
+    case (.Percentage, .Number), (.CanonicalDimension, .Number):
+        a.value = a.value * b.value
+        return true
+    default:
+        return false
+    }
+}
+
+/// Parses a `<calc-sum>`.
+///
+/// `<calc-sum> = <calc-product> [ [ '+' | '-' ] <calc-product> ]*`
+private func calcParseSum(
+    _ cursor: borrowing CalcTokens,
+    _ index: inout UInt32,
+    _ end: UInt32,
+    _ depth: Int32,
+    _ state: inout CalcParseState
+) -> CalcParsed? {
+    if depth > calcMaxExpressionDepth { return nil }
+
+    guard let parsedFirst = calcParseProduct(cursor, &index, end, depth, &state) else { return nil }
+    var sumType = parsedFirst.type
+
+    var first: CalcParsed? = parsedFirst
+    var children = UniqueArray<CalcNode>()
+
+    while index < end {
+        let token = calcToken(cursor, &state, index)
+        let op = token.type == WebCore.DelimiterToken ? token.delimiter : 0
+        if op != 0x2B && op != 0x2D { break } // '+' and '-'
+
+        // `calc(1px+ 2px)` is invalid: the operator must be preceded by whitespace, which is why
+        // whitespace tokens stay in the cursor.
+        if index == 0 { return nil }
+        if !calcTokenIsWhitespace(calcToken(cursor, &state, index - 1).type) { return nil }
+
+        index += 1
+        // `calc(1px +2px)` is invalid: the operator must be followed by whitespace.
+        if index >= end || !calcTokenIsWhitespace(calcToken(cursor, &state, index).type) { return nil }
+        calcSkipWhitespace(cursor, &index, end, &state)
+
+        guard let next = calcParseProduct(cursor, &index, end, depth, &state) else { return nil }
+
+        let nextType = next.type
+        var operand = next.node
+        if op == 0x2D {
+            operand = calcParseNegate(operand, nextType, state)
+        }
+
+        guard let merged = sumType.added(to: nextType) else { return nil }
+        sumType = merged
+
+        // Step 8.2's merge into the first instance, made before a buffer exists. See
+        // `calcSumMergesIntoHead`.
+        if state.foldAtConstruction, first != nil, calcSumMergesIntoHead(first!.node, operand) {
+            first!.node.value = CalcExecutor.sum(first!.node.value, operand.value)
+            continue
+        }
+
+        if let head = first.take() {
+            children = state.takeOperandBuffer()
+            children.append(head.node)
+        }
+        children.append(operand)
+    }
+
+    if let single = first.take() { return CalcParsed(node: single.node, type: sumType) }
+    var sum = calcParseOperation(.Sum, children, sumType)
+    calcFoldAtConstruction(&sum, &state)
+    return CalcParsed(node: sum, type: sumType)
+}
+
+/// Whether `foldSum` would merge `operand` into `head` if they were children 0 and 1 of a `Sum`:
+/// both are `Number`, `Percentage` or `CanonicalDimension` leaves with the same `mergeKey`.
+///
+/// Merging before the `Sum` exists gives the node `simplifyParsed` would give, whatever follows:
+/// `foldSum` accumulates the head's bucket into the head left to right, and `size` and `merges`
+/// both drop by one, so neither `size - merges` nor `size - (merges + removableBuckets)` moves. A
+/// `NonCanonicalDimension` is not merged, because the pass may canonicalize it first.
+@inline(always)
+private func calcSumMergesIntoHead(_ head: borrowing CalcNode, _ operand: borrowing CalcNode) -> Bool {
+    switch head.alternative {
+    case .Number, .Percentage, .CanonicalDimension: break
+    default: return false
+    }
+    switch operand.alternative {
+    case .Number, .Percentage, .CanonicalDimension: break
+    default: return false
+    }
+    guard let headLeaf = head.numericLeaf, let operandLeaf = operand.numericLeaf else {
+        return false
+    }
+    return mergeKey(headLeaf) == mergeKey(operandLeaf)
+}
+
+/// What one attempt at the whole parse produced.
+private struct CalcParseAttempt {
+    /// Nil when the descent failed or refused; the flags say which.
+    var type: CalcType?
+    /// A fold refused the tree (`CalcFold.declined`), as `simplifyParsedCalcMix` and
+    /// `calcMixFoldToZero` can.
+    var foldRefused = false
+    /// `calcEmitParsed` refused, a boundary contract violation reported as `ContractViolation`.
+    var emitRefused = false
+    /// How many tokens the descent consumed, for `CalcParseOptions.bareCalcSum`, whose C++ caller
+    /// advances its range by exactly this.
+    ///
+    /// Meaningless unless `type` is non-nil.
+    var consumedTokens: UInt32 = 0
+}
+
+/// Parse the token range inside a `calc()`, simplify it, and materialise the result once.
+@_expose(Cxx)
+public func cssCalcParseSwift(
+    _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
+    _ simplificationOptions: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
+    _ simplify: Bool
+) -> WebCore.CSSCalc.CSSCalcSwiftParseResult {
+    var result = WebCore.CSSCalc.CSSCalcSwiftParseResult()
+    let parseOptions = CalcParseOptions(options)
+    var state = CalcParseState(parseOptions)
+
+    // `consumeRandomKey` advances `PropertyParserState::cssRandomFunctionCount`, which keys each
+    // `random()` draw, so a descent that produces no tree puts the count back.
+    let savedRandomCount = cursor.randomFunctionCount()
+
+    let attempt = withCalcTokens(cursor) { tokens in
+        calcParseAttempt(tokens, &builder, simplificationOptions, simplify, &state)
+    }
+
+    guard let type = attempt.type else {
+        cursor.setRandomFunctionCount(savedRandomCount)
+
+        if attempt.foldRefused {
+            result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
+            result.declineReason = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None.rawValue)
+            return result
+        }
+        if attempt.emitRefused {
+            result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
+            result.declineReason = UInt8(
+                WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.ContractViolation.rawValue
+            )
+            return result
+        }
+        result.outcome = UInt8(
+            state.declined
+                ? WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue
+                : WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Failed.rawValue
+        )
+        result.declineReason = UInt8(state.declineReason.rawValue)
+        return result
+    }
+
+    result.type = type
+    result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Parsed.rawValue)
+    result.requiresConversionData = state.requiresConversionData
+    result.consumedTokens = attempt.consumedTokens
+    return result
+}
+
+/// One attempt at parse, simplify and emit.
+@inline(never)
+private func calcParseAttempt(
+    _ cursor: borrowing CalcTokens,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ simplificationOptions: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
+    _ simplify: Bool,
+    _ state: inout CalcParseState
+) -> CalcParseAttempt {
+    let end = cursor.tokenCount()
+    // An unsimplified parse makes no fold at all.
+    state.conversionDataFoldsRun = simplify && simplificationOptions.hasConversionData
+    state.foldAtConstruction = simplify
+    state.simplification = CalcSimplification(
+        percentageResolveToDimension: simplificationOptions.percentageResolveToDimension,
+        allowZeroValueLengthRemovalFromSum: simplificationOptions.allowZeroValueLengthRemovalFromSum,
+        category: simplificationOptions.category,
+        hasConversionData: simplificationOptions.hasConversionData
+    )
+    var attempt = CalcParseAttempt()
+    var index: UInt32 = 0
+    // Not for the bare `<calc-sum>` entry: `parseCalcSum` skips no leading whitespace. For
+    // `parseAndSimplify`, `consumeFunction` already has, so this is a no-op.
+    if !state.options.bareCalcSum {
+        calcSkipWhitespace(cursor, &index, end, &state)
+    }
+
+    // The top-level function, at depth 0 as in `parseCalcFunction(tokens, function, 0, state)`.
+    let descent: CalcParsed?
+    if state.options.bareCalcSum {
+        // `parseAndSimplifyCalcSum`: `parseCalcSum(tokens, 0, state)`. `rootFunctionId` is
+        // `CSSValueInvalid`.
+        descent = calcParseSum(cursor, &index, end, 0, &state)
+    } else if let rootFunction = calcParseFunctionAlternative(state.options.rootFunctionId) {
+        switch rootFunction.arguments {
+        case .oneOrMore:
+            descent = calcParseArgumentList(cursor, &index, end, 0, &state, rootFunction.alternative)
+        case .exactlyOne:
+            descent = calcParseUnaryFunction(cursor, &index, end, 0, &state, rootFunction.alternative)
+        case .clamp:
+            descent = calcParseClamp(cursor, &index, end, 0, &state)
+        case .oneOrTwo:
+            descent = calcParseOneOrTwoArguments(cursor, &index, end, 0, &state, rootFunction.alternative)
+        case .round:
+            descent = calcParseRound(cursor, &index, end, 0, &state)
+        case .exactlyTwo:
+            descent = calcParseTwoArguments(cursor, &index, end, 0, &state, rootFunction.alternative)
+        case .progress:
+            descent = calcParseProgress(cursor, &index, end, 0, &state)
+        case .zeroArguments:
+            descent = calcParseZeroArguments(cursor, &index, end, &state, rootFunction.alternative)
+        case .calcMix:
+            descent = calcParseCalcMix(cursor, &index, end, 0, &state)
+        case .anchor:
+            descent = calcParseAnchor(cursor, &index, end, 0, &state)
+        case .anchorSize:
+            descent = calcParseAnchorSize(cursor, &index, end, 0, &state)
+        case .random:
+            descent = calcParseRandom(cursor, &index, end, 0, &state)
+        }
+    } else if state.options.rootFunctionId == UInt16(WebCore.CSSValueCalc.rawValue)
+        || state.options.rootFunctionId == UInt16(WebCore.CSSValueWebkitCalc.rawValue)
+    {
+        descent = calcParseSum(cursor, &index, end, 0, &state)
+    } else {
+        // A top-level math function this grammar does not handle. The range is the function's
+        // arguments, so parsing it as a `<calc-sum>` would be wrong.
+        state.declined = true
+        state.declineReason = calcParseDeclineReasonForFunction(state.options.rootFunctionId)
+        descent = nil
+    }
+
+    guard var parsed = consume descent else {
+        return attempt
+    }
+
+    // `parseCalcFunction` requires the inner range to be exhausted.
+    //
+    // The bare `<calc-sum>` entry does not: `<calc-sum>` stops at `calc-size()`'s top-level comma,
+    // which its caller consumes. It reports how many tokens were consumed, and skips no trailing
+    // whitespace, because `parseCalcSum` leaves its range at the same place.
+    if state.options.bareCalcSum {
+        attempt.consumedTokens = index
+    } else {
+        calcSkipWhitespace(cursor, &index, end, &state)
+        if index != end {
+            return attempt
+        }
+        attempt.consumedTokens = end
+    }
+
+    if simplify {
+        let simplification = CalcSimplification(
+            percentageResolveToDimension: simplificationOptions.percentageResolveToDimension,
+            allowZeroValueLengthRemovalFromSum: simplificationOptions.allowZeroValueLengthRemovalFromSum,
+            category: simplificationOptions.category,
+            hasConversionData: simplificationOptions.hasConversionData
+        )
+        // A fold that refuses outright and one that sets `declined` mid-pass are both
+        // `foldRefused`.
+        var fold = CalcFold(options: simplification, builder: builder)
+        guard fold.simplifyParsed(&parsed.node, state.hasAnchorSide), !fold.declined else {
+            attempt.foldRefused = true
+            return attempt
+        }
+    }
+
+    guard calcEmitParsed(parsed.node, true, &builder) else {
+        attempt.emitRefused = true
+        return attempt
+    }
+
+    attempt.type = parsed.type
+    return attempt
 }

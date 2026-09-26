@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include "CSSCalcSwiftTypes.h"
 #include "CSSCalcSymbolsAllowed.h"
 #include "CSSPrimitiveNumericRange.h"
 #include "CSSPropertyParserOptions.h"
@@ -63,10 +64,23 @@ struct ParserOptions {
     CSSPropertyParserOptions propertyOptions;
 };
 
+// Whether the C++ recursive-descent parser is compiled in: exactly when the Swift CSS
+// implementation is not (WK_USE_SWIFT_CSS). There is one parser in any build.
+#if USE(SWIFT_CSS)
+#define CSS_CALC_CPP_PARSER_COMPILED_IN 0
+#else
+#define CSS_CALC_CPP_PARSER_COMPILED_IN 1
+#endif
+
 // Parses and simplifies the provided `CSSParserTokenRange` into a CSSCalc::Tree. Returns `std::nullopt` on failure.
 std::optional<Tree> parseAndSimplify(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&);
 
 // Parses and simplifies a bare `<calc-sum>`, one that is not wrapped in a math function.
+//
+// Used by `calc-size()`.
+//
+// Unlike `parseAndSimplify`, this consumes part of the range: `<calc-sum>` stops at the top-level
+// comma in `calc-size(<calc-size-basis>, <calc-sum>)`, which the caller consumes next.
 std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange&, CSS::PropertyParserState&, const ParserOptions&, const SimplificationOptions&);
 
 // Returns whether the provided `CSSValueID` is one of the functions that should be parsed as a `calc()`.
