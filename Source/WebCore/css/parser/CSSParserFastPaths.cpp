@@ -50,6 +50,10 @@
 #include "FloatConversion.h"
 #include "HashTools.h"
 #include "StylePropertyShorthand.h"
+#if USE(SWIFT_CSS)
+#include "CSSTokenizerSwiftTypes.h"
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringParsingBuffer.h>
 
@@ -214,6 +218,12 @@ static RefPtr<CSSValue> parseSimpleLengthValue(StringView string, CSSParserMode 
 
     return CSSPrimitiveValue::create(number, unit);
 }
+
+#if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
+
+// MARK: - C++ color fast paths
+//
+// With USE(SWIFT_CSS) these are implemented in CSSParserFastPathsSwift.swift instead.
 
 // Returns the number of characters which form a valid double
 // and are terminated by the given terminator character
@@ -459,6 +469,68 @@ static inline bool NODELETE mightBeHSL(std::span<const CharacterType> characters
         && isASCIIAlphaCaselessEqual(characters[2], 'l');
 }
 
+#endif // CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
+
+// MARK: - Swift color fast paths (CSSParserFastPathsSwift.swift)
+//
+// Swift reads the candidate in place and answers a packed `PackedColor::ARGB`.
+#if USE(SWIFT_CSS)
+
+// The outcome numbering is declared in Swift. Pin it, so that reordering the Swift enum fails the
+// build rather than reinterpreting every scan.
+static_assert(!static_cast<uint8_t>(CSSSwiftColorOutcomeNotAColor));
+static_assert(static_cast<uint8_t>(CSSSwiftColorOutcomeParsed) == 1);
+static_assert(static_cast<uint8_t>(CSSSwiftColorOutcomeDeclined) == 2);
+
+
+// `parseCSSNumber` for the Swift scans, for numbers outside Clinger's fast path, so that both
+// implementations use one decimal-to-double conversion.
+template<typename CharacterType>
+static CSSSwiftDoubleScan swiftColorParseCSSNumber(std::span<const CharacterType> characters)
+{
+    auto number = parseCSSNumber(characters);
+    if (!number)
+        return CSSSwiftDoubleScan { 0, 0 };
+    return CSSSwiftDoubleScan { *number, 1 };
+}
+
+// Both annotations are repeated on each definition because `__counted_by` is part of the
+// function's type: a plain pointer parameter is a "conflicting types" error.
+//
+// unsafeMakeSpan rather than std::span's two-argument constructor, which
+// -Wunsafe-buffer-usage-in-container rejects without consulting `__counted_by`.
+CSSSwiftDoubleScan cssSwiftParseCSSNumber8(const Latin1Character *__counted_by(length) characters __attribute__((noescape)), size_t length)
+{
+    return swiftColorParseCSSNumber(unsafeMakeSpan(characters, length));
+}
+
+CSSSwiftDoubleScan cssSwiftParseCSSNumber16(const char16_t *__counted_by(length) characters __attribute__((noescape)), size_t length)
+{
+    return swiftColorParseCSSNumber(unsafeMakeSpan(characters, length));
+}
+
+#if !CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
+static CSSSwiftColor scanColorSwift(CSSSwiftColorSpan8 characters, CSSSwiftFastPathKind kind)
+{
+    return cssParseFastPathSwift8(characters, kind);
+}
+static CSSSwiftColor scanColorSwift(CSSSwiftColorSpan16 characters, CSSSwiftFastPathKind kind)
+{
+    return cssParseFastPathSwift16(characters, kind);
+}
+
+// The Swift scan never answers `Declined`, and there is no other scanner to hand the input to.
+static std::optional<SRGBA<uint8_t>> resolveSwiftColorScan(CSSSwiftColor result)
+{
+    RELEASE_ASSERT(result.outcome != CSSSwiftColorOutcomeDeclined);
+    if (result.outcome == CSSSwiftColorOutcomeParsed)
+        return asSRGBA(PackedColor::ARGB { result.argb });
+    return std::nullopt;
+}
+#endif // !CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
+#endif // USE(SWIFT_CSS)
+
+#if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 static std::optional<SRGBA<uint8_t>> NODELETE finishParsingHexColor(uint32_t value, unsigned length)
 {
     switch (length) {
@@ -484,10 +556,12 @@ static std::optional<SRGBA<uint8_t>> NODELETE finishParsingHexColor(uint32_t val
     }
     return std::nullopt;
 }
+#endif // CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 
 template<typename CharacterType>
 static std::optional<SRGBA<uint8_t>> NODELETE parseHexColorInternal(std::span<const CharacterType> characters)
 {
+#if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
     if (characters.size() != 3 && characters.size() != 4 && characters.size() != 6 && characters.size() != 8)
         return std::nullopt;
 
@@ -499,8 +573,12 @@ static std::optional<SRGBA<uint8_t>> NODELETE parseHexColorInternal(std::span<co
         value |= toASCIIHexValue(digit);
     }
     return finishParsingHexColor(value, characters.size());
+#else
+    return resolveSwiftColorScan(scanColorSwift(characters, CSSSwiftFastPathKindHexColor));
+#endif
 }
 
+#if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseHSL(std::span<const CharacterType> characters)
 {
     auto skipWhitespace = [](std::span<const CharacterType>& characters) ALWAYS_INLINE_LAMBDA {
@@ -595,6 +673,7 @@ template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseHSL(s
     auto typedColor = convertToTypedColor<HSLFunctionModern>(parsedColor, 1.0);
     return convertToColor<HSLFunctionModern, CSSColorFunctionForm::Absolute>(typedColor, 0).tryGetAsSRGBABytes();
 }
+#endif // CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 
 template<typename CharacterType>
 static std::optional<SRGBA<uint8_t>> parseNumericColor(std::span<const CharacterType> characters, const CSSParserContext& context)
@@ -609,6 +688,7 @@ static std::optional<SRGBA<uint8_t>> parseNumericColor(std::span<const Character
             return *hexColor;
     }
 
+#if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
     if (mightBeRGB(characters) || mightBeRGBA(characters)) {
         auto expectedUnitType = CSSUnitType::Unknown;
         auto current = mightBeRGBA(characters) ? characters.subspan(5) : characters.subspan(4);
@@ -658,6 +738,9 @@ static std::optional<SRGBA<uint8_t>> parseNumericColor(std::span<const Character
         return parseHSL(characters.subspan(4));
 
     return std::nullopt;
+#else
+    return resolveSwiftColorScan(scanColorSwift(characters, CSSSwiftFastPathKindNumericColor));
+#endif // CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 }
 
 static std::optional<SRGBA<uint8_t>> parseNumericColor(StringView string, const CSSParserContext& context)
@@ -681,6 +764,19 @@ static RefPtr<CSSValue> parseColor(StringView string, const CSSParserContext& co
     return nullptr;
 }
 
+// The named-color lookup for the Swift scan. The `__counted_by` plus `noescape` parameter is what
+// the importer turns into a `Span`; see `cssSwiftParseCSSNumber8` for why both are repeated here.
+#if USE(SWIFT_CSS)
+CSSSwiftColor cssSwiftFindNamedColor(const Latin1Character *__counted_by(length) name __attribute__((noescape)), size_t length)
+{
+    auto* namedColor = findColor(byteCast<char>(name), static_cast<unsigned>(length));
+    if (!namedColor)
+        return CSSSwiftColor { 0, static_cast<uint8_t>(CSSSwiftColorOutcomeNotAColor) };
+    return CSSSwiftColor { namedColor->ARGBValue, static_cast<uint8_t>(CSSSwiftColorOutcomeParsed) };
+}
+#endif // USE(SWIFT_CSS)
+
+#if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 static std::optional<SRGBA<uint8_t>> finishParsingNamedColor(std::span<char> buffer)
 {
     buffer.back() = '\0';
@@ -690,7 +786,7 @@ static std::optional<SRGBA<uint8_t>> finishParsingNamedColor(std::span<char> buf
     return asSRGBA(PackedColor::ARGB { namedColor->ARGBValue });
 }
 
-template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseNamedColorInternal(std::span<const CharacterType> characters)
+template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseNamedColorInternalCpp(std::span<const CharacterType> characters)
 {
     std::array<char, 64> buffer; // Easily big enough for the longest color name.
     if (characters.size() > buffer.size() - 1)
@@ -702,6 +798,16 @@ template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseNamed
         buffer[i] = toASCIILower(static_cast<char>(character));
     }
     return finishParsingNamedColor(std::span { buffer }.first(characters.size() + 1));
+}
+#endif // CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
+
+template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseNamedColorInternal(std::span<const CharacterType> characters)
+{
+#if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
+    return parseNamedColorInternalCpp(characters);
+#else
+    return resolveSwiftColorScan(scanColorSwift(characters, CSSSwiftFastPathKindNamedColor));
+#endif
 }
 
 template<typename CharacterType> static std::optional<SRGBA<uint8_t>> parseSimpleColorInternal(std::span<const CharacterType> characters, const CSSParserContext& context)

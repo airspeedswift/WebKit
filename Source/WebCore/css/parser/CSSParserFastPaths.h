@@ -31,6 +31,7 @@
 
 #include <WebCore/CSSValueKeywords.h>
 #include <WebCore/ColorTypes.h>
+#include <cstddef>
 #include <optional>
 #include <wtf/Forward.h>
 
@@ -59,5 +60,17 @@ public:
     static std::optional<SRGBA<uint8_t>> NODELETE parseHexColor(StringView); // Hex colors of length 3, 4, 6, or 8, without leading "#".
     static std::optional<SRGBA<uint8_t>> parseNamedColor(StringView);
 };
+
+// The longest CSS named color is `lightgoldenrodyellow`, at 20 characters. The generated
+// ColorData.cpp holds the same bound as gperf's `MAX_WORD_LENGTH`, which no header exports.
+static constexpr size_t maximumColorNameLength = 20;
+
+// With USE(SWIFT_CSS) the color fast paths are CSSParserFastPathsSwift.swift's, and the C++
+// implementations are not compiled.
+#if USE(SWIFT_CSS)
+#define CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN 0
+#else
+#define CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN 1
+#endif
 
 } // namespace WebCore
