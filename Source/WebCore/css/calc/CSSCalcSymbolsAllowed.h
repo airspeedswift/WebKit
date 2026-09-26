@@ -46,6 +46,10 @@ public:
     std::optional<CSSUnitType> NODELETE get(CSSValueID) const;
     bool NODELETE contains(CSSValueID) const;
 
+    // Whether there is any symbol at all. The Swift parser does not carry the symbol table, so it
+    // hands back any input containing an `IdentToken` when this is false.
+    bool isEmpty() const { return m_table.isEmpty(); }
+
 private:
     // FIXME: A HashMap here is not ideal, as these tables are always constant expressions
     // and always quite small (currently always 4, but in the future will include one that
