@@ -33,6 +33,7 @@
 #pragma once
 
 #include <WebCore/CSSParserTokenBits.h>
+#include <WebCore/CSSUnitType.h>
 #include <WebCore/PlatformExportMacros.h>
 #include <cstddef>
 #include <cstdint>
@@ -126,7 +127,7 @@ struct CSSSwiftColor {
 // terminator: `findColorImpl` reads only `str[0 .. len-1]`.
 CSSSwiftColor cssSwiftFindNamedColor(const Latin1Character *__counted_by(length) name __attribute__((noescape)), size_t length);
 
-// MARK: - Fast-path entry point (CSSParserFastPathsSwift.swift)
+// MARK: - Transform fast-path types (CSSParserFastPathsSwift.swift)
 
 // Which fast path one call into `cssParseFastPathSwift8`/`16` runs. One entry point per width
 // rather than per scan, so each width has a single `Span(_unsafeCxxSpan:)` conversion
@@ -135,6 +136,46 @@ enum CSSSwiftFastPathKind : uint8_t {
     CSSSwiftFastPathKindHexColor = 0,
     CSSSwiftFastPathKindNamedColor,
     CSSSwiftFastPathKindNumericColor,
+    CSSSwiftFastPathKindTransform,
+};
+
+// One transform function argument: the parsed double and its unit.
+struct CSSSwiftTransformArgument {
+    double value;
+    CSSUnitType unit;
+};
+
+// The transform functions the fast path recognises. Mapped to `CSSValueID` in CSSParserFastPaths.cpp.
+enum CSSSwiftTransformFunction : uint8_t {
+    CSSSwiftTransformFunctionTranslate = 0,
+    CSSSwiftTransformFunctionTranslateX,
+    CSSSwiftTransformFunctionTranslateY,
+    CSSSwiftTransformFunctionTranslateZ,
+    CSSSwiftTransformFunctionTranslate3d,
+    CSSSwiftTransformFunctionMatrix3d,
+    CSSSwiftTransformFunctionScale3d,
+    CSSSwiftTransformFunctionRotate,
+    CSSSwiftTransformFunctionRotateZ,
+};
+
+class CSSSwiftTransformListBuilder;
+
+// Receives each transform function the Swift scan recognises, in order. The caller discards the
+// list if the scan returns false. Stack-scoped with the same `SWIFT_SAFE` argument as
+// CSSSwiftTokenSink. A color scan gets one with no list.
+class SWIFT_SAFE CSSSwiftFastPathSink {
+public:
+    CSSSwiftFastPathSink() = default;
+    explicit CSSSwiftFastPathSink(CSSSwiftTransformListBuilder& list LIFETIME_BOUND)
+        : m_list(&list)
+    {
+    }
+
+    WEBCORE_EXPORT void append(uint8_t function,
+        const CSSSwiftTransformArgument *__counted_by(count) arguments __attribute__((noescape)), size_t count);
+
+private:
+    CSSSwiftTransformListBuilder* m_list { nullptr };
 };
 
 } // namespace WebCore

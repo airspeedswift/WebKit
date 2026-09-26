@@ -65,12 +65,15 @@ public:
 // ColorData.cpp holds the same bound as gperf's `MAX_WORD_LENGTH`, which no header exports.
 static constexpr size_t maximumColorNameLength = 20;
 
-// With USE(SWIFT_CSS) the color fast paths are CSSParserFastPathsSwift.swift's, and the C++
-// implementations are not compiled.
+// With USE(SWIFT_CSS) the color and transform fast paths are CSSParserFastPathsSwift.swift's, and
+// the C++ implementations are not compiled.
 #if USE(SWIFT_CSS)
 #define CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN 0
 #else
 #define CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN 1
 #endif
+
+#define CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
+
 
 } // namespace WebCore

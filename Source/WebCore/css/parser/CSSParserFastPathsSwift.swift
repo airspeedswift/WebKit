@@ -25,8 +25,8 @@
 // headers whose definitions live in explicit submodules nothing imports.
 public import WebCore_Private.CSSTokenizerSwiftTypes
 
-// Swift implementation of the color fast paths in CSSParserFastPaths.cpp, used when WebCore is
-// built with WK_USE_SWIFT_CSS: hex, named and `rgb()`/`hsl()` colors.
+// Swift implementation of the fast paths in CSSParserFastPaths.cpp, used when WebCore is built
+// with WK_USE_SWIFT_CSS: hex, named and `rgb()`/`hsl()` colors, and simple transforms.
 //
 // The numeric color forms run floating point and must match the C++ bit for bit; "MARK: -
 // Bit-exactness" below lists the rounding sites where that is not automatic.
@@ -1145,6 +1145,272 @@ private func scanNumericColor<Unit: CSSColorCodeUnit>(_ characters: Span<Unit>) 
     return notAColor
 }
 
+// MARK: - Transforms
+
+/// `toASCIILower` for a code unit of either width.
+///
+/// Only A-Z move.
+@inline(always)
+private func toASCIILowerAnyUnit(_ unit: UInt32) -> UInt32 {
+    unit &- 0x41 < 26 ? unit | 0x20 : unit
+}
+
+/// `find(buffer.span(), character)` from `offset`: the distance to the first `character`, or nil.
+@inline(always)
+private func distanceToUnit<Unit: CSSColorCodeUnit>(_ cursor: borrowing ColorCursor<Unit>, _ character: UInt32) -> Int? {
+    var index = cursor.offset
+    while index < cursor.count {
+        if cursor.unit(index) == character {
+            return index - cursor.offset
+        }
+        index += 1
+    }
+    return nil
+}
+
+/// `parseCSSNumber` over `[start, end)`.
+@inline(always)
+private func parseTransformNumber<Unit: CSSColorCodeUnit>(_ cursor: borrowing ColorCursor<Unit>, _ start: Int, _ end: Int) -> Double? {
+    if end > start, cursor.unit(end - 1) == 0x2E {
+        return nil
+    }
+    switch scanExactDouble(cursor, start, end) {
+    case .value(let value): return value
+    case .invalid: return nil
+    }
+}
+
+/// `parseSimpleLength`: an optional caseless `px` or `%` suffix and the number before it.
+@inline(always)
+private func parseTransformLength<Unit: CSSColorCodeUnit>(
+    _ cursor: borrowing ColorCursor<Unit>,
+    _ start: Int,
+    _ end: Int
+) -> (value: Double, unit: WebCore.CSSUnitType)? {
+    var end = end
+    var unit = WebCore.CSSUnitType.Number
+    if end - start > 2, isASCIIAlphaCaselessEqualUnit(cursor.unit(end - 2), 0x70), isASCIIAlphaCaselessEqualUnit(cursor.unit(end - 1), 0x78)
+    {
+        end -= 2
+        unit = WebCore.CSSUnitType.Px
+    } else if end > start, cursor.unit(end - 1) == 0x25 {
+        end -= 1
+        unit = WebCore.CSSUnitType.Percentage
+    }
+    guard let value = parseTransformNumber(cursor, start, end) else {
+        return nil
+    }
+    return (value, unit)
+}
+
+/// `parseSimpleAngle(..., RequireUnits::Yes, ...)`: a required caseless `deg` or `rad` suffix.
+@inline(always)
+private func parseTransformAngle<Unit: CSSColorCodeUnit>(
+    _ cursor: borrowing ColorCursor<Unit>,
+    _ start: Int,
+    _ end: Int
+) -> (value: Double, unit: WebCore.CSSUnitType)? {
+    guard end - start >= 4 else {
+        return nil
+    }
+    let (c3, c2, c1) = (cursor.unit(end - 3), cursor.unit(end - 2), cursor.unit(end - 1))
+    let unit: WebCore.CSSUnitType
+    if isASCIIAlphaCaselessEqualUnit(c3, 0x64), isASCIIAlphaCaselessEqualUnit(c2, 0x65), isASCIIAlphaCaselessEqualUnit(c1, 0x67) {
+        unit = WebCore.CSSUnitType.Deg
+    } else if isASCIIAlphaCaselessEqualUnit(c3, 0x72), isASCIIAlphaCaselessEqualUnit(c2, 0x61), isASCIIAlphaCaselessEqualUnit(c1, 0x64) {
+        unit = WebCore.CSSUnitType.Rad
+    } else {
+        return nil
+    }
+    guard let value = parseTransformNumber(cursor, start, end - 3) else {
+        return nil
+    }
+    return (value, unit)
+}
+
+/// Up to sixteen arguments, the count of `matrix3d()`, held inline so a function costs no
+/// allocation.
+private typealias TransformArguments = InlineArray<16, WebCore.CSSSwiftTransformArgument>
+
+/// `parseTransformTranslateArguments`.
+@inline(always)
+private func scanTranslateArguments<Unit: CSSColorCodeUnit>(
+    _ cursor: inout ColorCursor<Unit>,
+    _ expectedCount: Int,
+    _ function: WebCore.CSSSwiftTransformFunction,
+    _ arguments: inout TransformArguments
+) -> Bool {
+    var remaining = expectedCount
+    var index = 0
+    while remaining > 0 {
+        guard let length = distanceToUnit(cursor, remaining == 1 ? 0x29 : 0x2C) else {
+            return false
+        }
+        guard var (value, unit) = parseTransformLength(cursor, cursor.offset, cursor.offset + length) else {
+            return false
+        }
+        if value == 0, unit == WebCore.CSSUnitType.Number {
+            unit = WebCore.CSSUnitType.Px
+        }
+        if unit == WebCore.CSSUnitType.Number {
+            return false
+        }
+        if unit == WebCore.CSSUnitType.Percentage,
+            function == WebCore.CSSSwiftTransformFunctionTranslateZ
+                || (function == WebCore.CSSSwiftTransformFunctionTranslate3d && remaining == 1)
+        {
+            return false
+        }
+        arguments[index] = WebCore.CSSSwiftTransformArgument(value: value, unit: unit)
+        index += 1
+        cursor.skip(length + 1)
+        remaining -= 1
+    }
+    return true
+}
+
+/// `parseTransformNumberArguments`.
+@inline(always)
+private func scanNumberArguments<Unit: CSSColorCodeUnit>(
+    _ cursor: inout ColorCursor<Unit>,
+    _ expectedCount: Int,
+    _ arguments: inout TransformArguments
+) -> Bool {
+    for index in 0..<expectedCount {
+        guard let length = distanceToUnit(cursor, index == expectedCount - 1 ? 0x29 : 0x2C),
+            let value = parseTransformNumber(cursor, cursor.offset, cursor.offset + length)
+        else {
+            return false
+        }
+        arguments[index] = WebCore.CSSSwiftTransformArgument(value: value, unit: WebCore.CSSUnitType.Number)
+        cursor.skip(length + 1)
+    }
+    return true
+}
+
+/// `parseSimpleTransformValue`: one function, appended to `sink`.
+private func scanTransformValue<Unit: CSSColorCodeUnit>(
+    _ cursor: inout ColorCursor<Unit>,
+    _ sink: inout WebCore.CSSSwiftFastPathSink
+) -> Bool {
+    // "rotate(0)". Also guarantees indexes up to [8] are in range.
+    guard cursor.remaining >= 9 else {
+        return false
+    }
+    let base = cursor.offset
+    @inline(always)
+    func lower(_ i: Int) -> UInt32 { toASCIILowerAnyUnit(cursor.unit(base + i)) }
+    @inline(always)
+    func raw(_ i: Int) -> UInt32 { cursor.unit(base + i) }
+
+    var arguments = TransformArguments(repeating: WebCore.CSSSwiftTransformArgument(value: 0, unit: .Number))
+
+    if lower(0) == 0x74, lower(1) == 0x72, lower(2) == 0x61, lower(3) == 0x6E, lower(4) == 0x73,
+        lower(5) == 0x6C, lower(6) == 0x61, lower(7) == 0x74, lower(8) == 0x65
+    {
+        // "translate(0)". Also guarantees indexes up to [11] are in range.
+        guard cursor.remaining >= 12 else {
+            return false
+        }
+        let function: WebCore.CSSSwiftTransformFunction
+        var expectedArgumentCount = 1
+        var argumentStart = 11
+        let c9 = lower(9)
+        if c9 == 0x78, raw(10) == 0x28 {
+            function = WebCore.CSSSwiftTransformFunctionTranslateX
+        } else if c9 == 0x79, raw(10) == 0x28 {
+            function = WebCore.CSSSwiftTransformFunctionTranslateY
+        } else if c9 == 0x7A, raw(10) == 0x28 {
+            function = WebCore.CSSSwiftTransformFunctionTranslateZ
+        } else if c9 == 0x28 {
+            function = WebCore.CSSSwiftTransformFunctionTranslate
+            expectedArgumentCount = 2
+            argumentStart = 10
+        } else if c9 == 0x33, lower(10) == 0x64, raw(11) == 0x28 {
+            function = WebCore.CSSSwiftTransformFunctionTranslate3d
+            expectedArgumentCount = 3
+            argumentStart = 12
+        } else {
+            return false
+        }
+        cursor.skip(argumentStart)
+        guard scanTranslateArguments(&cursor, expectedArgumentCount, function, &arguments) else {
+            return false
+        }
+        sink.append(function.rawValue, arguments.span.extracting(0..<expectedArgumentCount))
+        return true
+    }
+
+    if lower(0) == 0x6D, lower(1) == 0x61, lower(2) == 0x74, lower(3) == 0x72, lower(4) == 0x69,
+        lower(5) == 0x78, raw(6) == 0x33, lower(7) == 0x64, raw(8) == 0x28
+    {
+        cursor.skip(9)
+        guard scanNumberArguments(&cursor, 16, &arguments) else {
+            return false
+        }
+        sink.append(WebCore.CSSSwiftTransformFunctionMatrix3d.rawValue, arguments.span.extracting(0..<16))
+        return true
+    }
+
+    if lower(0) == 0x73, lower(1) == 0x63, lower(2) == 0x61, lower(3) == 0x6C, lower(4) == 0x65,
+        raw(5) == 0x33, lower(6) == 0x64, raw(7) == 0x28
+    {
+        cursor.skip(8)
+        guard scanNumberArguments(&cursor, 3, &arguments) else {
+            return false
+        }
+        sink.append(WebCore.CSSSwiftTransformFunctionScale3d.rawValue, arguments.span.extracting(0..<3))
+        return true
+    }
+
+    if lower(0) == 0x72, lower(1) == 0x6F, lower(2) == 0x74, lower(3) == 0x61, lower(4) == 0x74, lower(5) == 0x65 {
+        let function: WebCore.CSSSwiftTransformFunction
+        var argumentStart = 7
+        let c6 = lower(6)
+        if c6 == 0x28 {
+            function = WebCore.CSSSwiftTransformFunctionRotate
+        } else if c6 == 0x7A, raw(7) == 0x28 {
+            function = WebCore.CSSSwiftTransformFunctionRotateZ
+            argumentStart = 8
+        } else {
+            return false
+        }
+        cursor.skip(argumentStart)
+        // `parseTransformAngleArgument`.
+        guard let length = distanceToUnit(cursor, 0x29),
+            let (value, unit) = parseTransformAngle(cursor, cursor.offset, cursor.offset + length)
+        else {
+            return false
+        }
+        cursor.skip(length + 1)
+        arguments[0] = WebCore.CSSSwiftTransformArgument(value: value, unit: unit)
+        sink.append(function.rawValue, arguments.span.extracting(0..<1))
+        return true
+    }
+
+    return false
+}
+
+/// `parseSimpleTransformList`: functions separated by `isCSSSpace`.
+///
+/// On `notAColor` the caller discards whatever was appended.
+private func scanTransformList<Unit: CSSColorCodeUnit>(
+    _ characters: Span<Unit>,
+    _ sink: inout WebCore.CSSSwiftFastPathSink
+) -> WebCore.CSSSwiftColor {
+    var cursor = ColorCursor(characters)
+    while !cursor.isEmpty {
+        cursor.skipCSSSpace()
+        if cursor.isEmpty {
+            break
+        }
+        guard scanTransformValue(&cursor, &sink) else {
+            return notAColor
+        }
+    }
+    return WebCore.CSSSwiftColor(argb: 0, outcome: CSSSwiftColorOutcome.parsed.rawValue)
+}
+
 // MARK: - Entry points
 //
 // `Span(_unsafeCxxSpan:)` is the only way to import a `std::span` where the callee is Swift
@@ -1152,13 +1418,13 @@ private func scanNumericColor<Unit: CSSColorCodeUnit>(_ characters: Span<Unit>) 
 // borrow sound:
 //
 // - The characters are a `StringView`'s `span8()`/`span16()`, or a `subspan` of one, and every
-//   caller of `CSSParserFastPaths::parseSimpleColor`, `parseHexColor` and `parseNamedColor` keeps
-//   the owning string alive across the call.
+//   caller of `CSSParserFastPaths::parseSimpleColor`, `parseHexColor`, `parseNamedColor` and
+//   `maybeParseValue` keeps the owning string alive across the call.
 //
-// - Swift re-enters C++ at two calls only: `cssSwiftFindNamedColor`, handed a Swift-owned
-//   `InlineArray`, and `cssSwiftParseCSSNumber8`/`16`, handed a `const` sub-range of the
-//   candidate. Neither writes the characters, allocates against the string, or calls back into
-//   Swift.
+// - Swift re-enters C++ at three calls only: `cssSwiftFindNamedColor`, handed a Swift-owned
+//   `InlineArray`; `cssSwiftParseCSSNumber8`/`16`, handed a `const` sub-range of the candidate;
+//   and `CSSSwiftFastPathSink::append`, handed a Swift-owned `InlineArray`. None writes the
+//   characters, allocates against the string, or calls back into Swift.
 //
 // - `StringImpl` character storage is immutable and never relocated. An upcall that took a
 //   mutable span, or that could append to the owning string, would invalidate this with no
@@ -1168,26 +1434,41 @@ private func scanNumericColor<Unit: CSSColorCodeUnit>(_ characters: Span<Unit>) 
 /// `Span(_unsafeCxxSpan:)` conversion.
 ///
 /// The C++ passes `kind` as a constant at each call site.
+///
+/// `sink` receives the transform scan's output; the color scans do not touch it.
 @inline(always)
-private func scanFastPath<Unit: CSSColorCodeUnit>(_ characters: Span<Unit>, _ kind: WebCore.CSSSwiftFastPathKind) -> WebCore.CSSSwiftColor {
+private func scanFastPath<Unit: CSSColorCodeUnit>(
+    _ characters: Span<Unit>,
+    _ kind: WebCore.CSSSwiftFastPathKind,
+    _ sink: inout WebCore.CSSSwiftFastPathSink
+) -> WebCore.CSSSwiftColor {
     switch kind {
     case WebCore.CSSSwiftFastPathKindHexColor: scanHexColor(characters)
     case WebCore.CSSSwiftFastPathKindNamedColor: scanNamedColor(characters)
     case WebCore.CSSSwiftFastPathKindNumericColor: scanNumericColor(characters)
+    case WebCore.CSSSwiftFastPathKindTransform: scanTransformList(characters, &sink)
     default: notAColor
     }
 }
 
 /// The fast paths over Latin-1 text.
 @_expose(Cxx)
-public func cssParseFastPathSwift8(_ text: WebCore.CSSSwiftColorSpan8, _ kind: WebCore.CSSSwiftFastPathKind) -> WebCore.CSSSwiftColor {
+public func cssParseFastPathSwift8(
+    _ text: WebCore.CSSSwiftColorSpan8,
+    _ kind: WebCore.CSSSwiftFastPathKind,
+    _ sink: inout WebCore.CSSSwiftFastPathSink
+) -> WebCore.CSSSwiftColor {
     // rdar://186723514; invariants above.
-    scanFastPath(unsafe Span<UInt8>(_unsafeCxxSpan: text), kind)
+    scanFastPath(unsafe Span<UInt8>(_unsafeCxxSpan: text), kind, &sink)
 }
 
 /// The fast paths over UTF-16 text.
 @_expose(Cxx)
-public func cssParseFastPathSwift16(_ text: WebCore.CSSSwiftColorSpan16, _ kind: WebCore.CSSSwiftFastPathKind) -> WebCore.CSSSwiftColor {
+public func cssParseFastPathSwift16(
+    _ text: WebCore.CSSSwiftColorSpan16,
+    _ kind: WebCore.CSSSwiftFastPathKind,
+    _ sink: inout WebCore.CSSSwiftFastPathSink
+) -> WebCore.CSSSwiftColor {
     // rdar://186723514; invariants above.
-    scanFastPath(unsafe Span<UInt16>(_unsafeCxxSpan: text), kind)
+    scanFastPath(unsafe Span<UInt16>(_unsafeCxxSpan: text), kind, &sink)
 }
