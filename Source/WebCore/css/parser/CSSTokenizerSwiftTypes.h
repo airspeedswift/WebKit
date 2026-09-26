@@ -23,7 +23,8 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// The WebCore declarations visible to the Swift CSS tokenizer (CSSTokenizerSwift.swift).
+// The WebCore declarations visible to the Swift CSS code: the tokenizer
+// (CSSTokenizerSwift.swift) and the fast paths (CSSParserFastPathsSwift.swift).
 //
 // This header is its own Clang module (WebCore_Private.modulemap) and must stay self-contained:
 // importing all of WebCore_Private reaches JavaScriptCore private headers whose inner structs sit
@@ -93,6 +94,47 @@ private:
     CSSTokenizer* m_tokenizer;
     CSSParserObserverWrapper* m_wrapper;
     unsigned m_observerOffset { 0 };
+};
+
+// MARK: - Color fast-path types (CSSParserFastPathsSwift.swift)
+
+// `parseCSSNumber`'s `std::optional<double>` result, which Swift cannot import.
+struct CSSSwiftDoubleScan {
+    double value;
+    uint32_t ok;
+};
+
+// Named aliases because Swift cannot spell std::span<const T> directly.
+using CSSSwiftColorSpan8 = std::span<const Latin1Character>;
+using CSSSwiftColorSpan16 = std::span<const char16_t>;
+
+// `parseCSSNumber` (CSSParserFastPaths.cpp) over a sub-range of a candidate. Swift handles
+// Clinger's fast path itself and calls this outside it (a significand past 2^53 or a decimal
+// exponent outside [-22, 22]), so results match the C++ fast paths exactly. One function per
+// width rather than a template, so each is compiled whether or not Swift calls it.
+CSSSwiftDoubleScan cssSwiftParseCSSNumber8(const Latin1Character *__counted_by(length) characters __attribute__((noescape)), size_t length);
+CSSSwiftDoubleScan cssSwiftParseCSSNumber16(const char16_t *__counted_by(length) characters __attribute__((noescape)), size_t length);
+
+// A packed sRGB color in `PackedColor::ARGB` order (0xAARRGGBB) for every input form, and a
+// `CSSSwiftColorOutcome` raw value, static_asserted in CSSParserFastPaths.cpp.
+struct CSSSwiftColor {
+    uint32_t argb;
+    uint8_t outcome;
+};
+
+// The named-color lookup, over gperf's `findColor` (ColorData.gperf). The name needs no NUL
+// terminator: `findColorImpl` reads only `str[0 .. len-1]`.
+CSSSwiftColor cssSwiftFindNamedColor(const Latin1Character *__counted_by(length) name __attribute__((noescape)), size_t length);
+
+// MARK: - Fast-path entry point (CSSParserFastPathsSwift.swift)
+
+// Which fast path one call into `cssParseFastPathSwift8`/`16` runs. One entry point per width
+// rather than per scan, so each width has a single `Span(_unsafeCxxSpan:)` conversion
+// (rdar://186723514).
+enum CSSSwiftFastPathKind : uint8_t {
+    CSSSwiftFastPathKindHexColor = 0,
+    CSSSwiftFastPathKindNamedColor,
+    CSSSwiftFastPathKindNumericColor,
 };
 
 } // namespace WebCore

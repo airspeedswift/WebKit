@@ -119,6 +119,10 @@ HSLA<float> ColorConversion<HSLA<float>, ExtendedSRGBA<float>>::convert(const Ex
 ExtendedSRGBA<float> ColorConversion<ExtendedSRGBA<float>, HSLA<float>>::convert(const HSLA<float>& color)
 {
     // https://drafts.csswg.org/css-color-4/#hsl-to-rgb
+    //
+    // CSSParserFastPathsSwift.swift reimplements this function for the hsl() fast path, including
+    // the multiply-add in hueToRGB below, which -ffp-contract=on fuses into one rounding. A change
+    // here that alters a result, or whether an operation can be contracted, must be made there too.
 
     auto [hue, saturation, lightness, alpha] = color.resolved();
 

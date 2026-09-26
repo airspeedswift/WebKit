@@ -12,8 +12,8 @@ framework module WebCore_Private [system] {
         export *
     }
 
-    // The boundary module for the CSS tokenizer, so that Swift imports only these types rather than
-    // the Core umbrella.
+    // The boundary module for the CSS tokenizer and fast paths, so that Swift imports only these
+    // types rather than the Core umbrella.
     explicit module CSSTokenizerSwiftTypes {
         header "CSSTokenizerSwiftTypes.h"
         header "CSSParserTokenBits.h"
