@@ -38,9 +38,10 @@ WK_SWIFT_PGO_GEN_FLAGS_YES = -Xfrontend -ir-profile-generate;
 GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_DEFINES);
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 
-// Selects the Swift implementation of CSS tokenizing, the property fast paths and calc()
-// serialization, and compiles out the C++ implementations it replaces. There is no fallback between
-// them.
+// Selects the Swift implementation of CSS tokenizing, the property fast paths, and calc()
+// simplification and serialization. The C++ implementations it replaces are compiled out,
+// except the calc() simplifier, which the C++ parser still calls. There is no fallback between
+// them: input the Swift does not handle is a build failure or a trap naming it.
 WK_USE_SWIFT_CSS = NO;
 WK_USE_SWIFT_CSS_DEFINES = $(WK_USE_SWIFT_CSS_DEFINES_$(WK_USE_SWIFT_CSS));
 WK_USE_SWIFT_CSS_DEFINES_YES = USE_SWIFT_CSS=1;
@@ -217,7 +218,7 @@ EXCLUDED_SOURCE_FILE_NAMES[sdk=xr*] = $(inherited) *.tiff *Cursor.png npapi.h np
 // With WK_USE_SWIFT_CSS=NO the Swift CSS sources are not compiled. C++ that exists only to call, or
 // be called from, them is under USE(SWIFT_CSS).
 WK_SWIFT_CSS_EXCLUDED_SOURCE_FILE_NAMES = $(WK_SWIFT_CSS_EXCLUDED_SOURCE_FILE_NAMES_$(WK_USE_SWIFT_CSS));
-WK_SWIFT_CSS_EXCLUDED_SOURCE_FILE_NAMES_NO = CSSTokenizerSwift.swift CSSParserTokenBitsSwift.swift CSSUnitTrieSwift.swift CSSParserFastPathsSwift.swift CSSCalcSerializationSwift.swift;
+WK_SWIFT_CSS_EXCLUDED_SOURCE_FILE_NAMES_NO = CSSTokenizerSwift.swift CSSParserTokenBitsSwift.swift CSSUnitTrieSwift.swift CSSParserFastPathsSwift.swift CSSCalcSerializationSwift.swift CSSCalcSimplificationSwift.swift;
 
 INCLUDED_SOURCE_FILE_NAMES = $(INCLUDED_SOURCE_FILE_NAMES_$(ENABLE_PDFJS));
 INCLUDED_SOURCE_FILE_NAMES_ENABLE_PDFJS = pdfjs*/*;

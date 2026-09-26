@@ -28,7 +28,9 @@
 #include "AnchorPositionEvaluator.h"
 #include "CSSCalcExecutor.h"
 #include "CSSCalcRandomCachingKey.h"
+#include "CSSCalcSwiftTypes.h"
 #include "CSSCalcSymbolTable.h"
+#include "CSSCalcSymbolsAllowed.h"
 #include "CSSCalcTree+Copy.h"
 #include "CSSCalcTree+Evaluation.h"
 #include "CSSCalcTree+Mappings.h"
@@ -37,16 +39,24 @@
 #include "CSSCalcTree.h"
 #include "CSSPrimitiveNumericCategory.h"
 #include "CSSPrimitiveValue.h"
+#include "CSSPropertyParserState.h"
+#include "CSSRandomKeyParser.h"
 #include "CSSUnevaluatedCalc.h"
 #include "StyleBuilderState.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleLengthResolution.h"
+// WebCoreSwift-Generated.h is module-scoped, so a translation unit that includes it must declare
+// every Swift boundary type.
+#if USE(SWIFT_CSS)
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
+#include <atomic>
+#include <bit>
 #include <wtf/StdLibExtras.h>
 
 namespace WebCore {
 namespace CSSCalc {
 
-static auto copyAndSimplify(const Random::Sharing&, const SimplificationOptions&) -> Random::Sharing;
 static auto copyAndSimplify(const CalcMix::Item&, const SimplificationOptions&) -> CalcMix::Item;
 static auto copyAndSimplify(const Vector<CalcMix::Item>&, const SimplificationOptions&) -> Vector<CalcMix::Item>;
 static auto copyAndSimplify(const CSS::Keyword::None&, const SimplificationOptions&) -> CSS::Keyword::None;
@@ -1448,7 +1458,10 @@ std::optional<Child> simplify(CalcMix& root, const SimplificationOptions& option
     auto zeroValueMatchingChild = [options](auto& child) -> Child {
         auto childType = getType(child.value);
         auto category = childType.calculationCategory();
-        ASSERT(category);
+        // `calculationCategory()` is `std::nullopt` for a mixed-base type (`px * s`) or a power
+        // other than 1 (`px * px`). `parseAndSimplify`'s type check rejects both, but other callers
+        // are not bound by it.
+        RELEASE_ASSERT(category);
         switch (*category) {
         case CSS::Category::Integer:
         case CSS::Category::Number:
@@ -1472,6 +1485,8 @@ std::optional<Child> simplify(CalcMix& root, const SimplificationOptions& option
         case CSS::Category::Flex:
             return makeChild(CanonicalDimension { .value = 0, .dimension = CanonicalDimension::Dimension::Flex });
         }
+        // Only an out-of-range `CSS::Category` reaches this; returning a zero would give it the
+        // wrong type.
         RELEASE_ASSERT_NOT_REACHED();
     };
 
@@ -1683,19 +1698,69 @@ std::optional<Child> simplify(CalcMix& root, const SimplificationOptions& option
     );
 }
 
+// What an `anchor()` evaluates to, or nothing. Shared by `simplify(Anchor&)` and
+// `resolveStyleCoupledValue`.
+//
+// `.range` is `CSS::All`, not `options.range`: an anchor is evaluated unclamped.
+static std::optional<double> evaluateAnchorFunction(const Anchor& anchor, const SimplificationOptions& options)
+{
+    return evaluateWithoutFallback(anchor, EvaluationOptions {
+        .category = options.category,
+        .range = CSS::All,
+        .conversionData = options.conversionData,
+        .symbolTable = options.symbolTable
+    });
+}
+
+// What an `anchor-size()` evaluates to, or nothing. Shared by `simplify(AnchorSize&)` and
+// `resolveStyleCoupledValue`.
+static std::optional<double> evaluateAnchorSizeFunction(const AnchorSize& anchorSize, Style::BuilderState& builderState)
+{
+    std::optional<Style::ScopedName> anchorSizeScopedName;
+    if (anchorSize.elementName) {
+        anchorSizeScopedName = Style::ScopedName {
+            .name = Style::toStyle(*anchorSize.elementName, builderState).value,
+            .scopeOrdinal = builderState.styleScopeOrdinal()
+        };
+    }
+    return Style::AnchorPositionEvaluator::evaluateSize(builderState, anchorSizeScopedName, anchorSize.dimension);
+}
+
+// MARK: - The `calc()` prefix an anchor slot carries
+//
+// `anchor()` and `anchor-size()` are not math functions, so a `calc()` written inside one keeps its
+// prefix in serialization. `consumeValueWithoutSimplifyingRootCalc` records it as a one-child `Sum`
+// in the slot, which css-values-4 8.3's one-term collapse (`simplify(Sum&)`) removes: a whole-tree
+// `copyAndSimplify` would turn `anchor(--a top, calc(1em * 2))` into `anchor(--a top, 2em)`.
+// `rebuildChildren` restores the wrapper, and the two substitution sites below drop it again once
+// the `anchor()` itself is gone.
+//
+// The slot as it came out of the pass, with the wrapper restored if the pass flattened a math
+// function into a leaf. `before` is the input slot, `after` the mapped one.
+static std::optional<Child> anchorSlotKeepingPrefix(const std::optional<Child>& before, std::optional<Child>&& after)
+{
+    if (!before || !after || isLeaf(*before) || !isLeaf(*after))
+        return WTF::move(after);
+    auto type = getType(*after);
+    return makeChild(Sum { Vector<Child>::from(WTF::move(*after)) }, type);
+}
+
+// The slot on its way out of the anchor node it takes the place of, with the wrapper removed. Left
+// in place, it would make the pass non-idempotent.
+static std::optional<Child> anchorSlotLeavingTheNode(std::optional<Child>&& slot)
+{
+    auto* sum = slot ? get_if<IndirectNode<Sum>>(&*slot) : nullptr;
+    if (sum && (*sum)->children.size() == 1)
+        return WTF::move((*sum)->children[0]);
+    return WTF::move(slot);
+}
+
 std::optional<Child> simplify(Anchor& anchor, const SimplificationOptions& options)
 {
     if (!options.conversionData || !options.conversionData->styleBuilderState())
         return { };
 
-    auto evaluationOptions = EvaluationOptions {
-        .category = options.category,
-        .range = CSS::All,
-        .conversionData = options.conversionData,
-        .symbolTable = options.symbolTable
-    };
-
-    auto result = evaluateWithoutFallback(anchor, evaluationOptions);
+    auto result = evaluateAnchorFunction(anchor, options);
     if (!result) {
         // https://drafts.csswg.org/css-anchor-position-1/#anchor-valid
         // "If any of these conditions are false, the anchor() function resolves to its specified fallback value.
@@ -1705,7 +1770,7 @@ std::optional<Child> simplify(Anchor& anchor, const SimplificationOptions& optio
             options.conversionData->styleBuilderState()->setCurrentPropertyInvalidAtComputedValueTime();
 
         // Replace the anchor node with the fallback node.
-        return std::exchange(anchor.fallback, { });
+        return anchorSlotLeavingTheNode(std::exchange(anchor.fallback, { }));
     }
     return CanonicalDimension { .value = *result, .dimension = CanonicalDimension::Dimension::Length };
 }
@@ -1717,32 +1782,19 @@ std::optional<Child> simplify(AnchorSize& anchorSize, const SimplificationOption
 
     CheckedPtr builderState = options.conversionData->styleBuilderState();
 
-    std::optional<Style::ScopedName> anchorSizeScopedName;
-    if (anchorSize.elementName) {
-        anchorSizeScopedName = Style::ScopedName {
-            .name = Style::toStyle(*anchorSize.elementName, *builderState).value,
-            .scopeOrdinal = builderState->styleScopeOrdinal()
-        };
-    }
-
-    auto result = Style::AnchorPositionEvaluator::evaluateSize(*builderState, anchorSizeScopedName, anchorSize.dimension);
+    auto result = evaluateAnchorSizeFunction(anchorSize, *builderState);
 
     if (!result) {
         if (!anchorSize.fallback)
             options.conversionData->styleBuilderState()->setCurrentPropertyInvalidAtComputedValueTime();
 
-        return std::exchange(anchorSize.fallback, { });
+        return anchorSlotLeavingTheNode(std::exchange(anchorSize.fallback, { }));
     }
 
     return CanonicalDimension { .value = *result, .dimension = CanonicalDimension::Dimension::Length };
 }
 
 // MARK: Copy & Simplify.
-
-Random::Sharing copyAndSimplify(const Random::Sharing& root, const SimplificationOptions&)
-{
-    return root;
-}
 
 CalcMix::Item copyAndSimplify(const CalcMix::Item& root, const SimplificationOptions& options)
 {
@@ -1781,23 +1833,42 @@ template<Leaf Op> static auto copyAndSimplifyChildren(const Op& op, const Simpli
     return op;
 }
 
+// One walk over an operation's tuple slots, parameterised by what each slot becomes:
+// `copyAndSimplifyChildren` maps each through `copyAndSimplify`, and
+// `CSSCalcSwiftBuilder::rebuildFrom` takes each off the operand stack through `rebuildSlot`.
+// FIXME: webkit.org/b/280798, make Anchor and AnchorSize tuple-like, and remove their two branches.
+//
+// An anchor's `side` is copied, not simplified, so `anchor(--a calc(25% + 25%))` does not fold to
+// `anchor(--a 50%)`. Its `fallback` is simplified, so its prefix has to be restored.
+//
+// `NOESCAPE` holds: `mapSlot` is only ever called here, never stored or captured.
+template<typename Op, typename MapSlot> static Op rebuildChildren(const IndirectNode<Op>& root, NOESCAPE MapSlot&& mapSlot)
+{
+    // `Random::Sharing` is the one tuple slot that is not a subtree.
+    //
+    // It is named rather than tested with `requires { mapSlot(slot); }`, which would silently pass
+    // through a slot shape a mapper does not handle.
+    //
+    // Without `ALWAYS_INLINE_LAMBDA`, `copyAndSimplify(const Children&)` gets `WTF::map` outlined,
+    // adding a call per node.
+    auto mapChildSlot = [&](const auto& slot) ALWAYS_INLINE_LAMBDA {
+        if constexpr (std::same_as<std::decay_t<decltype(slot)>, Random::Sharing>)
+            return slot;
+        else
+            return mapSlot(slot);
+    };
+
+    if constexpr (std::same_as<Op, Anchor>)
+        return Anchor { .elementName = root->elementName, .side = copy(root->side), .fallback = anchorSlotKeepingPrefix(root->fallback, mapSlot(root->fallback)) };
+    else if constexpr (std::same_as<Op, AnchorSize>)
+        return AnchorSize { .elementName = root->elementName, .dimension = root->dimension, .fallback = anchorSlotKeepingPrefix(root->fallback, mapSlot(root->fallback)) };
+    else
+        return WTF::apply([&](const auto& ...x) { return Op { mapChildSlot(x)... }; }, *root);
+}
+
 template<typename Op> static auto copyAndSimplifyChildren(const IndirectNode<Op>& root, const SimplificationOptions& options) -> Op
 {
-    return WTF::apply([&](const auto& ...x) { return Op { copyAndSimplify(x, options)... }; } , *root);
-}
-
-static auto copyAndSimplifyChildren(const IndirectNode<Anchor>& anchor, const SimplificationOptions& options) -> Anchor
-{
-    return Anchor { .elementName = anchor->elementName, .side = copy(anchor->side), .fallback = copyAndSimplify(anchor->fallback, options) };
-}
-
-static auto copyAndSimplifyChildren(const IndirectNode<AnchorSize>& anchorSize, const SimplificationOptions& options) -> AnchorSize
-{
-    return AnchorSize {
-        .elementName = anchorSize->elementName,
-        .dimension = anchorSize->dimension,
-        .fallback = copyAndSimplify(anchorSize->fallback, options)
-    };
+    return rebuildChildren(root, [&](const auto& slot) { return copyAndSimplify(slot, options); });
 }
 
 Child copyAndSimplify(const Child& root, const SimplificationOptions& options)
@@ -1816,23 +1887,684 @@ Child copyAndSimplify(const Child& root, const SimplificationOptions& options)
     );
 }
 
+// MARK: - The Swift calc simplification path (CSSCalcSimplificationSwift.swift)
+#if USE(SWIFT_CSS)
+//
+// Swift simplifies a `CalcNode` tree and emits it post-order onto `CSSCalcSwiftOperandStack`, and
+// the builder below constructs the `Child`s. For a node built from an original `Child`,
+// `rebuildFrom` recovers the operation from the original's variant tag and fills its slots from the
+// stack, so no operation table is needed. `buildOperation` names the alternative, for a node with
+// no original, such as `clamp()` rewritten to `min()`/`max()`.
+
+// The outcome numbering is declared in Swift. Reading `declined` as `simplified` would install an
+// empty operand stack as the tree.
+static_assert(!static_cast<uint8_t>(CSSCalcSwiftSimplificationOutcomeSimplified));
+static_assert(static_cast<uint8_t>(CSSCalcSwiftSimplificationOutcomeDeclined) == 1);
+
+// One `calc-mix()` item's weight, from `pushCalcMixItemWeight`. Spec steps 2 and 4 compute a weight,
+// which arrives as a `double`. `simplify(CalcMix&)`'s `!canNormalize` path keeps each survivor's
+// weight, which may be a `Calc` weight Swift cannot reproduce, so Swift names the original item
+// instead.
+struct CalcMixWeightPlan {
+    // The replacement weight, as a `<percentage>` in [0,100]. Meaningful only when `replace` is
+    // set and `real` is absent; 0 otherwise.
+    double weight;
+    // The item's index in the original item list, when `replace` is not set.
+    uint32_t origin;
+    bool replace;
+    // A `Calc` weight from the payload table, for a parsed `calc-mix()`, which has no original
+    // item to keep a weight from. Takes precedence over the fields above.
+    std::optional<CalcMix::Item::Weight> real;
+};
+
+// The operand stack the Swift emit pushes onto, forward-declared in CSSCalcSwiftTypes.h.
+//
+// 16 rather than 8 inline: the peak is the widest operand run the emit holds at once, and at 8 a
+// twelve-term sum moves to the heap.
+using OperandVector = Vector<Child, 16>;
+
+struct CSSCalcSwiftOperandStack {
+    OperandVector value { };
+    // The weights the next `calc-mix()` construction pairs with its items, in item order. A stack,
+    // so that a nested `calc-mix()` consumes only its own.
+    Vector<CalcMixWeightPlan> calcMixWeights { };
+    // Where the finished root is constructed instead of on the stack: `Tree::root` inside the
+    // caller's return object (see `swiftSimplifiedRoot`).
+    //
+    // Null means the root goes on the stack.
+    //
+    // Also the completion flag: `constructOperand` nulls it, so a non-null slot afterwards means no
+    // root was built. A second root construction goes on the stack, which then fails the same check.
+    Child* rootSlot { nullptr };
+
+    // The payload table a parsed node names by index in its `origin`.
+    //
+    // Null when simplifying an existing tree, which has none.
+    const CSSCalcSwiftFlatPayloads* flatPayloads { nullptr };
+};
+
+template<typename T> const T* CSSCalcSwiftBuilder::payloadFor(uint32_t index) const noexcept
+{
+    if (!m_operands->flatPayloads || index >= m_operands->flatPayloads->size())
+        return nullptr;
+    return get_if<T>(&(*m_operands->flatPayloads)[index]);
+}
+
+// Constructs a finished node in place: into the root slot when this is the root and one was
+// provided, onto the operand stack otherwise.
+//
+// The root slot holds a live placeholder `Child` holding a `Number` (see `swiftSimplifiedRoot`),
+// whose destructor is not run: [basic.life]/5 allows reusing its storage because nothing depends on
+// that destructor.
+template<typename... Args>
+static ALWAYS_INLINE void constructOperand(CSSCalcSwiftOperandStack& operands, bool isRoot, Args&&... args)
+{
+    static_assert(std::is_trivially_destructible_v<Number>, "the root placeholder's storage is reused without a destructor call, which [basic.life]/5 allows only because nothing depends on the destructor");
+    if (Child* slot = isRoot ? std::exchange(operands.rootSlot, nullptr) : nullptr)
+        new (NotNull, slot) Child(std::forward<Args>(args)...);
+    else
+        operands.value.constructAndAppend(std::forward<Args>(args)...);
+}
+
+// A forward cursor over the operands `rebuildFrom` fills a node's slots from. `Children` and
+// `calc-mix()`'s items can change arity, so the count is checked as the slots are filled: too few
+// operands clears `ok`, too many leaves the cursor short of `end`.
+struct RebuildCursor {
+    OperandVector& stack;
+    size_t next;
+    size_t end;
+    // The weight stack, and where this node's `calc-mix()` weights start.
+    Vector<CalcMixWeightPlan>& weights;
+    size_t weightBase;
+    bool ok { true };
+
+    bool exhausted() const { return next >= end; }
+
+    Child take()
+    {
+        if (exhausted()) {
+            ok = false;
+            // Never reaches the tree: `rebuildFrom` discards the node when `ok` is false.
+            return makeChild(Number { .value = 0 });
+        }
+        return WTF::move(stack[next++]);
+    }
+};
+
+// One overload per slot shape that holds a subtree. An operation with a new slot shape fails to
+// compile until one is added.
+static Child rebuildSlot(const Child&, RebuildCursor& cursor)
+{
+    return cursor.take();
+}
+
+static std::optional<Child> rebuildSlot(const std::optional<Child>& original, RebuildCursor& cursor)
+{
+    // Presence follows the original: `childCount` counted only the present operands.
+    if (!original)
+        return std::nullopt;
+    return cursor.take();
+}
+
+static ChildOrNone rebuildSlot(const ChildOrNone& original, RebuildCursor& cursor)
+{
+    // The `none` keyword was never pushed, so it comes off the original.
+    if (WTF::holdsAlternative<CSS::Keyword::None>(original))
+        return ChildOrNone { CSS::Keyword::None { } };
+    return ChildOrNone { cursor.take() };
+}
+
+static Children rebuildSlot(const Children&, RebuildCursor& cursor)
+{
+    // All the remaining operands, not the original's count, so a sum can lose a zero term.
+    // `Children` is always an operation's only slot.
+    //
+    // Moved straight out of the stack: `take()` returns by value, which costs a second `Child` move
+    // per operand.
+    Vector<Child> children;
+    children.reserveInitialCapacity(cursor.end - cursor.next);
+    for (size_t i = std::exchange(cursor.next, cursor.end); i < cursor.end; ++i)
+        children.append(WTF::move(cursor.stack[i]));
+    return Children { WTF::move(children) };
+}
+
+static Vector<CalcMix::Item> rebuildSlot(const Vector<CalcMix::Item>& original, RebuildCursor& cursor)
+{
+    // Each item carries an optional weight beside its value, so this is not a `Children`.
+    //
+    // All the remaining operands, as for `Children`. Simplification can drop items, so a kept
+    // weight is found by the original item index in its `CalcMixWeightPlan`, not by position.
+    size_t itemCount = cursor.end - cursor.next;
+    if (cursor.weights.size() - cursor.weightBase != itemCount) {
+        // The operand and weight stacks are out of step: a contract violation.
+        cursor.ok = false;
+        return { };
+    }
+
+    Vector<CalcMix::Item> items;
+    items.reserveInitialCapacity(itemCount);
+    for (size_t i = 0; i < itemCount; ++i) {
+        auto& plan = cursor.weights[cursor.weightBase + i];
+        std::optional<CalcMix::Item::Weight> weight;
+        if (plan.replace) {
+            // As `simplify(CalcMix&)` constructs a normalised weight.
+            weight = CalcMix::Item::Weight { plan.weight };
+        } else if (plan.origin < original.size()) {
+            // The survivor's own weight, including a `Calc` or an absent one.
+            weight = original[plan.origin].weight;
+        } else {
+            cursor.ok = false;
+            return { };
+        }
+        items.append(CalcMix::Item { .value = cursor.take(), .weight = WTF::move(weight) });
+    }
+    cursor.weights.shrink(cursor.weightBase);
+    return items;
+}
+
+// The `SimplificationOptions` fields Swift reads, as a POD.
+static CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const SimplificationOptions& options)
+{
+    return CSSCalcSwiftSimplificationOptions {
+        .rangeMinimum = options.range.min,
+        .rangeMaximum = options.range.max,
+        .category = static_cast<uint8_t>(options.category),
+        .allowZeroValueLengthRemovalFromSum = options.allowZeroValueLengthRemovalFromSum,
+        .hasConversionData = options.conversionData.has_value(),
+        .percentageResolveToDimension = percentageResolveToDimension(options),
+    };
+}
+
+bool CSSCalcSwiftBuilder::pushLeaf(CSSCalcSwiftLeaf leaf, bool isRoot) noexcept
+{
+    // Constructed in place from the named alternative, which selects the variant member at compile
+    // time; appending a finished `Child` would cost an out-of-line 41-alternative move.
+    switch (static_cast<CSSCalcSwiftNodeKind>(leaf.kind)) {
+    case CSSCalcSwiftNodeKind::Percentage:
+        // Not `makeNumeric`, which builds a `Percentage` with no hint: a folded percentage keeps its
+        // operand's hint, as in `makeChildWithValueBasedOn`.
+        constructOperand(*m_operands, isRoot, Percentage {
+            .value = leaf.value,
+            .hint = leaf.percentHint ? Type::PercentHintValue { static_cast<PercentHint>(leaf.percentHint) } : Type::PercentHintValue { }
+        });
+        return true;
+
+    case CSSCalcSwiftNodeKind::NonCanonicalDimension:
+        // Not `makeNumeric`, which would canonicalize some of these units; a
+        // `NonCanonicalDimension` that `simplify(NonCanonicalDimension&)` leaves alone stays one.
+        constructOperand(*m_operands, isRoot, NonCanonicalDimension { .value = leaf.value, .unit = static_cast<CSSUnitType>(leaf.unitType) });
+        return true;
+
+    case CSSCalcSwiftNodeKind::Number:
+        // `makeNumeric` builds `Number` for exactly these two units.
+        //
+        // A `Number` kind with any other unit is a contract violation.
+        if (auto unit = static_cast<CSSUnitType>(leaf.unitType); unit != CSSUnitType::Number && unit != CSSUnitType::Integer)
+            return false;
+        constructOperand(*m_operands, isRoot, Number { .value = leaf.value });
+        return true;
+
+    case CSSCalcSwiftNodeKind::CanonicalDimension:
+        // `makeNumeric` picks the `CanonicalDimension::Dimension`, so the canonical-unit table is not
+        // duplicated.
+        //
+        // This is the one case that pays the extra `Child` move.
+        constructOperand(*m_operands, isRoot, makeNumeric(leaf.value, static_cast<CSSUnitType>(leaf.unitType)));
+        return true;
+
+    case CSSCalcSwiftNodeKind::Symbol:
+        // `parseCalcKeyword`'s `Symbol { token.id(), *unit }`. `CSSValueInvalid` is refused: it
+        // would resolve to nothing at computed-value time instead of failing the parse.
+        if (static_cast<CSSValueID>(leaf.valueID) == CSSValueInvalid)
+            return false;
+        constructOperand(*m_operands, isRoot, Symbol { static_cast<CSSValueID>(leaf.valueID), static_cast<CSSUnitType>(leaf.unitType) });
+        return true;
+
+    case CSSCalcSwiftNodeKind::SiblingCount:
+        // The tree-counting functions are leaves, empty structs whose type is `Type { }`.
+        constructOperand(*m_operands, isRoot, SiblingCount { });
+        return true;
+
+    case CSSCalcSwiftNodeKind::SiblingIndex:
+        constructOperand(*m_operands, isRoot, SiblingIndex { });
+        return true;
+
+    default:
+        // A contract violation.
+        return false;
+    }
+}
+
+void CSSCalcSwiftBuilder::pushCopyOf(const Child& node, bool isRoot) noexcept
+{
+    constructOperand(*m_operands, isRoot, copy(node));
+}
+
+bool CSSCalcSwiftBuilder::pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight, uint32_t payloadIndex) noexcept
+{
+    if (payloadIndex == cssCalcSwiftFlatNoNode) {
+        m_operands->calcMixWeights.append(CalcMixWeightPlan { .weight = weight, .origin = origin, .replace = replaceWeight, .real = std::nullopt });
+        return true;
+    }
+    // A `Calc` weight from the payload table.
+    auto* real = payloadFor<CalcMix::Item::Weight>(payloadIndex);
+    if (!real)
+        return false;
+    m_operands->calcMixWeights.append(CalcMixWeightPlan { .weight = 0, .origin = 0, .replace = false, .real = *real });
+    return true;
+}
+
+CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child& node, uint32_t index) noexcept
+{
+    // `get_if` rather than `switchOn`, which would instantiate a fallback per alternative.
+    auto* calcMix = get_if<IndirectNode<CalcMix>>(&node);
+    if (!calcMix || index >= (*calcMix)->children.size()) {
+        // Not a `calc-mix()`, or an item past the end: answered as absent, which the caller
+        // already handles as spec step 1's omitted weight.
+        return { };
+    }
+
+    auto& weight = (*calcMix)->children[index].weight;
+    if (!weight)
+        return { };
+    if (auto raw = weight->raw())
+        return { .value = raw->value, .present = true, .isRaw = true };
+    // A `Calc` weight, whose value stays in C++.
+    return { .value = 0, .present = true, .isRaw = false };
+}
+
+bool CSSCalcSwiftBuilder::rebuildFrom(const Child& original, uint32_t childCount, bool isRoot) noexcept
+{
+    auto& stack = m_operands->value;
+    auto& weights = m_operands->calcMixWeights;
+    if (childCount > stack.size())
+        return false;
+
+    size_t base = stack.size() - childCount;
+    // Only a `calc-mix()` reads the weight stack. Clamped, so one arriving without its weights
+    // fails `rebuildSlot`'s item-count test rather than underflowing.
+    size_t weightBase = weights.size() >= childCount ? weights.size() - childCount : weights.size();
+    RebuildCursor cursor { stack, base, stack.size(), weights, weightBase };
+
+    auto rebuilt = WTF::switchOn(original,
+        [&](const auto& alternative) -> std::optional<Child> {
+            if constexpr (requires { *alternative; }) {
+                auto op = rebuildChildren(alternative, [&](const auto& slot) { return rebuildSlot(slot, cursor); });
+                if (!cursor.ok || !cursor.exhausted())
+                    return std::nullopt;
+                // The original's type, as `copyAndSimplify` keeps it.
+                return makeChild(WTF::move(op), getType(alternative));
+            } else {
+                // A leaf has no slots: a contract violation.
+                return std::nullopt;
+            }
+        }
+    );
+
+    if (!rebuilt) {
+        // Some operands may have been moved from. The whole tree is abandoned, and a moved-from
+        // `Child` is destructible.
+        return false;
+    }
+
+    stack.shrink(base);
+    constructOperand(*m_operands, isRoot, WTF::move(*rebuilt));
+    return true;
+}
+
+void CSSCalcSwiftBuilder::clearOperands() noexcept
+{
+    m_operands->value.shrink(0);
+}
+
+// Whether `Op` declares a slot count, which the operations do and the leaves do not.
+template<typename Op> concept OperationWithSlots = requires { std::tuple_size<Op>::value; };
+
+// Whether `Op` has at least one slot and every slot is a plain `Child`, so that N slots take N
+// operands in order.
+template<OperationWithSlots Op> static constexpr bool slotsAreAllChild = []<size_t... I>(std::index_sequence<I...>) {
+    return sizeof...(I) > 0 && (std::is_same_v<std::remove_cvref_t<std::tuple_element_t<I, Op>>, Child> && ...);
+}(std::make_index_sequence<std::tuple_size_v<Op>> { });
+
+bool CSSCalcSwiftBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount, Type carriedType, bool isRoot, uint8_t noneMask) noexcept
+{
+    auto& stack = m_operands->value;
+    if (!childCount || childCount > stack.size())
+        return false;
+
+    size_t base = stack.size() - childCount;
+
+    auto finish = [&](auto&& op) -> bool {
+        stack.shrink(base);
+        // Constructed in place, as in `pushLeaf`.
+        //
+        // No `toType`: `clamp()` rewritten to `min()`/`max()` computes its type in
+        // `CalcFold.convertToMinMax` and carries it like every other node.
+        constructOperand(*m_operands, isRoot, makeIndirectNode(WTF::move(op), carriedType));
+        return true;
+    };
+
+    // The `Children`-slotted operations, which take every operand.
+    auto takeChildren = [&] {
+        Vector<Child> children;
+        children.reserveInitialCapacity(childCount);
+        for (size_t i = base; i < stack.size(); ++i)
+            children.append(WTF::move(stack[i]));
+        return children;
+    };
+
+    // The operations whose slots are filled from the operand stack alone, placed by the slot shape
+    // `Op` declares.
+    //
+    // No Swift type can hold a `Child`, so this construction is in C++.
+    //
+    // Two shapes are served, and any other is refused:
+    //
+    //  - N plain `Child` slots take exactly N operands. Braced-init evaluates left to right, so
+    //    slot order is operand order.
+    //  - `Child, std::optional<Child>` (`round()` and `log()`) takes one or two operands; the
+    //    second slot is present exactly when there are two.
+    //
+    // The arity is checked before any slot is taken; getting it wrong reads past the stack.
+    auto finishFromSlotShape = [&]<typename Op>() -> bool {
+        if constexpr (OperationWithSlots<Op>) {
+            if constexpr (slotsAreAllChild<Op>) {
+                if (childCount != std::tuple_size_v<Op>)
+                    return false;
+                return [&]<size_t... I>(std::index_sequence<I...>) {
+                    return finish(Op { WTF::move(stack[base + I])... });
+                }(std::make_index_sequence<std::tuple_size_v<Op>> { });
+            } else if constexpr (std::tuple_size_v<Op> == 2) {
+                if constexpr (std::is_same_v<std::remove_cvref_t<std::tuple_element_t<0, Op>>, Child>
+                    && std::is_same_v<std::remove_cvref_t<std::tuple_element_t<1, Op>>, std::optional<Child>>) {
+                    if (childCount > 2)
+                        return false;
+                    return finish(Op { WTF::move(stack[base]),
+                        childCount == 2 ? std::optional<Child> { WTF::move(stack[base + 1]) } : std::optional<Child> { } });
+                }
+            }
+        }
+        return false;
+    };
+
+    switch (alternative) {
+    case CSSCalcSwiftAlternative::Sum:
+        return finish(Sum { .children = takeChildren() });
+    case CSSCalcSwiftAlternative::Product:
+        return finish(Product { .children = takeChildren() });
+    case CSSCalcSwiftAlternative::Min:
+        return finish(Min { .children = takeChildren() });
+    case CSSCalcSwiftAlternative::Max:
+        return finish(Max { .children = takeChildren() });
+    case CSSCalcSwiftAlternative::Hypot:
+        return finish(Hypot { .children = takeChildren() });
+
+    // `clamp()`, whose slots cannot be filled from the operand stack alone.
+    //
+    // A `none` bound is not pushed, so `noneMask` says which bounds are `none`.
+    //
+    // `childCount + popcount(noneMask)` must be 3, checked before any slot is taken.
+    case CSSCalcSwiftAlternative::Clamp: {
+        if (childCount + (noneMask & 1) + ((noneMask >> 1) & 1) != 3)
+            return false;
+        size_t next = base;
+        auto bound = [&](uint8_t bit) -> ChildOrNone {
+            return (noneMask & bit) ? ChildOrNone { CSS::Keyword::None { } } : ChildOrNone { WTF::move(stack[next++]) };
+        };
+        auto minimum = bound(1);
+        auto value = WTF::move(stack[next++]);
+        return finish(Clamp { WTF::move(minimum), WTF::move(value), bound(2) });
+    }
+
+    // `calc-mix()`, whose weights are not operands.
+    //
+    // Each item's value is an operand and its weight comes off the weight stack, top `childCount`
+    // first, so a nested `calc-mix()` takes only its own.
+    //
+    // With no original item to keep a weight from, `plan.replace` clear here means an omitted
+    // weight, and `origin` is unread.
+    case CSSCalcSwiftAlternative::CalcMix: {
+        auto& weights = m_operands->calcMixWeights;
+        if (weights.size() < childCount)
+            return false;
+        size_t weightBase = weights.size() - childCount;
+        Vector<CalcMix::Item> items(childCount, [&](size_t item) {
+            auto& plan = weights[weightBase + item];
+            // As `simplify(CalcMix&)` constructs its weights; a `Calc` weight in `plan.real` comes
+            // first.
+            return CalcMix::Item { .value = WTF::move(stack[base + item]), .weight = plan.real ? plan.real : (plan.replace ? std::optional<CalcMix::Item::Weight> { CalcMix::Item::Weight { plan.weight } } : std::nullopt) };
+        });
+        weights.shrink(weightBase);
+        return finish(CalcMix { WTF::move(items) });
+    }
+
+    default:
+        // Served by its slot shape. A leaf, or an operation with its own entry point, is a
+        // contract violation, and the stack is left as it was.
+#define CSS_CALC_SWIFT_BUILD_FROM_SLOT_SHAPE(name, type) \
+        case CSSCalcSwiftAlternative::name: \
+            return finishFromSlotShape.operator()<name>();
+        switch (alternative) {
+        CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_BUILD_FROM_SLOT_SHAPE)
+        }
+#undef CSS_CALC_SWIFT_BUILD_FROM_SLOT_SHAPE
+        return false;
+    }
+}
+
+static constexpr CSSCalcSwiftNumericResult unresolvedNumber { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = false };
+
+static constexpr CSSCalcSwiftNumericResult resolvedNumber(double value)
+{
+    return { .value = value, .unitType = static_cast<uint16_t>(CSSUnitType::Number), .resolved = true, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = false };
+}
+
+// A resolved canonical `<length>`, as `simplify(Anchor&)` and `simplify(AnchorSize&)` produce.
+//
+// The unit is `toCSSUnit(Dimension::Length)`, so that `pushLeaf`'s `makeNumeric` builds the same
+// alternative.
+static constexpr CSSCalcSwiftNumericResult resolvedCanonicalLength(double value)
+{
+    return { .value = value, .unitType = static_cast<uint16_t>(toCSSUnit(CanonicalDimension::Dimension::Length)), .resolved = true, .alternative = CSSCalcSwiftAlternative::CanonicalDimension, .substituteFallback = false };
+}
+
+// See `CSSCalcSwiftNumericResult::substituteFallback`.
+static constexpr CSSCalcSwiftNumericResult substituteAnchorFallback { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = true };
+
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const Child& node) const noexcept
+{
+    // The guard `simplify(SiblingCount&)`, `simplify(SiblingIndex&)` and `simplify(Random&)` open
+    // with. It comes before the `fixed` branch, so `random(fixed 0.5, 1px, 3px)` does not fold
+    // without a builder state.
+    if (!m_options->conversionData || !m_options->conversionData->styleBuilderState())
+        return unresolvedNumber;
+
+    CheckedPtr builderState = protect(m_options->conversionData->styleBuilderState());
+
+    // `get_if` rather than `switchOn`, which would instantiate all 41 alternatives. Any other
+    // alternative answers `unresolvedNumber`.
+    if (auto* random = get_if<IndirectNode<Random>>(&node)) {
+        // A `fixed` `Calc` needs full evaluation, which simplification does not do, so it does not
+        // go through `resolveRandomBaseValue`.
+        if (auto* sharingFixed = std::get_if<Random::SharingFixed>(&(*random)->sharing)) {
+            return WTF::switchOn(sharingFixed->value,
+                [](const CSS::Number<CSS::ClosedUnitRange>::Raw& raw) { return resolvedNumber(raw.value); },
+                [](const CSS::Number<CSS::ClosedUnitRange>::Calc&) { return unresolvedNumber; }
+            );
+        }
+        // The same resolver `evaluate(const IndirectNode<Random>&)` calls.
+        if (auto randomBaseValue = resolveRandomBaseValue((*random)->sharing, *builderState))
+            return resolvedNumber(*randomBaseValue);
+        return unresolvedNumber;
+    }
+
+    auto anchorEvaluationFailed = [&](bool hasFallback) {
+        // https://drafts.csswg.org/css-anchor-position-1/#anchor-valid
+        // "If any of these conditions are false, the anchor() function resolves to its specified
+        // fallback value. If no fallback value is specified, it makes the declaration referencing it
+        // invalid at computed-value time."
+        //
+        // Unlike `simplify(Anchor&)`, this does not move the fallback out of the node: Swift
+        // substitutes the fallback subtree it has already simplified.
+        if (!hasFallback)
+            builderState->setCurrentPropertyInvalidAtComputedValueTime();
+        return substituteAnchorFallback;
+    };
+
+    // The evaluation `simplify(Anchor&)` and `simplify(AnchorSize&)` use, answered as a value.
+    //
+    // Above the element guard: `AnchorPositionEvaluator::evaluate` does not need one.
+    if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
+        if (auto result = evaluateAnchorFunction(**anchor, *m_options))
+            return resolvedCanonicalLength(*result);
+        return anchorEvaluationFailed(static_cast<bool>((*anchor)->fallback));
+    }
+
+    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
+        if (auto result = evaluateAnchorSizeFunction(**anchorSize, *builderState))
+            return resolvedCanonicalLength(*result);
+        return anchorEvaluationFailed(static_cast<bool>((*anchorSize)->fallback));
+    }
+
+    // `simplify(SiblingCount&)` and `simplify(SiblingIndex&)` require an element and otherwise leave
+    // the function in the tree. `simplify(Random&)` does not, so it is handled above.
+    if (!builderState->element())
+        return unresolvedNumber;
+
+    if (WTF::holdsAlternative<SiblingCount>(node))
+        return resolvedNumber(static_cast<double>(builderState->siblingCount()));
+    if (WTF::holdsAlternative<SiblingIndex>(node))
+        return resolvedNumber(static_cast<double>(builderState->siblingIndex()));
+    return unresolvedNumber;
+}
+
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, uint16_t unit) const noexcept
+{
+    // The lookup `simplify(Symbol&)` makes.
+    auto value = m_options->symbolTable.get(static_cast<CSSValueID>(valueID));
+    if (!value) {
+        // A miss leaves the `Symbol` unchanged. Not a failure.
+        return unresolvedNumber;
+    }
+
+    // The value from the table and the unit from the node, as `simplify(Symbol&)` does; the table's
+    // own unit is not read.
+    auto leaf = makeNumeric(value->value, static_cast<CSSUnitType>(unit));
+
+    // Read back off the node `makeNumeric` built, so its unit classification is not duplicated.
+    // The numeric alternatives are inline, so this does not allocate.
+    CSSCalcSwiftNumericResult out {
+        .value = 0,
+        .unitType = static_cast<uint16_t>(CSSUnitType::Unknown),
+        .resolved = true,
+        .alternative = static_cast<CSSCalcSwiftAlternative>(leaf.value.index()),
+        .substituteFallback = false,
+    };
+    WTF::switchOn(leaf,
+        [&]<Numeric T>(const T& numeric) {
+            out.value = numeric.value;
+            out.unitType = static_cast<uint16_t>(toCSSUnit(numeric));
+        },
+        // Unreachable: `makeNumeric` always returns a numeric leaf.
+        [&](const auto&) { }
+    );
+    return out;
+}
+
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double value, uint16_t unitType) const noexcept
+{
+    // `canonicalize`'s `tryMakeCanonical`. `canonicalizedDimension` in
+    // CSSCalcSimplificationSwift.swift handles the other units.
+    //
+    // `CSS::toLengthUnit` is the only statement of which units reach this.
+    //
+    // Both optionals are checked: unlike in `canonicalize`, nothing has established that the unit
+    // is a length unit.
+    if (auto lengthUnit = CSS::toLengthUnit(static_cast<CSSUnitType>(unitType)); lengthUnit && m_options->conversionData)
+        return resolvedCanonicalLength(Style::resolveLength(value, *lengthUnit, *m_options->conversionData));
+    return unresolvedNumber;
+}
+
+
+// Whether Swift simplified the tree. True leaves the new root constructed in `operands.rootSlot`.
+//
+// A `bool` rather than a `std::optional<Tree>`, because each `Child` move is an out-of-line
+// 41-alternative visit; the root is constructed straight into the caller's `Tree` instead.
+static bool trySimplifyWithSwift(const Tree& tree, const SimplificationOptions& options, CSSCalcSwiftOperandStack& operands)
+{
+    CSSCalcSwiftBuilder builder { operands, options };
+
+    auto swiftOptions = swiftSimplificationOptions(options);
+
+    auto result = cssCalcSimplifySwift(tree.root, builder, swiftOptions);
+
+
+    if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftSimplificationOutcomeSimplified)) {
+        return false;
+    }
+
+    // A completed walk fills the root slot and leaves the operand stack empty. Otherwise the
+    // caller's placeholder would be returned as `calc(0)`.
+    if (operands.rootSlot || !operands.value.isEmpty()) {
+        return false;
+    }
+
+    return true;
+}
+
+// MARK: Exposed interface
+
+// The Swift whole-tree simplification, with the finished root constructed straight into the `Tree`
+// the caller asked for.
+//
+// `root` is returned by NRVO into `Tree::root` below, and `copyAndSimplify` returns that `Tree` by
+// NRVO, so `&root` is normally the caller's own storage.
+//
+// `Tree` has no default constructor, so the slot holds a placeholder; `constructOperand` says why
+// its destructor is not run.
+static Child swiftSimplifiedRoot(const Tree& tree, const SimplificationOptions& options, bool& simplified)
+{
+    Child root = Number { .value = 0 };
+
+    CSSCalcSwiftOperandStack operands { .rootSlot = &root };
+    simplified = trySimplifyWithSwift(tree, options, operands);
+    return root;
+}
+#endif // USE(SWIFT_CSS)
+
 Tree copyAndSimplify(const Tree& tree, const SimplificationOptions& options)
 {
+#if !USE(SWIFT_CSS)
     return Tree {
         .root = copyAndSimplify(tree.root, options),
         .type = tree.type,
         .stage = tree.stage,
         .requiresConversionData = tree.requiresConversionData,
     };
+#else
+    bool simplified = false;
+    Tree result {
+        .root = swiftSimplifiedRoot(tree, options, simplified),
+        .type = tree.type,
+        .stage = tree.stage,
+        .requiresConversionData = tree.requiresConversionData,
+    };
+    if (simplified)
+        return result;
+
+    // `copyAndSimplify` has no failure channel, and a build selects one simplifier for it.
+    // Returning the tree unsimplified would be a silently wrong computed value.
+    RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the Swift calc() simplifier declined a tree");
+#endif
 }
 
 // MARK: - Can Simplify
 
-bool canSimplify(const Tree& tree, const SimplificationOptions&)
+// NOTE: This is a simple and conservative implementation of `canSimplify`. A more precise
+// implementation is possible by utilizing the provided `SimplificationOptions` if that should be
+// necessary.
+static bool canSimplifyWithCpp(const Tree& tree, const SimplificationOptions&)
 {
-    // NOTE: This is a simple and conservative implementation of `canSimplify`. A more precise implementation
-    // is possible by utilizing the provided `SimplificationOptions` if that should be necessary.
-
     return WTF::switchOn(tree.root,
         [&](const Number&) -> bool {
             return false;
@@ -1847,6 +2579,13 @@ bool canSimplify(const Tree& tree, const SimplificationOptions&)
             return true;
         }
     );
+}
+
+bool canSimplify(const Tree& tree, const SimplificationOptions& options)
+{
+    // `canSimplify(t) == false` must imply `copyAndSimplify(t) == t`, which holds because `simplify`
+    // is a no-op for the three alternatives it answers false for.
+    return canSimplifyWithCpp(tree, options);
 }
 
 } // namespace CSSCalc
