@@ -66,7 +66,7 @@ struct TestCondition {
     let evaluate: () -> Bool
 }
 
-@inline(__always)
+@inline(always)
 func ~= <T>(_ lhs: T, _ rhs: T) -> TestCondition where T: Equatable {
     TestCondition(message: "lhs \(lhs) is not equal to rhs \(rhs)") {
         lhs == rhs
