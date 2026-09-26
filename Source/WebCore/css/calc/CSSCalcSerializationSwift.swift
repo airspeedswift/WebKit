@@ -281,11 +281,11 @@ private func isSerializableNode(
         // Not a coverage gap but a tree-invariant violation, which the C++ simplifier asserts
         // (`ASSERT(!root.children.isEmpty())`). No producer can make one: `parseCalcSum` and
         // `parseCalcProduct` return the single term rather than wrapping it when the operand list came
-        // out empty, and `add`/`multiply`/`subtract` append exactly two. The C++ serializer would read
-        // an empty inline buffer behind a compiled-out `ASSERT`, so refusing is strictly safer than
-        // matching it. It stays a refusal rather than an invented identity value (`calc(0)` /
-        // `calc(1)`), because inventing output would mask the invariant break that had to happen
-        // upstream to get here.
+        // out empty, `add`/`multiply`/`subtract` append exactly two, and the Swift builder rebuilds
+        // from children that already exist. The C++ serializer would read an empty inline buffer
+        // behind a compiled-out `ASSERT`, so refusing is strictly safer than matching it. It stays a
+        // refusal rather than an invented identity value (`calc(0)` / `calc(1)`), because inventing
+        // output would mask the invariant break that had to happen upstream to get here.
         return childCount > 0
     case .Negate, .Invert, .Transparent:
         // Fixed arity 1 by construction: all three are single-slot operations in CSSCalcTree.h, so a

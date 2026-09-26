@@ -23,21 +23,28 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// Everything CSSCalcSerializationSwift.swift may see of WebCore. It has its own Clang module in
-// WebCore_Private.modulemap and must stay self-contained: including CSSCalcTree.h or CSSTokenizer.h
-// here walks the importer into the PrivateHeaders umbrella.
+// Everything CSSCalcSerializationSwift.swift and CSSCalcSimplificationSwift.swift may see of
+// WebCore. It has its own Clang module in WebCore_Private.modulemap and must stay self-contained:
+// including CSSCalcTree.h or CSSTokenizer.h here walks the importer into the PrivateHeaders
+// umbrella.
 //
 // Every function declared here must stay `noexcept`, or Swift emits a termination landing pad
-// around each call to it. Anything added here needs a call graph that is C++ throughout, with no
-// Objective-C frame that could `@throw` past it.
+// around each call to it.
 
 #pragma once
 
+#include <WebCore/CSSCalcType.h>
+#include <WebCore/CSSParserTokenBits.h>
 #include <WebCore/CSSUnitType.h>
 #include <WebCore/PlatformExportMacros.h>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
+#include <wtf/Ref.h>
+#include <wtf/RefCounted.h>
 #include <wtf/SwiftBridging.h>
+#include <wtf/TZoneMalloc.h>
+#include <wtf/Vector.h>
 
 namespace WTF {
 class StringBuilder;
@@ -45,20 +52,37 @@ class StringBuilder;
 
 namespace WebCore {
 
+class CSSParserTokenRange;
+class CSSCalcSymbolsAllowed;
+
 namespace CSS {
 struct SerializationContext;
+// Not included: CSSPropertyParserState.h names the generated property-id enum.
+struct PropertyParserState;
 }
 
 namespace CSSCalc {
 
 struct Child;
+struct Tree;
+struct SimplificationOptions;
+struct EvaluationOptions;
+
+// Defined in CSSCalcTree+Simplification.cpp.
+struct CSSCalcSwiftOperandStack;
+
+// The payload table: the values the parse resolves for an `<anchor-element>`, a `<random-key>` and a
+// `calc-mix()` weight that is a math function. A parsed `CalcNode` names one by index in its
+// `origin`; Swift never sees the values. Defined in CSSCalcTree.h.
+struct CSSCalcSwiftFlatPayloads;
+
 
 // The shape of a node's serialization, not its operation: several operations share a kind, and
-// `CSSCalcSwiftNodeInfo::valueID` carries the name, so the operator name table stays in C++.
-// `Operation` is an operation this boundary has not been taught, and falls back to the C++ path.
+// `CSSCalcSwiftNodeInfo::valueID` carries the name. `Operation` is one the Swift serializer does
+// not handle.
 //
-// New cases are appended, never inserted. `CSSCalcSwiftSerializationResult::kindMask` is
-// `1 << rawValue`, so inserting a case would silently relabel every existing coverage count.
+// New cases are appended, never inserted: `CSSCalcSwiftSerializationResult::kindMask` is
+// `1 << rawValue`.
 enum class CSSCalcSwiftNodeKind : uint8_t {
     Number,
     Percentage,
@@ -80,39 +104,93 @@ enum class CSSCalcSwiftNodeKind : uint8_t {
     // `valueID` is the rounding strategy rather than the function name.
     RoundFunction,
     ProgressNoClampFunction,
-    // `clamp()` with one bound holding the keyword `none` -- the one argument in the tree that is
-    // not a child node, since `forAllChildNodes` skips a `ChildOrNone` holding `none`. Without
-    // these, `clamp(none, VAL, MAX)` would serialize as `clamp(VAL, MAX)`. Two kinds rather than a
-    // flag, so that an exhaustive `switch` is forced to decide. The both-`none` shape has a kind
-    // too, `ClampWithNoneMinimumAndMaximum` below -- appended there rather than placed here because
-    // these values are bit positions in `kindMask` and inserting one would relabel every kind after
-    // it.
+    // `clamp()` with one bound holding the keyword `none`, which `forAllChildNodes` skips. Without
+    // these, `clamp(none, VAL, MAX)` would serialize as `clamp(VAL, MAX)`.
     ClampWithNoneMinimum,
     ClampWithNoneMaximum,
-    // The four operations whose arguments are not a plain list of calculation trees; see
-    // `CSSCalcSwiftOperationInfo`. `childCount` counts `Child`s only, so `random()`'s
-    // `<random-key>`, `calc-mix()`'s per-item weights and `anchor()`'s keyword `<anchor-side>` are
-    // not in it.
+    // The four operations whose arguments are not all calculation trees; see
+    // `CSSCalcSwiftOperationInfo`. `childCount` counts only the `Child`s.
     RandomFunction,
     CalcMixFunction,
     AnchorFunction,
     AnchorSizeFunction,
-    // `clamp(none, VAL, none)`: both bounds hold the keyword, so `childCount` is 1 and the two
-    // `none`s are arguments the walk cannot see. Simplification rewrites this shape to `VAL`
-    // (`simplify(Clamp&)`), so it reaches serialization only on
-    // an unsimplified tree -- which is a reachable state, not a hypothetical one. Belongs beside the
-    // other two `ClampWithNone...` kinds and is here instead because the numbering is append-only.
+    // `clamp(none, VAL, none)`, which `simplify(Clamp&)` rewrites to `VAL`, so only an unsimplified
+    // tree serializes it.
     ClampWithNoneMinimumAndMaximum,
 };
 
-// `CSSCalcSwiftSerializationResult::kindMask` is `1 << rawValue` in a `uint32_t`, and Swift's shift
-// yields 0 for a count of 32 or more rather than trapping, so a kind at or past 32 would drop out of
-// every coverage count while every assertion over the mask still passed. Keyed on the last
-// enumerator, so appending one more than the mask can hold is a build failure.
+// Swift's `<<` yields 0 for a shift of 32 or more rather than trapping, so a kind past 31 would
+// silently drop out of `kindMask`.
 static_assert(static_cast<uint8_t>(CSSCalcSwiftNodeKind::ClampWithNoneMinimumAndMaximum) < 32, "kindMask is 1 << rawValue in a UInt32");
 
-// Everything the four operation kinds need that is neither a child subtree nor text. Each field is
-// meaningful only for the kinds that carry it, and the rest are inert rather than indeterminate.
+// Which of `CSSCalc::Node`'s variant alternatives a node is, numbered by `Node::index()`. `Node`'s
+// `Variant<...>` is generated from this list in CSSCalcTree.h, and each pairing is pinned with
+// `WTF::alternativeIndexV` in CSSCalcTree+Serialization.cpp, because `init?(rawValue:)` on an
+// imported C++ enum never fails.
+//
+// Split into FIRST and REST because a template argument list cannot carry a trailing comma.
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_FIRST(macro) \
+    macro(Number, Number)
+
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_REST(macro) \
+    macro(Percentage, Percentage) \
+    macro(CanonicalDimension, CanonicalDimension) \
+    macro(NonCanonicalDimension, NonCanonicalDimension) \
+    macro(Symbol, Symbol) \
+    macro(SiblingCount, SiblingCount) \
+    macro(SiblingIndex, SiblingIndex) \
+    macro(Sum, IndirectNode<Sum>) \
+    macro(Product, IndirectNode<Product>) \
+    macro(Negate, IndirectNode<Negate>) \
+    macro(Invert, IndirectNode<Invert>) \
+    macro(Deg2Rad, IndirectNode<Deg2Rad>) \
+    macro(Min, IndirectNode<Min>) \
+    macro(Max, IndirectNode<Max>) \
+    macro(Clamp, IndirectNode<Clamp>) \
+    macro(RoundNearest, IndirectNode<RoundNearest>) \
+    macro(RoundUp, IndirectNode<RoundUp>) \
+    macro(RoundDown, IndirectNode<RoundDown>) \
+    macro(RoundToZero, IndirectNode<RoundToZero>) \
+    macro(Mod, IndirectNode<Mod>) \
+    macro(Rem, IndirectNode<Rem>) \
+    macro(Sin, IndirectNode<Sin>) \
+    macro(Cos, IndirectNode<Cos>) \
+    macro(Tan, IndirectNode<Tan>) \
+    macro(Asin, IndirectNode<Asin>) \
+    macro(Acos, IndirectNode<Acos>) \
+    macro(Atan, IndirectNode<Atan>) \
+    macro(Atan2, IndirectNode<Atan2>) \
+    macro(Pow, IndirectNode<Pow>) \
+    macro(Sqrt, IndirectNode<Sqrt>) \
+    macro(Hypot, IndirectNode<Hypot>) \
+    macro(Log, IndirectNode<Log>) \
+    macro(Exp, IndirectNode<Exp>) \
+    macro(Abs, IndirectNode<Abs>) \
+    macro(Sign, IndirectNode<Sign>) \
+    macro(Random, IndirectNode<Random>) \
+    macro(Progress, IndirectNode<Progress>) \
+    macro(ProgressNoClamp, IndirectNode<ProgressNoClamp>) \
+    macro(CalcMix, IndirectNode<CalcMix>) \
+    macro(Anchor, IndirectNode<Anchor>) \
+    macro(AnchorSize, IndirectNode<AnchorSize>)
+
+#define CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(macro) \
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_FIRST(macro) \
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_REST(macro)
+
+enum class CSSCalcSwiftAlternative : uint8_t {
+#define CSS_CALC_SWIFT_DECLARE_ALTERNATIVE(name, type) name,
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_DECLARE_ALTERNATIVE)
+#undef CSS_CALC_SWIFT_DECLARE_ALTERNATIVE
+};
+
+// Held equal to `WTF::VariantSizeV<Node>` in CSSCalcTree+Serialization.cpp.
+#define CSS_CALC_SWIFT_COUNT_ALTERNATIVE(name, type) + 1
+static constexpr uint8_t numberOfCSSCalcSwiftAlternatives = 0 CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_COUNT_ALTERNATIVE);
+#undef CSS_CALC_SWIFT_COUNT_ALTERNATIVE
+
+// What the four operation kinds need beyond their child subtrees. A field a kind does not carry is
+// zero.
 struct CSSCalcSwiftOperationInfo {
     // `Anchor`: the `<anchor-side>` keyword. `AnchorSize`: the `<anchor-size>` dimension keyword.
     // `Random`: `property-scoped` or `property-index-scoped`. `CSSValueInvalid` otherwise.
@@ -125,48 +203,59 @@ struct CSSCalcSwiftOperationInfo {
     bool randomKeyIsElementScoped;
     bool randomKeyHasPropertyScope;
 
-    // When false, the `<anchor-side>` is a `<percentage>` subtree occupying child 0, which is what
-    // makes the fallback's index depend on this.
+    // When false, the `<anchor-side>` is a `<percentage>` subtree in child 0.
     bool anchorSideIsKeyword;
 
     bool hasElementName;
     bool hasDimension;
-    // Redundant with `childCount`, and kept so that a mismatch between the two is reported as a
-    // contract violation rather than writing an argument in the wrong position.
+    // Redundant with `childCount`, so that a mismatch is a contract violation rather than an
+    // argument written in the wrong position.
     bool hasFallback;
 };
 
-// One node, described. Each field is meaningful only for the kinds that carry it, and the rest are
-// inert (`CSSValueInvalid`, `CSSUnitType::Unknown`) rather than indeterminate.
+// One `calc-mix()` item's weight: absent, raw, or `Calc`. The spec's step 1 counts the absent
+// ones and `simplify(CalcMix&)`'s `canNormalize` rejects the `Calc` ones. `value` is zero unless
+// the weight is raw.
+struct CSSCalcSwiftCalcMixWeight {
+    double value;
+    bool present;
+    bool isRaw;
+};
+
+static_assert(sizeof(CSSCalcSwiftCalcMixWeight) == 16);
+
+// One node, described. A field a kind does not carry is `CSSValueInvalid`, `CSSUnitType::Unknown`
+// or zero.
 struct CSSCalcSwiftNodeInfo {
     double numericValue;
-    // Counts through `ChildOrNone` and `std::optional<Child>` exactly as `forAllChildNodes` does. A
-    // `ChildOrNone` holding `none` is not counted, which is why the two `ClampWithNone...` kinds
-    // exist: the count stays the number of subtrees to walk and the kind says where the keyword
-    // goes.
+    // Counts as `forAllChildNodes` does, so a `ChildOrNone` holding `none` is not counted.
     uint32_t childCount;
     uint16_t valueID;
-    // `toCSSUnit(node)` for a numeric leaf.
+    // `toCSSUnit(node)` for a numeric leaf, and `Symbol::unit` for a `Symbol`: `simplify(Symbol&)`
+    // takes the value from `CSSCalcSymbolTable` and the unit from the node.
     uint8_t unitType;
     CSSCalcSwiftNodeKind kind;
+    // `Type::PercentHint`'s underlying value, 0 for none.
+    uint8_t percentHint;
+    CSSCalcSwiftAlternative alternative;
+    // An `anchor()` whose `<anchor-side>` is a subtree: child 0 is the side and the fallback, if
+    // any, is child 1.
+    bool anchorSideIsSubtree;
 };
 
 // MARK: - Reading a node
 //
-// A `const Child&` parameter is safe to Swift where a `const Child&` return is not -- only the
-// return position imports as `UnsafePointer`. That is what lets `Child` stay incomplete here.
+// `Child` is taken as a `const Child&` parameter, never returned: only a return imports as
+// `UnsafePointer`.
 WEBCORE_EXPORT CSSCalcSwiftNodeInfo swiftNodeInfo(const Child&) noexcept;
 WEBCORE_EXPORT CSSCalcSwiftOperationInfo swiftOperationInfo(const Child&) noexcept;
+WEBCORE_EXPORT CSSCalcSwiftCalcMixWeight swiftCalcMixItemWeight(const Child&, uint32_t index) noexcept;
 
-// Where the serialization output goes. Number formatting must stay an upcall: Swift's
-// `Double.description` is shortest-round-trip and CSS number serialization is a different
-// algorithm, so a Swift reimplementation would diverge on subnormals and 17-significant-digit
-// values.
+// Where the serialization output goes. Numbers are formatted in C++, because CSS number
+// serialization is not Swift's shortest-round-trip `Double.description`.
 //
-// `SWIFT_SAFE` is an unchecked assertion that the two raw pointers below are safely encapsulated,
-// and it is what keeps every Swift use of this type free of an `unsafe` marker. It holds only while
-// no Swift type declares a stored property of this type: every Swift signature naming it takes it
-// `inout`, and an `inout` argument cannot be captured by an escaping closure.
+// `SWIFT_SAFE` is an unchecked assertion about the two raw pointers below. It holds only while no
+// Swift type stores one of these: every Swift signature takes it `inout`, which cannot escape.
 struct SWIFT_SAFE CSSCalcSwiftSink {
     CSSCalcSwiftSink(WTF::StringBuilder& builder LIFETIME_BOUND, const CSS::SerializationContext& context LIFETIME_BOUND) noexcept
         : m_builder(&builder)
@@ -174,21 +263,16 @@ struct SWIFT_SAFE CSSCalcSwiftSink {
     {
     }
 
-    // One entry for every fixed spelling, selected by `CSSCalcSwiftLiteral`, so that no text crosses
-    // the boundary and there is exactly one copy of every CSS literal in the program. `uint8_t`
-    // rather than the imported enum type, because this header is what the generated header is
-    // generated from and cannot see the Swift enum's C name.
+    // A `CSSCalcSwiftLiteral`, a Swift enum this header cannot name: the generated header that
+    // declares it depends on this one.
     WEBCORE_EXPORT void appendLiteral(uint8_t literal) noexcept;
 
     WEBCORE_EXPORT void appendNumber(double value, uint8_t unitType) noexcept;
 
-    // `nameLiteralForSerialization(CSSValueID)`. C++ owns the table, which is generated and must not
-    // be transcribed.
+    // `nameLiteralForSerialization(CSSValueID)`.
     WEBCORE_EXPORT void appendValueIDName(uint16_t valueID) noexcept;
 
-    // Arguments that are CSS values rather than calculation trees. Routing them through
-    // `appendNumber` would mean deciding in Swift that they are plain doubles in a known unit, a
-    // claim about types Swift cannot see.
+    // Arguments that are CSS values rather than calculation trees, serialized by their own C++ types.
     WEBCORE_EXPORT void appendOperationArgument(const Child&, uint8_t part, uint32_t index) noexcept;
 
 private:
@@ -196,15 +280,164 @@ private:
     const CSS::SerializationContext* m_context;
 };
 
-// What the serialization walk did. `nodeCount` and `kindMask` make a fallback to the C++
-// serializer observable, which the serialized output alone cannot.
+// What the serialization walk did.
 struct CSSCalcSwiftSerializationResult {
     // Bit `1 << rawValue` for each CSSCalcSwiftNodeKind the walk stood on.
     uint32_t kindMask;
     uint32_t nodeCount;
-    // 0 = serialized, 1 = declined. Not a `bool`, so a third outcome is not an ABI change; the
-    // numbering is pinned by static_assert against the Swift enum.
+    // 0 = serialized, 1 = handed back. Pinned by static_assert against the Swift enum.
     uint8_t outcome;
+};
+
+// MARK: - The Swift calc simplification path (CSSCalcSimplificationSwift.swift)
+
+// A leaf to build. `makeNumeric` recovers `CanonicalDimension::Dimension` from `unitType`.
+struct CSSCalcSwiftLeaf {
+    double value;
+    uint16_t unitType;
+    // A `CSSCalcSwiftNodeKind`: one of the four numeric leaves, the two tree-counting ones, or
+    // `Symbol`.
+    uint8_t kind;
+    uint8_t percentHint;
+    // `Symbol::id`; `CSSValueInvalid` for every other kind.
+    uint16_t valueID;
+};
+static_assert(sizeof(CSSCalcSwiftLeaf) == 16);
+
+// A `double` and a `CSSUnitType`, or nothing: one type for both of the builder's lookups.
+struct CSSCalcSwiftNumericResult {
+    double value;
+    // For `resolveSymbol`, `toCSSUnit` of the leaf `makeNumeric` built, so that passing it back to
+    // `pushLeaf` builds the same alternative.
+    uint16_t unitType;
+    // False means "no answer", not an error: an unresolved `<calc-keyword>` or a `1em` with no
+    // conversion data stays as it is.
+    bool resolved;
+    // Reported so that `makeNumeric`'s unit table is not duplicated in Swift.
+    CSSCalcSwiftAlternative alternative;
+
+    // For `anchor()` and `anchor-size()`: the evaluation answered nothing, so the node is replaced
+    // by its fallback, or the property is invalid at computed-value time if it has none. Mutually
+    // exclusive with `resolved`.
+    bool substituteFallback;
+};
+
+static_assert(sizeof(CSSCalcSwiftNumericResult) == 16);
+
+// The parts of `CSSCalc::SimplificationOptions` Swift reads, each reduced to a trivial type.
+struct CSSCalcSwiftSimplificationOptions {
+    double rangeMinimum;
+    double rangeMaximum;
+    // `CSS::Category`'s underlying value. Not read by Swift.
+    uint8_t category;
+    bool allowZeroValueLengthRemovalFromSum;
+    bool hasConversionData;
+    // `percentageResolveToDimension(options)`.
+    bool percentageResolveToDimension;
+};
+
+// MARK: - Building the result tree
+
+// "No payload" and "no such node". No tree or payload table is large enough to reach it.
+static constexpr uint32_t cssCalcSwiftFlatNoNode = UINT32_MAX;
+
+// Where the Swift simplifier's output goes: an operand stack. Swift emits its tree post-order,
+// pushing each finished leaf; an operation pops the operands it consumes and pushes one node. No
+// Swift container ever holds a `Child`.
+//
+// `SWIFT_SAFE` is an unchecked assertion, as on `CSSCalcSwiftSink`. This type is also taken by
+// value, so it holds only while every copy stays a parameter of the same recursion. The operand
+// stack and root slot are fresh C++ storage, not reachable from the input tree.
+struct SWIFT_SAFE CSSCalcSwiftBuilder {
+    CSSCalcSwiftBuilder(CSSCalcSwiftOperandStack& operands LIFETIME_BOUND, const SimplificationOptions& options LIFETIME_BOUND) noexcept
+        : m_operands(&operands)
+        , m_options(&options)
+    {
+    }
+
+    // `isRoot` on the entries below constructs the node into the root slot rather than onto the
+    // operand stack. With no root slot provided it pushes.
+
+    // Returns false, a contract violation, for a `kind` `CSSCalcSwiftLeaf::kind` does not allow.
+    WEBCORE_EXPORT bool pushLeaf(CSSCalcSwiftLeaf, bool isRoot = false) noexcept;
+
+    // Push a deep copy of an input subtree, made by `CSSCalc::copy(const Child&)`.
+    WEBCORE_EXPORT void pushCopyOf(const Child&, bool isRoot = false) noexcept;
+
+    // Pop `childCount` operands and push one node of `original`'s operation, with `original`'s type.
+    // A `Children` slot takes all the operands, so its arity may change; every other slot takes one
+    // or none.
+    //
+    // Returns false for a contract violation: too few operands, a mismatched arity, or a leaf.
+    // `Anchor` and `AnchorSize` declare `tuple_size` 0 (webkit.org/b/280798) and are rebuilt by
+    // `rebuildChildren`.
+    WEBCORE_EXPORT bool rebuildFrom(const Child& original, uint32_t childCount, bool isRoot = false) noexcept;
+
+    // Push the weight of the next `calc-mix()` item. A `calc-mix()` consumes the top `childCount` of
+    // both the operand and the weight stacks.
+    //
+    // For `rebuildFrom`, `replaceWeight` clear means "original item `origin`'s weight, unchanged",
+    // which is how `simplify(CalcMix&)`'s `!canNormalize` path drops items while keeping the
+    // survivors' weights. For `buildOperation`, which has no original, clear means an omitted weight.
+    //
+    // A `payloadIndex` other than `cssCalcSwiftFlatNoNode` names a `Calc` weight in the payload table
+    // and takes precedence over the other arguments. Returns false only for a `payloadIndex` that
+    // names no payload, a contract violation.
+    WEBCORE_EXPORT bool pushCalcMixItemWeight(uint32_t origin, double weight, bool replaceWeight, uint32_t payloadIndex = cssCalcSwiftFlatNoNode) noexcept;
+
+    // Pop `childCount` operands and push a new node of `alternative`, for a node with no original
+    // to rebuild from, and for `clamp()` rewritten to `min()` or `max()`.
+    //
+    // `Type` is supplied rather than recomputed, because `copyAndSimplify` keeps a node's type when
+    // its kind does not change: `calc((2 / 3px) * 4px)` keeps its parse-time type, where `toType`
+    // of the surviving `Product{6px, 4px}` is px^2.
+    //
+    // `noneMask` bit 0 means the minimum bound is `none`, bit 1 the maximum; `clamp(none, V, M)`
+    // and `clamp(M, V, none)` both push two operands.
+    //
+    // Returns false, leaving the stack untouched, for a contract violation: an alternative this does
+    // not build, a mismatched arity, or too few operands.
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false, uint8_t noneMask = 0) noexcept;
+
+    // Drop every operand, after an emit that stopped half way.
+    WEBCORE_EXPORT void clearOperands() noexcept;
+
+    // `simplify(Symbol&)`: `makeNumeric(options.symbolTable.get(id)->value, unit)`, with the
+    // node's unit; see `CSSCalcSwiftNodeInfo::unitType`.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveSymbol(uint16_t valueID, uint16_t unit) const noexcept;
+
+    // `canonicalize`'s `tryMakeCanonical`, for the lengths that need `CSSToLengthConversionData`.
+    // The Swift `switch` calls this as its `default` case, so the set is not duplicated.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const noexcept;
+
+    // `simplify`'s `Style::BuilderState` folds of `sibling-count()`, `sibling-index()`, `random()`,
+    // `anchor()` and `anchor-size()`, dispatched on the node's variant tag. `resolved == false` is
+    // the C++'s `std::nullopt`. The anchor answers are a `CanonicalDimension` and alone use
+    // `substituteFallback`; the others are a `<number>`.
+    //
+    // This may mark the property invalid at computed-value time. The mark has no clear, so a
+    // repeated call is harmless.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const Child&) const noexcept;
+
+private:
+    // The payload `index` names, or null for no table, an index out of range, or a payload that is
+    // not a `T`. Each is a contract violation, and callers refuse rather than substitute a default.
+    template<typename T> const T* payloadFor(uint32_t index) const noexcept;
+
+    CSSCalcSwiftOperandStack* m_operands;
+    const SimplificationOptions* m_options;
+};
+
+// What the simplification walk did.
+struct CSSCalcSwiftSimplificationResult {
+    // Bit `1 << rawValue` for each `CSSCalcSwiftAlternative` the walk stood on. Keyed on the
+    // alternative because `min()` and `mod()` share a `CSSCalcSwiftNodeKind`.
+    uint64_t kindMask;
+    uint32_t nodeCount;
+    // 0 = simplified, 1 = handed back. Pinned by static_assert in CSSCalcTree+Simplification.cpp.
+    uint8_t outcome;
+    // The `CSSCalcSwiftAlternative` that stopped the walk, or 0xFF.
+    uint8_t declineAlternative;
 };
 
 } // namespace CSSCalc

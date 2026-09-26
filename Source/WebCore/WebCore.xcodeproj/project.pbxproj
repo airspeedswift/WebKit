@@ -76,6 +76,7 @@
 		DEADBEEF0000000000000112 /* CSSParserFastPathsSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000111 /* CSSParserFastPathsSwift.swift */; };
 		DEADBEEF0000000000000122 /* CSSCalcSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000121 /* CSSCalcSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DEADBEEF0000000000000132 /* CSSCalcSerializationSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000131 /* CSSCalcSerializationSwift.swift */; };
+		DEADBEEF0000000000000134 /* CSSCalcSimplificationSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000133 /* CSSCalcSimplificationSwift.swift */; };
 		DEADBEEF0000000000000162 /* WebCoreSwiftBoundaryTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000161 /* WebCoreSwiftBoundaryTypes.h */; };
 		0014628B103CD1DE000B20DB /* OriginAccessEntry.h in Headers */ = {isa = PBXBuildFile; fileRef = 00146289103CD1DE000B20DB /* OriginAccessEntry.h */; };
 		003F1FEA11E6AB43008258D9 /* UserContentTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 003F1FE911E6AB43008258D9 /* UserContentTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -482,6 +483,7 @@
 		0F6383DE18615B29003E5DB5 /* ThreadedScrollingTree.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6383DC18615B29003E5DB5 /* ThreadedScrollingTree.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F6A12BE1A00923700C6DE72 /* DebugPageOverlays.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6A12BC1A00923700C6DE72 /* DebugPageOverlays.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BEE7501000000000000000B2 /* CSSUnitType.h in Headers */ = {isa = PBXBuildFile; fileRef = BEE7501000000000000000B1 /* CSSUnitType.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		BEE7501000000000000000D2 /* CSSUnitConversions.h in Headers */ = {isa = PBXBuildFile; fileRef = BEE7501000000000000000D1 /* CSSUnitConversions.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F6B707A237BC36D0052CA47 /* CSSUnits.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F6B7077237BC12F0052CA47 /* CSSUnits.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F73B769222B3A0C00805316 /* ScrollingTreeOverflowScrollingNodeMac.h in Headers */ = {isa = PBXBuildFile; fileRef = 0FC0516A219B5EBE0031C39E /* ScrollingTreeOverflowScrollingNodeMac.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F768C2D26D03841008DBE0B /* UserMediaRequestIdentifier.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F768C2B26D03841008DBE0B /* UserMediaRequestIdentifier.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -5143,6 +5145,7 @@
 		BA6920702E0E93A80014E98A /* SpeculationRulesMatcher.h in Headers */ = {isa = PBXBuildFile; fileRef = BA69206E2E0E939C0014E98A /* SpeculationRulesMatcher.h */; };
 		BA96836B2E8FDAA30035D494 /* LoadableSpeculationRules.h in Headers */ = {isa = PBXBuildFile; fileRef = BA9683692E8FDA9A0035D494 /* LoadableSpeculationRules.h */; };
 		BC000BE72C6011020033AA75 /* CSSCalcTree.h in Headers */ = {isa = PBXBuildFile; fileRef = BC000BDB2C5A9D4F0033AA75 /* CSSCalcTree.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		BCEEF6762C6A865C00468D58 /* CSSCalcTree+NumericIdentity.h in Headers */ = {isa = PBXBuildFile; fileRef = BCEEF6752C6A865C00468D58 /* CSSCalcTree+NumericIdentity.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC000BE82C60110B0033AA75 /* CSSCalcType.h in Headers */ = {isa = PBXBuildFile; fileRef = BC000BD82C5A96850033AA75 /* CSSCalcType.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC00F0150E0A189500FD04E3 /* JSFile.h in Headers */ = {isa = PBXBuildFile; fileRef = BC00F0110E0A189500FD04E3 /* JSFile.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC00F0170E0A189500FD04E3 /* JSFileList.h in Headers */ = {isa = PBXBuildFile; fileRef = BC00F0130E0A189500FD04E3 /* JSFileList.h */; };
@@ -7876,6 +7879,7 @@
 		DEADBEEF0000000000000111 /* CSSParserFastPathsSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/parser/CSSParserFastPathsSwift.swift; sourceTree = "<group>"; };
 		DEADBEEF0000000000000121 /* CSSCalcSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = css/calc/CSSCalcSwiftTypes.h; sourceTree = "<group>"; };
 		DEADBEEF0000000000000131 /* CSSCalcSerializationSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/calc/CSSCalcSerializationSwift.swift; sourceTree = "<group>"; };
+		DEADBEEF0000000000000133 /* CSSCalcSimplificationSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = css/calc/CSSCalcSimplificationSwift.swift; sourceTree = "<group>"; };
 		DEADBEEF0000000000000161 /* WebCoreSwiftBoundaryTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = WebCoreSwiftBoundaryTypes.h; sourceTree = "<group>"; };
 		00146288103CD1DE000B20DB /* OriginAccessEntry.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = OriginAccessEntry.cpp; sourceTree = "<group>"; };
 		00146289103CD1DE000B20DB /* OriginAccessEntry.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = OriginAccessEntry.h; sourceTree = "<group>"; };
@@ -8630,6 +8634,7 @@
 		0F6A12BB1A00923700C6DE72 /* DebugPageOverlays.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = DebugPageOverlays.cpp; sourceTree = "<group>"; };
 		0F6A12BC1A00923700C6DE72 /* DebugPageOverlays.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DebugPageOverlays.h; sourceTree = "<group>"; };
 		BEE7501000000000000000B1 /* CSSUnitType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSUnitType.h; sourceTree = "<group>"; };
+		BEE7501000000000000000D1 /* CSSUnitConversions.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSUnitConversions.h; sourceTree = "<group>"; };
 		0F6B7077237BC12F0052CA47 /* CSSUnits.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSUnits.h; sourceTree = "<group>"; };
 		0F6B7079237BC12F0052CA47 /* CSSUnits.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CSSUnits.cpp; sourceTree = "<group>"; };
 		0F6EAD6626FE728000064D03 /* ScrollAnimation.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ScrollAnimation.cpp; sourceTree = "<group>"; };
@@ -42636,6 +42641,7 @@
 				71DB0FD829007C750071AC42 /* CSSTransformListValue.h */,
 				371F53E80D2704F900ECE0D5 /* CSSUnicodeRangeValue.cpp */,
 				371F53E70D2704F900ECE0D5 /* CSSUnicodeRangeValue.h */,
+				BEE7501000000000000000D1 /* CSSUnitConversions.h */,
 				0F6B7079237BC12F0052CA47 /* CSSUnits.cpp */,
 				0F6B7077237BC12F0052CA47 /* CSSUnits.h */,
 				BEE7501000000000000000B1 /* CSSUnitType.h */,
@@ -45496,6 +45502,7 @@
 				DEADBEEF0000000000000122 /* CSSCalcSwiftTypes.h in Headers */,
 				BC3301312BEC1AA700A2A878 /* CSSCalcSymbolsAllowed.h in Headers */,
 				BC709DE0266323CF00B9A21C /* CSSCalcSymbolTable.h in Headers */,
+				BCEEF6762C6A865C00468D58 /* CSSCalcTree+NumericIdentity.h in Headers */,
 				BC000BE72C6011020033AA75 /* CSSCalcTree.h in Headers */,
 				BC000BE82C60110B0033AA75 /* CSSCalcType.h in Headers */,
 				49AE2D8F134EE50C0072920A /* CSSCalcValue.h in Headers */,
@@ -45699,6 +45706,7 @@
 				1EE518E5ED7854C9B3BB1291 /* CSSTypeSpecifier.h in Headers */,
 				BCB272002CC1EB8B00265123 /* CSSUnevaluatedCalc.h in Headers */,
 				371F53E90D2704F900ECE0D5 /* CSSUnicodeRangeValue.h in Headers */,
+				BEE7501000000000000000D2 /* CSSUnitConversions.h in Headers */,
 				0F6B707A237BC36D0052CA47 /* CSSUnits.h in Headers */,
 				BEE7501000000000000000B2 /* CSSUnitType.h in Headers */,
 				4BAFD0E1219242A000C0AB64 /* CSSUnitValue.h in Headers */,
@@ -51660,6 +51668,7 @@
 				463642A729687D53003D43F2 /* CoreHapticsSoftLink.mm in Sources */,
 				46C696CC1E7205FC00597937 /* CPUMonitor.cpp in Sources */,
 				DEADBEEF0000000000000132 /* CSSCalcSerializationSwift.swift in Sources */,
+				DEADBEEF0000000000000134 /* CSSCalcSimplificationSwift.swift in Sources */,
 				DEADBEEF0000000000000112 /* CSSParserFastPathsSwift.swift in Sources */,
 				BEE7501000000000000000C2 /* CSSParserTokenBitsSwift.swift in Sources */,
 				1ABA76CA11D20E50004C201C /* CSSPropertyNames.cpp in Sources */,

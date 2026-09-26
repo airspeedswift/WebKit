@@ -9,6 +9,7 @@ framework module WebCore_Private [system] {
     // the calc boundary reach the tokenizer's types.
     explicit module CSSUnitsSwiftTypes {
         header "CSSUnitType.h"
+        header "CSSUnitConversions.h"
         requires cplusplus
         export *
     }
@@ -22,9 +23,31 @@ framework module WebCore_Private [system] {
         export *
     }
 
-    // The boundary module for calc() serialization.
+    // The boundary module for calc() serialization and simplification.
     explicit module CSSCalcSwiftTypes {
         header "CSSCalcSwiftTypes.h"
+        requires cplusplus
+        export *
+    }
+
+    // `CSSCalc::Type`, whose algebra (`multiply`, `invert`, `calculationCategory`,
+    // `determinePercentHint`) Swift calls. CSSCalcType.h includes only `<array>`, `<optional>` and
+    // `<wtf/Forward.h>`.
+    //
+    // Swift must spell it ``WebCore.CSSCalc.`Type` ``: the bare name parses as the namespace
+    // enum's metatype, and the diagnostic ("type 'WebCore.CSSCalc' has no member 'length'") does
+    // not name the cause.
+    explicit module CSSCalcTypeSwiftTypes {
+        header "CSSCalcType.h"
+        requires cplusplus
+        export *
+    }
+
+    // `CSS::Category`, which `Type::determinePercentHint` takes and `Type::calculationCategory`
+    // returns. Its own submodule because CSSPrimitiveNumericCategory.h is general WebCore
+    // vocabulary, included by hundreds of headers.
+    explicit module CSSPrimitiveNumericCategorySwiftTypes {
+        header "CSSPrimitiveNumericCategory.h"
         requires cplusplus
         export *
     }
@@ -57,7 +80,10 @@ framework module WebCore_Private [system] {
         exclude header "CSSTokenizerSwiftTypes.h"
         exclude header "CSSParserTokenBits.h"
         exclude header "CSSUnitType.h"
+        exclude header "CSSUnitConversions.h"
         exclude header "CSSCalcSwiftTypes.h"
+        exclude header "CSSCalcType.h"
+        exclude header "CSSPrimitiveNumericCategory.h"
 
         module * {
             export *
