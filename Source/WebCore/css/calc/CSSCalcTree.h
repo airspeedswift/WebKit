@@ -238,21 +238,99 @@ using Node = Variant<
     IndirectNode<AnchorSize>
 >;
 
+// Size and alignment of `Node`, so that the Swift-facing stand-in for `Child::value` below can be
+// declared without naming `Node` at all. Asserted against the real type in the branch that can see
+// it; if an alternative ever grows, the assert fires here rather than two views of a live `Child`
+// silently disagreeing on its layout.
+inline constexpr size_t nodeStorageSize = 24;
+inline constexpr size_t nodeStorageAlignment = 8;
+
+// `Child::value` is hidden from Swift's Clang importer, and same-size opaque storage stands in for
+// it, for the same reason `Children`'s storage is hidden below: a pointer reachable through a data
+// member makes the enclosing type unsafe under -strict-memory-safety, and the unsafety propagates
+// to everything containing it. Here the pointer is one level down -- each `IndirectNode<Op>`
+// alternative holds a `UniqueRef<Op>` -- so without this, every use of a `Child` from Swift needs
+// an `unsafe` marker. Making the member private would not help; WebCore's Swift step passes
+// -enable-experimental-feature ImportNonPublicCxxMembers.
+//
+// This is not rdar://186742920, which is the importer odr-using a variant member's destructor over
+// incomplete alternatives: that applies to `std::variant` and not to `WTF::Variant`, which is a
+// vendored MPark.Variant and imports cleanly.
+//
+// Swift does not need the layout. It reaches the payload through the accessors and never touches
+// the storage, so the stand-in costs nothing at runtime and needs no `unsafe` marker.
+//
+// The template constructor has to be on this side of the `#if` whatever the importer would have
+// done with it, because its constraint names `Node`. Swift never constructs a `Child`, and an
+// unspecialized function template does not import as a usable generic API in any case
+// (rdar://151479317).
+//
+// `FORWARD_VARIANT_FUNCTIONS` likewise expands to member templates over `value`, so it is hidden
+// too. None of this changes anything a C++ caller sees: `__swift__` is defined only when the Clang
+// importer is parsing the header.
 struct Child {
+#if !defined(__swift__)
     Node value;
 
     template<typename T>
         requires std::constructible_from<Node, T>
     Child(T&&);
+#else
+    alignas(nodeStorageAlignment) unsigned char storage[nodeStorageSize];
+#endif
 
+    // Deleted so that Swift cannot synthesize one. For C++ this changes nothing: the user-declared
+    // move constructor below already suppresses the implicit default constructor, so `Child()` is
+    // ill-formed either way and only the diagnostic changes.
+    //
+    // The Clang importer otherwise hands Swift a zero-argument `init()` for an imported C++ class
+    // even when the class has no default constructor, and that initializer zero-fills the backing
+    // storage: here, a `Node` variant whose alternative 0 is `Number`. It is deprecated, but the
+    // diagnostic is not in any `-Werror` group WebKit's Swift step passes, and
+    // `-strict-memory-safety` does not reject it either.
+    //
+    // Swift reaches a `Child` only by borrowing one from a tree the C++ built. With this line, a
+    // `Child` that Swift invents is a build error rather than a zero-filled `Number` the serializer
+    // would walk.
+    Child() = delete;
     Child(Child&&);
     Child& operator=(Child&&);
     ~Child();
 
+    // MARK: The direct children of this node, by count and by index.
+    //
+    // The same set `forAllChildNodes` yields: a `ChildOrNone` holding the keyword and an absent
+    // `std::optional<Child>` are not children, and `Anchor`/`AnchorSize` are answered for by hand
+    // because they declare `tuple_size` 0 (see the FIXME at webkit.org/b/280798 below). One
+    // implementation serves both, so the count and the indices cannot disagree.
+    //
+    // Both are O(1) in the child count -- they walk the tuple SLOTS, of which the widest operation
+    // has four -- so reading a node's children one at a time is linear rather than quadratic.
+    //
+    // `operator[]` rather than a named accessor, because Swift's Clang importer maps `operator[]`
+    // to a `subscript` and `operator*` to `pointee`, and those two spellings alone yield a checked
+    // borrow of a non-copyable C++ type. The identical signature under any other name -- including
+    // with `[[clang::lifetimebound]]` or `swift_attr("@lifetime(borrow self)")` -- imports as
+    // `UnsafePointer<Child>` and is rejected under -strict-memory-safety. Only these two names,
+    // because `pointee` and `subscript` are synthesized as address accessors (rdar://108773658);
+    // extending borrow accessors to other imported C++ methods is rdar://140443562. Renaming this to
+    // a plain member would compile in C++ and remove the Swift code's only safe route into the tree.
+    size_t childCount() const;
+    const Child& operator[](size_t index) const LIFETIME_BOUND;
+
+#if !defined(__swift__)
     FORWARD_VARIANT_FUNCTIONS(Child, value)
+#endif
 
     bool operator==(const Child&) const;
 };
+
+#if !defined(__swift__)
+static_assert(sizeof(Node) == nodeStorageSize, "Child's Swift-facing stand-in storage is the wrong size");
+static_assert(alignof(Node) == nodeStorageAlignment, "Child's Swift-facing stand-in storage is the wrong alignment");
+static_assert(sizeof(Child) == nodeStorageSize, "Child holds more than the Node the stand-in accounts for");
+static_assert(alignof(Child) == nodeStorageAlignment, "Child is aligned more strictly than the stand-in");
+#endif
 
 struct ChildOrNone {
     Variant<Child, CSS::Keyword::None> value;
@@ -265,7 +343,22 @@ struct ChildOrNone {
     bool operator==(const ChildOrNone&) const = default;
 };
 
+// `Children`'s storage is hidden from the importer for a different reason than `Child`'s, and one
+// that is easy to miss: a raw pointer data member makes the whole enclosing type unsafe under
+// -strict-memory-safety even when nothing in Swift touches it, and the unsafety propagates, so
+// every operation holding a `Children` -- Sum, Product, Min, Max, and the twelve others -- becomes
+// unsafe by containment. `WTF::Vector`'s buffer is a raw pointer, so `value` is exactly that case.
+// (WebCore's Swift step passes -enable-experimental-feature ImportNonPublicCxxMembers, so making
+// the member private would not help either.)
+//
+// The iterator typedefs and the begin/end family go with it: they name `Vector<Child>::iterator`,
+// which is `Child*`, and a pointer-returning accessor is an `unsafe` surface in its own right.
+// Swift reaches elements through `size()` and `operator[]` instead.
+inline constexpr size_t childrenStorageSize = 16;
+inline constexpr size_t childrenStorageAlignment = 8;
+
 struct Children {
+#if !defined(__swift__)
     using iterator = typename Vector<Child>::iterator;
     using reverse_iterator = typename Vector<Child>::reverse_iterator;
     using const_iterator = typename Vector<Child>::const_iterator;
@@ -286,6 +379,9 @@ struct Children {
     const_iterator end() const LIFETIME_BOUND;
     const_reverse_iterator rbegin() const LIFETIME_BOUND;
     const_reverse_iterator rend() const LIFETIME_BOUND;
+#else
+    alignas(childrenStorageAlignment) unsigned char storage[childrenStorageSize];
+#endif
 
     bool isEmpty() const;
     size_t size() const;
@@ -293,8 +389,15 @@ struct Children {
     Child& operator[](size_t i) LIFETIME_BOUND;
     const Child& operator[](size_t i) const LIFETIME_BOUND;
 
+#if !defined(__swift__)
     bool operator==(const Children&) const = default;
+#endif
 };
+
+#if !defined(__swift__)
+static_assert(sizeof(Children) == childrenStorageSize, "Children's Swift-facing stand-in storage is the wrong size");
+static_assert(alignof(Children) == childrenStorageAlignment, "Children's Swift-facing stand-in storage is the wrong alignment");
+#endif
 
 enum class Stage : bool { Specified, Computed };
 
@@ -1262,12 +1365,16 @@ template<size_t I> const auto& get(const CalcMix& root)
 
 // MARK: Child Definition
 
+// Hidden alongside the declaration: this names both `Node` and `value`, neither of which exists
+// on the importer's side of the `#if` above.
+#if !defined(__swift__)
 template<typename T>
     requires std::constructible_from<Node, T>
 Child::Child(T&& value)
     : value(std::forward<T>(value))
 {
 }
+#endif
 
 } // namespace CSSCalc
 } // namespace WebCore

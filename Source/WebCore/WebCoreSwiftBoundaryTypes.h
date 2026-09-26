@@ -29,21 +29,22 @@
 // any translation unit that calls into Swift, rather than WebCoreSwift-Generated.h directly.
 //
 // WebCoreSwift-Generated.h is emitted once for the whole module, so a translation unit including
-// it must see every boundary's types, and a missing one fails the build in whichever translation
-// unit includes the generated header, naming a type that unit never uses. A new boundary's headers
-// are added here.
+// it must see every boundary's types. Leave out CSSCalcSwiftTypes.h and the thunk for
+// cssCalcSerializeSwift fails with "no member named 'CSSCalcSwiftSink' in namespace
+// 'WebCore::CSSCalc'" in a file unrelated to calc(). A new boundary's headers are added here.
 //
 // A Project header, not a Private one: WebCore_Private.modulemap's `Core` module is
 // `umbrella "PrivateHeaders"`, so an installed copy would be swept into `Core`, which excludes
 // the boundary headers below because each has its own `explicit module`.
 
+#include "CSSCalcSwiftTypes.h"
 #include "CSSTokenizerSwiftTypes.h"
 #include <wtf/Compiler.h>
 
 // FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops
 // handing C++ the Objective-C spelling. Under C++ it expands
-// `typedef SWIFT_ENUM(uint8_t, CSSBlockTypeSwift, closed) {` to
-// `enum CSSBlockTypeSwift : uint8_t CSSBlockTypeSwift;`, which only Objective-C accepts, and
+// `typedef SWIFT_ENUM(uint8_t, CSSCalcSwiftOutcome, closed) {` to
+// `enum CSSCalcSwiftOutcome : uint8_t CSSCalcSwiftOutcome;`, which only Objective-C accepts, and
 // -Welaborated-enum-base is fatal under -Werror. JSC_CF_ENUM (JavaScriptCore's API/JSBase.h)
 // shows the fix: branch on `__cplusplus` and emit the plain `enum X : T { ... }`.
 IGNORE_CLANG_WARNINGS_BEGIN("elaborated-enum-base")
