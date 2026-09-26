@@ -25,6 +25,7 @@
 #pragma once
 
 #include "CSSPrimitiveNumericRange.h"
+#include <cstdint>
 #include <wtf/Forward.h>
 
 namespace WebCore {
@@ -46,15 +47,29 @@ struct SerializationOptions {
     const CSS::SerializationContext& serializationContext;
 };
 
+// Whether the C++ serializer is compiled in: exactly when the Swift CSS implementation is not
+// (WK_USE_SWIFT_CSS). There is one serializer in any build, and nothing chooses between them.
+#if USE(SWIFT_CSS)
+#define CSS_CALC_CPP_SERIALIZER_COMPILED_IN 0
+#else
+#define CSS_CALC_CPP_SERIALIZER_COMPILED_IN 1
+#endif
+
 // https://drafts.csswg.org/css-values-4/#serialize-a-math-function
 void serializationForCSS(StringBuilder&, const Tree&, const SerializationOptions&);
 String serializationForCSS(const Tree&, const SerializationOptions&);
 
+#if CSS_CALC_CPP_SERIALIZER_COMPILED_IN
+// These two overloads have no caller anywhere in WebCore; every production path goes through the
+// `Tree` overloads above.
 void serializationForCSS(StringBuilder&, const Child&, const SerializationOptions&);
 String serializationForCSS(const Child&, const SerializationOptions&);
+#endif
 
-// Serializes a `<calc-sum>` as a math function argument, omitting the grouping parentheses.
+// Serializes a `<calc-sum>` as a math function argument, omitting the grouping parentheses. Same
+// `Serializer` selection as the two entry points above, and for the same reason.
 void serializationForCSSAsFunctionArgument(StringBuilder&, const Tree&, const SerializationOptions&);
+
 
 } // namespace CSSCalc
 } // namespace WebCore
