@@ -2474,6 +2474,48 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveStyleCoupledValue(const Ch
     return unresolvedNumber;
 }
 
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveCalcMixItemWeight(const Child& node, uint32_t index) const noexcept
+{
+    // `evaluate(const IndirectNode<CalcMix>&)`'s guard.
+    if (!m_options->conversionData || !m_options->conversionData->styleBuilderState())
+        return unresolvedNumber;
+
+    // Not a `calc-mix()`, or an item past its end: a contract violation, not an omitted weight.
+    auto* calcMix = get_if<IndirectNode<CalcMix>>(&node);
+    if (!calcMix || index >= (*calcMix)->children.size())
+        return unresolvedNumber;
+
+    auto& weight = (*calcMix)->children[index].weight;
+    if (!weight)
+        return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = true, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = true };
+
+    // `evaluate(CalcMix)`'s conversion, which clamps a raw weight and evaluates a `Calc` one.
+    CheckedPtr builderState = m_options->conversionData->styleBuilderState();
+    return resolvedNumber(Style::toStyle(*weight, *builderState).value);
+}
+
+bool CSSCalcSwiftBuilder::hasStyleBuilderState() const noexcept
+{
+    return m_options->conversionData && m_options->conversionData->styleBuilderState();
+}
+
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRandomBaseValueForEvaluation(const Child& node) const noexcept
+{
+    auto* random = get_if<IndirectNode<Random>>(&node);
+    if (!random || !hasStyleBuilderState())
+        return unresolvedNumber;
+    CheckedPtr builderState = m_options->conversionData->styleBuilderState();
+    if (auto base = resolveRandomBaseValue((*random)->sharing, *builderState))
+        return resolvedNumber(*base);
+    return unresolvedNumber;
+}
+
+void CSSCalcSwiftBuilder::markCurrentPropertyInvalidAtComputedValueTime() const noexcept
+{
+    if (hasStyleBuilderState())
+        m_options->conversionData->styleBuilderState()->setCurrentPropertyInvalidAtComputedValueTime();
+}
+
 CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, uint16_t unit) const noexcept
 {
     // The lookup `simplify(Symbol&)` makes.
@@ -2614,6 +2656,53 @@ static bool canSimplifyWithCpp(const Tree& tree, const SimplificationOptions&)
         }
     );
 }
+
+#if USE(SWIFT_CSS)
+// The Swift evaluator on any subtree, not only a whole tree's root, because `evaluateWithoutFallback`
+// evaluates an `anchor()`'s `<anchor-side>` on its own.
+static CSSCalcSwiftNumericResult cssCalcSwiftEvaluateChild(const Child& root, const EvaluationOptions& options) noexcept
+{
+    // The builder carries the conversion data Swift reads, as a `SimplificationOptions`. The
+    // evaluator pushes no operands.
+    SimplificationOptions simplificationOptions {
+        .category = options.category,
+        .range = options.range,
+        .conversionData = options.conversionData,
+        .symbolTable = options.symbolTable,
+    };
+    CSSCalcSwiftOperandStack operands;
+    CSSCalcSwiftBuilder builder { operands, simplificationOptions };
+    return cssCalcEvaluateSwift(root, builder, simplificationOptions.conversionData.has_value());
+}
+
+CSSCalcSwiftNumericResult cssCalcSwiftEvaluate(const Tree& tree, const EvaluationOptions& options) noexcept
+{
+    return cssCalcSwiftEvaluateChild(tree.root, options);
+}
+
+// With the C++ evaluator compiled in, a tree the Swift evaluator refuses is a `std::nullopt` the
+// caller answers with the C++. Without it, a `std::nullopt` would read as "answers nothing" and
+// compute as zero, so it stops.
+static std::optional<double> answerOf(const CSSCalcSwiftNumericResult& result)
+{
+    if (result.resolved)
+        return result.value;
+#if !CSS_CALC_CPP_EVALUATOR_COMPILED_IN
+    RELEASE_ASSERT_WITH_MESSAGE(!result.substituteFallback, "the Swift calc() evaluator refused a tree in a build with no C++ evaluator compiled in");
+#endif
+    return std::nullopt;
+}
+
+std::optional<double> evaluateDoubleWithSwift(const Tree& tree, const EvaluationOptions& options)
+{
+    return answerOf(cssCalcSwiftEvaluate(tree, options));
+}
+
+std::optional<double> evaluateDoubleWithSwift(const Child& root, const EvaluationOptions& options)
+{
+    return answerOf(cssCalcSwiftEvaluateChild(root, options));
+}
+#endif // USE(SWIFT_CSS)
 
 bool canSimplify(const Tree& tree, const SimplificationOptions& options)
 {

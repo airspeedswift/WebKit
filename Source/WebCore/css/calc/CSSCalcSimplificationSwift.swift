@@ -34,8 +34,8 @@ internal import WebCore_Private.Core
 // The <angle> conversion constants, which plain `import wtf` does not see.
 internal import wtf.Core.MathExtras
 
-// calc() simplification and parsing in Swift, used when WebCore is built with WK_USE_SWIFT_CSS, in
-// which the C++ parser is not compiled.
+// calc() simplification, parsing and evaluation in Swift, used when WebCore is built with
+// WK_USE_SWIFT_CSS, in which the C++ parser and evaluator are not compiled.
 //
 // Simplification copies the `CSSCalc::Child` tree once into an owned `CalcNode` tree
 // (`calcBuildNode`), simplifies it in place by a recursive post-order walk (`CalcFold.simplify`),
@@ -44,7 +44,8 @@ internal import wtf.Core.MathExtras
 // the whole tree has simplified. A tree that cannot be simplified is refused whole:
 // `isSimplifiableAlternative` refuses an arity `rebuildFrom` could not fill, and a fold that cannot
 // derive its answer sets `CalcFold.declined`. The grammar builds `CalcNode`s directly and folds them
-// as it builds them.
+// as it builds them. The evaluator builds nothing: it walks the borrowed `Child`, as `evaluateDouble`
+// does.
 
 /// What simplification did with a tree.
 @c
@@ -5907,4 +5908,490 @@ private func calcParseAttempt(
 
     attempt.type = parsed.type
     return attempt
+}
+
+// MARK: - Evaluation
+
+/// `evaluateDouble`, over the borrowed `CSSCalc::Child`.
+///
+/// Nothing is built: each node is read through `swiftNodeInfo` and its children through
+/// `Child::operator[]`, so the upcalls that need the original node are handed the node the walk is
+/// on.
+///
+/// Separate from the simplifier because `evaluateDouble` is a different computation: it resolves a
+/// percentage to its value, multiplies left to right as written where `simplify(Product&)` folds
+/// numbers first, and reads a present but unresolvable optional argument as omitted where
+/// `simplify` refuses. The arithmetic goes through `CalcExecutor`.
+///
+/// A nil answer is an evaluation to nothing, where `evaluateDouble` has none. A node
+/// `isSimplifiableAlternative` refuses (an arity no parse produces) sets `refused`, and the whole
+/// evaluation is handed back unevaluated (see `cssCalcEvaluateSwift`).
+private struct CalcEvaluation: ~Copyable {
+    let units: CalcSimplification
+    let builder: WebCore.CSSCalc.CSSCalcSwiftBuilder
+    /// The alternative where a nil started, not an ancestor it was passed up through.
+    var blame: CalcAlternative? = nil
+    /// The walk reached a node it does not handle.
+    var refused = false
+
+    init(units: CalcSimplification, builder: WebCore.CSSCalc.CSSCalcSwiftBuilder) {
+        self.units = units
+        self.builder = builder
+    }
+
+    @inline(always)
+    mutating func fail(_ alternative: CalcAlternative) -> Double? {
+        if blame == nil {
+            blame = alternative
+        }
+        return nil
+    }
+
+    @inline(always)
+    mutating func child(_ node: borrowing WebCore.CSSCalc.Child, _ k: Int) -> Double? {
+        evaluateNode(node[k])
+    }
+
+    /// `evaluate(node)`, for a node reached through `Child::operator[]`.
+    @inline(always)
+    mutating func evaluateNode(_ node: borrowing WebCore.CSSCalc.Child) -> Double? {
+        evaluate(node, WebCore.CSSCalc.swiftNodeInfo(node))
+    }
+
+    /// `evaluate(node[k])` with its blame discarded: a present but unresolvable optional argument
+    /// is read as omitted, so it must not be the node a later nil is attributed to.
+    @inline(always)
+    mutating func swallowedChild(_ node: borrowing WebCore.CSSCalc.Child, _ k: Int) -> Double? {
+        let saved = blame
+        blame = nil
+        let value = child(node, k)
+        blame = saved
+        return value
+    }
+
+    /// `EvaluatedItem`: an item's value, and its weight or nil where the weight was omitted.
+    typealias CalcMixEvaluatedItem = (value: Double, weight: Double?)
+
+    /// The `Vector<EvaluatedItem, 8>` of `evaluate(const IndirectNode<CalcMix>&)`.
+    ///
+    /// Up to eight items are in an `InlineArray` (SE-0453), more in an `Array`, both handed to the
+    /// body as a `MutableSpan`.
+    ///
+    /// Out of line, so the inline storage is not in every frame of the recursive `evaluate`. Item
+    /// `k` is child `k`; its weight comes from the upcall that applies the evaluator's
+    /// `Style::toStyle`.
+    @inline(never)
+    mutating func evaluateCalcMix(_ node: borrowing WebCore.CSSCalc.Child, _ itemCount: Int) -> Double? {
+        if itemCount <= 8 {
+            var items = InlineArray<8, CalcMixEvaluatedItem>(repeating: (value: 0, weight: nil))
+            var span = items.mutableSpan
+            return evaluateCalcMixItems(node, itemCount, &span)
+        }
+        var items = [CalcMixEvaluatedItem](repeating: (value: 0, weight: nil), count: itemCount)
+        var span = items.mutableSpan
+        return evaluateCalcMixItems(node, itemCount, &span)
+    }
+
+    /// The body of `evaluateCalcMix`, over `items`, which has room for at least `itemCount` items.
+    mutating func evaluateCalcMixItems(
+        _ node: borrowing WebCore.CSSCalc.Child,
+        _ itemCount: Int,
+        _ items: inout MutableSpan<CalcMixEvaluatedItem>
+    ) -> Double? {
+        // Value then weight, one item at a time, stopping at the first value that answers nothing,
+        // as the C++ does: converting a `Calc` weight can have side effects. Each weight is
+        // converted once.
+        var total = 0.0
+        var numberOfOmittedWeights = 0
+        for k in 0..<itemCount {
+            guard let value = child(node, k) else {
+                return nil
+            }
+            let weight = builder.resolveCalcMixItemWeight(node, UInt32(k))
+            guard weight.resolved else {
+                return fail(.CalcMix)
+            }
+            if weight.substituteFallback {
+                items[k] = (value: value, weight: nil)
+                numberOfOmittedWeights += 1
+            } else {
+                items[k] = (value: value, weight: weight.value)
+                total += weight.value
+            }
+        }
+        // `std::min(total, 100.0)` is `100.0 < total ? 100.0 : total`, which keeps a NaN `total`
+        // where `Swift.min` would not.
+        let cappedTotal = 100.0 < total ? 100.0 : total
+        let weightForOmitted = numberOfOmittedWeights > 0 ? (100.0 - cappedTotal) / Double(numberOfOmittedWeights) : 0.0
+        let normalizationFactor = total > 100.0 ? (100.0 / total) : 1.0
+        // `OperatorExecutor<Operator::CalcMix>`: a running sum from `+0` of
+        // `value * (percentage / 100)`, in item order.
+        var result = 0.0
+        for k in 0..<itemCount {
+            let item = items[k]
+            let percentage = (item.weight ?? weightForOmitted) * normalizationFactor
+            result += item.value * (percentage / 100)
+        }
+        return result
+    }
+
+    /// The value of `node`, whose `swiftNodeInfo` is `info`, or nil if this walk does not evaluate
+    /// it.
+    mutating func evaluate(_ node: borrowing WebCore.CSSCalc.Child, _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo) -> Double? {
+        let alternative = info.alternative
+        let count = Int(info.childCount)
+        guard isSimplifiableAlternative(alternative, info.childCount) else {
+            refused = true
+            return fail(alternative)
+        }
+
+        switch alternative {
+        // `evaluate(const Number&)`, `evaluate(const Percentage&)` and
+        // `evaluate(const CanonicalDimension&)`: the stored value, unconditionally.
+        case .Number, .Percentage, .CanonicalDimension:
+            return info.numericValue
+
+        // `evaluate(const NonCanonicalDimension&)`: `canonicalize` against the conversion data, or
+        // nothing if it does not canonicalize.
+        case .NonCanonicalDimension:
+            let canonical = units.canonicalizedDimension(info.numericValue, UInt16(info.unitType), builder)
+            guard canonical.kind != .nonCanonicalDimension else {
+                return fail(.NonCanonicalDimension)
+            }
+            return canonical.value
+
+        // `executeVariadicMathOperationAfterUnwrapping`: any child that answers nothing makes the
+        // operation answer nothing.
+        case .Sum:
+            // From `+0`, as `OperatorExecutor<Operator::Sum>`, so a sum of only `-0` is `+0`.
+            var sum: Double = 0
+            var k = 0
+            while k < count {
+                guard let value = child(node, k) else {
+                    return nil
+                }
+                sum += value
+                k += 1
+            }
+            return sum
+
+        case .Product:
+            // Left to right from `1`, as `OperatorExecutor<Operator::Product>`, not numbers first
+            // as `simplify(Product&)`; the two can differ in the last bit.
+            var product: Double = 1
+            var k = 0
+            while k < count {
+                guard let value = child(node, k) else {
+                    return nil
+                }
+                product *= value
+                k += 1
+            }
+            return product
+
+        case .Min, .Max:
+            // `OperatorExecutor<Operator::Min>` and `<Operator::Max>`: a signed-zero fold that
+            // stops at the first NaN. Every operand is still evaluated, because a later one
+            // answering nothing makes the whole thing answer nothing.
+            let isMin = alternative == .Min
+            var result: Double? = nil
+            var sawNaN = false
+            var k = 0
+            while k < count {
+                guard let value = child(node, k) else {
+                    return nil
+                }
+                if let current = result {
+                    if !sawNaN {
+                        if value.isNaN {
+                            result = value
+                            sawNaN = true
+                        } else {
+                            result = isMin ? CalcExecutor.minWithSignedZero(current, value) : CalcExecutor.maxWithSignedZero(current, value)
+                        }
+                    }
+                } else {
+                    result = value
+                }
+                k += 1
+            }
+            // An empty range is NaN in the C++; a parsed `min()` always has an operand.
+            return result ?? Double.nan
+
+        case .Hypot:
+            // `OperatorExecutor<Operator::Hypot>`: one operand is its magnitude, none is NaN.
+            var sumOfSquares: Double = 0
+            var only: Double = 0
+            var k = 0
+            while k < count {
+                guard let value = child(node, k) else {
+                    return nil
+                }
+                sumOfSquares += value * value
+                only = value
+                k += 1
+            }
+            switch count {
+            case 0:
+                return Double.nan
+            case 1:
+                return CalcExecutor.abs(only)
+            default:
+                return CalcExecutor.sqrt(sumOfSquares)
+            }
+
+        // `isSimplifiableAlternative` has already required exactly one child.
+        case .Negate:
+            return child(node, 0).map { -$0 }
+        case .Invert:
+            return child(node, 0).map { CalcExecutor.invert($0) }
+        case .Deg2Rad:
+            return child(node, 0).map { CalcExecutor.degreesToRadians($0) }
+        // The operand is a number, or a `Deg2Rad` over an angle, so it is already in radians.
+        case .Sin:
+            return child(node, 0).map { CalcExecutor.sin($0) }
+        case .Cos:
+            return child(node, 0).map { CalcExecutor.cos($0) }
+        case .Tan:
+            return child(node, 0).map { CalcExecutor.tan($0) }
+        // The inverse functions answer in degrees, as their executors do.
+        case .Asin:
+            return child(node, 0).map { CalcExecutor.asin($0) }
+        case .Acos:
+            return child(node, 0).map { CalcExecutor.acos($0) }
+        case .Atan:
+            return child(node, 0).map { CalcExecutor.atan($0) }
+        case .Sqrt:
+            return child(node, 0).map { CalcExecutor.sqrt($0) }
+        case .Exp:
+            return child(node, 0).map { CalcExecutor.exp($0) }
+        case .Abs:
+            return child(node, 0).map { CalcExecutor.abs($0) }
+        case .Sign:
+            return child(node, 0).map { CalcExecutor.sign($0) }
+
+        // Both operands are evaluated before either is tested, as the C++ builds its argument pack.
+        case .Atan2, .Pow, .Mod, .Rem:
+            let x = child(node, 0)
+            let y = child(node, 1)
+            guard let x, let y else {
+                return nil
+            }
+            switch alternative {
+            case .Atan2: return CalcExecutor.atan2(x, y)
+            case .Pow: return CalcExecutor.pow(x, y)
+            case .Mod: return CalcExecutor.mod(x, y)
+            default: return CalcExecutor.rem(x, y)
+            }
+
+        case .Progress, .ProgressNoClamp:
+            let x = child(node, 0)
+            let y = child(node, 1)
+            let z = child(node, 2)
+            guard let x, let y, let z else {
+                return nil
+            }
+            return alternative == .Progress ? CalcExecutor.progress(x, y, z) : CalcExecutor.progressNoClamp(x, y, z)
+
+        // `round()` and `log()`: the second argument is present when `childCount` is 2.
+        //
+        // FIXME: `evaluateDouble` reads a second argument that is present but answers nothing as
+        // omitted, because `executeMathOperationAfterUnwrapping` tests only the outer optional:
+        // `round(100px, 1rem)` without conversion data rounds to 1. This reproduces it so the two
+        // evaluators agree; fix both together.
+        case .RoundNearest, .RoundUp, .RoundDown, .RoundToZero, .Log:
+            let x = child(node, 0)
+            let second: Double? = count == 2 ? swallowedChild(node, 1) : nil
+            guard let x else {
+                return nil
+            }
+            switch alternative {
+            case .RoundNearest: return CalcExecutor.roundNearest(x, second ?? 1.0)
+            case .RoundUp: return CalcExecutor.roundUp(x, second ?? 1.0)
+            case .RoundDown: return CalcExecutor.roundDown(x, second ?? 1.0)
+            case .RoundToZero: return CalcExecutor.roundToZero(x, second ?? 1.0)
+            default:
+                if let second {
+                    return CalcExecutor.log(x, second)
+                }
+                return CalcExecutor.log(x)
+            }
+
+        // `evaluate(const SiblingCount&)` and `evaluate(const SiblingIndex&)`, through the upcall
+        // the simplifier makes, with the evaluator's guards in its order.
+        case .SiblingCount, .SiblingIndex:
+            let resolved = builder.resolveStyleCoupledValue(node)
+            guard resolved.resolved else {
+                return fail(alternative)
+            }
+            return resolved.value
+
+        // `evaluate(const IndirectNode<CalcMix>&)`. `isSimplifiableAlternative` requires an item.
+        case .CalcMix:
+            return evaluateCalcMix(node, count)
+
+        // `evaluate(const Symbol&)`: the symbol table's value with the node's unit, through
+        // `makeNumeric`, evaluated as the numeric leaf that builds. A miss answers nothing, as the
+        // C++ does after its `ASSERT_NOT_REACHED`.
+        case .Symbol:
+            let resolved = builder.resolveSymbol(info.valueID, UInt16(info.unitType))
+            guard resolved.resolved else {
+                return fail(alternative)
+            }
+            switch resolved.alternative {
+            case .Number, .Percentage, .CanonicalDimension:
+                return resolved.value
+            case .NonCanonicalDimension:
+                let canonical = units.canonicalizedDimension(resolved.value, resolved.unitType, builder)
+                guard canonical.kind != .nonCanonicalDimension else {
+                    return fail(.NonCanonicalDimension)
+                }
+                return canonical.value
+            default:
+                return fail(alternative)
+            }
+
+        // `evaluate(const IndirectNode<Random>&)`, in its order: the guard, min, max, step, then
+        // the base value, whose lookup inserts into the random cache. A step that answers nothing
+        // is read as omitted, as for `round()`.
+        case .Random:
+            guard builder.hasStyleBuilderState() else {
+                return fail(alternative)
+            }
+            guard let minimum = child(node, 0) else {
+                return nil
+            }
+            guard let maximum = child(node, 1) else {
+                return nil
+            }
+            let step: Double? = count == 3 ? swallowedChild(node, 2) : nil
+            let base = builder.resolveRandomBaseValueForEvaluation(node)
+            guard base.resolved else {
+                return fail(alternative)
+            }
+            return CalcExecutor.random(base.value, minimum, maximum, step)
+
+        // `evaluate(const IndirectNode<Anchor>&)` and `<AnchorSize>`, through the simplifier's
+        // upcall, which answers the value, nothing, or asks for the fallback (having marked the
+        // property invalid if there is none). A fallback that answers nothing marks it invalid, in
+        // the C++'s order. An `<anchor-side>` subtree is child 0; the fallback follows it.
+        case .Anchor, .AnchorSize:
+            let answer = builder.resolveStyleCoupledValue(node)
+            if answer.resolved {
+                return answer.value
+            }
+            guard answer.substituteFallback else {
+                return fail(alternative)
+            }
+            let fallbackIndex = alternative == .Anchor && info.anchorSideIsSubtree ? 1 : 0
+            guard count > fallbackIndex else {
+                return fail(alternative)
+            }
+            if let fallback = child(node, fallbackIndex) {
+                return fallback
+            }
+            builder.markCurrentPropertyInvalidAtComputedValueTime()
+            return nil
+
+        // `evaluate(const IndirectNode<Clamp>&)` and `OperatorExecutor<Operator::Clamp>`. A `none`
+        // bound is not a child, and the kind says which are missing. A bound that answers nothing
+        // fails the whole `clamp()`. All three are evaluated before any is tested.
+        case .Clamp:
+            let minimumIsNone = info.kind == .ClampWithNoneMinimum || info.kind == .ClampWithNoneMinimumAndMaximum
+            let maximumIsNone = info.kind == .ClampWithNoneMaximum || info.kind == .ClampWithNoneMinimumAndMaximum
+            let expected = 3 - (minimumIsNone ? 1 : 0) - (maximumIsNone ? 1 : 0)
+            guard count == expected else {
+                return fail(alternative)
+            }
+            var next = 0
+            var minimum: Double? = nil
+            var maximum: Double? = nil
+            var failed = false
+            if !minimumIsNone {
+                next += 1
+                minimum = child(node, 0)
+                failed = failed || minimum == nil
+            }
+            let valueSlot = next
+            next += 1
+            let value = child(node, valueSlot)
+            failed = failed || value == nil
+            if !maximumIsNone {
+                maximum = child(node, next)
+                failed = failed || maximum == nil
+            }
+            guard !failed, let value else {
+                return nil
+            }
+            // `clamp(none, VAL, none)` is `VAL`; `clamp(none, VAL, MAX)` is the two-operand
+            // `min()`; `clamp(MIN, VAL, none)` is the two-operand `max()`, operands in that order.
+            switch (minimum, maximum) {
+            case (nil, nil):
+                return value
+            case (nil, let maximum?):
+                return CalcExecutor.min(value, maximum)
+            case (let minimum?, nil):
+                return CalcExecutor.max(minimum, value)
+            case (let minimum?, let maximum?):
+                return CalcExecutor.clamp(minimum, value, maximum)
+            }
+
+        default:
+            refused = true
+            return fail(alternative)
+        }
+    }
+}
+
+/// Evaluate a tree to a `double`.
+///
+/// When `resolved` is false, `alternative` names the node the walk stopped at, and
+/// `substituteFallback` says why: set, the tree was refused unevaluated; clear, it evaluated to
+/// nothing, as `evaluateDouble` would.
+@_expose(Cxx)
+public func cssCalcEvaluateSwift(
+    _ root: borrowing WebCore.CSSCalc.Child,
+    // `inout`, as `cssCalcSimplifySwift` takes it. Nothing is written through it.
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ hasConversionData: Bool
+) -> WebCore.CSSCalc.CSSCalcSwiftNumericResult {
+    // `canonicalizedDimension` reads only `hasConversionData`.
+    let units = CalcSimplification(
+        percentageResolveToDimension: false,
+        allowZeroValueLengthRemovalFromSum: false,
+        category: 0,
+        hasConversionData: hasConversionData
+    )
+
+    let rootInfo = WebCore.CSSCalc.swiftNodeInfo(root)
+    var evaluation = CalcEvaluation(units: units, builder: builder)
+    let value = evaluation.evaluate(root, rootInfo)
+
+    // A refused tree names the root. A tree that evaluates to nothing, where
+    // `evaluateDouble` answers nothing, answers that, naming the node the walk stopped at.
+    if evaluation.refused {
+        return WebCore.CSSCalc.CSSCalcSwiftNumericResult(
+            value: 0,
+            unitType: 0,
+            resolved: false,
+            alternative: rootInfo.alternative,
+            substituteFallback: true
+        )
+    }
+    guard let answer = value else {
+        return WebCore.CSSCalc.CSSCalcSwiftNumericResult(
+            value: 0,
+            unitType: 0,
+            resolved: false,
+            alternative: evaluation.blame ?? rootInfo.alternative,
+            substituteFallback: false
+        )
+    }
+    return WebCore.CSSCalc.CSSCalcSwiftNumericResult(
+        value: answer,
+        unitType: 0,
+        resolved: true,
+        alternative: .Number,
+        substituteFallback: false
+    )
 }
