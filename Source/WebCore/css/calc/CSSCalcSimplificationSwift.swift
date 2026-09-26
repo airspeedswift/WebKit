@@ -42,7 +42,7 @@ internal import Cxx
 import Darwin
 
 // calc() simplification, parsing and evaluation in Swift, used when WebCore is built with
-// WK_USE_SWIFT_CSS, in which the C++ parser and evaluator are not compiled.
+// WK_USE_SWIFT_CSS, in which the C++ simplifier, parser and evaluator are not compiled.
 //
 // Simplification copies the `CSSCalc::Child` tree once into an owned `CalcNode` tree
 // (`calcBuildNode`), simplifies it in place by a recursive post-order walk (`CalcFold.simplify`),

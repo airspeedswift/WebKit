@@ -103,18 +103,28 @@ struct SimplificationOptions {
 
 // MARK: Implementation
 
-// Whether the C++ `evaluateDouble` walk (CSSCalcTree+Evaluation.cpp) is compiled in: exactly when
-// the Swift CSS implementation is not (WK_USE_SWIFT_CSS). With it off, `evaluateDouble` is the Swift
-// evaluator, and a tree that evaluator refuses is a `RELEASE_ASSERT`.
+// Whether the C++ simplifier (the recursive `copyAndSimplify` walk and the per-operation `simplify`
+// overloads) is compiled in: exactly when the Swift CSS implementation is not (WK_USE_SWIFT_CSS).
+// Without it, a tree the Swift simplifier hands back is a `RELEASE_ASSERT`.
+//
+// What stays compiled either way has a caller outside that walk: `canonicalize`, which
+// CSSCalcTree+Evaluation.cpp also calls, and what the Swift simplifier's C++ builder calls:
+// `rebuildChildren`, `anchorSlotKeepingPrefix`, `evaluateAnchorFunction`,
+// `evaluateAnchorSizeFunction` and `percentageResolveToDimension`.
+#if USE(SWIFT_CSS)
+#define CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN 0
+#else
+#define CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN 1
+#endif
+
+// Whether the C++ `evaluateDouble` walk (CSSCalcTree+Evaluation.cpp) is compiled in; off exactly
+// when the C++ simplifier is. With it off, `evaluateDouble` is the Swift evaluator, and a tree that
+// evaluator refuses is a `RELEASE_ASSERT`.
 //
 // What stays compiled has a caller outside the walk: `resolveRandomBaseValue`, and
 // `evaluateWithoutFallback`, which `evaluateAnchorFunction` calls and which evaluates the
 // `<anchor-side>` with the Swift evaluator.
-#if USE(SWIFT_CSS)
-#define CSS_CALC_CPP_EVALUATOR_COMPILED_IN 0
-#else
-#define CSS_CALC_CPP_EVALUATOR_COMPILED_IN 1
-#endif
+#define CSS_CALC_CPP_EVALUATOR_COMPILED_IN CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 // MARK: Can Simplify
 
@@ -128,10 +138,12 @@ bool canSimplify(const Tree&, const SimplificationOptions&);
 // MARK: Copy & Simplify
 
 Tree copyAndSimplify(const Tree&, const SimplificationOptions&);
-// The C++ simplifier.
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
+// The C++ simplifier. Declared only where it is compiled, so that a use without it is a compile
+// error rather than a link error.
 //
 // It has no Swift implementation: it is the per-node recursion, and a Swift one would cross into
-// Swift once per node.
+// Swift once per node. Its one external caller is the C++ parser.
 Child copyAndSimplify(const Child&, const SimplificationOptions&);
 
 // MARK: In-place Simplify
@@ -177,6 +189,7 @@ std::optional<Child> simplify(ProgressNoClamp&, const SimplificationOptions&);
 std::optional<Child> simplify(CalcMix&, const SimplificationOptions&);
 std::optional<Child> simplify(Anchor&, const SimplificationOptions&);
 std::optional<Child> simplify(AnchorSize&, const SimplificationOptions&);
+#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 // MARK: Unit Canonicalization
 
