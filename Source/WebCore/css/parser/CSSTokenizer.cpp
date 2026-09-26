@@ -34,7 +34,16 @@
 #include "CSSParserObserverWrapper.h"
 #include "CSSParserTokenRange.h"
 #include "CSSTokenizerInputStream.h"
+#if USE(SWIFT_CSS)
+#include "CSSTokenizerSwiftTypes.h"
+// The Swift entry points. WebCoreSwift-Generated.h is module-scoped, so a translation unit that
+// includes it must declare every Swift subsystem's boundary types, which
+// WebCoreSwiftBoundaryTypes.h does.
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
+#include <atomic>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/dtoa.h>
 #include <wtf/text/CodePointIterator.h>
 #include <wtf/text/StringBuilder.h>
 #include <wtf/unicode/CharacterNames.h>
@@ -132,9 +141,25 @@ CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper* wrapper,
     if (constructionSuccessPtr)
         *constructionSuccessPtr = true;
 
-    if (string.isEmpty())
+    // An empty sheet still has to finalise the observer wrapper: endOffset() indexes
+    // m_tokenOffsets relative to m_firstParserToken, which only finalizeConstruction sets.
+    if (string.isEmpty()) {
+        if (wrapper) {
+            wrapper->addToken(0);
+            wrapper->finalizeConstruction(m_tokens.begin());
+        }
         return;
+    }
 
+#if !CSS_CPP_TOKENIZER_COMPILED_IN
+    // The Swift tokenizer fails only if m_tokens could not be allocated or a chunk failed
+    // CSSSwiftTokenSink's consistency checks. A retry would fail the same way.
+    if (!tokenizeWithSwiftScanner(wrapper, constructionSuccessPtr)) [[unlikely]] {
+        // As on the C++ path: crash if the caller did not ask to be told.
+        RELEASE_ASSERT(constructionSuccessPtr);
+        *constructionSuccessPtr = false;
+    }
+#else
     // To avoid resizing we err on the side of reserving too much space.
     // Most strings we tokenize have about 3.5 to 5 characters per token.
     if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]] {
@@ -169,12 +194,163 @@ CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper* wrapper,
         wrapper->addToken(offset);
         wrapper->finalizeConstruction(m_tokens.begin());
     }
+#endif // CSS_CPP_TOKENIZER_COMPILED_IN
 }
 
 CSSParserTokenRange CSSTokenizer::tokenRange() const LIFETIME_BOUND
 {
     return m_tokens;
 }
+
+// MARK: - Swift tokenizer path
+//
+// CSSTokenizerSwift.swift decides token types, extents and block structure. The code below turns
+// its output into CSSParserTokens: StringViews over the input, double conversion, and the
+// escaped-value string pool.
+#if USE(SWIFT_CSS)
+
+// BlockType is nested inside CSSParserToken, so Swift mirrors it as CSSBlockTypeSwift rather than
+// importing it.
+static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == CSSBlockTypeSwiftNotBlock);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == CSSBlockTypeSwiftBlockStart);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == CSSBlockTypeSwiftBlockEnd);
+
+static_assert(sizeof(CSSSwiftObserverRecord) == 12);
+static_assert(alignof(CSSSwiftObserverRecord) == 4);
+static_assert(std::is_trivially_copyable_v<CSSSwiftObserverRecord>);
+
+bool CSSTokenizer::tokenizeWithSwiftScanner(CSSParserObserverWrapper* wrapper, bool* constructionSuccessPtr)
+{
+    auto string = m_input.currentString();
+
+    // Same reservation the C++ path uses.
+    if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]]
+        return false;
+
+    // Swift owns its buffers and hands each chunk to the sink, which lives on this frame for the
+    // one Swift call it is passed to. Each of StringImpl's widths has its own specialization.
+    CSSSwiftTokenSink sink { *this, wrapper };
+    bool tokenized = string.is8Bit()
+        ? cssTokenizeSwiftAll8(string.span8(), sink)
+        : cssTokenizeSwiftAll16(string.span16(), sink);
+    if (!tokenized) [[unlikely]]
+        return false;
+
+    if (constructionSuccessPtr)
+        *constructionSuccessPtr = true;
+    return true;
+}
+
+void CSSSwiftTokenSink::finish()
+{
+    if (m_wrapper) {
+        m_wrapper->addToken(m_observerOffset);
+        m_wrapper->finalizeConstruction(m_tokenizer->m_tokens.begin());
+    }
+}
+
+// Converts one chunk of Swift's tokens, and feeds the observer wrapper the offsets the C++ loop
+// would have. Each token's kind was fixed by the Swift factory that built it, so nothing here
+// dispatches on it. charactersToDouble runs here so that rounding matches the C++ scanner.
+//
+// The annotations are repeated on the definition because an unannotated one is a different
+// function. unsafeMakeSpan rather than std::span's two-argument constructor, which
+// -Wunsafe-buffer-usage-in-container rejects without consulting __counted_by.
+bool CSSSwiftTokenSink::takeChunk(
+    const CSSParserTokenBits* __counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
+    const char16_t* __counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount,
+    const CSSSwiftObserverRecord* __counted_by(recordCount) records __attribute__((noescape)), size_t recordCount)
+{
+    auto tokenBits = unsafeMakeSpan(tokens, tokenCount);
+    auto unescaped = unsafeMakeSpan(unescapedUnits, unitCount);
+    auto observerRecords = unsafeMakeSpan(records, recordCount);
+    auto& tokenizer = *m_tokenizer;
+    auto& parserTokens = tokenizer.m_tokens;
+    unsigned inputLength = tokenizer.m_input.length();
+
+    // The width scales every bounds check below, so it comes from the input rather than from a
+    // token's own valueIs8Bit, and from the same is8Bit() that selected the Swift specialization.
+    // It is fixed for the tokenization, so resolveValuePointer is specialized on it.
+    auto input = tokenizer.m_input.currentString();
+    bool inputIs8Bit = input.is8Bit();
+    auto inputBytes = inputIs8Bit ? asBytes(input.span8()) : asBytes(input.span16());
+
+    // addComment's `tokensBefore` counts from here.
+    unsigned firstTokenIndex = parserTokens.size();
+
+    for (auto bits : tokenBits) {
+        auto parkedOffset = bitsParkedValueOffset(bits);
+        if (parkedOffset & cssParserTokenBitsUnescapedValueTag) [[unlikely]] {
+            // A value Swift unescaped: its range indexes the per-chunk unescape buffer, which
+            // Swift clears on return, so it becomes a pooled String now. create8BitIfPossible
+            // matches the representation the C++ path's StringBuilder produces.
+            auto units = unescaped.subspan(parkedOffset & ~cssParserTokenBitsUnescapedValueTag, bits.valueLength);
+            auto value = tokenizer.registerString(String { StringImpl::create8BitIfPossible(units) });
+            bits.valueLength = value.length();
+            bits.valueIs8Bit = value.is8Bit();
+            bits.valueDataCharRaw = value.rawCharacters();
+        } else if (inputIs8Bit)
+            resolveValuePointer<1>(bits, inputBytes);
+        else
+            resolveValuePointer<2>(bits, inputBytes);
+
+        if (bitsCarryPendingNumber(bits)) {
+            // bitsCarryPendingNumber depends only on the type, so hasParkedNumberRange is what
+            // says the union holds a range rather than a double. The range is bounded here
+            // because rangeAt only ASSERTs and substring clamps.
+            if (!bits.hasParkedNumberRange) [[unlikely]]
+                return false;
+            auto range = bits.pendingNumberRange;
+            if (range.length > inputLength || range.offset > inputLength - range.length) [[unlikely]]
+                return false;
+            auto numberText = tokenizer.m_input.rangeAt(range.offset, range.length);
+            bool isResultOK = false;
+            double numericValue = numberText.is8Bit()
+                ? charactersToDouble(numberText.span8(), &isResultOK)
+                : charactersToDouble(numberText.span16(), &isResultOK);
+            bits.numericValue = isResultOK ? numericValue : 0;
+            bits.hasParkedNumberRange = 0;
+        }
+
+        // No per-chunk reservation: reserveCapacity is exact, so it would reallocate on every
+        // chunk of an input denser than the initial estimate, where tryAppend grows geometrically.
+        // A temporary rather than tryConstructAndAppend(bits), because the bits constructor is
+        // private and Vector would make the access check.
+        if (!parserTokens.tryAppend(CSSParserToken { bits })) [[unlikely]]
+            return false;
+    }
+
+    // Empty unless wantsObserverRecords(). m_tokenOffsets must be in token order and
+    // m_commentOffsets ascending by tokensBefore, which source order gives.
+    if (auto* wrapper = m_wrapper) {
+        // Swift appends one record per token plus one per comment. A mismatch would give Web
+        // Inspector wrong source ranges, so it is checked in every build.
+        size_t recordedTokens = 0;
+        for (auto& record : observerRecords) {
+            if (!record.isComment)
+                ++recordedTokens;
+        }
+        if (recordedTokens != tokenCount) [[unlikely]]
+            return false;
+
+        unsigned tokenIndex = firstTokenIndex;
+        for (auto& record : observerRecords) {
+            if (record.isComment)
+                wrapper->addComment(record.start, record.end, tokenIndex);
+            else {
+                wrapper->addToken(record.start);
+                ++tokenIndex;
+            }
+            m_observerOffset = record.end;
+        }
+    } else if (recordCount) [[unlikely]] {
+        // Records without a wrapper mean Swift ignored wantsObserverRecords().
+        return false;
+    }
+
+    return true;
+}
+#endif // USE(SWIFT_CSS)
 
 unsigned CSSTokenizer::tokenCount() const
 {
@@ -185,6 +361,12 @@ bool CSSTokenizer::isWhitespace(CSSParserTokenType type)
 {
     return type == NonNewlineWhitespaceToken || type == NewlineToken;
 }
+
+// MARK: - C++ tokenizer state machine
+//
+// Reachable only from nextToken. preprocessString, registerString, tokenRange, tokenCount and
+// isWhitespace are outside this region because the Swift path uses them too.
+#if CSS_CPP_TOKENIZER_COMPILED_IN
 
 CSSParserToken CSSTokenizer::newline(char16_t)
 {
@@ -906,6 +1088,8 @@ bool CSSTokenizer::nextCharsAreIdentifier()
     reconsume(first);
     return areIdentifier;
 }
+
+#endif // CSS_CPP_TOKENIZER_COMPILED_IN
 
 StringView CSSTokenizer::registerString(String&& string)
 {

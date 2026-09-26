@@ -120,7 +120,12 @@ EXCLUDED_SOURCE_FILE_NAMES = $(EXCLUDED_SOURCE_FILE_NAMES_$(WK_COCOA_TOUCH));
 EXCLUDED_SOURCE_FILE_NAMES_ = *IOS.h *IOS.cpp *IOS.mm;
 EXCLUDED_SOURCE_FILE_NAMES_cocoatouch = *Mac.h *Mac.cpp *Mac.mm */mac/*;
 
-OTHER_CFLAGS = $(inherited) --system-header-prefix=WebKit/;
+// Must match WebCore's setting of the same name: TestWebKitAPI includes WebCore headers whose
+// declarations depend on which CSS implementation WebCore was built with.
+WK_USE_SWIFT_CSS_CFLAGS = $(WK_USE_SWIFT_CSS_CFLAGS_$(WK_USE_SWIFT_CSS));
+WK_USE_SWIFT_CSS_CFLAGS_YES = -DUSE_SWIFT_CSS=1;
+
+OTHER_CFLAGS = $(inherited) --system-header-prefix=WebKit/ $(WK_USE_SWIFT_CSS_CFLAGS);
 OTHER_CFLAGS[sdk=macosx*] = $(inherited) -iframework $(SDKROOT)$(SYSTEM_LIBRARY_DIR)/PrivateFrameworks;
 
 // FIXME: (rdar://149216417) Enable this on all platforms when possible.
