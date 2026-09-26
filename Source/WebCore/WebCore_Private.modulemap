@@ -4,8 +4,9 @@ framework module WebCore_Private [system] {
         export *
     }
 
-    // The CSS unit vocabulary, in a module of its own so that a boundary module can import
-    // CSSUnitType without the tokenizer's types.
+    // The CSS unit vocabulary, shared by the tokenizer and calc boundary modules. A header may
+    // belong to only one submodule, and putting CSSUnitType.h in CSSTokenizerSwiftTypes would make
+    // the calc boundary reach the tokenizer's types.
     explicit module CSSUnitsSwiftTypes {
         header "CSSUnitType.h"
         requires cplusplus
@@ -13,10 +14,17 @@ framework module WebCore_Private [system] {
     }
 
     // The boundary module for the CSS tokenizer and fast paths, so that Swift imports only these
-    // types rather than the Core umbrella.
+    // types rather than the Core umbrella, and cannot reach another boundary's types.
     explicit module CSSTokenizerSwiftTypes {
         header "CSSTokenizerSwiftTypes.h"
         header "CSSParserTokenBits.h"
+        requires cplusplus
+        export *
+    }
+
+    // The boundary module for calc() serialization.
+    explicit module CSSCalcSwiftTypes {
+        header "CSSCalcSwiftTypes.h"
         requires cplusplus
         export *
     }
@@ -49,6 +57,7 @@ framework module WebCore_Private [system] {
         exclude header "CSSTokenizerSwiftTypes.h"
         exclude header "CSSParserTokenBits.h"
         exclude header "CSSUnitType.h"
+        exclude header "CSSCalcSwiftTypes.h"
 
         module * {
             export *

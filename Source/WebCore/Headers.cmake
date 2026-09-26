@@ -1150,6 +1150,7 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS
     css/calc/CSSCalcOperator.h
     css/calc/CSSCalcRandomCachingKey.h
     css/calc/CSSCalcRandomSharing.h
+    css/calc/CSSCalcSwiftTypes.h
     css/calc/CSSCalcSymbolTable.h
     css/calc/CSSCalcTree.h
     css/calc/CSSCalcType.h
