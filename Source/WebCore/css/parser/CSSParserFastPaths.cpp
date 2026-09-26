@@ -139,6 +139,7 @@ static inline bool parseSimpleLength(std::span<const CharacterType> characters, 
     return parsedNumber.has_value();
 }
 
+#if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 enum class RequireUnits : bool { No, Yes };
 
 template <typename CharacterType>
@@ -165,6 +166,7 @@ static inline bool parseSimpleAngle(std::span<const CharacterType> characters, R
     number = parsedNumber.value_or(0);
     return parsedNumber.has_value();
 }
+#endif // CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 
 template <typename CharacterType>
 static inline bool parseSimpleNumberOrPercentageDividedBy100(std::span<const CharacterType> characters, double& number)
@@ -512,11 +514,13 @@ CSSSwiftDoubleScan cssSwiftParseCSSNumber16(const char16_t *__counted_by(length)
 #if !CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 static CSSSwiftColor scanColorSwift(CSSSwiftColorSpan8 characters, CSSSwiftFastPathKind kind)
 {
-    return cssParseFastPathSwift8(characters, kind);
+    CSSSwiftFastPathSink noList;
+    return cssParseFastPathSwift8(characters, kind, noList);
 }
 static CSSSwiftColor scanColorSwift(CSSSwiftColorSpan16 characters, CSSSwiftFastPathKind kind)
 {
-    return cssParseFastPathSwift16(characters, kind);
+    CSSSwiftFastPathSink noList;
+    return cssParseFastPathSwift16(characters, kind, noList);
 }
 
 // The Swift scan never answers `Declined`, and there is no other scanner to hand the input to.
@@ -875,6 +879,7 @@ static RefPtr<CSSValue> parseKeywordValue(CSSPropertyID property, StringView str
     return nullptr;
 }
 
+#if CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
 template <typename CharType>
 static bool parseTransformTranslateArguments(StringParsingBuffer<CharType>& buffer, unsigned expectedCount, CSSValueID transformType, CSSValueListBuilder& arguments)
 {
@@ -1070,6 +1075,54 @@ static RefPtr<CSSValue> parseSimpleTransformList(std::span<const CharacterType> 
     return CSSTransformListValue::create(WTF::move(builder));
 }
 
+#endif // CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
+
+#if USE(SWIFT_CSS)
+// MARK: - Swift transform fast path (CSSParserFastPathsSwift.swift)
+//
+// The Swift scan hands each function here as (double, unit) pairs, which become the same
+// `CSSFunctionValue`s `parseSimpleTransformValue` builds.
+
+class CSSSwiftTransformListBuilder {
+public:
+    CSSValueListBuilder list;
+};
+
+static constexpr std::array swiftTransformFunctions {
+    CSSValueTranslate, CSSValueTranslateX, CSSValueTranslateY, CSSValueTranslateZ, CSSValueTranslate3d,
+    CSSValueMatrix3d, CSSValueScale3d, CSSValueRotate, CSSValueRotateZ,
+};
+static_assert(swiftTransformFunctions.size() == CSSSwiftTransformFunctionRotateZ + 1);
+static_assert(swiftTransformFunctions[CSSSwiftTransformFunctionTranslate3d] == CSSValueTranslate3d);
+static_assert(swiftTransformFunctions[CSSSwiftTransformFunctionRotateZ] == CSSValueRotateZ);
+
+void CSSSwiftFastPathSink::append(uint8_t function,
+    const CSSSwiftTransformArgument* __counted_by(count) arguments __attribute__((noescape)), size_t count)
+{
+    // `swiftTransformFunctions` is a hardened std::array, so an out-of-range function aborts.
+    CSSValueListBuilder functionArguments;
+    functionArguments.reserveInitialCapacity(count);
+    for (auto& argument : unsafeMakeSpan(arguments, count))
+        functionArguments.append(CSSPrimitiveValue::create(argument.value, argument.unit));
+    RELEASE_ASSERT(m_list);
+    m_list->list.append(CSSFunctionValue::create(swiftTransformFunctions[function], WTF::move(functionArguments)));
+}
+
+static RefPtr<CSSValue> parseSimpleTransform(StringView string)
+{
+    ASSERT(!string.isEmpty());
+    CSSSwiftTransformListBuilder builder;
+    CSSSwiftFastPathSink sink { builder };
+    auto result = string.is8Bit()
+        ? cssParseFastPathSwift8(string.span8(), CSSSwiftFastPathKindTransform, sink)
+        : cssParseFastPathSwift16(string.span16(), CSSSwiftFastPathKindTransform, sink);
+    if (result.outcome != CSSSwiftColorOutcomeParsed || builder.list.isEmpty())
+        return nullptr;
+    return CSSTransformListValue::create(WTF::move(builder.list));
+}
+#endif // USE(SWIFT_CSS)
+
+#if CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
 static RefPtr<CSSValue> parseSimpleTransform(StringView string)
 {
     ASSERT(!string.isEmpty());
@@ -1077,6 +1130,7 @@ static RefPtr<CSSValue> parseSimpleTransform(StringView string)
         return parseSimpleTransformList(string.span8());
     return parseSimpleTransformList(string.span16());
 }
+#endif // CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
 
 static RefPtr<CSSValue> parseDisplay(StringView string)
 {
