@@ -123,6 +123,9 @@ template<typename CharacterType> static inline std::optional<double> parseCSSNum
     return number;
 }
 
+// With USE(SWIFT_CSS) these number scans, and the transform scan that uses them, are in
+// CSSParserFastPathsSwift.swift. `parseCSSNumber` stays: the Swift scans call it.
+#if CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
 template <typename CharacterType>
 static inline bool parseSimpleLength(std::span<const CharacterType> characters, CSSUnitType& unit, double& number)
 {
@@ -138,6 +141,7 @@ static inline bool parseSimpleLength(std::span<const CharacterType> characters, 
     number = parsedNumber.value_or(0);
     return parsedNumber.has_value();
 }
+#endif // CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
 
 #if CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 enum class RequireUnits : bool { No, Yes };
@@ -168,6 +172,7 @@ static inline bool parseSimpleAngle(std::span<const CharacterType> characters, R
 }
 #endif // CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 
+#if CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
 template <typename CharacterType>
 static inline bool parseSimpleNumberOrPercentageDividedBy100(std::span<const CharacterType> characters, double& number)
 {
@@ -190,6 +195,20 @@ static inline bool parseSimpleNumberOrPercentageDividedBy100(std::span<const Cha
 
     return true;
 }
+#endif // CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
+
+// `parseSimpleLength` (isOpacity false) or `parseSimpleNumberOrPercentageDividedBy100` (true) over the
+// whole string. With USE(SWIFT_CSS) it is defined below, over the Swift scans.
+#if CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
+static bool scanSimpleNumber(StringView string, bool isOpacity, CSSUnitType& unit, double& number)
+{
+    if (isOpacity)
+        return string.is8Bit() ? parseSimpleNumberOrPercentageDividedBy100(string.span8(), number) : parseSimpleNumberOrPercentageDividedBy100(string.span16(), number);
+    return string.is8Bit() ? parseSimpleLength(string.span8(), unit, number) : parseSimpleLength(string.span16(), unit, number);
+}
+#else
+static bool scanSimpleNumber(StringView, bool isOpacity, CSSUnitType&, double&);
+#endif
 
 static RefPtr<CSSValue> parseSimpleLengthValue(StringView string, CSSParserMode cssParserMode, CSS::Range valueRange)
 {
@@ -197,14 +216,8 @@ static RefPtr<CSSValue> parseSimpleLengthValue(StringView string, CSSParserMode 
 
     double number;
     auto unit = CSSUnitType::Number;
-
-    if (string.is8Bit()) {
-        if (!parseSimpleLength(string.span8(), unit, number))
-            return nullptr;
-    } else {
-        if (!parseSimpleLength(string.span16(), unit, number))
-            return nullptr;
-    }
+    if (!scanSimpleNumber(string, false, unit, number))
+        return nullptr;
 
     if (unit == CSSUnitType::Number) {
         if (number && cssParserMode != SVGAttributeMode)
@@ -1108,6 +1121,18 @@ void CSSSwiftFastPathSink::append(uint8_t function,
     m_list->list.append(CSSFunctionValue::create(swiftTransformFunctions[function], WTF::move(functionArguments)));
 }
 
+static bool scanSimpleNumber(StringView string, bool isOpacity, CSSUnitType& unit, double& number)
+{
+    auto kind = isOpacity ? CSSSwiftFastPathKindOpacity : CSSSwiftFastPathKindLength;
+    CSSSwiftFastPathSink sink;
+    auto result = string.is8Bit() ? cssParseFastPathSwift8(string.span8(), kind, sink) : cssParseFastPathSwift16(string.span16(), kind, sink);
+    if (result.outcome != CSSSwiftColorOutcomeParsed)
+        return false;
+    number = sink.number().value;
+    unit = sink.number().unit;
+    return true;
+}
+
 static RefPtr<CSSValue> parseSimpleTransform(StringView string)
 {
     ASSERT(!string.isEmpty());
@@ -1177,15 +1202,9 @@ static RefPtr<CSSValue> parseDisplay(StringView string)
 static RefPtr<CSSValue> parseOpacity(StringView string)
 {
     double number;
-
-    if (string.is8Bit()) {
-        if (!parseSimpleNumberOrPercentageDividedBy100(string.span8(), number))
-            return nullptr;
-    } else {
-        if (!parseSimpleNumberOrPercentageDividedBy100(string.span16(), number))
-            return nullptr;
-    }
-
+    auto unit = CSSUnitType::Number;
+    if (!scanSimpleNumber(string, true, unit, number))
+        return nullptr;
     return CSSPrimitiveValue::create(number, CSSUnitType::Number);
 }
 

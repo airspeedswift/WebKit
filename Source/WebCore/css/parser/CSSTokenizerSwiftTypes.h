@@ -137,6 +137,10 @@ enum CSSSwiftFastPathKind : uint8_t {
     CSSSwiftFastPathKindNamedColor,
     CSSSwiftFastPathKindNumericColor,
     CSSSwiftFastPathKindTransform,
+    // `parseSimpleLength` over the whole candidate: the number and its unit, set on the sink.
+    CSSSwiftFastPathKindLength,
+    // `parseSimpleNumberOrPercentageDividedBy100` over the whole candidate: a unitless number.
+    CSSSwiftFastPathKindOpacity,
 };
 
 // One transform function argument: the parsed double and its unit.
@@ -174,8 +178,16 @@ public:
     WEBCORE_EXPORT void append(uint8_t function,
         const CSSSwiftTransformArgument *__counted_by(count) arguments __attribute__((noescape)), size_t count);
 
+    // The length and opacity scans' result.
+    void setNumber(double value, CSSUnitType unit)
+    {
+        m_number = { value, unit };
+    }
+    CSSSwiftTransformArgument number() const { return m_number; }
+
 private:
     CSSSwiftTransformListBuilder* m_list { nullptr };
+    CSSSwiftTransformArgument m_number { 0, CSSUnitType::Number };
 };
 
 } // namespace WebCore

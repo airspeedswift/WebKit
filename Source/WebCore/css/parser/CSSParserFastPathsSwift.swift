@@ -26,7 +26,8 @@
 public import WebCore_Private.CSSTokenizerSwiftTypes
 
 // Swift implementation of the fast paths in CSSParserFastPaths.cpp, used when WebCore is built
-// with WK_USE_SWIFT_CSS: hex, named and `rgb()`/`hsl()` colors, and simple transforms.
+// with WK_USE_SWIFT_CSS: hex, named and `rgb()`/`hsl()` colors, simple transforms, lengths and
+// opacity.
 //
 // The numeric color forms run floating point and must match the C++ bit for bit; "MARK: -
 // Bit-exactness" below lists the rounding sites where that is not automatic.
@@ -1228,6 +1229,45 @@ private func parseTransformAngle<Unit: CSSColorCodeUnit>(
     return (value, unit)
 }
 
+/// `parseSimpleNumberOrPercentageDividedBy100`.
+@inline(always)
+private func parseOpacityNumber<Unit: CSSColorCodeUnit>(_ cursor: borrowing ColorCursor<Unit>) -> Double? {
+    var end = cursor.count
+    var isPercentage = false
+    if end > 0, cursor.unit(end - 1) == 0x25 {
+        end -= 1
+        isPercentage = true
+    }
+    guard let number = parseTransformNumber(cursor, 0, end), !number.isInfinite else {
+        return nil
+    }
+    return isPercentage ? number / 100.0 : number
+}
+
+/// The length and opacity scans, answered through `sink.setNumber`.
+///
+/// The property-dependent checks stay with the C++ caller, which knows the property.
+@inline(always)
+private func scanSimpleNumber<Unit: CSSColorCodeUnit>(
+    _ characters: Span<Unit>,
+    _ isOpacity: Bool,
+    _ sink: inout WebCore.CSSSwiftFastPathSink
+) -> WebCore.CSSSwiftColor {
+    let cursor = ColorCursor(characters)
+    if isOpacity {
+        guard let number = parseOpacityNumber(cursor) else {
+            return notAColor
+        }
+        sink.setNumber(number, WebCore.CSSUnitType.Number)
+    } else {
+        guard let (value, unit) = parseTransformLength(cursor, 0, cursor.count) else {
+            return notAColor
+        }
+        sink.setNumber(value, unit)
+    }
+    return WebCore.CSSSwiftColor(argb: 0, outcome: CSSSwiftColorOutcome.parsed.rawValue)
+}
+
 /// Up to sixteen arguments, the count of `matrix3d()`, held inline so a function costs no
 /// allocation.
 private typealias TransformArguments = InlineArray<16, WebCore.CSSSwiftTransformArgument>
@@ -1435,7 +1475,8 @@ private func scanTransformList<Unit: CSSColorCodeUnit>(
 ///
 /// The C++ passes `kind` as a constant at each call site.
 ///
-/// `sink` receives the transform scan's output; the color scans do not touch it.
+/// `sink` receives the transform, length and opacity scans' output; the color scans do not touch
+/// it.
 @inline(always)
 private func scanFastPath<Unit: CSSColorCodeUnit>(
     _ characters: Span<Unit>,
@@ -1447,6 +1488,8 @@ private func scanFastPath<Unit: CSSColorCodeUnit>(
     case WebCore.CSSSwiftFastPathKindNamedColor: scanNamedColor(characters)
     case WebCore.CSSSwiftFastPathKindNumericColor: scanNumericColor(characters)
     case WebCore.CSSSwiftFastPathKindTransform: scanTransformList(characters, &sink)
+    case WebCore.CSSSwiftFastPathKindLength: scanSimpleNumber(characters, false, &sink)
+    case WebCore.CSSSwiftFastPathKindOpacity: scanSimpleNumber(characters, true, &sink)
     default: notAColor
     }
 }
