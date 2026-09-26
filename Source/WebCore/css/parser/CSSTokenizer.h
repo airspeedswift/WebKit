@@ -34,6 +34,19 @@
 #include <climits>
 #include <wtf/text/StringView.h>
 
+// The C++ tokenizer state machine is compiled in exactly when the Swift CSS implementation is not
+// (WK_USE_SWIFT_CSS in WebCore.xcconfig); a build has one scanner.
+//
+// This condition derives from a target-scoped define, so it must not change the layout of this
+// exported class: it may remove non-virtual member functions and nothing else. A member, base
+// class or virtual function under it would make a target built without the define disagree with
+// WebCore about the class.
+#if USE(SWIFT_CSS)
+#define CSS_CPP_TOKENIZER_COMPILED_IN 0
+#else
+#define CSS_CPP_TOKENIZER_COMPILED_IN 1
+#endif
+
 namespace WebCore {
 
 class CSSTokenizerInputStream;
@@ -51,6 +64,7 @@ public:
     WEBCORE_EXPORT explicit CSSTokenizer(StringView string LIFETIME_BOUND);
     CSSTokenizer(StringView string LIFETIME_BOUND, CSSParserObserverWrapper&); // For the inspector
 
+
     WEBCORE_EXPORT CSSParserTokenRange NODELETE tokenRange() const LIFETIME_BOUND;
     unsigned NODELETE tokenCount() const;
 
@@ -59,14 +73,24 @@ public:
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
+    friend class CSSSwiftTokenSink;
+
     CSSTokenizer(StringView string LIFETIME_BOUND, CSSParserObserverWrapper*, bool* constructionSuccess);
 
+    StringView preprocessString(StringView);
+
+    StringView registerString(String&&);
+    StringView registerString(const String&);
+
+    // Fills m_tokens from the Swift tokenizer (CSSTokenizerSwift.swift). Returns false if
+    // m_tokens could not be allocated or CSSSwiftTokenSink rejected a chunk.
+    bool tokenizeWithSwiftScanner(CSSParserObserverWrapper*, bool* constructionSuccess);
+
+#if CSS_CPP_TOKENIZER_COMPILED_IN
     CSSParserToken nextToken();
 
     char16_t NODELETE consume();
     void NODELETE reconsume(char16_t);
-
-    StringView preprocessString(StringView);
 
     CSSParserToken consumeNumericToken();
     CSSParserToken consumeIdentLikeToken();
@@ -116,22 +140,23 @@ private:
     CSSParserToken commercialAt(char16_t);
     CSSParserToken reverseSolidus(char16_t);
     CSSParserToken asciiDigit(char16_t);
-    CSSParserToken letterU(char16_t);
     CSSParserToken nameStart(char16_t);
     CSSParserToken stringStart(char16_t);
     CSSParserToken endOfFile(char16_t);
 
-    StringView registerString(String&&);
-    StringView registerString(const String&);
-
     using CodePoint = CSSParserToken (CSSTokenizer::*)(char16_t);
     static const std::array<CodePoint, 128> codePoints;
+#endif // CSS_CPP_TOKENIZER_COMPILED_IN
 
+    // Used only by the C++ state machine, but declared unconditionally so that the layout of
+    // this class does not depend on CSS_CPP_TOKENIZER_COMPILED_IN.
     Vector<CSSParserTokenType, 8> m_blockStack;
+
     Vector<CSSParserToken, 32> m_tokens;
     // We only allocate strings when escapes are used.
     Vector<String> m_stringPool;
     CSSTokenizerInputStream m_input;
 };
+
 
 } // namespace WebCore
