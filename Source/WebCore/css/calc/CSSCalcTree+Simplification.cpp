@@ -59,6 +59,10 @@
 namespace WebCore {
 namespace CSSCalc {
 
+// The C++ simplifier: the per-operation `simplify` overloads and the recursive
+// `copyAndSimplify(const Child&)`. See `CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN` for what stays compiled
+// without it.
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 static auto copyAndSimplify(const CalcMix::Item&, const SimplificationOptions&) -> CalcMix::Item;
 static auto copyAndSimplify(const Vector<CalcMix::Item>&, const SimplificationOptions&) -> Vector<CalcMix::Item>;
 static auto copyAndSimplify(const CSS::Keyword::None&, const SimplificationOptions&) -> CSS::Keyword::None;
@@ -66,7 +70,9 @@ static auto copyAndSimplify(const Children&, const SimplificationOptions&) -> Ch
 static auto copyAndSimplify(const ChildOrNone&, const SimplificationOptions&) -> ChildOrNone;
 template<typename T>
 static auto copyAndSimplify(const std::optional<T>&, const SimplificationOptions&) -> std::optional<T>;
+#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 template<typename Op, typename... Args> static double executeMathOperation(Args&&... args)
 {
     return executeOperation<ToCalculationTreeOp<Op>::op>(std::forward<Args>(args)...);
@@ -86,6 +92,7 @@ template<typename... F> static decltype(auto) switchTogether(const Child& a, con
         }
     );
 }
+#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 // MARK: Predicate: percentageResolveToDimension
 
@@ -112,6 +119,7 @@ static bool NODELETE percentageResolveToDimension(const SimplificationOptions& o
     return false;
 }
 
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 // MARK: Predicate: unitsMatch
 
 constexpr bool NODELETE unitsMatch(const Number&, const Number&, const SimplificationOptions&)
@@ -177,6 +185,7 @@ constexpr bool NODELETE fullyResolved(const NonCanonicalDimension&, const Simpli
 {
     return false;
 }
+#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 std::optional<CanonicalDimension> canonicalize(NonCanonicalDimension root, const std::optional<CSSToLengthConversionData>& conversionData)
 {
@@ -299,6 +308,7 @@ std::optional<CanonicalDimension> canonicalize(NonCanonicalDimension root, const
 }
 
 
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 // MARK: Generic partial evaluation functions
 
 template<typename Op> static std::optional<Child> simplifyForOperation(Child& a, Child& b, const SimplificationOptions& options)
@@ -1628,6 +1638,7 @@ std::optional<Child> simplify(CalcMix& root, const SimplificationOptions& option
         }
     );
 }
+#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 // What an `anchor()` evaluates to, or nothing. Shared by `simplify(Anchor&)` and
 // `resolveStyleCoupledValue`.
@@ -1676,6 +1687,7 @@ static std::optional<Child> anchorSlotKeepingPrefix(const std::optional<Child>& 
     return makeChild(Sum { Vector<Child>::from(WTF::move(*after)) }, type);
 }
 
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 // The slot on its way out of the anchor node it takes the place of, with the wrapper removed. Left
 // in place, it would make the pass non-idempotent.
 static std::optional<Child> anchorSlotLeavingTheNode(std::optional<Child>&& slot)
@@ -1763,6 +1775,7 @@ template<Leaf Op> static auto copyAndSimplifyChildren(const Op& op, const Simpli
 {
     return op;
 }
+#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 // One walk over an operation's tuple slots, parameterised by what each slot becomes:
 // `copyAndSimplifyChildren` maps each through `copyAndSimplify`, and
@@ -1799,6 +1812,7 @@ template<typename Op, typename MapSlot> static Op rebuildChildren(const Indirect
         }, *root);
 }
 
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 template<typename Op> static auto copyAndSimplifyChildren(const IndirectNode<Op>& root, const SimplificationOptions& options) -> Op
 {
     return rebuildChildren(root, [&](const auto& slot) {
@@ -1821,6 +1835,7 @@ Child copyAndSimplify(const Child& root, const SimplificationOptions& options)
         }
     );
 }
+#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 // MARK: - The Swift calc simplification path (CSSCalcSimplificationSwift.swift)
 #if USE(SWIFT_CSS)
@@ -2564,6 +2579,7 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double valu
 }
 
 
+#if !CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 // Whether Swift simplified the tree. True leaves the new root constructed in `operands.rootSlot`.
 //
 // A `bool` rather than a `std::optional<Tree>`, because each `Child` move is an out-of-line
@@ -2606,11 +2622,12 @@ static Child swiftSimplifiedRoot(const Tree& tree, const SimplificationOptions& 
     simplified = trySimplifyWithSwift(tree, options, operands);
     return root;
 }
+#endif // !CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 #endif // USE(SWIFT_CSS)
 
 Tree copyAndSimplify(const Tree& tree, const SimplificationOptions& options)
 {
-#if !USE(SWIFT_CSS)
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
     return Tree {
         .root = copyAndSimplify(tree.root, options),
         .type = tree.type,
@@ -2628,7 +2645,7 @@ Tree copyAndSimplify(const Tree& tree, const SimplificationOptions& options)
     if (simplified)
         return result;
 
-    // `copyAndSimplify` has no failure channel, and a build selects one simplifier for it.
+    // There is no C++ simplifier in this build and `copyAndSimplify` has no failure channel.
     // Returning the tree unsimplified would be a silently wrong computed value.
     RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the Swift calc() simplifier declined a tree");
 #endif
@@ -2636,6 +2653,7 @@ Tree copyAndSimplify(const Tree& tree, const SimplificationOptions& options)
 
 // MARK: - Can Simplify
 
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 // NOTE: This is a simple and conservative implementation of `canSimplify`. A more precise
 // implementation is possible by utilizing the provided `SimplificationOptions` if that should be
 // necessary.
@@ -2656,6 +2674,7 @@ static bool canSimplifyWithCpp(const Tree& tree, const SimplificationOptions&)
         }
     );
 }
+#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 #if USE(SWIFT_CSS)
 // The Swift evaluator on any subtree, not only a whole tree's root, because `evaluateWithoutFallback`
@@ -2708,7 +2727,12 @@ bool canSimplify(const Tree& tree, const SimplificationOptions& options)
 {
     // `canSimplify(t) == false` must imply `copyAndSimplify(t) == t`, which holds because `simplify`
     // is a no-op for the three alternatives it answers false for.
+#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
     return canSimplifyWithCpp(tree, options);
+#else
+    UNUSED_PARAM(options);
+    return cssCalcCanSimplifySwift(tree.root);
+#endif
 }
 
 } // namespace CSSCalc

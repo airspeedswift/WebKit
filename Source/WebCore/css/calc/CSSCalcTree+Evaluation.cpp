@@ -42,8 +42,8 @@
 namespace WebCore {
 namespace CSSCalc {
 
-// The `evaluateDouble` walk. Compiled out when the Swift evaluator is the only one; see
-// `CSS_CALC_CPP_EVALUATOR_COMPILED_IN`.
+// The `evaluateDouble` walk. Compiled out with the C++ simplifier, when the Swift evaluator is the
+// only one; see `CSS_CALC_CPP_EVALUATOR_COMPILED_IN`.
 #if CSS_CALC_CPP_EVALUATOR_COMPILED_IN
 static auto evaluate(const CSS::Keyword::None&, const EvaluationOptions&) -> std::optional<CSS::Keyword::None>;
 static auto evaluate(const ChildOrNone&, const EvaluationOptions&) -> std::optional<Variant<double, CSS::Keyword::None>>;
