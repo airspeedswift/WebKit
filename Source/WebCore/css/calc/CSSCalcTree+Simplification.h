@@ -101,13 +101,37 @@ struct SimplificationOptions {
 };
 
 
+// MARK: Implementation
+
+// Whether the C++ `evaluateDouble` walk (CSSCalcTree+Evaluation.cpp) is compiled in: exactly when
+// the Swift CSS implementation is not (WK_USE_SWIFT_CSS). With it off, `evaluateDouble` is the Swift
+// evaluator, and a tree that evaluator refuses is a `RELEASE_ASSERT`.
+//
+// What stays compiled has a caller outside the walk: `resolveRandomBaseValue`, and
+// `evaluateWithoutFallback`, which `evaluateAnchorFunction` calls and which evaluates the
+// `<anchor-side>` with the Swift evaluator.
+#if USE(SWIFT_CSS)
+#define CSS_CALC_CPP_EVALUATOR_COMPILED_IN 0
+#else
+#define CSS_CALC_CPP_EVALUATOR_COMPILED_IN 1
+#endif
+
 // MARK: Can Simplify
 
+// Whether simplifying the tree could change it: false for `Number`, `Percentage` and
+// `CanonicalDimension`, true for the other 38. `canSimplify(t) == false` must imply
+// `copyAndSimplify(t) == t`.
+//
+// The options are not read; the Swift implementation does not take them.
 bool canSimplify(const Tree&, const SimplificationOptions&);
 
 // MARK: Copy & Simplify
 
 Tree copyAndSimplify(const Tree&, const SimplificationOptions&);
+// The C++ simplifier.
+//
+// It has no Swift implementation: it is the per-node recursion, and a Swift one would cross into
+// Swift once per node.
 Child copyAndSimplify(const Child&, const SimplificationOptions&);
 
 // MARK: In-place Simplify
@@ -157,6 +181,7 @@ std::optional<Child> simplify(AnchorSize&, const SimplificationOptions&);
 // MARK: Unit Canonicalization
 
 std::optional<CanonicalDimension> canonicalize(NonCanonicalDimension, const std::optional<CSSToLengthConversionData>&);
+
 
 } // namespace CSSCalc
 } // namespace WebCore

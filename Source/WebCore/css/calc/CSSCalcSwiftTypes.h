@@ -434,6 +434,25 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // repeated call is harmless.
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const Child&) const noexcept;
 
+    // `evaluate(const IndirectNode<CalcMix>&)`'s weight for item `index`:
+    // `Style::toStyle(*item.weight, builderState).value`, which clamps a raw weight and evaluates a
+    // `Calc` one. `resolved` is false with no conversion data or builder state, where
+    // `evaluate(CalcMix)` answers nothing; `substituteFallback` means the weight is omitted.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveCalcMixItemWeight(const Child& calcMix, uint32_t index) const noexcept;
+
+    // The guard `evaluate(const IndirectNode<Random>&)` takes first, asked on its own because the
+    // lookup below has a side effect.
+    WEBCORE_EXPORT bool hasStyleBuilderState() const noexcept;
+
+    // `evaluate(const IndirectNode<Random>&)`'s `resolveRandomBaseValue`, which, unlike
+    // `resolveStyleCoupledValue`, evaluates a `fixed` `Calc` value. It inserts into the random cache,
+    // so it is asked only where the C++ evaluator asks it.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRandomBaseValueForEvaluation(const Child& random) const noexcept;
+
+    // What `evaluate(const IndirectNode<Anchor>&)` and `AnchorSize`'s do when neither the evaluation
+    // nor the fallback answers.
+    WEBCORE_EXPORT void markCurrentPropertyInvalidAtComputedValueTime() const noexcept;
+
 private:
     // The payload `index` names, or null for no table, an index out of range, or a payload that is
     // not a `T`. Each is a contract violation, and callers refuse rather than substitute a default.
@@ -687,6 +706,10 @@ WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16
 // Returns `Parsed` only when the range was consumed, the root slot filled and the operand stack left
 // empty. Anything else leaves `outRoot` untouched.
 WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const CSSCalcSymbolsAllowed&, const SimplificationOptions&, Child& outRoot, bool simplify = true, CSS::PropertyParserState* = nullptr) noexcept;
+
+// `evaluateDoubleWithSwift` (CSSCalcTree+Evaluation.h) with the whole answer: when `resolved` is
+// false, `alternative` names the node the Swift evaluator refused.
+WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftEvaluate(const Tree&, const EvaluationOptions&) noexcept;
 
 } // namespace CSSCalc
 } // namespace WebCore
