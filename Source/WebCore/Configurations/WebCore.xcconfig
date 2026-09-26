@@ -39,9 +39,9 @@ GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRE
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 
 // Selects the Swift implementation of CSS tokenizing, the property fast paths, and calc()
-// parsing, simplification, evaluation and serialization. The C++ implementations it replaces
-// are compiled out, except the calc() simplifier. There is no fallback between them: input the
-// Swift does not handle is a build failure or a trap naming it.
+// parsing, simplification, evaluation and serialization, and compiles out the C++
+// implementations it replaces. There is no fallback between them: input the Swift does not handle
+// is a build failure or a trap naming it.
 WK_USE_SWIFT_CSS = NO;
 WK_USE_SWIFT_CSS_DEFINES = $(WK_USE_SWIFT_CSS_DEFINES_$(WK_USE_SWIFT_CSS));
 WK_USE_SWIFT_CSS_DEFINES_YES = USE_SWIFT_CSS=1;

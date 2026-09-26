@@ -184,10 +184,10 @@ template<typename CalculationOp> CSSCalc::Child toCSS(const IndirectNode<Calcula
 
     auto op = WTF::apply([&](const auto& ...x) { return CalcOp { toCSS(x, options)... }; } , *root);
 
-    if (auto replacement = CSSCalc::simplify(op, options.simplification))
-        return WTF::move(*replacement);
-
+    // Not simplified here: `toCSS(const Tree&)` below runs one whole-tree `copyAndSimplify`
+    // instead, as `toStyle` does in the other direction.
     auto type = toType(op);
+    ASSERT(type);
     return CSSCalc::makeChild(WTF::move(op), *type);
 }
 
@@ -359,14 +359,20 @@ CSSCalc::Tree toCSS(const Tree& tree, const ToCSSOptions& toCSSOptions)
         },
     };
 
-    auto root = toCSS(tree.root, conversionOptions);
-    auto type = CSSCalc::getType(root);
-
-    return CSSCalc::Tree {
-        .root = WTF::move(root),
-        .type = type,
+    auto converted = CSSCalc::Tree {
+        .root = toCSS(tree.root, conversionOptions),
+        .type = CSSCalc::Type { },
         .stage = CSSCalc::Stage::Computed,
     };
+
+    // The finished tree is simplified once. `.conversionData` is `std::nullopt` above, so nothing is
+    // canonicalised; what is left is folding, which `copyAndSimplify` does bottom-up.
+    auto simplified = CSSCalc::copyAndSimplify(converted, conversionOptions.simplification);
+
+    // Taken from the simplified root: `copyAndSimplify` copies `Tree::type` through unchanged, so
+    // reading it off `converted` would give the type of the unfolded tree.
+    simplified.type = CSSCalc::getType(simplified.root);
+    return simplified;
 }
 
 Tree toStyle(const CSSCalc::Tree& tree, const ToStyleOptions& toStyleOptions)
