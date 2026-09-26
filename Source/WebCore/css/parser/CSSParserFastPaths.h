@@ -51,6 +51,12 @@ public:
     // Parses simple values like '10px' or 'green', but makes no guarantees about handling any property completely.
     static RefPtr<CSSValue> maybeParseValue(CSSPropertyID, StringView, CSS::PropertyParserState&);
 
+    // Test instrumentation: while enabled, counts the maybeParseValue calls that return a value, so a
+    // layout test can tell a fast-path parse from the full parser's identical answer. Reset by
+    // Internals::resetToConsistentState.
+    static WEBCORE_EXPORT void setHitCountingEnabledForTesting(bool);
+    static WEBCORE_EXPORT uint64_t hitCountForTesting();
+
     // Returns the allowed numeric value range for a length value if the property supports a single length value.
     // FIXME: This should be generated from CSSProperties.json
     static std::optional<CSS::Range> NODELETE lengthValueRangeForPropertiesSupportingSimpleLengths(CSSPropertyID);

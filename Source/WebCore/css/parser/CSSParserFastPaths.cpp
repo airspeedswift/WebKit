@@ -1216,7 +1216,21 @@ static RefPtr<CSSValue> parseColorWithAuto(StringView string, const CSSParserCon
     return parseColor(string, context);
 }
 
-RefPtr<CSSValue> CSSParserFastPaths::maybeParseValue(CSSPropertyID property, StringView string, CSS::PropertyParserState& state)
+static bool fastPathHitCountingEnabled;
+static uint64_t fastPathHitCount;
+
+void CSSParserFastPaths::setHitCountingEnabledForTesting(bool enabled)
+{
+    fastPathHitCountingEnabled = enabled;
+    fastPathHitCount = 0;
+}
+
+uint64_t CSSParserFastPaths::hitCountForTesting()
+{
+    return fastPathHitCount;
+}
+
+static RefPtr<CSSValue> maybeParseValueImpl(CSSPropertyID property, StringView string, CSS::PropertyParserState& state)
 {
     // Some at-rules like @keyframes, @position-try restrict which properties
     // are allowed inside the rule. Fallback to slow path for at-rules since
@@ -1247,12 +1261,20 @@ RefPtr<CSSValue> CSSParserFastPaths::maybeParseValue(CSSPropertyID property, Str
         return parseColor(string, context);
     }
 
-    if (auto valueRange = lengthValueRangeForPropertiesSupportingSimpleLengths(property)) {
+    if (auto valueRange = CSSParserFastPaths::lengthValueRangeForPropertiesSupportingSimpleLengths(property)) {
         if (auto result = parseSimpleLengthValue(string, state.context.mode, *valueRange))
             return result;
     }
 
     return parseKeywordValue(property, string, state);
+}
+
+RefPtr<CSSValue> CSSParserFastPaths::maybeParseValue(CSSPropertyID property, StringView string, CSS::PropertyParserState& state)
+{
+    RefPtr value = maybeParseValueImpl(property, string, state);
+    if (fastPathHitCountingEnabled && value) [[unlikely]]
+        ++fastPathHitCount;
+    return value;
 }
 
 } // namespace WebCore

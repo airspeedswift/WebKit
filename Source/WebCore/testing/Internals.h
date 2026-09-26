@@ -557,6 +557,8 @@ public:
     ExceptionOr<unsigned> countFindMatches(const String&, const Vector<String>& findOptions);
     void setCachedFindMatchBufferLimitForTesting(unsigned maximumRunCount);
     void setCSSRandomBaseValuesDerivedFromKey(bool);
+    void setCSSPropertyFastPathHitCounting(bool);
+    uint64_t cssPropertyFastPathHitCount() const;
 #if ENABLE(VIDEO)
     ExceptionOr<Vector<double>> findCueMatches(const String&, const Vector<String>& findOptions);
     void clearFindCaptionTracks();
