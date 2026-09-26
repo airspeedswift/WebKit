@@ -42,6 +42,9 @@
 namespace WebCore {
 namespace CSSCalc {
 
+// The `evaluateDouble` walk. Compiled out when the Swift evaluator is the only one; see
+// `CSS_CALC_CPP_EVALUATOR_COMPILED_IN`.
+#if CSS_CALC_CPP_EVALUATOR_COMPILED_IN
 static auto evaluate(const CSS::Keyword::None&, const EvaluationOptions&) -> std::optional<CSS::Keyword::None>;
 static auto evaluate(const ChildOrNone&, const EvaluationOptions&) -> std::optional<Variant<double, CSS::Keyword::None>>;
 static auto evaluate(const std::optional<Child>&, const EvaluationOptions&) -> std::optional<std::optional<double>>;
@@ -235,6 +238,8 @@ std::optional<double> evaluate(const IndirectNode<Tan>& root, const EvaluationOp
     return evaluateTrig(root, options);
 }
 
+#endif // CSS_CALC_CPP_EVALUATOR_COMPILED_IN
+
 std::optional<double> resolveRandomBaseValue(const Random::Sharing& sharing, Style::BuilderState& builderState)
 {
     return WTF::switchOn(sharing,
@@ -264,6 +269,7 @@ std::optional<double> resolveRandomBaseValue(const Random::Sharing& sharing, Sty
     );
 }
 
+#if CSS_CALC_CPP_EVALUATOR_COMPILED_IN
 std::optional<double> evaluate(const IndirectNode<Random>& root, const EvaluationOptions& options)
 {
     if (!options.conversionData || !options.conversionData->styleBuilderState())
@@ -379,9 +385,15 @@ template<typename Op> std::optional<double> evaluate(const IndirectNode<Op>& roo
     return WTF::apply([&](const auto& ...x) { return executeMathOperationAfterUnwrapping<Op>(evaluate(x, options)...); } , *root);
 }
 
+#endif // CSS_CALC_CPP_EVALUATOR_COMPILED_IN
+
 std::optional<double> evaluateDouble(const Tree& tree, const EvaluationOptions& options)
 {
+#if CSS_CALC_CPP_EVALUATOR_COMPILED_IN
     return evaluate(tree.root, options);
+#else
+    return evaluateDoubleWithSwift(tree, options);
+#endif
 }
 
 std::optional<double> evaluateWithoutFallback(const Anchor& anchor, const EvaluationOptions& options)
@@ -390,7 +402,11 @@ std::optional<double> evaluateWithoutFallback(const Anchor& anchor, const Evalua
 
     auto side = WTF::switchOn(anchor.side,
         [&](const Child& percentage) -> Style::AnchorPositionEvaluator::Side {
+#if CSS_CALC_CPP_EVALUATOR_COMPILED_IN
             return evaluate(percentage, options).value_or(0) / 100;
+#else
+            return evaluateDoubleWithSwift(percentage, options).value_or(0) / 100;
+#endif
         },
         [&](CSSValueID sideID) -> Style::AnchorPositionEvaluator::Side {
             return sideID;
