@@ -12494,6 +12494,45 @@ double Document::lookupCSSRandomBaseValue(const CSSCalc::RandomCachingKey& key) 
     return m_randomCachingKeyMap->lookupCSSRandomBaseValue(key);
 }
 
+static bool s_cssRandomBaseValuesDerivedFromKeyForTesting;
+
+void CSSCalc::RandomCachingKeyMap::setBaseValuesDerivedFromKeyForTesting(bool derived)
+{
+    s_cssRandomBaseValuesDerivedFromKeyForTesting = derived;
+}
+
+bool CSSCalc::RandomCachingKeyMap::baseValuesDerivedFromKeyForTesting()
+{
+    return s_cssRandomBaseValuesDerivedFromKeyForTesting;
+}
+
+// CSSCalcRandomCachingKeyHash hashes each name's AtomStringImpl pointer, which differs between
+// processes, so the value is derived from the key's characters instead.
+double CSSCalc::RandomCachingKeyMap::baseValueDerivedFromKeyForTesting(const RandomCachingKey& key)
+{
+    auto& resolved = std::get<RandomCachingKey::Key>(key.value);
+    auto addProperty = [](Hasher& hasher, const RandomScopedProperty& property) {
+        add(hasher, property.property, property.customPropertyName.string(), property.function);
+    };
+    Hasher hasher;
+    add(hasher, resolved.name.has_value());
+    if (resolved.name)
+        add(hasher, resolved.name->value.string());
+    add(hasher, resolved.propertyScoped.has_value());
+    if (resolved.propertyScoped) {
+        add(hasher, resolved.propertyScoped->index());
+        WTF::switchOn(*resolved.propertyScoped,
+            [&](const RandomSharingKey::PropertyScoped& scoped) {
+                addProperty(hasher, scoped.property);
+            },
+            [&](const RandomSharingKey::PropertyIndexScoped& scoped) {
+                addProperty(hasher, scoped.property);
+                add(hasher, scoped.index);
+            });
+    }
+    return static_cast<double>(hasher.hash()) / 4294967296.0;
+}
+
 void Document::prefetch(const URL& url, const Vector<String>& tags, std::optional<ReferrerPolicy> referrerPolicy, bool lowPriority)
 {
     RefPtr frame = this->frame();

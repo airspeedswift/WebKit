@@ -680,6 +680,7 @@ enum ContentsFormat {
     unsigned long countMatchesForText(DOMString text, sequence<DOMString> findOptions, DOMString markMatches);
     unsigned long countFindMatches(DOMString text, sequence<DOMString> findOptions);
     undefined setCachedFindMatchBufferLimitForTesting(unsigned long maximumRunCount);
+    undefined setCSSRandomBaseValuesDerivedFromKey(boolean derived);
     [Conditional=VIDEO] sequence<unrestricted double> findCueMatches(DOMString text, sequence<DOMString> findOptions);
     [Conditional=VIDEO] undefined clearFindCaptionTracks();
 
