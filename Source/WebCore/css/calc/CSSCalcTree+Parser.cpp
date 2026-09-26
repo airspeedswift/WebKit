@@ -27,6 +27,7 @@
 
 #include "AnchorPositionEvaluator.h"
 #include "CSSCalcOperator.h"
+#include "CSSCalcSwiftTypes.h"
 #include "CSSCalcSymbolTable.h"
 #include "CSSCalcTree+Serialization.h"
 #include "CSSCalcTree+Simplification.h"
@@ -73,6 +74,8 @@ static std::optional<std::pair<Number, Type>> lookupConstantNumber(CSSValueID sy
 
 // MARK: - Parser State
 
+#if CSS_CALC_CPP_PARSER_COMPILED_IN
+
 namespace {
 
 enum class ParseStatus { Ok, TooDeep };
@@ -116,6 +119,80 @@ static std::optional<TypedChild> parseCalcNumber(const CSSParserToken&, ParserSt
 static std::optional<TypedChild> parseCalcPercentage(const CSSParserToken&, ParserState&);
 static std::optional<TypedChild> parseCalcDimension(const CSSParserToken&, ParserState&);
 
+#endif // CSS_CALC_CPP_PARSER_COMPILED_IN
+
+// The context conditions on `random()`. Shared by `CSSCalcSwiftParseOptions::randomAllowed` and
+// `consumeRandom` so the two cannot disagree about which contexts allow the function.
+static bool randomAllowedIn(const CSS::PropertyParserState& propertyParserState)
+{
+    return propertyParserState.context.cssRandomFunctionEnabled
+        && (propertyParserState.currentRule == StyleRuleType::Style || propertyParserState.currentRule == StyleRuleType::Keyframe)
+        && propertyParserState.currentProperty != CSSPropertyInvalid
+        && !propertyParserState.randomFunctionsDisallowed;
+}
+
+// The same for `sibling-count()` and `sibling-index()`. The last two conditions are disjoined.
+static bool treeCountingAllowedIn(const CSS::PropertyParserState& propertyParserState)
+{
+    return propertyParserState.context.cssTreeCountingFunctionsEnabled
+        && (propertyParserState.currentRule == StyleRuleType::Style || propertyParserState.currentRule == StyleRuleType::Keyframe)
+        && (propertyParserState.currentProperty != CSSPropertyInvalid || propertyParserState.treeCountingFunctionsAllowed);
+}
+
+// Shared by both Swift entry points, so a context condition dropped from one of them cannot make
+// that entry accept input the other rejects.
+#if !CSS_CALC_CPP_PARSER_COMPILED_IN
+static CSSCalcSwiftParseOptions swiftParseOptionsFor(CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, CSSValueID rootFunction, bool bareCalcSum)
+{
+    return CSSCalcSwiftParseOptions {
+        .category = parserOptions.category,
+        .absoluteLengthUnitsOnly = propertyParserState.absoluteLengthUnitsOnly,
+        .hasAllowedSymbols = !parserOptions.allowedSymbols.isEmpty(),
+        .treeCountingAllowed = treeCountingAllowedIn(propertyParserState),
+        .cssCalcMixEnabled = propertyParserState.context.cssCalcMixEnabled,
+        .anchorAllowed = parserOptions.propertyOptions.anchorPolicy == AnchorPolicy::Allow,
+        .anchorSizeAllowed = parserOptions.propertyOptions.anchorSizePolicy == AnchorSizePolicy::Allow,
+        .randomAllowed = randomAllowedIn(propertyParserState),
+        .unitlessZeroLengthAllowed = parserOptions.propertyOptions.unitlessZeroLength == UnitlessZeroQuirk::Allow,
+        .rootFunctionId = static_cast<uint16_t>(rootFunction),
+        .bareCalcSum = bareCalcSum,
+    };
+}
+
+// Runs the Swift parser and turns its outcome into the answer both entry points need. The outer
+// optional is empty when the parser hands the input back; the inner one is `nullopt` when the input
+// is invalid. The two must stay distinct: turning a handed-back input into `nullopt` would drop a
+// valid declaration.
+//
+// `outConsumedTokens` is written only when a tree comes back.
+static std::optional<std::optional<Tree>> attemptSwiftParse(const CSSParserTokenRange& tokens, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, CSSValueID rootFunction, bool bareCalcSum, uint32_t& outConsumedTokens)
+{
+    Child swiftRoot = Number { .value = 0 };
+    auto swiftResult = cssCalcSwiftParseIntoChild(tokens, swiftParseOptionsFor(propertyParserState, parserOptions, rootFunction, bareCalcSum), parserOptions.allowedSymbols, simplificationOptions, swiftRoot, true, &propertyParserState);
+
+    switch (static_cast<CSSCalcSwiftParseOutcome>(swiftResult.outcome)) {
+    case CSSCalcSwiftParseOutcome::Failed:
+        return std::optional<Tree> { std::nullopt };
+
+    case CSSCalcSwiftParseOutcome::Parsed:
+        // The type check `parseAndSimplify`'s C++ path performs, on the type the Swift parser computed.
+        if (!swiftResult.type.matches(parserOptions.category))
+            return std::optional<Tree> { std::nullopt };
+        outConsumedTokens = swiftResult.consumedTokens;
+        return std::optional<Tree> { Tree {
+            .root = WTF::move(swiftRoot),
+            .type = swiftResult.type,
+            .stage = CSSCalc::Stage::Specified,
+            .requiresConversionData = swiftResult.requiresConversionData,
+        } };
+
+    case CSSCalcSwiftParseOutcome::Declined:
+        break;
+    }
+    return std::nullopt;
+}
+#endif // !CSS_CALC_CPP_PARSER_COMPILED_IN
+
 std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions)
 {
     auto function = range.peek().functionId();
@@ -128,6 +205,22 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
 
     // -- Parsing --
 
+#if !CSS_CALC_CPP_PARSER_COMPILED_IN
+    {
+        // Unread here: this entry requires the range exhausted, so the count is the whole range.
+        uint32_t consumedTokens = 0;
+        if (auto answer = attemptSwiftParse(tokens, propertyParserState, parserOptions, simplificationOptions, function, false, consumedTokens))
+            return WTF::move(*answer);
+    }
+
+    // A handed-back input may not become a `nullopt`, which would drop a valid declaration.
+    //
+    // The Swift parser hands back only folds that need conversion data (tree counting, `anchor()`,
+    // `anchor-size()`, `random()`), and no caller combines conversion data with a policy that admits
+    // them: the only caller that sets `SimplificationOptions::conversionData`, `SizesAttributeParser`,
+    // uses the default property options and no `currentProperty`.
+    RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the Swift calc() parser declined a function");
+#else
     ParserState state {
         .propertyParserState = propertyParserState,
         .parserOptions = parserOptions,
@@ -159,10 +252,33 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     LOG_WITH_STREAM(Calc, stream << "Completed top level parse/simplification for function '" << nameLiteralForSerialization(function) << "': " << serializationForCSS(result, { parserOptions.range, CSS::defaultSerializationContext() }) << ", type: " << getType(result.root) << ", category=" << parserOptions.category << ", requires-conversion-data: " << result.requiresConversionData);
 
     return result;
+#endif // CSS_CALC_CPP_PARSER_COMPILED_IN
 }
 
 std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange& tokens, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions)
 {
+    // `<calc-sum>` stops at `calc-size()`'s top-level comma, so the range is not required to be
+    // exhausted.
+    //
+    // The Swift path advances it only on success; the C++ path leaves it part-consumed on
+    // failure. No caller reads it after a failure.
+#if !CSS_CALC_CPP_PARSER_COMPILED_IN
+    {
+        uint32_t consumedTokens = 0;
+        // `bareCalcSum` never consults the root function; `CSSValueInvalid` makes a use of it fail
+        // rather than parse as `calc()`.
+        if (auto answer = attemptSwiftParse(tokens, propertyParserState, parserOptions, simplificationOptions, CSSValueInvalid, true, consumedTokens)) {
+            // The Swift entry takes the range by const reference, so the advance is replayed here.
+            // Clamped so that a count past the end cannot be a span violation.
+            if (*answer)
+                tokens = CSSParserTokenRange { tokens.span().subspan(std::min<size_t>(consumedTokens, tokens.size())) };
+            return WTF::move(*answer);
+        }
+    }
+
+    // See `parseAndSimplify`. This entry's caller leaves `SimplificationOptions::conversionData` unset.
+    RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the Swift calc() parser declined a bare <calc-sum>");
+#else
     ParserState state {
         .propertyParserState = propertyParserState,
         .parserOptions = parserOptions,
@@ -182,6 +298,7 @@ std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange& tokens, CSS::Pr
         .stage = CSSCalc::Stage::Specified,
         .requiresConversionData = state.requiresConversionData,
     };
+#endif // CSS_CALC_CPP_PARSER_COMPILED_IN
 }
 
 bool isCalcFunction(CSSValueID functionId)
@@ -222,6 +339,8 @@ bool isCalcFunction(CSSValueID functionId)
     }
     return false;
 }
+
+#if CSS_CALC_CPP_PARSER_COMPILED_IN
 
 template<typename Op> static std::optional<TypedChild> consumeZeroArguments(CSSParserTokenRange& tokens, int, ParserState&)
 {
@@ -683,15 +802,7 @@ static std::optional<TypedChild> consumeRandom(CSSParserTokenRange& tokens, int 
 {
     // <random()> = random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )
 
-    if (!state.propertyParserState.context.cssRandomFunctionEnabled)
-        return { };
-
-    if (state.propertyParserState.currentRule != StyleRuleType::Style && state.propertyParserState.currentRule != StyleRuleType::Keyframe)
-        return { };
-    if (state.propertyParserState.currentProperty == CSSPropertyInvalid)
-        return { };
-
-    if (state.propertyParserState.randomFunctionsDisallowed)
+    if (!randomAllowedIn(state.propertyParserState))
         return { };
 
     using Op = Random;
@@ -931,13 +1042,13 @@ static std::optional<TypedChild> consumeValueWithoutSimplifyingRootCalc(CSSParse
     if (!typedValue)
         return { };
 
-    auto isLeafValue = WTF::switchOn(typedValue->child,
-        [](Leaf auto&) { return true; },
-        [](auto&) { return false; }
-    );
+    auto isLeafValue = isLeaf(typedValue->child);
 
     if (isFunction && isLeafValue) {
-        // Wrap in Sum to keep top level calc() function in serialization.
+        // Wrap in Sum to keep top level calc() function in serialization. `anchor()` is not a math
+        // function, so `serializeWithoutOmittingPrefix` prints a `calc()` only for a non-`Leaf`
+        // child, and this wrapper is the tree's only record that the author wrote one. A whole-tree
+        // `copyAndSimplify` collapses it (css-values-4 8.3) and `rebuildChildren` restores it.
         Vector<Child> children;
         children.append(WTF::move(typedValue->child));
 
@@ -1130,7 +1241,11 @@ static std::optional<TypedChild> consumeAnchor(CSSParserTokenRange& tokens, int 
     return TypedChild { makeChild(WTF::move(anchor), type), type };
 }
 
-static std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID value)
+#endif // CSS_CALC_CPP_PARSER_COMPILED_IN
+
+// Not `static`, and compiled in every configuration: `CSSCalcSwiftBuilder::buildAnchor` uses the same
+// mapping to build an `AnchorSize` from the keyword's `CSSValueID`.
+std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID value)
 {
     switch (value) {
     case CSSValueWidth:
@@ -1149,6 +1264,8 @@ static std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSize
         return { };
     }
 }
+
+#if CSS_CALC_CPP_PARSER_COMPILED_IN
 
 static std::optional<TypedChild> consumeAnchorSize(CSSParserTokenRange& tokens, int depth, ParserState& state)
 {
@@ -1366,11 +1483,7 @@ std::optional<TypedChild> parseCalcFunction(CSSParserTokenRange& tokens, CSSValu
         // <sibling-count()> = sibling-count()
         //     - INPUT: none
         //     - OUTPUT: <integer>
-        if (!state.propertyParserState.context.cssTreeCountingFunctionsEnabled)
-            return { };
-        if (state.propertyParserState.currentRule != StyleRuleType::Style && state.propertyParserState.currentRule != StyleRuleType::Keyframe)
-            return { };
-        if (state.propertyParserState.currentProperty == CSSPropertyInvalid && !state.propertyParserState.treeCountingFunctionsAllowed)
+        if (!treeCountingAllowedIn(state.propertyParserState))
             return { };
         state.requiresConversionData = true;
         return consumeZeroArguments<SiblingCount>(tokens, depth, state);
@@ -1379,11 +1492,7 @@ std::optional<TypedChild> parseCalcFunction(CSSParserTokenRange& tokens, CSSValu
         // <sibling-index()> = sibling-index()
         //     - INPUT: none
         //     - OUTPUT: <integer>
-        if (!state.propertyParserState.context.cssTreeCountingFunctionsEnabled)
-            return { };
-        if (state.propertyParserState.currentRule != StyleRuleType::Style && state.propertyParserState.currentRule != StyleRuleType::Keyframe)
-            return { };
-        if (state.propertyParserState.currentProperty == CSSPropertyInvalid && !state.propertyParserState.treeCountingFunctionsAllowed)
+        if (!treeCountingAllowedIn(state.propertyParserState))
             return { };
         state.requiresConversionData = true;
         return consumeZeroArguments<SiblingIndex>(tokens, depth, state);
@@ -1661,6 +1770,220 @@ std::optional<TypedChild> parseCalcDimension(const CSSParserToken& token, Parser
         return TypedChild { copyAndSimplify(WTF::move(child), *simplificationOptions), type };
     return TypedChild { WTF::move(child), type };
 }
+
+#endif // CSS_CALC_CPP_PARSER_COMPILED_IN
+
+// MARK: - Swift parser token boundary
+#if USE(SWIFT_CSS)
+
+// The Swift-visible stand-ins must be the size of the real members, or the two languages hold
+// different views of one live object. Only this translation unit can see `CSSParserTokenRange`.
+static_assert(sizeof(CSSCalcSwiftParseCursor) == sizeof(const CSSParserTokenRange*) + sizeof(const CSSCalcSymbolsAllowed*) + sizeof(CSS::PropertyParserState*) + sizeof(CSSCalcSwiftFlatPayloads*));
+
+// Swift's `calcFindBlockEnd` compares the raw block type against these values.
+static_assert(static_cast<uint8_t>(CSSParserToken::NotBlock) == 0);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockStart) == 1);
+static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
+
+// Swift reads a raw `CSSValueID` of 0 as "absent", which is what `CSSParserToken::id()` and
+// `functionId()` return for a token of the wrong type.
+static_assert(static_cast<uint16_t>(CSSValueInvalid) == 0);
+
+static_assert(static_cast<uint8_t>(PercentHint::Length) != 0, "CSSCalcSwiftLeaf::percentHint and CSSCalcSwiftNodeInfo::percentHint use 0 as \"no hint\"");
+
+// Which alternative `makeNumeric` builds for `unit`, answered by calling it so the unit
+// classification is not duplicated. Numeric alternatives are inline, so this does not allocate.
+uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
+{
+    auto child = makeNumeric(0, static_cast<CSSUnitType>(unit));
+
+    // Not `swiftNodeInfo`: its 41-way `WTF::switchOn` is far more work than these four tests.
+    if (WTF::holdsAlternative<Number>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Number);
+    if (WTF::holdsAlternative<Percentage>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Percentage);
+    if (WTF::holdsAlternative<CanonicalDimension>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::CanonicalDimension);
+    if (WTF::holdsAlternative<NonCanonicalDimension>(child))
+        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::NonCanonicalDimension);
+
+    // Unreachable for any unit the Swift parser asks about; `pushLeaf` treats it as a contract violation.
+    return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Operation);
+}
+
+CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
+{
+    auto constant = lookupConstantNumber(static_cast<CSSValueID>(id));
+    if (!constant)
+        return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = false };
+    // `lookupConstantNumber` always builds a `Number` with an empty `Type`.
+    return {
+        .value = constant->first.value,
+        .unitType = static_cast<uint16_t>(CSSUnitType::Number),
+        .resolved = true,
+        .alternative = CSSCalcSwiftAlternative::Number,
+        .substituteFallback = false,
+    };
+}
+
+// Whether canonicalizing `unit` needs conversion data.
+static uint8_t cssCalcSwiftUnitFlagsFor(CSSUnitType unit) noexcept
+{
+    return conversionToCanonicalUnitRequiresConversionData(unit) ? cssCalcSwiftTokenUnitNeedsConversionData : 0;
+}
+
+static uint8_t cssCalcSwiftFunctionFlagsFor(CSSValueID functionId) noexcept
+{
+    uint8_t flags = 0;
+    if (isCalcFunction(functionId))
+        flags |= cssCalcSwiftTokenIsCalcFunction;
+    if (functionId == CSSValueCalc || functionId == CSSValueWebkitCalc)
+        flags |= cssCalcSwiftTokenIsPlainCalcFunction;
+    return flags;
+}
+
+// The Swift parser's `calcMaxExpressionDepth` repeats this value.
+static_assert(maxExpressionDepth == 100);
+
+uint32_t CSSCalcSwiftParseCursor::tokenCount() const noexcept
+{
+    return static_cast<uint32_t>(m_range.size());
+}
+
+CSSCalcSwiftSymbolResult CSSCalcSwiftParseCursor::lookupSymbol(uint16_t valueID) const noexcept
+{
+    // `parseCalcKeyword`'s first branch. The conversion-data predicate is asked of the resolved unit,
+    // which the token does not carry.
+    auto unit = m_symbols.get(static_cast<CSSValueID>(valueID));
+    if (!unit)
+        return { .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .needsConversionData = false };
+    return {
+        .unitType = static_cast<uint16_t>(*unit),
+        .resolved = true,
+        .needsConversionData = conversionToCanonicalUnitRequiresConversionData(*unit),
+    };
+}
+
+void CSSCalcSwiftParseCursor::fillTokens(CSSCalcSwiftToken *__counted_by(count) out __attribute__((noescape)), uint32_t count) const noexcept
+{
+    // Past the end `peek` is the EOF token. `numericValue()` and `delimiter()` assert on a token of
+    // another type, so each accessor is called only for the types it answers for.
+    for (auto& slot : unsafeMakeSpan(out, count)) {
+        auto& token = m_range.peek(&slot - out);
+        auto type = token.type();
+        bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
+        auto functionId = type == FunctionToken ? token.functionId() : CSSValueInvalid;
+        slot = {
+            .numericValue = isNumeric ? token.numericValue() : 0,
+            .id = static_cast<uint16_t>(type == IdentToken ? token.id() : CSSValueInvalid),
+            .functionId = static_cast<uint16_t>(functionId),
+            .delimiter = type == DelimiterToken ? token.delimiter() : u'\0',
+            .unit = token.unitType(),
+            .type = type,
+            .blockType = static_cast<uint8_t>(token.getBlockType()),
+            .flags = type == DimensionToken ? cssCalcSwiftUnitFlagsFor(token.unitType()) : type == FunctionToken ? cssCalcSwiftFunctionFlagsFor(functionId) : uint8_t { 0 },
+        };
+    }
+}
+
+CSSCalcSwiftConsumedPayload CSSCalcSwiftParseCursor::consumeRandomKey(uint32_t index) const noexcept
+{
+    // `consumeRandom`'s `<random-key>` half, over a range starting at `index`. The context conditions
+    // are already in `CSSCalcSwiftParseOptions::randomAllowed`, which is false without a parser state.
+    if (!m_propertyParserState || !m_payloads)
+        return { .nextIndex = index, .payloadIndex = cssCalcSwiftFlatNoNode, .consumed = false };
+
+    auto& state = *m_propertyParserState;
+    auto tokens = CSSParserTokenRange { m_range.span().subspan(std::min<size_t>(index, m_range.size())) };
+    auto sizeBefore = tokens.size();
+
+    auto keySource = CSSPropertyParserHelpers::RandomKeySource {
+        .property = { state.currentProperty, state.currentCustomPropertyName, RandomFunction::Random },
+        .autoElementScoped = CSS::Keyword::ElementScoped { }
+    };
+
+    // Read where `consumeRandom` reads it: a `random()` draw is keyed to source order.
+    auto consumedIndex = state.cssRandomFunctionCount;
+
+    std::optional<Random::Sharing> sharing;
+    if (auto key = CSSPropertyParserHelpers::consumeUnresolvedRandomKey(tokens, state, keySource, [&] {
+        return consumedIndex;
+    })) {
+        // As in `consumeRandom`, a missing comma after a key fails the whole function.
+        if (!CSSPropertyParserHelpers::consumeCommaIncludingWhitespace(tokens))
+            return { .nextIndex = index, .payloadIndex = cssCalcSwiftFlatNoNode, .consumed = false };
+        sharing = WTF::move(*key);
+    } else {
+        // An omitted key is `auto`; `nextIndex` stays on the first argument.
+        sharing = Random::Sharing { CSSPropertyParserHelpers::randomSharingAuto(keySource, consumedIndex) };
+    }
+
+    // After the key and before the arguments, as in `consumeRandom`, so a nested `random()` sees the
+    // incremented value.
+    ++state.cssRandomFunctionCount;
+
+    auto payloadIndex = static_cast<uint32_t>(m_payloads->size());
+    m_payloads->append(WTF::move(*sharing));
+
+    return {
+        .nextIndex = index + static_cast<uint32_t>(sizeBefore - tokens.size()),
+        .payloadIndex = payloadIndex,
+        .consumed = true,
+    };
+}
+
+uint32_t CSSCalcSwiftParseCursor::randomFunctionCount() const noexcept
+{
+    if (!m_propertyParserState)
+        return 0;
+    return static_cast<uint32_t>(m_propertyParserState->cssRandomFunctionCount);
+}
+
+void CSSCalcSwiftParseCursor::setRandomFunctionCount(uint32_t count) const noexcept
+{
+    // Nothing to restore with no property state: `randomAllowed` is false in that case, so
+    // `consumeRandomKey` returned without touching a counter.
+    if (!m_propertyParserState)
+        return;
+    m_propertyParserState->cssRandomFunctionCount = count;
+}
+
+CSSCalcSwiftConsumedPayload CSSCalcSwiftParseCursor::consumeCalcMixWeightAt(uint32_t index) const noexcept
+{
+    // `consumeCalcMix`'s weight when it is a math function; a raw `<percentage>` never reaches here.
+    // This both validates the weight and resolves it into the payload table.
+    if (!m_propertyParserState || !m_payloads)
+        return { .nextIndex = index, .payloadIndex = cssCalcSwiftFlatNoNode, .consumed = false };
+
+    auto tokens = CSSParserTokenRange { m_range.span().subspan(std::min<size_t>(index, m_range.size())) };
+    auto sizeBefore = tokens.size();
+    auto weight = CSSPropertyParserHelpers::MetaConsumer<CalcMix::Item::Weight>::consume(tokens, *m_propertyParserState);
+    if (!weight)
+        return { .nextIndex = index, .payloadIndex = cssCalcSwiftFlatNoNode, .consumed = false };
+
+    auto payloadIndex = static_cast<uint32_t>(m_payloads->size());
+    m_payloads->append(WTF::move(*weight));
+
+    return { .nextIndex = index + static_cast<uint32_t>(sizeBefore - tokens.size()), .payloadIndex = payloadIndex, .consumed = true };
+}
+
+uint32_t CSSCalcSwiftParseCursor::resolveDashedIdentAt(uint32_t index) const noexcept
+{
+    // The same `toAtomString()` of one token that `consumeUnresolvedDashedIdent` does.
+    //
+    // The token type is re-checked so that a wrong index fails rather than naming the wrong element; an index past
+    // the end reads the EOF token.
+    if (!m_payloads)
+        return cssCalcSwiftFlatNoNode;
+    auto& token = m_range.peek(index);
+    if (token.type() != IdentToken || !token.value().startsWith("--"_s))
+        return cssCalcSwiftFlatNoNode;
+
+    auto payloadIndex = static_cast<uint32_t>(m_payloads->size());
+    m_payloads->append(CSS::CustomIdent { token.value().toAtomString() });
+    return payloadIndex;
+}
+#endif // USE(SWIFT_CSS)
 
 } // namespace CSSCalc
 } // namespace WebCore

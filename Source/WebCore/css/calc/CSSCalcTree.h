@@ -973,9 +973,14 @@ struct AnchorSize {
     bool operator==(const AnchorSize&) const = default;
 };
 
-// A value a `CalcNode` names by index in `origin` rather than holding: an `<anchor-element>`, a
-// `<random-key>`, or a `calc-mix()` item weight that is a math function. A tree built from an
-// existing `Child` has no payload table.
+// `<anchor-size>` as the `Style::AnchorSizeDimension` it names, or nothing. Defined in
+// CSSCalcTree+Parser.cpp; `CSSCalcSwiftBuilder::buildAnchor` uses it to build an `AnchorSize` from
+// the keyword's `CSSValueID`.
+std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID);
+
+// A value the parse resolves for a `CalcNode`: an `<anchor-element>`, a `<random-key>`, or a
+// `calc-mix()` item weight that is a math function. The node names it by index in `origin`. The
+// payload table lives for one `cssCalcSwiftParseIntoChild` call.
 using CSSCalcSwiftFlatPayload = Variant<CSS::CustomIdent, Random::Sharing, CalcMix::Item::Weight>;
 
 // A named struct so that CSSCalcSwiftTypes.h can forward-declare it.

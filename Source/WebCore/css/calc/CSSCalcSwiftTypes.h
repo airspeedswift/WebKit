@@ -399,6 +399,21 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     // not build, a mismatched arity, or too few operands.
     WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false, uint8_t noneMask = 0) noexcept;
 
+    // Pop the subtree operands of an `anchor()` or `anchor-size()` and push the finished node.
+    // `elementNamePayload` names the `CSS::CustomIdent` from `resolveDashedIdentAt` in the payload
+    // table, or is `cssCalcSwiftFlatNoNode` for none.
+    //
+    // `valueID` `CSSValueInvalid` means, for an `AnchorSize`, no dimension; for an `Anchor`, that
+    // the side is the `<percentage>` subtree in slot 0.
+    WEBCORE_EXPORT bool buildAnchor(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot, uint16_t valueID, uint32_t elementNamePayload) noexcept;
+
+    // Pop a `random()`'s two or three `<calc-sum>` operands and push the finished node.
+    // `sharingPayload` names the `Random::Sharing` that `consumeRandomKey` resolved.
+    //
+    // The sharing is carried whole: `resolveRandomBaseValue` hashes all of it into a
+    // `RandomCachingKey`, and a second derivation that disagreed would give one key two values.
+    WEBCORE_EXPORT bool buildRandom(uint32_t childCount, Type, bool isRoot, uint32_t sharingPayload) noexcept;
+
     // Drop every operand, after an emit that stopped half way.
     WEBCORE_EXPORT void clearOperands() noexcept;
 
@@ -439,6 +454,239 @@ struct CSSCalcSwiftSimplificationResult {
     // The `CSSCalcSwiftAlternative` that stopped the walk, or 0xFF.
     uint8_t declineAlternative;
 };
+
+// MARK: - The Swift calc parse path's token boundary
+
+// One CSS token, as the calc grammar needs it. Unlike `CSSParserTokenBits` it holds no pointer into
+// the stylesheet text.
+struct CSSCalcSwiftToken {
+    double numericValue;
+    // Raw `CSSValueID`s: CSSValueKeywords.h is generated. Swift compares them only against values it
+    // obtains from C++.
+    uint16_t id;
+    uint16_t functionId;
+    // 16 bits, as `CSSParserToken::delimiter()` returns: at 8, U+012B would compare equal to '+'.
+    char16_t delimiter;
+    CSSUnitType unit;
+    CSSParserTokenType type;
+    // `CSSParserToken::BlockType`, pinned in CSSCalcTree+Parser.cpp.
+    uint8_t blockType;
+
+    // Predicates on the fields above, computed once per token by `fillTokens`.
+    uint8_t flags;
+};
+// For a DimensionToken: `conversionToCanonicalUnitRequiresConversionData(unit)`.
+static constexpr uint8_t cssCalcSwiftTokenUnitNeedsConversionData = 1 << 0;
+// For a FunctionToken: `isCalcFunction(functionId)`. A math function the Swift grammar does not parse
+// hands the input back rather than failing.
+static constexpr uint8_t cssCalcSwiftTokenIsCalcFunction = 1 << 1;
+// For a FunctionToken: `calc()` or `-webkit-calc()`. A function with neither bit fails the parse.
+static constexpr uint8_t cssCalcSwiftTokenIsPlainCalcFunction = 1 << 2;
+static_assert(sizeof(CSSCalcSwiftToken) == 24);
+static_assert(alignof(CSSCalcSwiftToken) == 8);
+
+// What `consumeRandomKey` and `consumeCalcMixWeightAt` answer. Each resolves its construct with the
+// C++ production and stores it in the payload table, so the emit needs no tokens and no
+// `PropertyParserState`.
+struct CSSCalcSwiftConsumedPayload {
+    // First token past the construct, and past a `<random-key>`'s comma. Unchanged for an omitted key.
+    uint32_t nextIndex;
+    // The payload's index, which becomes the node's `origin`. An omitted `<random-key>` resolves to
+    // `auto` and has one too.
+    uint32_t payloadIndex;
+    // False for input the C++ consumer rejects, which fails the enclosing function.
+    bool consumed;
+};
+static_assert(sizeof(CSSCalcSwiftConsumedPayload) == 12);
+
+// `ParserOptions::allowedSymbols.get(id)`, for `<calc-keyword>`.
+struct CSSCalcSwiftSymbolResult {
+    uint16_t unitType;
+    bool resolved;
+    // `conversionToCanonicalUnitRequiresConversionData` of the resolved unit.
+    bool needsConversionData;
+};
+static_assert(sizeof(CSSCalcSwiftSymbolResult) == 4);
+
+// A read-only cursor over the tokens of one `calc()`, which Swift copies into a buffer it owns
+// because it cannot receive a bounds-carrying view of the range (rdar://186723514).
+//
+// `SWIFT_SAFE` is an unchecked assertion over the `std::span` inside `CSSParserTokenRange`. It holds
+// because the cursor is constructed on the C++ stack immediately before the single Swift call that
+// takes it and destroyed when that call returns, it crosses `noescape`, and the token vector is
+// complete before any property parser runs.
+struct SWIFT_SAFE CSSCalcSwiftParseCursor {
+    // Includes whitespace tokens: the grammar looks behind at the token at `i - 1`.
+    uint32_t tokenCount() const noexcept;
+
+    // Tokens `[0, count)` into `out`. A slot past the end gets the `EOFToken` that
+    // `CSSParserTokenRange::peek` returns there.
+    void fillTokens(CSSCalcSwiftToken *__counted_by(count) out __attribute__((noescape)), uint32_t count) const noexcept;
+
+    // `parseCalcKeyword`'s symbol-table lookup. When it does not resolve, the grammar tries the
+    // `<calc-keyword>` constants next, in `parseCalcKeyword`'s order.
+    CSSCalcSwiftSymbolResult lookupSymbol(uint16_t valueID) const noexcept;
+
+    // `consumeRandom`'s `<random-key>` half at `index`, resolved into the payload table. It stays in
+    // C++ because a key can hold an ident, a property name or a nested `calc()`, none of which a
+    // `CSSCalcSwiftToken` carries.
+    //
+    // Swift calls this where `consumeRandom` calls `consumeUnresolvedRandomKey`, before the
+    // arguments, and this reads and increments `cssRandomFunctionCount`, so the count is taken in
+    // source order and a nested `random()` sees the incremented value.
+    CSSCalcSwiftConsumedPayload consumeRandomKey(uint32_t index) const noexcept;
+
+    // The caller's `PropertyParserState::cssRandomFunctionCount`, so that a parse that produces no
+    // tree can restore it. 0, and the setter does nothing, without a `PropertyParserState`.
+    uint32_t randomFunctionCount() const noexcept;
+    void setRandomFunctionCount(uint32_t) const noexcept;
+
+    // `MetaConsumer<CalcMix::Item::Weight>::consume` at `index`, for a weight that is a math
+    // function. That weight is a separate `CSSCalc::Value`, parsed and simplified under its own
+    // options (`UnevaluatedCalcBase::parseBase`), not part of this tree, so it goes in the payload
+    // table. A raw `<percentage>` weight is parsed in Swift.
+    CSSCalcSwiftConsumedPayload consumeCalcMixWeightAt(uint32_t index) const noexcept;
+
+    // `consumeUnresolvedDashedIdent` over the token at `index`, resolved into the payload table,
+    // because Swift cannot see a token's text. `cssCalcSwiftFlatNoNode` when the token is not a
+    // `<dashed-ident>`.
+    uint32_t resolveDashedIdentAt(uint32_t index) const noexcept;
+
+#if !defined(__swift__)
+    CSSCalcSwiftParseCursor(const CSSParserTokenRange& range, const CSSCalcSymbolsAllowed& symbols, CSS::PropertyParserState* propertyParserState = nullptr, CSSCalcSwiftFlatPayloads* payloads = nullptr)
+        : m_range(range)
+        , m_symbols(symbols)
+        , m_propertyParserState(propertyParserState)
+        , m_payloads(payloads)
+    {
+    }
+
+private:
+    const CSSParserTokenRange& m_range;
+    const CSSCalcSymbolsAllowed& m_symbols;
+    // Read only by the three resolving productions, and null for a caller with no property state.
+    // Non-const because `consumeRandomKey` increments `cssRandomFunctionCount`; the member functions
+    // stay `const`, so Swift imports them as non-mutating.
+    CSS::PropertyParserState* m_propertyParserState;
+    // The payload table. When null, each resolving production refuses, which the Swift grammar
+    // reports as a contract violation.
+    CSSCalcSwiftFlatPayloads* m_payloads;
+#else
+    // Same-size stand-ins, so the importer never reaches CSSTokenizer.h. CSSCalcTree+Parser.cpp
+    // asserts the size.
+    const void* m_rangeStandIn;
+    const void* m_symbolsStandIn;
+    const void* m_propertyParserStateStandIn;
+    const void* m_payloadsStandIn;
+#endif
+};
+
+// What the parse needs from `ParserState` and `ParserOptions`, flattened.
+//
+// When `treeCountingAllowed`, `cssCalcMixEnabled`, `anchorAllowed`, `anchorSizeAllowed` or
+// `randomAllowed` is clear, its function fails the parse, as in the C++ parser.
+struct CSSCalcSwiftParseOptions {
+    // The enum rather than its raw value: `init?(rawValue:)` on an imported C++ enum never fails.
+    CSS::Category category;
+    // When set, a unit needing conversion data fails the parse, as in `parseCalcDimension`.
+    bool absoluteLengthUnitsOnly;
+    // Whether `ParserOptions::allowedSymbols` is non-empty; when clear, `lookupSymbol` is skipped.
+    // Cleared for an `<anchor-side>`, which `consumeAnchor` parses with no symbols.
+    bool hasAllowedSymbols;
+
+    // `treeCountingAllowedIn` in CSSCalcTree+Parser.cpp.
+    bool treeCountingAllowed;
+
+    bool cssCalcMixEnabled;
+
+    // Separate, because the inset properties allow both while sizing and margin properties allow
+    // only `anchor-size()`.
+    bool anchorAllowed;
+    bool anchorSizeAllowed;
+
+    // `randomAllowedIn` in CSSCalcTree+Parser.cpp. Also false without a `PropertyParserState`,
+    // which every `<random-key>` production needs.
+    bool randomAllowed;
+
+    // `consumeAnchorFallback`'s `Category::Number` case: a property that forbids it rejects
+    // `anchor(top, 0)`.
+    bool unitlessZeroLengthAllowed;
+
+    // The top-level function's `CSSValueID`, since the parse is handed only the range inside it.
+    // Passing the outer range instead would parse the arguments at depth 1 rather than 0. Ignored
+    // when `bareCalcSum` is set.
+    uint16_t rootFunctionId;
+
+    // `parseAndSimplifyCalcSum`: a bare `<calc-sum>`, for `calc-size()`'s arguments. The parse
+    // starts at `<calc-sum>`, skips no leading whitespace, and need not exhaust the range: it stops
+    // at `calc-size()`'s top-level comma, and `CSSCalcSwiftParseResult::consumedTokens` says where.
+    bool bareCalcSum;
+};
+
+// `Failed` means the input is invalid. `Declined` means the Swift parser handed it back, which a
+// caller must not treat as invalid.
+enum class CSSCalcSwiftParseOutcome : uint8_t {
+    Parsed,
+    Failed,
+    Declined,
+};
+
+// Which uncovered construct made the Swift parser hand the input back. Appended to, never inserted
+// into, so that each reason keeps its number.
+enum class CSSCalcSwiftParseDeclineReason : uint8_t {
+    None,
+    MathFunction,
+    Symbol,
+    TreeCounting,
+    // No producer. Kept so that each later reason keeps its number.
+    TooManyTokens,
+    // No producer: a math-function `calc-mix()` weight goes in the payload table. Kept so that each
+    // later reason keeps its number.
+    CalcMixWeight,
+    // An `anchor()` or `anchor-size()` that `simplify` would evaluate, which needs an original
+    // `CSSCalc::Child` a parsed tree does not have.
+    AnchorEvaluation,
+    // A construction refused because the boundary's contract was broken, not because of the input.
+    // No input should produce it.
+    ContractViolation,
+    // `AnchorEvaluation` for `random()`, which `simplify(Random&)` evaluates through
+    // `resolveStyleCoupledValue(const Child&)`.
+    RandomEvaluation,
+};
+
+struct alignas(8) CSSCalcSwiftParseResult {
+    Type type;
+    // A `CSSCalcSwiftParseOutcome`.
+    uint8_t outcome;
+    // A `CSSCalcSwiftParseDeclineReason`.
+    uint8_t declineReason;
+    bool requiresConversionData;
+    // Tokens consumed, for `CSSCalcSwiftParseOptions::bareCalcSum`; meaningful only for `Parsed`.
+    // Kept inside the asserted size, clear of the `@_expose(Cxx)` return-struct tail-zeroing hazard
+    // (rdar://186742920).
+    uint32_t consumedTokens;
+};
+static_assert(sizeof(CSSCalcSwiftParseResult) == 16);
+static_assert(alignof(CSSCalcSwiftParseResult) == 8);
+
+
+// The alternative `makeNumeric` builds for `unit`, as a `CSSCalcSwiftNodeKind`.
+WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
+
+// `lookupConstantNumber(id)`: the `<calc-keyword>` constants.
+WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept;
+
+// Runs the Swift grammar over the tokens inside a `calc()`, simplifies the result, and constructs it
+// into `outRoot`.
+//
+// `simplify` false leaves the tree as parsed, for a test that compares unsimplified trees.
+//
+// `propertyParserState` is what the three resolving productions need. With it null, `random()` and
+// a math-function `calc-mix()` weight fail the parse.
+//
+// Returns `Parsed` only when the range was consumed, the root slot filled and the operand stack left
+// empty. Anything else leaves `outRoot` untouched.
+WEBCORE_EXPORT CSSCalcSwiftParseResult cssCalcSwiftParseIntoChild(const CSSParserTokenRange& innerRange, CSSCalcSwiftParseOptions, const CSSCalcSymbolsAllowed&, const SimplificationOptions&, Child& outRoot, bool simplify = true, CSS::PropertyParserState* = nullptr) noexcept;
 
 } // namespace CSSCalc
 } // namespace WebCore
