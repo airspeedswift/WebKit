@@ -41,4 +41,9 @@
 // If Swift function parameters or return types depend on C++ types, the
 // relevant headers must be included here.
 
+#if USE(SWIFT_CSS)
+// The CSS boundary types every thunk in the generated header names, then the header itself.
+#include "WebCoreSwiftBoundaryTypes.h"
+#else
 #include "WebCoreSwift-Generated.h"
+#endif
