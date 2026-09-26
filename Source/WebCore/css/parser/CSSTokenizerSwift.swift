@@ -202,8 +202,14 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
     /// As in C++ it may advance past the end, so every read clamps and every report goes
     /// through `clampedOffset`.
     private var offset = 0
-    /// Owned here and growable, so nesting depth is unbounded.
-    private var blockStack = UniqueArray<UInt8>()
+    /// Mirrors m_blockStack, a `Vector<CSSParserTokenType, 8>`, so nesting depth is unbounded.
+    ///
+    /// The first eight levels are the bytes of `blockStackInline`, level `k` at bits `8k ..< 8k +
+    /// 8`, matching the C++'s inline capacity, so a stack no deeper than that allocates nothing.
+    /// Level `k >= 8` is `blockStackSpill[k - 8]`.
+    private var blockStackInline: UInt64 = 0
+    private var blockStackDepth = 0
+    private var blockStackSpill = UniqueArray<UInt8>()
 
     /// Code units of values that contained escapes, in the order the tokens referring to them
     /// were produced.
@@ -416,7 +422,34 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
 
     @inline(always)
     private mutating func pushBlock(_ type: WebCore.CSSParserTokenType) {
-        blockStack.append(type.rawValue)
+        if blockStackDepth < 8 {
+            let shift = UInt64(truncatingIfNeeded: blockStackDepth &* 8)
+            blockStackInline = (blockStackInline & ~(0xFF << shift)) | (UInt64(type.rawValue) << shift)
+        } else {
+            blockStackSpill.append(type.rawValue)
+        }
+        blockStackDepth &+= 1
+    }
+
+    /// The type on top of the block stack, or nil if it is empty.
+    @inline(always)
+    private func topBlock() -> UInt8? {
+        let top = blockStackDepth &- 1
+        if top < 0 {
+            return nil
+        }
+        if top < 8 {
+            return UInt8(truncatingIfNeeded: blockStackInline >> UInt64(truncatingIfNeeded: top &* 8))
+        }
+        return blockStackSpill[top &- 8]
+    }
+
+    @inline(always)
+    private mutating func popBlock() {
+        if blockStackDepth > 8 {
+            _ = blockStackSpill.removeLast()
+        }
+        blockStackDepth &-= 1
     }
 
     private mutating func blockStart(
@@ -434,12 +467,8 @@ struct CSSTokenizerSwift<Unit: CSSCodeUnit>: ~Copyable {
         _ start: Int,
         _ data: Span<Unit>
     ) -> EmittedToken {
-        // The unsigned compare both bounds-checks and tests for an empty stack.
-        let top = blockStack.count &- 1
-        if UInt(bitPattern: top) < UInt(bitPattern: blockStack.count),
-            blockStack[top] == startType.rawValue
-        {
-            _ = blockStack.removeLast()
+        if topBlock() == startType.rawValue {
+            popBlock()
             return token(type, start, data, block: .blockEnd)
         }
         return token(type, start, data)
