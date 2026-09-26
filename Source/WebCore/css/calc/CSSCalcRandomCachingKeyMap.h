@@ -43,11 +43,22 @@ public:
     double lookupCSSRandomBaseValue(const RandomCachingKey& key)
     {
         // FIXME: Probably doesn't need to be cryptographically strong, but starting with this.
-        return m_map.ensure(key, [] { return cryptographicallyRandomUnitInterval(); }).iterator->value;
+        return m_map.ensure(key, [&] {
+            if (baseValuesDerivedFromKeyForTesting()) [[unlikely]]
+                return baseValueDerivedFromKeyForTesting(key);
+            return cryptographicallyRandomUnitInterval();
+        }).iterator->value;
     }
+
+    // Makes each base value a function of its caching key's contents alone, so computed random()
+    // values are reproducible across processes. Test-only; reset by Internals::resetToConsistentState.
+    WEBCORE_EXPORT static void setBaseValuesDerivedFromKeyForTesting(bool);
+    WEBCORE_EXPORT static bool baseValuesDerivedFromKeyForTesting();
 
 private:
     RandomCachingKeyMap() = default;
+
+    static double baseValueDerivedFromKeyForTesting(const RandomCachingKey&);
 
     HashMap<RandomCachingKey, double> m_map;
 };
