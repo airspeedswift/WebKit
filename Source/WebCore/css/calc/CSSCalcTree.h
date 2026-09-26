@@ -26,6 +26,7 @@
 #pragma once
 
 #include <WebCore/CSSCalcRandomSharing.h>
+#include <WebCore/CSSCalcSwiftTypes.h>
 #include <WebCore/CSSCalcType.h>
 #include <WebCore/CSSCustomIdent.h>
 #include <WebCore/CSSPrimitiveNumeric.h>
@@ -194,49 +195,16 @@ template<typename Op> struct IndirectNode {
     bool operator==(const IndirectNode<Op>& other) const { return type == other.type && arePointingToEqualData(op, other.op); }
 };
 
+// Expanded from `CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE` in CSSCalcSwiftTypes.h, which also declares
+// `CSSCalcSwiftAlternative`, numbered by this variant's alternative index.
+#define CSS_CALC_NODE_ALTERNATIVE_FIRST(name, type) type
+#define CSS_CALC_NODE_ALTERNATIVE_REST(name, type) , type
 using Node = Variant<
-    Number,
-    Percentage,
-    CanonicalDimension,
-    NonCanonicalDimension,
-    Symbol,
-    SiblingCount,
-    SiblingIndex,
-    IndirectNode<Sum>,
-    IndirectNode<Product>,
-    IndirectNode<Negate>,
-    IndirectNode<Invert>,
-    IndirectNode<Deg2Rad>,
-    IndirectNode<Min>,
-    IndirectNode<Max>,
-    IndirectNode<Clamp>,
-    IndirectNode<RoundNearest>,
-    IndirectNode<RoundUp>,
-    IndirectNode<RoundDown>,
-    IndirectNode<RoundToZero>,
-    IndirectNode<Mod>,
-    IndirectNode<Rem>,
-    IndirectNode<Sin>,
-    IndirectNode<Cos>,
-    IndirectNode<Tan>,
-    IndirectNode<Asin>,
-    IndirectNode<Acos>,
-    IndirectNode<Atan>,
-    IndirectNode<Atan2>,
-    IndirectNode<Pow>,
-    IndirectNode<Sqrt>,
-    IndirectNode<Hypot>,
-    IndirectNode<Log>,
-    IndirectNode<Exp>,
-    IndirectNode<Abs>,
-    IndirectNode<Sign>,
-    IndirectNode<Random>,
-    IndirectNode<Progress>,
-    IndirectNode<ProgressNoClamp>,
-    IndirectNode<CalcMix>,
-    IndirectNode<Anchor>,
-    IndirectNode<AnchorSize>
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_FIRST(CSS_CALC_NODE_ALTERNATIVE_FIRST)
+    CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE_REST(CSS_CALC_NODE_ALTERNATIVE_REST)
 >;
+#undef CSS_CALC_NODE_ALTERNATIVE_REST
+#undef CSS_CALC_NODE_ALTERNATIVE_FIRST
 
 // Size and alignment of `Node`, so that the Swift-facing stand-in for `Child::value` below can be
 // declared without naming `Node` at all. Asserted against the real type in the branch that can see
@@ -411,6 +379,7 @@ struct Tree {
 
     bool operator==(const Tree&) const = default;
 };
+
 
 struct Sum {
     WTF_MAKE_STRUCT_TZONE_ALLOCATED(Sum);
@@ -1004,6 +973,15 @@ struct AnchorSize {
     bool operator==(const AnchorSize&) const = default;
 };
 
+// A value a `CalcNode` names by index in `origin` rather than holding: an `<anchor-element>`, a
+// `<random-key>`, or a `calc-mix()` item weight that is a math function. A tree built from an
+// existing `Child` has no payload table.
+using CSSCalcSwiftFlatPayload = Variant<CSS::CustomIdent, Random::Sharing, CalcMix::Item::Weight>;
+
+// A named struct so that CSSCalcSwiftTypes.h can forward-declare it.
+struct CSSCalcSwiftFlatPayloads : Vector<CSSCalcSwiftFlatPayload> { };
+
+
 
 // MARK: TextStream
 
@@ -1011,9 +989,16 @@ TextStream& operator<<(TextStream&, Tree);
 
 // MARK: Construction
 
+// `makeChild`'s indirect half, for a caller that constructs the `Child` in place with
+// `Vector<Child>::constructAndAppend`, which avoids the out-of-line `Child` move constructor.
+template<typename Op> IndirectNode<Op> makeIndirectNode(Op&& op, Type type)
+{
+    return IndirectNode<Op> { type, makeUniqueRef<Op>(WTF::move(op)) };
+}
+
 // Default implementation of ChildConstruction used for all indirect nodes.
 template<typename Op> struct ChildConstruction {
-    static Child make(Op&& op, Type type) { return Child { IndirectNode<Op> { type, makeUniqueRef<Op>(WTF::move(op)) } }; }
+    static Child make(Op&& op, Type type) { return Child { makeIndirectNode(WTF::move(op), type) }; }
 };
 
 // Specialized implementation of ChildConstruction for leaf nodes, needed to avoid `makeUniqueRef`.
@@ -1116,6 +1101,10 @@ constexpr CSSUnitType toCSSUnit(const NonCanonicalDimension& dimension) { return
 // MARK: Predicates
 
 bool isNumeric(const Child& root);
+
+// True for the seven `Leaf` alternatives. `serializeWithoutOmittingPrefix`,
+// `consumeValueWithoutSimplifyingRootCalc` and `rebuildChildren` must agree on it.
+bool isLeaf(const Child& root);
 
 // Convenience constructors
 

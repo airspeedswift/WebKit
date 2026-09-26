@@ -854,9 +854,37 @@ template<typename Op> static constexpr bool hasChildOrNoneArgument = []<size_t..
     return (std::same_as<std::remove_cvref_t<std::tuple_element_t<I, Op>>, ChildOrNone> || ...);
 }(std::make_index_sequence<std::tuple_size_v<Op>> { });
 
-// 8 + 4 + 2 + 1 + 1 = 16 bytes, with no padding. A field that grows the struct trips this and has
-// to justify moving the AArch64 return value out of registers.
-static_assert(sizeof(CSSCalcSwiftNodeInfo) == 16);
+// Pins `CSSCalcSwiftAlternative` to `Node`'s alternative order. This lives here because this is
+// the nearest translation unit that can see both the enum and the variant.
+//
+// `Node` and the enum both expand from `CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`, so a divergence is
+// not expressible in the source, but a change to that generation is, and this is the only place
+// where such a change fails loudly. `init?(rawValue:)` on an imported C++ enum never fails, so a
+// renumbered alternative would reach Swift as a valid case, be switched on, and produce a wrong
+// node, with no runtime check able to catch it.
+//
+// One assert per alternative, expanded from the same list that declares the enumerators, so an
+// enumerator that gained no assert is not expressible. `WTF::alternativeIndexV` carries its own
+// `static_assert(count == 1)`, so a type that appears twice in `Node` is rejected here too, and a
+// type that appears zero times fails to instantiate rather than silently answering the past-the-end
+// index.
+#define CSS_CALC_SWIFT_PIN_ALTERNATIVE(name, type) \
+    static_assert(WTF::alternativeIndexV<type, Node> == static_cast<size_t>(CSSCalcSwiftAlternative::name), \
+        "CSSCalcSwiftAlternative::" #name " is not Node's index for " #type);
+CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_PIN_ALTERNATIVE)
+#undef CSS_CALC_SWIFT_PIN_ALTERNATIVE
+
+// The count is what makes an added alternative a build failure rather than one this file simply
+// cannot name. The left side counts the list; the right side is the variant itself. Neither is
+// "the last enumerator + 1", which does not count an alternative inserted out of order.
+//
+// `WTF::VariantSizeV`, not `std::variant_size_v`: WTF's `Variant` is an alias for `mpark::variant`,
+// so the `std` spelling instantiates an undefined template.
+static_assert(numberOfCSSCalcSwiftAlternatives == WTF::VariantSizeV<Node>);
+
+// 8 + 4 + 2 + 1 + 1 + 1 + 1 = 18 live bytes, aligned to 8. A field that grows the struct trips this
+// and has to justify moving the AArch64 return value out of registers.
+static_assert(sizeof(CSSCalcSwiftNodeInfo) == 24);
 
 CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node) noexcept
 {
@@ -868,6 +896,14 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node) noexcept
         .valueID = static_cast<uint16_t>(CSSValueInvalid),
         .unitType = static_cast<uint8_t>(CSSUnitType::Unknown),
         .kind = CSSCalcSwiftNodeKind::Operation,
+        .percentHint = 0,
+        // The variant's own discriminant, read directly. No switch and no table, on either side of
+        // the boundary: `CSSCalcSwiftAlternative` is pinned to `Node`'s alternative order by the
+        // asserts above, so the cast is the identity on the numbering rather than a mapping.
+        .alternative = static_cast<CSSCalcSwiftAlternative>(node.value.index()),
+        // False for every alternative but `Anchor`, whose lambda below answers it from the same
+        // visit.
+        .anchorSideIsSubtree = false,
     };
 
     // `childCount` is filled inside this visit rather than by a trailing `node.childCount()` call,
@@ -886,9 +922,14 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node) noexcept
         [&]<Numeric T>(const T& leaf) {
             if constexpr (std::same_as<T, Number>)
                 out.kind = CSSCalcSwiftNodeKind::Number;
-            else if constexpr (std::same_as<T, Percentage>)
+            else if constexpr (std::same_as<T, Percentage>) {
                 out.kind = CSSCalcSwiftNodeKind::Percentage;
-            else if constexpr (std::same_as<T, CanonicalDimension>)
+                // `Type::PercentHint` is numbered from 1 so that 0 is `PercentHintValue`'s
+                // internal `None`; this is that representation unchanged, with no sentinel
+                // invented. Read here rather than through a second accessor because simplification
+                // needs it for every percentage it folds.
+                out.percentHint = leaf.hint ? static_cast<uint8_t>(*leaf.hint) : 0;
+            } else if constexpr (std::same_as<T, CanonicalDimension>)
                 out.kind = CSSCalcSwiftNodeKind::CanonicalDimension;
             else
                 out.kind = CSSCalcSwiftNodeKind::NonCanonicalDimension;
@@ -898,6 +939,14 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node) noexcept
         [&](const Symbol& leaf) {
             out.kind = CSSCalcSwiftNodeKind::Symbol;
             out.valueID = static_cast<uint16_t>(leaf.id);
+            // The node's own unit, not the symbol table's. `simplify(Symbol&)` is
+            // `makeNumeric(value->value, root.unit)`: the value comes from `CSSCalcSymbolTable` and
+            // the unit from `Symbol::unit`, which the parser took from `CSSCalcSymbolsAllowed`.
+            // Those are two independently populated `HashMap`s and they can disagree, so taking the
+            // unit from the table's answer would fold `Symbol{r, Deg}` under a `{r -> 1px}` table
+            // into a length where an angle is correct. `unitType` is inert for a `Symbol` otherwise,
+            // so this costs no space.
+            out.unitType = static_cast<uint8_t>(leaf.unit);
         },
         [&](const SiblingCount&) {
             out.kind = CSSCalcSwiftNodeKind::SiblingCount;
@@ -932,9 +981,14 @@ CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node) noexcept
         // These four each get their own kind because each has a different serialization shape and
         // a different set of non-tree arguments; `valueID` is the function's own name in all four,
         // exactly as for the generic ones, so none of them costs a name table on the Swift side.
-        [&](const IndirectNode<Anchor>&) {
+        [&](const IndirectNode<Anchor>& anchor) {
             out.kind = CSSCalcSwiftNodeKind::AnchorFunction;
             out.valueID = static_cast<uint16_t>(Anchor::id);
+            // Which form the `<anchor-side>` takes, answered here because this visit already has the
+            // node's concrete alternative in hand. A keyword side is an argument the serializer
+            // writes; a subtree side occupies child slot 0, which is what decides whether the
+            // fallback is slot 0 or slot 1.
+            out.anchorSideIsSubtree = !WTF::holdsAlternative<CSSValueID>((*anchor).side.value);
             out.childCount = static_cast<uint32_t>(node.childCount());
         },
         [&](const IndirectNode<AnchorSize>&) {
