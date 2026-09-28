@@ -127,12 +127,17 @@ Child copy(const IndirectNode<AnchorSize>& anchorSize)
 
 Tree copy(const Tree& tree)
 {
+#if USE(SWIFT_CSS)
+    // Immutable once stored, so a copy shares it.
+    return tree;
+#else
     return Tree {
         .root = copy(tree.root),
         .type = tree.type,
         .stage = tree.stage,
         .requiresConversionData = tree.requiresConversionData
     };
+#endif
 }
 
 } // namespace CSSCalc

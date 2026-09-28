@@ -37,51 +37,76 @@ internal import wtf.Core.MathExtras
 // calc() simplification, parsing and evaluation in Swift, used when WebCore is built with
 // WK_USE_SWIFT_CSS, in which the C++ simplifier, parser and evaluator are not compiled.
 //
-// Simplification copies the `CSSCalc::Child` tree once into an owned `CalcNode` tree
-// (`calcBuildNode`), simplifies it in place by a recursive post-order walk (`CalcFold.simplify`),
-// children before their parent and in forward order as `copyAndSimplify` does, and then emits it onto
-// the builder's operand stack (`calcEmit`). The operand stack has no pop, so nothing is pushed until
-// the whole tree has simplified. A tree that cannot be simplified is refused whole:
-// `isSimplifiableAlternative` refuses an arity `rebuildFrom` could not fill, and a fold that cannot
-// derive its answer sets `CalcFold.declined`. The grammar builds `CalcNode`s directly and folds them
-// as it builds them. The evaluator builds nothing: it walks the borrowed `Child`, as `evaluateDouble`
-// does.
-
-/// What simplification did with a tree.
-@c
-enum CSSCalcSwiftSimplificationOutcome: UInt8 {
-    /// The complete simplified tree is on the builder's operand stack.
-    case simplified = 0
-    /// Nothing usable was built. The caller stops with a `RELEASE_ASSERT`.
-    case declined = 1
-}
+// Handles all 41 of `CSSCalc::Node`'s alternatives. A simplification that cannot derive its answer
+// sets `CalcFold.declined`, which refuses the whole tree.
+//
+// The grammar builds an owned `CalcNode` tree and folds it as it goes; `CSSCalc::Tree` stores the
+// result (`CSSCalcSwiftRoot`), and every reader walks that stored tree: simplification with
+// conversion data folds a copy of it, children before their parent and in forward order as
+// `copyAndSimplify` does. A `CSSCalc::Child` is built from it (`calcEmitParsed`) only for the C++
+// that reads one.
 
 // MARK: - The per-alternative discriminant
 
-// Dispatches on `CSSCalcSwiftAlternative`, the variant's own alternative index, not on
-// `CSSCalcSwiftNodeKind`, which classifies by serialization shape and conflates `min()` with `mod()`.
+// Dispatches on `CSSCalcSwiftAlternative`, the variant's own alternative index (pinned to `Node`'s
+// via `WTF::alternativeIndexV`), not on `CalcNodeKind`, which classifies by serialization shape and
+// conflates `min()` with `mod()`.
 
-private typealias CalcAlternative = WebCore.CSSCalc.CSSCalcSwiftAlternative
+typealias CalcAlternative = WebCore.CSSCalc.CSSCalcSwiftAlternative
 
 /// `WebCore::CSSCalc::Type`.
 ///
 /// The backticks are required: unescaped, `WebCore.CSSCalc.Type` parses as the metatype of the
 /// `WebCore.CSSCalc` namespace enum.
-private typealias CalcType = WebCore.CSSCalc.`Type`
+typealias CalcType = WebCore.CSSCalc.`Type`
 
-/// A switch rather than `kind.rawValue`: nothing ties the two enums' raw values together.
+/// The value `CSSCalcSwiftLeaf.alternative` wants for one of the four numeric leaves.
 @inline(always)
-private func leafKindRawValue(_ kind: NumericKind) -> UInt8 {
+private func leafAlternativeRawValue(_ kind: NumericKind) -> UInt8 {
     switch kind {
     case .number:
-        return WebCore.CSSCalc.CSSCalcSwiftNodeKind.Number.rawValue
+        return CalcAlternative.Number.rawValue
     case .percentage:
-        return WebCore.CSSCalc.CSSCalcSwiftNodeKind.Percentage.rawValue
+        return CalcAlternative.Percentage.rawValue
     case .canonicalDimension:
-        return WebCore.CSSCalc.CSSCalcSwiftNodeKind.CanonicalDimension.rawValue
+        return CalcAlternative.CanonicalDimension.rawValue
     case .nonCanonicalDimension:
-        return WebCore.CSSCalc.CSSCalcSwiftNodeKind.NonCanonicalDimension.rawValue
+        return CalcAlternative.NonCanonicalDimension.rawValue
     }
+}
+
+/// The shape of a node's serialization, not its operation: several operations share a kind, and the
+/// node's `valueID` carries the name, so the operator name table stays in C++. `operation` is an
+/// alternative `CalcNode.info` has not been taught.
+enum CalcNodeKind: UInt8 {
+    case number
+    case percentage
+    case canonicalDimension
+    case nonCanonicalDimension
+    case symbol
+    case siblingCount
+    case siblingIndex
+    case sum
+    case product
+    case negate
+    case invert
+    case operation
+    /// `Deg2Rad`, which has no CSS-level spelling and serializes as its child.
+    case transparent
+    case function
+    /// `valueID` is the rounding strategy rather than the function name.
+    case roundFunction
+    case progressNoClampFunction
+    /// `clamp()` with one bound, or both, holding the keyword `none`, which is not a child, so the
+    /// kind says where the keyword goes.
+    case clampWithNoneMinimum
+    case clampWithNoneMaximum
+    case clampWithNoneMinimumAndMaximum
+    /// The four operations whose arguments are not a plain list of calculation trees.
+    case randomFunction
+    case calcMixFunction
+    case anchorFunction
+    case anchorSizeFunction
 }
 
 // MARK: - The four numeric leaves
@@ -94,8 +119,9 @@ private enum NumericKind {
     case nonCanonicalDimension
 }
 
-/// `Type::PercentHintValue` as the `uint8_t` the boundary carries, 0 for none. Decoded by comparison
-/// because `PercentHintValue`'s storage is private.
+/// `Type::PercentHintValue` as the `uint8_t` the boundary carries. A decoder rather than a field
+/// read, since `PercentHintValue`'s storage is private and no accessor returns it: the value is
+/// identified by comparing against each enumerator's own construction.
 @inline(always)
 private func percentHintRawValue(_ hint: CalcType.PercentHintValue) -> UInt8 {
     if hint == CalcType.PercentHintValue(.Length) {
@@ -119,7 +145,8 @@ private func percentHintRawValue(_ hint: CalcType.PercentHintValue) -> UInt8 {
     return 0
 }
 
-/// The inverse, or `nil` for 0 or an unrecognized value.
+/// The inverse: the `Type::PercentHint` whose raw value this byte is, or `nil` for 0 or an
+/// unrecognized value.
 ///
 /// Explicit comparisons, because `init?(rawValue:)` on an imported C++ scoped enum accepts any raw
 /// value, and an out-of-range hint would alias onto `.length` in `Type::operator[](PercentHint)`.
@@ -152,8 +179,8 @@ extension CalcType {
     /// The C++'s `if (type.percentHint)`.
     @inline(always)
     fileprivate var hasPercentHint: Bool {
-        // `!(… == …)`, not `!=`: the ClangImporter does not synthesise the negation of a defaulted
-        // `operator==`.
+        // `!(… == …)`, not `!=`: C++20 synthesises the negation of a defaulted `operator==` and
+        // the ClangImporter does not.
         !(percentHint == CalcType.PercentHintValue())
     }
 
@@ -542,7 +569,7 @@ private struct NumericLeaf {
         WebCore.CSSCalc.CSSCalcSwiftLeaf(
             value: value,
             unitType: unitType,
-            kind: leafKindRawValue(kind),
+            alternative: leafAlternativeRawValue(kind),
             percentHint: percentHint,
             valueID: 0
         )
@@ -960,9 +987,8 @@ private enum CalcExecutor {
 
 // MARK: - The coverage predicate
 
-/// Whether a node of this alternative with this many children can be simplified.
-///
-/// The count must match what `rebuildFrom` consumes, or it would fill the wrong slots.
+/// Whether this file can evaluate a node of this alternative with this many children: an arity no
+/// parse produces is refused.
 @inline(always)
 private func isSimplifiableAlternative(_ alternative: CalcAlternative, _ childCount: UInt32) -> Bool {
     switch alternative {
@@ -1495,115 +1521,12 @@ private enum CalcCoverage {
     }
 }
 
-/// Simplify a whole tree onto the builder's operand stack, or refuse it.
-@_expose(Cxx)
-public func cssCalcSimplifySwift(
-    _ root: borrowing WebCore.CSSCalc.Child,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions
-) -> WebCore.CSSCalc.CSSCalcSwiftSimplificationResult {
-    let rootInfo = WebCore.CSSCalc.swiftNodeInfo(root)
-
-    // A numeric leaf root is never rewritten structurally (`simplify(Number&)` and its two siblings
-    // are no-ops, `simplify(NonCanonicalDimension&)` only canonicalizes), so it builds no `CalcNode`.
-    if rootInfo.childCount == 0 {
-        switch rootInfo.alternative {
-        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
-            return calcSimplifyNumericLeafRoot(rootInfo, options, &builder)
-        default:
-            break
-        }
-    }
-
-    return calcSimplifyOwnedTree(root, rootInfo, &builder, options)
-}
-
-/// The whole of `cssCalcSimplifySwift` for a root that is a numeric leaf with no children.
-@inline(always)
-private func calcSimplifyNumericLeafRoot(
-    _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
-) -> WebCore.CSSCalc.CSSCalcSwiftSimplificationResult {
-    let kind: NumericKind
-    switch info.alternative {
-    case .Number: kind = .number
-    case .Percentage: kind = .percentage
-    case .CanonicalDimension: kind = .canonicalDimension
-    default: kind = .nonCanonicalDimension
-    }
-    let leaf = NumericLeaf(
-        kind: kind,
-        value: info.numericValue,
-        unitType: UInt16(info.unitType),
-        percentHint: info.percentHint
-    )
-    return calcSimplifyNumericLeaf(leaf, info.alternative, options, &builder)
-}
-
-/// `calcSimplifyNumericLeafRoot` for a leaf already read, from a `Child` or from a stored node.
-@inline(always)
-private func calcSimplifyNumericLeaf(
-    _ arrived: NumericLeaf,
-    _ alternative: CalcAlternative,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
-) -> WebCore.CSSCalc.CSSCalcSwiftSimplificationResult {
-    // The same `kindMask` and `nodeCount` that `calcBuildNode` reports for a one-node tree.
-    let kindMask = CalcCoverage.bit(alternative)
-    var leaf = arrived
-
-    if leaf.kind == .nonCanonicalDimension {
-        // `simplifyNonCanonicalDimension` without a tree. The `UInt8` guard mirrors `setLeaf`'s so
-        // the two cannot diverge, although `CSSUnitType` is `uint8_t`-backed and it never fires.
-        let simplification = CalcSimplification(
-            percentageResolveToDimension: options.percentageResolveToDimension,
-            allowZeroValueLengthRemovalFromSum: options.allowZeroValueLengthRemovalFromSum,
-            category: options.category,
-            hasConversionData: options.hasConversionData
-        )
-        let canonicalized = simplification.canonicalizedDimension(leaf.value, leaf.unitType, builder)
-        if canonicalized.kind != .nonCanonicalDimension, UInt8(exactly: canonicalized.unitType) != nil {
-            leaf = canonicalized
-        }
-    }
-
-    // The leaf is the whole tree, so it is constructed straight into the caller's root slot.
-    guard builder.pushLeaf(leaf.boundaryLeaf, true) else {
-        return declined(kindMask, 1, nil)
-    }
-    return WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
-        kindMask: kindMask,
-        nodeCount: 1,
-        outcome: CSSCalcSwiftSimplificationOutcome.simplified.rawValue,
-        declineAlternative: noDeclineAlternative
-    )
-}
-
-/// `CSSCalcSwiftSimplificationResult::declineAlternative` when there is no alternative to blame.
-private let noDeclineAlternative: UInt8 = 0xFF
-
-/// A declined result, with the blame filled in.
-@inline(always)
-private func declined(
-    _ kindMask: UInt64,
-    _ nodeCount: UInt32,
-    _ blame: CalcAlternative?
-) -> WebCore.CSSCalc.CSSCalcSwiftSimplificationResult {
-    WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
-        kindMask: kindMask,
-        nodeCount: nodeCount,
-        outcome: CSSCalcSwiftSimplificationOutcome.declined.rawValue,
-        declineAlternative: blame.map { $0.rawValue } ?? noDeclineAlternative
-    )
-}
-
 // MARK: - The second entry point
 
 /// Whether simplifying this tree could change it, as `canSimplifyWithCpp` answers.
 @_expose(Cxx)
-public func cssCalcCanSimplifySwift(_ root: borrowing WebCore.CSSCalc.Child) -> Bool {
-    switch WebCore.CSSCalc.swiftNodeInfo(root).alternative {
+public func cssCalcCanSimplifySwift(_ stored: CSSCalcSwiftRoot) -> Bool {
+    switch stored.root.alternative {
     case .Number, .Percentage, .CanonicalDimension:
         return false
 
@@ -1650,7 +1573,7 @@ private struct CalcMixItemPlan {
 /// What spec steps 1 to 5, as `simplify(CalcMix&)` implements them, do to one item.
 @inline(always)
 private func calcMixItemPlan(
-    _ weight: WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight,
+    _ weight: CalcMixWeight,
     _ survey: CalcMixWeightSurvey
 ) -> CalcMixItemPlan {
     // `item.weight && item.weight->isKnownZero()`. A `Calc` weight is never known to be zero.
@@ -1711,12 +1634,12 @@ extension CalcSimplification {
     }
 }
 
-/// The "no payload" index, for a parsed node that names no payload and for a weight that is not a
-/// math function.
-private var calcNoPayload: UInt32 { WebCore.CSSCalc.cssCalcSwiftFlatNoNode }
+/// The "no payload" index: `CalcNode.origin` on a parsed node that names no payload, and the
+/// payload argument of `pushCalcMixItemWeight` for a weight that is not a math function.
+var calcNoPayload: UInt32 { WebCore.CSSCalc.cssCalcSwiftFlatNoNode }
 
 /// The bits on `CalcNode.flags`.
-private enum CalcNodeFlags {
+enum CalcNodeFlags {
     /// The minimum bound of `clamp()` is the keyword `none`.
     static let clampNoneMinimum: UInt16 = 1 << 0
     /// The maximum bound of `clamp()` is the keyword `none`.
@@ -1733,7 +1656,7 @@ private enum CalcNodeFlags {
     /// This node is inside the `<anchor-side>` subtree of an `anchor()`.
     ///
     /// It is never simplified: `simplify(Anchor&)` copies the side, so `anchor(--a calc(25% + 25%))`
-    /// keeps its sum. The subtree is still visited, so that an unhandled alternative refuses the tree.
+    /// keeps its sum.
     static let insideAnchorSide: UInt16 = 1 << 3
     /// On an interleaved weight node of a parsed `calc-mix()`: the author wrote a `<percentage>` here.
     ///
@@ -1759,175 +1682,11 @@ private enum CalcNodeFlags {
     /// `consumeCalcMixWeightAt` rather than held as a subtree.
     static let calcMixWeightIsCalc: UInt16 = 1 << 7
     /// On a `Sum`, `Product`, `Min` or `Max` the grammar built: `calcFoldAtConstruction` already
-    /// folded it with the options `simplifyParsed` uses, so the pass skips its fold.
+    /// folded it with the options `simplifyParsed` uses, so the parse's pass skips its fold.
     ///
     /// This holds because nothing changes a node's children after `calcFoldAtConstruction`
     /// returns it.
     static let foldedAtConstruction: UInt16 = 1 << 8
-}
-
-/// Where a pre-order descent over the original tree got to.
-private enum CalcOriginDescent<R> {
-    /// The target was not in this subtree, which spans this many pre-order indices.
-    case passed(UInt32)
-    /// The target was reached, and this is what `body` answered about it.
-    case reached(R)
-}
-
-/// Run `body` on the original node whose pre-order index is `target`, or answer nil if no node has
-/// that index.
-///
-/// A recursive descent because a `CSSCalc::Child` is `~Copyable` and no Swift container can hold
-/// one, so the borrow stays on the call stack. It is O(target): each node stepped past costs
-/// `Child::childCount()` and `operator[]`, both generic visits over every alternative.
-///
-/// FIXME: record each node's original subtree size while building, so that the walk can skip a
-/// sibling subtree and run in O(depth).
-private func withCalcOriginalNode<R>(
-    _ root: borrowing WebCore.CSSCalc.Child,
-    _ target: UInt32,
-    _ body: (borrowing WebCore.CSSCalc.Child) -> R
-) -> R? {
-    switch calcDescendToOrigin(root, 0, target, body) {
-    case .reached(let answer):
-        return answer
-    case .passed:
-        return nil
-    }
-}
-
-private func calcDescendToOrigin<R>(
-    _ node: borrowing WebCore.CSSCalc.Child,
-    _ index: UInt32,
-    _ target: UInt32,
-    _ body: (borrowing WebCore.CSSCalc.Child) -> R
-) -> CalcOriginDescent<R> {
-    if index == target {
-        return .reached(body(node))
-    }
-
-    // Pre-order, the numbering `calcBuildNode` assigns to `origin`.
-    var next = index &+ 1
-    var childIndex = 0
-    let childCount = node.childCount()
-    while childIndex < childCount {
-        switch calcDescendToOrigin(node[childIndex], next, target, body) {
-        case .reached(let answer):
-            return .reached(answer)
-        case .passed(let size):
-            next &+= size
-        }
-        childIndex += 1
-    }
-    return .passed(next &- index)
-}
-
-/// The two origin routes, kept out of line.
-@inline(never)
-private func calcEmitFromOrigin(
-    _ target: UInt32,
-    _ operands: UInt32,
-    _ copyWhole: Bool,
-    _ isRoot: Bool,
-    _ original: borrowing WebCore.CSSCalc.Child,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
-) -> Bool {
-    if copyWhole {
-        return withCalcOriginalNode(original, target) { builder.pushCopyOf($0, isRoot) } != nil
-    }
-    return withCalcOriginalNode(original, target) { builder.rebuildFrom($0, operands, isRoot) } ?? false
-}
-
-/// Emits a `calc-mix()`: recompute the weight plan, push the surviving weights, then `rebuildFrom`.
-@inline(never)
-private func calcEmitCalcMix(
-    _ target: UInt32,
-    _ operands: UInt32,
-    _ isRoot: Bool,
-    _ original: borrowing WebCore.CSSCalc.Child,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
-) -> Bool {
-    withCalcOriginalNode(original, target) { node -> Bool in
-        let itemCount = UInt32(clamping: node.childCount())
-
-        var survey = CalcMixWeightSurvey()
-        var index: UInt32 = 0
-        while index < itemCount {
-            // Every counter is bounded by `itemCount`, so `&+=` cannot overflow.
-            let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
-            if !weight.present {
-                survey.numberOfOmittedWeights &+= 1
-            } else if weight.isRaw {
-                if weight.value == 0 {
-                    survey.numberOfKnownZeroWeights &+= 1
-                }
-                survey.total += weight.value
-            } else {
-                survey.canNormalize = false
-            }
-            index += 1
-        }
-
-        // In item order, the order `rebuildSlot(const Vector<CalcMix::Item>&)` pairs weights with
-        // operands. The operands are already on the stack, and nested `calc-mix()`es have consumed
-        // their own weights.
-        var pushed: UInt32 = 0
-        index = 0
-        while index < itemCount {
-            let plan = calcMixItemPlan(WebCore.CSSCalc.swiftCalcMixItemWeight(node, index), survey)
-            if plan.survives {
-                _ = builder.pushCalcMixItemWeight(
-                    index,
-                    plan.weight,
-                    plan.replaceWeight,
-                    calcNoPayload
-                )
-                pushed &+= 1
-            }
-            index += 1
-        }
-        guard pushed == operands else {
-            return false
-        }
-        return builder.rebuildFrom(node, operands, isRoot)
-    } ?? false
-}
-
-/// Everything `calcBuildNode` reports about the tree it walked, which is returned to C++.
-private struct CalcBuildReport {
-    /// Every node in the whole tree, including any past the point where writing stopped.
-    var nodeCount: UInt32 = 0
-    /// One bit per `CSSCalcSwiftAlternative` seen, over the whole tree.
-    var kindMask: UInt64 = 0
-    /// The first unhandled alternative in pre-order.
-    var blame: CalcAlternative? = nil
-    var everyNodeSimplifiable = true
-    /// Whether the tree built so far can still be simplified.
-    ///
-    /// Once false it stays false, and the walk keeps counting but builds nothing more.
-    var writing = true
-
-    @inline(always)
-    mutating func sawAlternative(_ alternative: CalcAlternative) {
-        kindMask |= UInt64(1) &<< UInt64(alternative.rawValue)
-    }
-
-    /// Whether every alternative seen is one this file covers.
-    var everyAlternativeCovered: Bool {
-        kindMask & ~CalcCoverage.mask == 0
-    }
-
-    /// A node this file cannot simplify.
-    ///
-    /// The first one in pre-order is blamed.
-    @inline(always)
-    mutating func sawUnsimplifiableNode(_ alternative: CalcAlternative) {
-        if blame == nil {
-            blame = alternative
-        }
-        everyNodeSimplifiable = false
-        writing = false
-    }
 }
 
 /// What `emitParsed` can materialise, as two masks over the alternative index.
@@ -1983,13 +1742,12 @@ private enum CalcParsedEmitCoverage {
 
 // MARK: - The owned tree
 
-/// One node of the calc tree the Swift simplifier works on, owning its children.
+/// One node of a calc tree, owning its children.
 ///
 /// `~Copyable` because a copy would be a deep copy of the subtree; a node moves into its parent's
-/// `children` and out again. `origin` is the node's pre-order index in the original
-/// `CSSCalc::Child` tree, which `withCalcOriginalNode` descends to; on a parsed node it indexes the
-/// payload table instead.
-private struct CalcNode: ~Copyable {
+/// `children` and out again. `origin` indexes the node's payload, on the nodes that have one, in the
+/// payload table stored with the tree.
+struct CalcNode: ~Copyable {
     var value: Double
     /// Carried, as `copyAndSimplify` keeps a node's type when its kind does not change.
     ///
@@ -2028,6 +1786,300 @@ private struct CalcNode: ~Copyable {
     }
 }
 
+/// The tree `CSSCalc::Tree` stores.
+///
+/// A class because a C++ type cannot hold a `~Copyable` Swift struct, and not a struct wrapping one
+/// because C++ copies a Swift class with a direct `swift_retain`/`swift_release` but a struct through
+/// its value-witness table, and C++ moves a `CSSCalc::Tree` by copying it. The tree is never mutated
+/// once stored, so every copy of a `Tree` shares it.
+@_expose(Cxx)
+public final class CSSCalcSwiftRoot: Sendable {
+    let root: CalcNode
+
+    init(_ root: consuming CalcNode) {
+        self.root = root
+    }
+
+    /// The root an entry answers when it has none, beside the failure it reports. Not an `Optional`,
+    /// because C++ holds a `swift::Optional`'s payload in heap storage and copies it through the
+    /// value-witness table. One shared object, so that a failed parse allocates nothing. The C++ reads
+    /// a root only from a `Parsed` outcome, a simplified result or a finished builder, so this one is
+    /// never read.
+    static var none: CSSCalcSwiftRoot { calcNoRoot }
+}
+
+private let calcNoRoot = CSSCalcSwiftRoot(
+    CalcNode(
+        value: 0,
+        type: CalcType(),
+        origin: calcNoPayload,
+        valueID: 0,
+        unitType: 0,
+        alternative: .Number,
+        percentHint: 0,
+        flags: 0,
+        children: UniqueArray()
+    )
+)
+
+// MARK: The stored tree, read as the `CSSCalc::Child` it stands for
+
+/// One node, as the walks read it.
+///
+/// Each field is meaningful only for the kinds that carry it.
+struct CalcNodeInfo {
+    var numericValue: Double
+    /// Operands, as `Child::operator[]` counts them: a `clamp()` bound holding `none` is not one, which
+    /// is why the two `clampWithNone...` kinds exist.
+    var childCount: UInt32
+    var valueID: UInt16
+    /// A numeric leaf's unit, or the own unit of a `Symbol` rather than the symbol table's.
+    var unitType: UInt8
+    var kind: CalcNodeKind
+    /// The underlying value of a `Type::PercentHint`, 0 for none.
+    var percentHint: UInt8
+    var alternative: CalcAlternative
+    /// An `anchor()` whose `<anchor-side>` is a subtree rather than a keyword, so child 0 is the side.
+    var anchorSideIsSubtree: Bool
+}
+
+/// One `calc-mix()` item's weight.
+///
+/// Three states in two bools: absent, a number (`isRaw`), or a math function, whose value stays in
+/// its payload.
+struct CalcMixWeight {
+    var value: Double
+    var present: Bool
+    var isRaw: Bool
+}
+
+/// A stored tree has the shape of the `CSSCalc::Child` it stands for, with one exception: a
+/// `calc-mix()`'s children interleave each item's value with a node carrying its weight. These read
+/// a node as `Child::operator[]` and the `Child` accessors read the `Child`.
+extension CalcNode {
+    /// Operand `k`, counted as `Child::operator[]` counts: a `calc-mix()` item's value, not its weight.
+    subscript(_ k: Int) -> CalcNode {
+        borrow {
+            return children[alternative == .CalcMix ? k &* 2 : k]
+        }
+    }
+
+    /// The weight node of item `k`, of a `calc-mix()`.
+    func calcMixWeight(_ k: Int) -> CalcMixWeight {
+        let flags = children[k &* 2 &+ 1].flags
+        let present = flags & CalcNodeFlags.calcMixWeightPresent != 0
+        return CalcMixWeight(
+            value: children[k &* 2 &+ 1].value,
+            present: present,
+            isRaw: present && flags & CalcNodeFlags.calcMixWeightIsCalc == 0
+        )
+    }
+
+    /// The weight payload of item `k`, or `calcNoPayload` when the weight is a number or absent.
+    func calcMixWeightPayload(_ k: Int) -> UInt32 {
+        let w = k &* 2 &+ 1
+        return children[w].flags & CalcNodeFlags.calcMixWeightIsCalc != 0 ? children[w].origin : calcNoPayload
+    }
+
+    var info: CalcNodeInfo {
+        let kind: CalcNodeKind
+        var valueID: UInt16 = 0
+        switch alternative {
+        case .Number: kind = .number
+        case .Percentage: kind = .percentage
+        case .CanonicalDimension: kind = .canonicalDimension
+        case .NonCanonicalDimension: kind = .nonCanonicalDimension
+        case .Symbol:
+            kind = .symbol
+            valueID = self.valueID
+        case .SiblingCount:
+            kind = .siblingCount
+            valueID = calcValueID(WebCore.CSSValueSiblingCount)
+        case .SiblingIndex:
+            kind = .siblingIndex
+            valueID = calcValueID(WebCore.CSSValueSiblingIndex)
+        case .Sum: kind = .sum
+        case .Product: kind = .product
+        case .Negate: kind = .negate
+        case .Invert: kind = .invert
+        case .Deg2Rad: kind = .transparent
+        case .Clamp:
+            valueID = calcValueID(WebCore.CSSValueClamp)
+            switch flags & CalcNodeFlags.clampNoneMask {
+            case CalcNodeFlags.clampNoneMask: kind = .clampWithNoneMinimumAndMaximum
+            case CalcNodeFlags.clampNoneMinimum: kind = .clampWithNoneMinimum
+            case CalcNodeFlags.clampNoneMaximum: kind = .clampWithNoneMaximum
+            default: kind = .function
+            }
+        case .RoundNearest:
+            kind = .roundFunction
+            valueID = calcValueID(WebCore.CSSValueNearest)
+        case .RoundUp:
+            kind = .roundFunction
+            valueID = calcValueID(WebCore.CSSValueUp)
+        case .RoundDown:
+            kind = .roundFunction
+            valueID = calcValueID(WebCore.CSSValueDown)
+        case .RoundToZero:
+            kind = .roundFunction
+            valueID = calcValueID(WebCore.CSSValueToZero)
+        case .ProgressNoClamp:
+            kind = .progressNoClampFunction
+            valueID = calcValueID(WebCore.CSSValueProgress)
+        case .Random:
+            kind = .randomFunction
+            valueID = calcValueID(WebCore.CSSValueRandom)
+        case .CalcMix:
+            kind = .calcMixFunction
+            valueID = calcValueID(WebCore.CSSValueCalcMix)
+        case .Anchor:
+            kind = .anchorFunction
+            valueID = calcValueID(WebCore.CSSValueAnchor)
+        case .AnchorSize:
+            kind = .anchorSizeFunction
+            valueID = calcValueID(WebCore.CSSValueAnchorSize)
+        case .Min, .Max, .Mod, .Rem, .Sin, .Cos, .Tan, .Asin, .Acos, .Atan, .Atan2, .Pow, .Sqrt, .Hypot,
+            .Log, .Exp, .Abs, .Sign, .Progress:
+            kind = .function
+            valueID = calcFunctionValueID(alternative)
+        @unknown default:
+            // An alternative added in C++ and not taught here: `.Operation` is refused by the
+            // serializer before anything is written.
+            kind = .operation
+        }
+        let isLeaf = children.isEmpty && CalcCoverage.bit(alternative) & CalcParsedEmitCoverage.leafMask != 0
+        return CalcNodeInfo(
+            numericValue: isLeaf ? value : 0,
+            childCount: UInt32(truncatingIfNeeded: alternative == .CalcMix ? children.count / 2 : children.count),
+            valueID: valueID,
+            unitType: isLeaf ? unitType : UInt8(WebCore.CSSUnitType.Unknown.rawValue),
+            kind: kind,
+            percentHint: alternative == .Percentage ? percentHint : 0,
+            alternative: alternative,
+            anchorSideIsSubtree: alternative == .Anchor && flags & CalcNodeFlags.anchorSideIsSubtree != 0
+        )
+    }
+
+    /// The sharing of a `random()` is read through `sink`, from the payload.
+    func operationInfo(_ sink: borrowing WebCore.CSSCalc.CSSCalcSwiftSink) -> WebCore.CSSCalc.CSSCalcSwiftOperationInfo {
+        if alternative == .Random {
+            return sink.randomSharingInfo(origin)
+        }
+        let isAnchor = alternative == .Anchor
+        let sideIsSubtree = isAnchor && flags & CalcNodeFlags.anchorSideIsSubtree != 0
+        return WebCore.CSSCalc.CSSCalcSwiftOperationInfo(
+            valueID: valueID,
+            randomSharingIsKey: false,
+            randomSharingIsFixed: false,
+            randomKeyHasName: false,
+            randomKeyIsElementScoped: false,
+            randomKeyHasPropertyScope: false,
+            anchorSideIsKeyword: isAnchor && !sideIsSubtree,
+            hasElementName: origin != calcNoPayload,
+            hasDimension: alternative == .AnchorSize && valueID != 0,
+            hasFallback: children.count > (sideIsSubtree ? 1 : 0)
+        )
+    }
+
+    /// A deep copy, for a fold that must not change the tree it was handed.
+    func clone() -> CalcNode {
+        var copied = UniqueArray<CalcNode>(capacity: children.count)
+        var k = 0
+        while k < children.count {
+            copied.append(children[k].clone())
+            k &+= 1
+        }
+        return CalcNode(
+            value: value,
+            type: type,
+            origin: origin,
+            valueID: valueID,
+            unitType: unitType,
+            alternative: alternative,
+            percentHint: percentHint,
+            flags: flags,
+            children: copied
+        )
+    }
+}
+
+@inline(always)
+private func calcValueID(_ id: WebCore.CSSValueID) -> UInt16 {
+    id.rawValue
+}
+
+/// `Op::id` for the operations serialized as `name(args...)`.
+private func calcFunctionValueID(_ alternative: CalcAlternative) -> UInt16 {
+    switch alternative {
+    case .Min: return calcValueID(WebCore.CSSValueMin)
+    case .Max: return calcValueID(WebCore.CSSValueMax)
+    case .Mod: return calcValueID(WebCore.CSSValueMod)
+    case .Rem: return calcValueID(WebCore.CSSValueRem)
+    case .Sin: return calcValueID(WebCore.CSSValueSin)
+    case .Cos: return calcValueID(WebCore.CSSValueCos)
+    case .Tan: return calcValueID(WebCore.CSSValueTan)
+    case .Asin: return calcValueID(WebCore.CSSValueAsin)
+    case .Acos: return calcValueID(WebCore.CSSValueAcos)
+    case .Atan: return calcValueID(WebCore.CSSValueAtan)
+    case .Atan2: return calcValueID(WebCore.CSSValueAtan2)
+    case .Pow: return calcValueID(WebCore.CSSValuePow)
+    case .Sqrt: return calcValueID(WebCore.CSSValueSqrt)
+    case .Hypot: return calcValueID(WebCore.CSSValueHypot)
+    case .Log: return calcValueID(WebCore.CSSValueLog)
+    case .Exp: return calcValueID(WebCore.CSSValueExp)
+    case .Abs: return calcValueID(WebCore.CSSValueAbs)
+    case .Sign: return calcValueID(WebCore.CSSValueSign)
+    case .Progress: return calcValueID(WebCore.CSSValueProgress)
+    default: return 0
+    }
+}
+
+/// Restore the one-child `Sum` a `calc()` in an `anchor()` slot leaves when it parses or folds to a
+/// leaf. `anchor()` is not a math function, so the C++ keeps that wrapper
+/// (`anchorSlotKeepingPrefix`) and serializes `anchor(--a calc(50%))` with its `calc()`.
+///
+/// The grammar records the prefix as a flag rather than building the wrapper, and a fold may
+/// collapse it again, so this runs after every fold of a tree that is kept. A wrapped side keeps
+/// `insideAnchorSide`, which is what stops a later fold collapsing it.
+func calcRestoreAnchorPrefixes(_ node: inout CalcNode) {
+    var k = 0
+    while k < node.children.count {
+        calcRestoreAnchorPrefixes(&node.children[k])
+        k &+= 1
+    }
+    guard node.alternative == .Anchor || node.alternative == .AnchorSize else {
+        return
+    }
+    let sideSlots = node.flags & CalcNodeFlags.anchorSideIsSubtree != 0 ? 1 : 0
+    k = 0
+    while k < node.children.count {
+        let prefixBit = k < sideSlots ? CalcNodeFlags.anchorSideWasFunction : CalcNodeFlags.anchorFallbackWasFunction
+        if node.flags & prefixBit != 0, node.children[k].children.isEmpty,
+            CalcCoverage.bit(node.children[k].alternative) & CalcParsedEmitCoverage.leafMask != 0,
+            let leafType = calcParsedLeafType(node.children[k])
+        {
+            let inherited = node.children[k].flags & CalcNodeFlags.insideAnchorSide
+            var wrapped = UniqueArray<CalcNode>(capacity: 1)
+            wrapped.append(node.children.remove(at: k))
+            node.children.insert(
+                CalcNode(
+                    value: 0,
+                    type: leafType,
+                    origin: calcNoPayload,
+                    valueID: 0,
+                    unitType: 0,
+                    alternative: .Sum,
+                    percentHint: 0,
+                    flags: inherited,
+                    children: wrapped
+                ),
+                at: k
+            )
+        }
+        k &+= 1
+    }
+}
+
 extension CalcNode {
     fileprivate var childCount: Int { children.count }
 
@@ -2059,7 +2111,7 @@ extension CalcNode {
             return WebCore.CSSCalc.CSSCalcSwiftLeaf(
                 value: 0,
                 unitType: UInt16(unitType),
-                kind: WebCore.CSSCalc.CSSCalcSwiftNodeKind.Symbol.rawValue,
+                alternative: CalcAlternative.Symbol.rawValue,
                 percentHint: 0,
                 valueID: valueID
             )
@@ -2067,7 +2119,7 @@ extension CalcNode {
             return WebCore.CSSCalc.CSSCalcSwiftLeaf(
                 value: 0,
                 unitType: 0,
-                kind: WebCore.CSSCalc.CSSCalcSwiftNodeKind.SiblingCount.rawValue,
+                alternative: CalcAlternative.SiblingCount.rawValue,
                 percentHint: 0,
                 valueID: 0
             )
@@ -2075,7 +2127,7 @@ extension CalcNode {
             return WebCore.CSSCalc.CSSCalcSwiftLeaf(
                 value: 0,
                 unitType: 0,
-                kind: WebCore.CSSCalc.CSSCalcSwiftNodeKind.SiblingIndex.rawValue,
+                alternative: CalcAlternative.SiblingIndex.rawValue,
                 percentHint: 0,
                 valueID: 0
             )
@@ -2187,10 +2239,16 @@ extension CalcNode {
 
 /// What a simplification pass over a `CalcNode` tree reads, and its one output besides the tree.
 private struct CalcFold {
-    init(options: CalcSimplification, builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?, keepsBuffers: Bool = false) {
+    init(
+        options: CalcSimplification,
+        builder: WebCore.CSSCalc.CSSCalcSwiftBuilder?,
+        keepsBuffers: Bool = false,
+        refoldsStoredTree: Bool = false
+    ) {
         self.options = options
         self.builder = builder
         self.keepsBuffers = keepsBuffers
+        self.refoldsStoredTree = refoldsStoredTree
     }
 
     let options: CalcSimplification
@@ -2200,6 +2258,9 @@ private struct CalcFold {
     /// Set only by `calcFoldAtConstruction`, which reuses it; a kept tree must not carry empty
     /// buffers.
     var keepsBuffers = false
+    /// `simplifyParsed` over a stored tree, which the parse folded without conversion data: every
+    /// node is folded again, including the functions that read the builder.
+    let refoldsStoredTree: Bool
     /// A fold discovered mid-pass that it cannot finish, so the whole tree is refused.
     ///
     /// Whole-tree rather than per-node because the operand stack has no pop, and leaving the node as
@@ -2207,162 +2268,10 @@ private struct CalcFold {
     var declined = false
 }
 
-// MARK: The owned tree's producer
+// MARK: The folds that read nothing but the node and its children
 
-/// Build the subtree of `node` as a `CalcNode`.
-///
-/// `origin` is the node's pre-order index in the tree of `node`, which is `report.nodeCount`
-/// before this node is counted.
-@inline(always)
-private func calcBuildNode(
-    _ node: borrowing WebCore.CSSCalc.Child,
-    _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
-    _ inheritedFlags: UInt16,
-    _ report: inout CalcBuildReport
-) -> CalcNode {
-    let me = report.nodeCount
-    report.nodeCount &+= 1
-    report.sawAlternative(info.alternative)
-    if !isSimplifiableAlternative(info.alternative, info.childCount) {
-        report.sawUnsimplifiableNode(info.alternative)
-    }
-
-    if info.childCount == 0 {
-        switch info.alternative {
-        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension,
-            .Symbol, .SiblingCount, .SiblingIndex:
-            return CalcNode(
-                value: info.numericValue,
-                type: CalcType(),
-                origin: me,
-                valueID: info.valueID,
-                unitType: info.unitType,
-                alternative: info.alternative,
-                percentHint: info.percentHint,
-                flags: inheritedFlags & CalcNodeFlags.insideAnchorSide,
-                children: UniqueArray()
-            )
-        default:
-            break
-        }
-    }
-    return calcBuildSubtree(node, info, inheritedFlags, me, &report)
-}
-
-/// `calcBuildNode` for a child reached through `Child::operator[]`, which has to ask for `info`.
-@inline(always)
-private func calcBuildChild(
-    _ node: borrowing WebCore.CSSCalc.Child,
-    _ inheritedFlags: UInt16,
-    _ report: inout CalcBuildReport
-) -> CalcNode {
-    calcBuildNode(node, WebCore.CSSCalc.swiftNodeInfo(node), inheritedFlags, &report)
-}
-
-/// Only `insideAnchorSide` is inherited.
-///
-/// The other flags describe the node itself: an inherited `anchorSideIsSubtree` would mark
-/// child 0 of every node under an `anchor()` as a side.
-@inline(never)
-private func calcBuildSubtree(
-    _ node: borrowing WebCore.CSSCalc.Child,
-    _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
-    _ inheritedFlags: UInt16,
-    _ me: UInt32,
-    _ report: inout CalcBuildReport
-) -> CalcNode {
-    var flags = inheritedFlags & CalcNodeFlags.insideAnchorSide
-    switch info.kind {
-    case .ClampWithNoneMinimum: flags |= CalcNodeFlags.clampNoneMinimum
-    case .ClampWithNoneMaximum: flags |= CalcNodeFlags.clampNoneMaximum
-    case .ClampWithNoneMinimumAndMaximum: flags |= CalcNodeFlags.clampNoneMask
-    default: break
-    }
-    if info.anchorSideIsSubtree {
-        flags |= CalcNodeFlags.anchorSideIsSubtree
-    }
-
-    let carriesType: Bool
-    switch info.alternative {
-    case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension,
-        .Symbol, .SiblingCount, .SiblingIndex:
-        carriesType = false
-    default:
-        carriesType = true
-    }
-    // A tree that will be refused needs only the count and the mask.
-    let type = carriesType && report.writing ? WebCore.CSSCalc.getType(node) : CalcType()
-
-    var children = UniqueArray<CalcNode>(capacity: Int(info.childCount))
-    var index: UInt32 = 0
-    while index < info.childCount {
-        let sideRoot = (flags & CalcNodeFlags.anchorSideIsSubtree) != 0 && index == 0
-        children.append(
-            calcBuildChild(
-                node[Int(index)],
-                sideRoot ? flags | CalcNodeFlags.insideAnchorSide : flags,
-                &report
-            )
-        )
-        index += 1
-    }
-    return CalcNode(
-        value: info.numericValue,
-        type: type,
-        origin: me,
-        valueID: info.valueID,
-        unitType: info.unitType,
-        alternative: info.alternative,
-        percentHint: info.percentHint,
-        flags: flags,
-        children: children
-    )
-}
-
-// MARK: The owned tree's simplifier
-
-/// `copyAndSimplify` over a tree built from `original`: children first, in order, then the node.
 extension CalcFold {
-    fileprivate mutating func simplify(_ node: inout CalcNode, _ original: borrowing WebCore.CSSCalc.Child) {
-        // `copyAndSimplify` copies an `anchor()`'s `<anchor-side>` (child 0) without simplifying it.
-        var k = node.flags & CalcNodeFlags.anchorSideIsSubtree != 0 ? 1 : 0
-        while k < node.children.count {
-            simplify(&node.children[k], original)
-            k &+= 1
-        }
-        simplifyNode(&node, original)
-    }
-
-    @inline(always)
-    fileprivate mutating func simplifyNode(_ node: inout CalcNode, _ original: borrowing WebCore.CSSCalc.Child) {
-        switch node.alternative {
-        case .Negate: calcFoldNegate(&node)
-        case .Invert: calcFoldInvert(&node)
-        case .Sum: foldSum(&node)
-        case .Product: foldProduct(&node)
-        case .Min: foldMinMax(&node, false)
-        case .Max: foldMinMax(&node, true)
-        case .NonCanonicalDimension: foldNonCanonicalDimension(&node)
-        case .Number, .Percentage, .CanonicalDimension: return
-        default: simplifyColdNode(&node, original)
-        }
-    }
-
-    @inline(never)
-    fileprivate mutating func simplifyColdNode(_ node: inout CalcNode, _ original: borrowing WebCore.CSSCalc.Child) {
-        switch node.alternative {
-        case .CalcMix: foldCalcMix(&node, original)
-        case .Symbol: foldSymbol(&node)
-        case .SiblingCount, .SiblingIndex: foldSiblingFunction(&node, original)
-        case .Anchor, .AnchorSize: foldAnchorFunction(&node, original)
-        case .Random: foldRandom(&node, original)
-        default: foldFunction(&node)
-        }
-    }
-
-    /// The folds that read only the node and its children.
-    ///
-    /// False for any other alternative.
+    /// False: an alternative none of these folds covers.
     @discardableResult
     fileprivate mutating func foldFunction(_ node: inout CalcNode) -> Bool {
         switch node.alternative {
@@ -2901,9 +2810,10 @@ extension CalcFold {
     /// `Type::consistentType` of the two, which is what `toType(Min)` and `toType(Max)` reduce to.
     /// If it fails the node stays a `Clamp`, as in the C++.
     ///
-    /// FIXME: `convertToMin` in the C++ moves `root.val` and `root.max` out before testing `toType`,
-    /// so on failure `copyAndSimplify` rebuilds the `Clamp` from moved-from children. Nothing is
-    /// moved here.
+    /// FIXME: `convertToMin` in the C++ moves `root.val` and `root.max` into its new `Vector`
+    /// before testing `toType`, so on failure `copyAndSimplify` rebuilds the `Clamp` from moved-from
+    /// children, an `IndirectNode` holding a null `UniqueRef`. `root.max` can be an arbitrary
+    /// subtree. Nothing is moved here.
     fileprivate func convertToMinMax(_ node: inout CalcNode, isMax: Bool) {
         guard let firstType = node.children[0].emittedType(options),
             let secondType = node.children[1].emittedType(options),
@@ -3093,7 +3003,26 @@ private func calcFoldLog(_ node: inout CalcNode) {
     node.setLeaf(NumericLeaf.number(CalcExecutor.log(node.children[0].value, node.children[1].value)))
 }
 
-// MARK: The folds that read the builder or the original tree
+// MARK: The folds that read the builder
+
+/// How a fold asks `resolveStyleCoupledValue` about the node it stands on.
+///
+/// Nil refuses the tree.
+typealias CalcStyleCoupledResolver = (WebCore.CSSCalc.CSSCalcSwiftBuilder, borrowing CalcNode) -> WebCore.CSSCalc.CSSCalcSwiftNumericResult?
+
+/// Builds the node as a `Child` on the operand stack and asks about that.
+///
+/// Only `anchor()`, `anchor-size()`, `random()` and the tree-counting functions ask.
+private func calcResolveStoredStyleCoupled(
+    _ builder: WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ node: borrowing CalcNode
+) -> WebCore.CSSCalc.CSSCalcSwiftNumericResult? {
+    var builder = builder
+    guard calcEmitParsed(node, false, &builder) else {
+        return nil
+    }
+    return builder.resolveStyleCoupledValueOfTop()
+}
 
 extension CalcFold {
     /// A leaf stays a leaf, so this is a `setLeaf`.
@@ -3142,12 +3071,12 @@ extension CalcFold {
         }
     }
 
-    /// An unresolved value is not a refusal: the C++ returns `{ }` and the leaf stays in the tree.
-    fileprivate mutating func foldSiblingFunction(_ node: inout CalcNode, _ original: borrowing WebCore.CSSCalc.Child) {
+    /// `resolved == false` is not a refusal: the C++ returns `{ }` and the leaf stays in the tree.
+    fileprivate mutating func foldSiblingFunction(_ node: inout CalcNode, _ resolve: CalcStyleCoupledResolver) {
         guard let builder else {
             return
         }
-        guard let resolved = withCalcOriginalNode(original, node.origin, { builder.resolveStyleCoupledValue($0) }) else {
+        guard let resolved = resolve(builder, node) else {
             declined = true
             return
         }
@@ -3157,9 +3086,7 @@ extension CalcFold {
         node.setLeaf(NumericLeaf.number(resolved.value))
     }
 
-    /// The node folds to the resolved value, stays as it is, or, with `substituteFallback`, becomes
-    /// its fallback child.
-    fileprivate mutating func foldAnchorFunction(_ node: inout CalcNode, _ original: borrowing WebCore.CSSCalc.Child) {
+    fileprivate mutating func foldAnchorFunction(_ node: inout CalcNode, _ resolve: CalcStyleCoupledResolver) {
         guard let builder else {
             return
         }
@@ -3169,7 +3096,7 @@ extension CalcFold {
             declined = true
             return
         }
-        guard let resolved = withCalcOriginalNode(original, node.origin, { builder.resolveStyleCoupledValue($0) }) else {
+        guard let resolved = resolve(builder, node) else {
             declined = true
             return
         }
@@ -3188,11 +3115,14 @@ extension CalcFold {
         }
     }
 
-    /// The `<random-key>` is not a child, so the children are `min`, `max` and the optional `step`.
+    /// The `<random-key>` is not a child; only `min`, `max` and the optional `step` are, so
+    /// `childCount` is 2 or 3 whether or not a key is present.
     ///
-    /// As in the C++, `max` and `step` are each checked against `min`, only `min` must be fully
-    /// resolved, and the result is shaped like `min`.
-    fileprivate mutating func foldRandom(_ node: inout CalcNode, _ original: borrowing WebCore.CSSCalc.Child) {
+    /// All present operands must be the same numeric alternative and unit, checked against `max` and
+    /// `step` separately and both anchored on `min`, as the C++ does; only `min` is checked for
+    /// `fullyResolved`, so a non-canonical dimension never folds here. The result is shaped like
+    /// `min`, so a `random()` over percentages keeps `min`'s percent hint.
+    fileprivate mutating func foldRandom(_ node: inout CalcNode, _ resolve: CalcStyleCoupledResolver) {
         guard let builder else {
             return
         }
@@ -3217,7 +3147,7 @@ extension CalcFold {
             }
             step = stepLeaf.value
         }
-        guard let baseValue = withCalcOriginalNode(original, node.origin, { builder.resolveStyleCoupledValue($0) }) else {
+        guard let baseValue = resolve(builder, node) else {
             declined = true
             return
         }
@@ -3227,99 +3157,7 @@ extension CalcFold {
         node.setLeaf(minimum.withValue(CalcExecutor.random(baseValue.value, minimum.value, maximum.value, step)))
     }
 
-    /// `simplify(CalcMix&)`: the weight survey, the `!canNormalize` early return that drops only
-    /// known-zero items, normalisation, and the weighted sum, which needs every surviving item to be
-    /// the same numeric kind and identity.
-    ///
-    /// `emit` recomputes each item's weight plan rather than reading it off the node. The fold
-    /// finishes an inner `calc-mix()` before an outer one while `emit` reaches the inner one first,
-    /// so plans pushed during the fold would be consumed by the wrong node. `calcMixItemPlan` is a
-    /// pure function of one weight and the survey, so both calls agree.
-    ///
-    /// A failing sum still keeps the dropped items and normalised weights, as in the C++, so the
-    /// survivor pass runs before the accumulator.
-    fileprivate mutating func foldCalcMix(_ node: inout CalcNode, _ original: borrowing WebCore.CSSCalc.Child) {
-        let itemCount = UInt32(truncatingIfNeeded: node.children.count)
-        guard itemCount > 0 else {
-            return
-        }
-        let origin = node.origin
-
-        guard let survey = calcMixSurveyOf(origin, itemCount, original) else {
-            declined = true
-            return
-        }
-
-        if !survey.canNormalize {
-            if survey.numberOfKnownZeroWeights != 0, itemCount == survey.numberOfKnownZeroWeights {
-                calcMixFoldToZero(&node)
-                return
-            }
-        } else if survey.total < 100 {
-            if survey.numberOfKnownZeroWeights > 0, survey.numberOfOmittedWeights == 0,
-                itemCount == survey.numberOfKnownZeroWeights
-            {
-                calcMixFoldToZero(&node)
-                return
-            }
-        }
-
-        // Phases 2 and 3: keep the surviving items, in item order.
-        var write = 0
-        var index: UInt32 = 0
-        while write < node.children.count, index < itemCount {
-            guard let weight = calcMixWeightOf(origin, index, original) else {
-                declined = true
-                return
-            }
-            index += 1
-            if calcMixItemPlan(weight, survey).survives {
-                write &+= 1
-            } else {
-                node.dropChild(write)
-            }
-        }
-
-        guard survey.canNormalize else {
-            return
-        }
-
-        // Phase 4, the weighted sum, over the survivors. `/ 100.0`, as in the C++, not `* 0.01`.
-        var accumulated: NumericLeaf? = nil
-        var c = 0
-        index = 0
-        while c < node.children.count, index < itemCount {
-            guard let weight = calcMixWeightOf(origin, index, original) else {
-                declined = true
-                return
-            }
-            index += 1
-            let plan = calcMixItemPlan(weight, survey)
-            guard plan.survives else {
-                continue
-            }
-            let item = c
-            c &+= 1
-            guard let leaf = node.children[item].numericLeaf else {
-                return
-            }
-            let scaled = plan.weight / 100.0
-            guard let current = accumulated else {
-                accumulated = leaf.withValue(leaf.value * scaled)
-                continue
-            }
-            guard options.calcMixAccumulatorAgrees(current, leaf) else {
-                return
-            }
-            accumulated = current.withValue(current.value + leaf.value * scaled)
-        }
-        guard let result = accumulated else {
-            return
-        }
-        node.setLeaf(result)
-    }
-
-    /// `zeroValueMatchingChild(children[0])`.
+    /// `zeroValueMatchingChild(children[0])` (`+Simplification.cpp:1454`-`:1482`).
     fileprivate mutating func calcMixFoldToZero(_ node: inout CalcNode) {
         guard node.children.count > 0,
             let childType = node.children[0].emittedType(options),
@@ -3333,95 +3171,16 @@ extension CalcFold {
     }
 }
 
-/// The weight survey of `simplify(CalcMix&)`, in one descent of the original tree.
-private func calcMixSurveyOf(
-    _ origin: UInt32,
-    _ itemCount: UInt32,
-    _ original: borrowing WebCore.CSSCalc.Child
-) -> CalcMixWeightSurvey? {
-    withCalcOriginalNode(original, origin) { node -> CalcMixWeightSurvey in
-        var survey = CalcMixWeightSurvey()
-        var index: UInt32 = 0
-        while index < itemCount {
-            let weight = WebCore.CSSCalc.swiftCalcMixItemWeight(node, index)
-            if !weight.present {
-                survey.numberOfOmittedWeights &+= 1
-            } else if weight.isRaw {
-                if weight.value == 0 {
-                    survey.numberOfKnownZeroWeights &+= 1
-                }
-                survey.total += weight.value
-            } else {
-                survey.canNormalize = false
-            }
-            index += 1
-        }
-        return survey
-    }
-}
+// MARK: The owned tree's simplifier and emit
 
-private func calcMixWeightOf(
-    _ origin: UInt32,
-    _ index: UInt32,
-    _ original: borrowing WebCore.CSSCalc.Child
-) -> WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight? {
-    withCalcOriginalNode(original, origin) { WebCore.CSSCalc.swiftCalcMixItemWeight($0, index) }
-}
-
-// MARK: The owned tree's emit
-
-/// Push the subtree of `node` onto the builder's operand stack.
+/// Where a tree differs from the `CSSCalc::Child` it stands for, which the fold and emit account for:
 ///
-/// False if it cannot be built.
-private func calcEmit(
-    _ node: borrowing CalcNode,
-    _ isRoot: Bool,
-    _ original: borrowing WebCore.CSSCalc.Child,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
-) -> Bool {
-    switch node.alternative {
-    case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
-        guard let leaf = node.numericLeaf else {
-            return false
-        }
-        return builder.pushLeaf(leaf.boundaryLeaf, isRoot)
-    case .Symbol, .SiblingCount, .SiblingIndex:
-        return calcEmitFromOrigin(node.origin, 0, true, isRoot, original, &builder)
-    default:
-        break
-    }
-
-    // `anchor()`'s `<anchor-side>` subtree is child 0 and is not an operand: `rebuildFrom` copies
-    // it off the original.
-    var k = node.flags & CalcNodeFlags.anchorSideIsSubtree != 0 ? 1 : 0
-    var pushed: UInt32 = 0
-    while k < node.children.count {
-        guard calcEmit(node.children[k], false, original, &builder) else { return false }
-        pushed &+= 1
-        k &+= 1
-    }
-
-    switch node.alternative {
-    case .Sum, .Product, .Negate, .Invert, .Min, .Max:
-        break
-    case .CalcMix:
-        return calcEmitCalcMix(node.origin, pushed, isRoot, original, &builder)
-    default:
-        return calcEmitFromOrigin(node.origin, pushed, false, isRoot, original, &builder)
-    }
-    return builder.buildOperation(node.alternative, pushed, node.type, isRoot)
-}
-
-// MARK: The owned tree's parse-time simplifier and emit
-
-/// A tree the grammar built differs from one built from an original tree:
-///
-/// - `origin` is a payload table index on `Anchor`, `AnchorSize`, `Random` and a `calc-mix()` weight
-///   that is a math function (`CalcNodeFlags.calcMixWeightIsCalc`), and `calcNoPayload` elsewhere.
-/// - A `calc-mix()`'s children alternate: value, weight carrier, value, weight carrier, ...
-/// - There is no original tree to read back from.
+/// - `origin` indexes a payload on an `Anchor`, `AnchorSize` or `Random`, and on a `calc-mix()`
+///   weight that is a math function (`CalcNodeFlags.calcMixWeightIsCalc`); elsewhere it is
+///   `calcNoPayload`.
+/// - A `calc-mix()`'s children are interleaved: value, weight carrier, value, weight carrier, ...
 extension CalcFold {
-    /// `copyAndSimplify` over a parsed tree. With `skipAnchorSides`, an `anchor()`'s `<anchor-side>`
+    /// `copyAndSimplify`. With `skipAnchorSides`, an `anchor()`'s `<anchor-side>`
     /// is copied without being simplified, as `copyAndSimplifyChildren` does.
     fileprivate mutating func simplifyParsed(_ node: inout CalcNode, _ skipAnchorSides: Bool) -> Bool {
         var k = 0
@@ -3441,7 +3200,7 @@ extension CalcFold {
     /// False refuses the tree.
     @inline(always)
     fileprivate mutating func simplifyParsedNode(_ node: inout CalcNode) -> Bool {
-        if node.flags & CalcNodeFlags.foldedAtConstruction != 0 {
+        if node.flags & CalcNodeFlags.foldedAtConstruction != 0, !refoldsStoredTree {
             return true
         }
         switch node.alternative {
@@ -3453,7 +3212,10 @@ extension CalcFold {
         case .Max: foldMinMax(&node, true)
         case .NonCanonicalDimension: foldNonCanonicalDimension(&node)
         case .Number, .Percentage, .CanonicalDimension: break
-        case .SiblingCount, .SiblingIndex: break
+        case .SiblingCount, .SiblingIndex:
+            if refoldsStoredTree {
+                foldSiblingFunction(&node, calcResolveStoredStyleCoupled)
+            }
         case .Symbol: foldSymbol(&node)
         default:
             guard simplifyParsedFunction(&node) else {
@@ -3469,7 +3231,15 @@ extension CalcFold {
         case .CalcMix:
             foldParsedCalcMix(&node)
             return true
-        case .Anchor, .AnchorSize, .Random:
+        case .Anchor, .AnchorSize:
+            if refoldsStoredTree {
+                foldAnchorFunction(&node, calcResolveStoredStyleCoupled)
+            }
+            return true
+        case .Random:
+            if refoldsStoredTree {
+                foldRandom(&node, calcResolveStoredStyleCoupled)
+            }
             return true
         default:
             return foldFunction(&node)
@@ -3522,7 +3292,7 @@ extension CalcFold {
             let present = node.children[v &+ 1].flags & CalcNodeFlags.calcMixWeightPresent != 0
             let isCalc = node.children[v &+ 1].flags & CalcNodeFlags.calcMixWeightIsCalc != 0
             let plan = calcMixItemPlan(
-                WebCore.CSSCalc.CSSCalcSwiftCalcMixWeight(
+                CalcMixWeight(
                     value: node.children[v &+ 1].value,
                     present: present,
                     isRaw: present && !isCalc
@@ -3586,7 +3356,7 @@ private func calcParsedLeafType(_ node: borrowing CalcNode) -> CalcType? {
     return calcLeafType(leaf)
 }
 
-/// `calcEmit` for a tree the grammar built.
+/// Build `node` on the builder's operand stack as a `Child`.
 private func calcEmitParsed(
     _ node: borrowing CalcNode,
     _ isRoot: Bool,
@@ -3640,10 +3410,9 @@ private func calcEmitParsedCalcMix(
         guard calcEmitParsed(node.children[v], false, &builder) else { return false }
         let flags = node.children[v &+ 1].flags
         if flags & CalcNodeFlags.calcMixWeightIsCalc != 0 {
-            guard builder.pushCalcMixItemWeight(0, 0, false, node.children[v &+ 1].origin) else { return false }
+            guard builder.pushCalcMixItemWeight(0, true, node.children[v &+ 1].origin) else { return false }
         } else {
             _ = builder.pushCalcMixItemWeight(
-                0,
                 node.children[v &+ 1].value,
                 flags & CalcNodeFlags.calcMixWeightPresent != 0,
                 calcNoPayload
@@ -3706,42 +3475,266 @@ private func calcEmitParsedAnchor(
     )
 }
 
-// MARK: The owned tree's entry
+// MARK: - The stored tree's entries
 
-/// Build, simplify and emit a tree that is not a single numeric leaf.
-@inline(always)
-private func calcSimplifyOwnedTree(
-    _ root: borrowing WebCore.CSSCalc.Child,
-    _ rootInfo: WebCore.CSSCalc.CSSCalcSwiftNodeInfo,
+/// `copyAndSimplify` of a stored tree: a copy of it, folded with the options' conversion data.
+/// `simplified` is false, and the root means nothing, if a fold gave up.
+@_expose(Cxx)
+public func cssCalcSimplifyStoredSwift(
+    _ root: CSSCalcSwiftRoot,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
-    _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions
-) -> WebCore.CSSCalc.CSSCalcSwiftSimplificationResult {
+    _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
+    _ simplified: inout Bool
+) -> CSSCalcSwiftRoot {
+    simplified = true
+    let box = root
+    // `simplify(Number&)`, `simplify(Percentage&)` and `simplify(CanonicalDimension&)` are no-ops, so
+    // a tree that is one of those leaves is its own simplification and is shared rather than copied.
+    switch box.root.alternative {
+    case .Number, .Percentage, .CanonicalDimension:
+        return copy root
+    default:
+        break
+    }
+
     let simplification = CalcSimplification(
         percentageResolveToDimension: options.percentageResolveToDimension,
         allowZeroValueLengthRemovalFromSum: options.allowZeroValueLengthRemovalFromSum,
         category: options.category,
         hasConversionData: options.hasConversionData
     )
+    var tree = box.root.clone()
+    var fold = CalcFold(options: simplification, builder: builder, refoldsStoredTree: true)
+    guard fold.simplifyParsed(&tree, true), !fold.declined else {
+        simplified = false
+        return .none
+    }
+    calcRestoreAnchorPrefixes(&tree)
+    return CSSCalcSwiftRoot(tree)
+}
 
-    var report = CalcBuildReport()
-    var tree = calcBuildNode(root, rootInfo, 0, &report)
-    // A tree holding an alternative with no Swift fold is built only for the count and the mask.
-    guard report.writing, report.everyAlternativeCovered else {
-        return declined(report.kindMask, report.nodeCount, report.blame)
+/// Build the stored tree as a `CSSCalc::Child` in the builder's root slot, for the C++ that reads one:
+/// Typed OM reification, and the computed-style dependency walk.
+@_expose(Cxx)
+public func cssCalcEmitStoredSwift(
+    _ stored: CSSCalcSwiftRoot,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder
+) -> Bool {
+    calcEmitParsed(stored.root, true, &builder)
+}
+
+/// Whether two stored trees stand for equal `CSSCalc::Child`s, as `Child::operator==` compares them.
+///
+/// Payloads are compared by value through `payloads`, not by index.
+@_expose(Cxx)
+public func cssCalcSwiftRootsEqual(
+    _ a: CSSCalcSwiftRoot,
+    _ b: CSSCalcSwiftRoot,
+    _ payloads: borrowing WebCore.CSSCalc.CSSCalcSwiftPayloadComparer
+) -> Bool {
+    if a === b {
+        return true
+    }
+    return calcNodesEqual(a.root, b.root, payloads)
+}
+
+/// The flags that are part of the tree `Child` stands for, rather than bookkeeping about how it was
+/// built or folded.
+private let calcStructuralFlags =
+    CalcNodeFlags.clampNoneMask | CalcNodeFlags.anchorSideIsSubtree
+    | CalcNodeFlags.calcMixWeightPresent | CalcNodeFlags.calcMixWeightIsCalc
+
+private func calcNodesEqual(
+    _ a: borrowing CalcNode,
+    _ b: borrowing CalcNode,
+    _ payloads: borrowing WebCore.CSSCalc.CSSCalcSwiftPayloadComparer
+) -> Bool {
+    guard a.alternative == b.alternative, a.valueID == b.valueID, a.children.count == b.children.count,
+        a.flags & calcStructuralFlags == b.flags & calcStructuralFlags
+    else {
+        return false
+    }
+    switch a.alternative {
+    case .Number:
+        guard a.value == b.value else { return false }
+    case .Percentage:
+        guard a.value == b.value, a.percentHint == b.percentHint else { return false }
+    case .CanonicalDimension, .NonCanonicalDimension:
+        guard a.value == b.value, a.unitType == b.unitType else { return false }
+    case .Symbol:
+        guard a.unitType == b.unitType else { return false }
+    case .SiblingCount, .SiblingIndex:
+        break
+    default:
+        guard a.type == b.type else { return false }
+    }
+    // `origin` means something only where a payload is held; a fold that turns a node into a leaf
+    // leaves its old `origin` behind.
+    let holdsPayload: Bool
+    switch a.alternative {
+    case .Anchor, .AnchorSize, .Random: holdsPayload = true
+    default: holdsPayload = a.flags & CalcNodeFlags.calcMixWeightIsCalc != 0
+    }
+    if holdsPayload, a.origin != calcNoPayload || b.origin != calcNoPayload {
+        guard a.origin != calcNoPayload, b.origin != calcNoPayload, payloads.equal(a.origin, b.origin) else {
+            return false
+        }
+    }
+    var k = 0
+    while k < a.children.count {
+        guard calcNodesEqual(a.children[k], b.children[k], payloads) else {
+            return false
+        }
+        k &+= 1
+    }
+    return true
+}
+
+/// `getType(tree.root)`.
+@_expose(Cxx)
+public func cssCalcSwiftRootType(_ stored: CSSCalcSwiftRoot) -> WebCore.CSSCalc.`Type` {
+    let box = stored
+    guard box.root.children.isEmpty, CalcCoverage.bit(box.root.alternative) & CalcParsedEmitCoverage.leafMask != 0 else {
+        return box.root.type
+    }
+    return calcParsedLeafType(box.root) ?? CalcType()
+}
+
+/// The alternative of the root node of `stored`.
+@_expose(Cxx)
+public func cssCalcSwiftRootAlternative(_ stored: CSSCalcSwiftRoot) -> WebCore.CSSCalc.CSSCalcSwiftAlternative {
+    stored.root.alternative
+}
+
+/// Where a tree built in C++ is stored: the C++ walks its `Child` and pushes each node here, children
+/// before their parent, so Swift never reads a `Child`.
+@_expose(Cxx)
+public final class CSSCalcSwiftStoreBuilder {
+    var stack = UniqueArray<CalcNode>()
+
+    /// An empty builder.
+    public init() {
     }
 
-    var fold = CalcFold(options: simplification, builder: builder)
-    fold.simplify(&tree, root)
-    guard !fold.declined, calcEmit(tree, true, root, &builder) else {
-        // A refusal mid-pass, or a builder contract violation; no single alternative to blame.
-        return declined(report.kindMask, report.nodeCount, nil)
+    /// A leaf.
+    ///
+    /// `valueID` is that of a `Symbol`; `unitType` is the unit of a dimension or a `Symbol`.
+    public func pushLeaf(
+        _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
+        _ value: Double,
+        _ unitType: UInt8,
+        _ percentHint: UInt8,
+        _ valueID: UInt16
+    ) {
+        stack.append(
+            CalcNode(
+                value: value,
+                type: CalcType(),
+                origin: calcNoPayload,
+                valueID: valueID,
+                unitType: unitType,
+                alternative: alternative,
+                percentHint: percentHint,
+                flags: 0,
+                children: UniqueArray()
+            )
+        )
     }
-    return WebCore.CSSCalc.CSSCalcSwiftSimplificationResult(
-        kindMask: report.kindMask,
-        nodeCount: report.nodeCount,
-        outcome: CSSCalcSwiftSimplificationOutcome.simplified.rawValue,
-        declineAlternative: noDeclineAlternative
-    )
+
+    /// A `calc-mix()` item's weight, pushed after the item's value: a number, the math function
+    /// `payload` names, or omitted when `present` is false.
+    public func pushCalcMixWeight(_ value: Double, _ present: Bool, _ payload: UInt32) {
+        var flags: UInt16 = 0
+        if present {
+            flags = CalcNodeFlags.calcMixWeightPresent
+            if payload != calcNoPayload {
+                flags |= CalcNodeFlags.calcMixWeightIsCalc
+            }
+        }
+        stack.append(
+            CalcNode(
+                value: present && payload == calcNoPayload ? value : 0,
+                type: CalcType(),
+                origin: payload,
+                valueID: 0,
+                unitType: UInt8(WebCore.CSSUnitType.Percentage.rawValue),
+                alternative: .Percentage,
+                percentHint: 0,
+                flags: flags,
+                children: UniqueArray()
+            )
+        )
+    }
+
+    /// Pop `childCount` nodes and push an operation over them.
+    ///
+    /// `noneMask` is that of `clamp()`, as on `CSSCalcSwiftBuilder::buildOperation`. For `anchor()`,
+    /// `valueID` is the `<anchor-side>` keyword, or zero when the side is the first child; for
+    /// `anchor-size()` it is the dimension, or zero. `origin` names an `<anchor-element>` or
+    /// `random()` sharing payload. False, with nothing pushed, when there are fewer than `childCount`
+    /// nodes.
+    public func pushOperation(
+        _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
+        _ childCount: UInt32,
+        _ type: WebCore.CSSCalc.`Type`,
+        _ noneMask: UInt8,
+        _ valueID: UInt16,
+        _ origin: UInt32
+    ) -> Bool {
+        let count = Int(childCount)
+        guard count <= stack.count else {
+            return false
+        }
+        var children = UniqueArray<CalcNode>(capacity: count)
+        var k = stack.count &- count
+        while k < stack.count {
+            children.append(stack.remove(at: k))
+        }
+        var flags = UInt16(noneMask) & CalcNodeFlags.clampNoneMask
+        if alternative == .Anchor || alternative == .AnchorSize {
+            let sideSlots = alternative == .Anchor && valueID == 0 ? 1 : 0
+            if sideSlots == 1 {
+                flags |= CalcNodeFlags.anchorSideIsSubtree
+                calcMarkInsideAnchorSide(&children[0])
+            }
+            k = 0
+            while k < children.count {
+                // Not a leaf: if a fold makes it one, `calcRestoreAnchorPrefixes` keeps the `calc()`
+                // the C++ keeps.
+                if !children[k].children.isEmpty {
+                    flags |= k < sideSlots ? CalcNodeFlags.anchorSideWasFunction : CalcNodeFlags.anchorFallbackWasFunction
+                }
+                k &+= 1
+            }
+        }
+        stack.append(
+            CalcNode(
+                value: 0,
+                type: type,
+                origin: origin,
+                valueID: valueID,
+                unitType: 0,
+                alternative: alternative,
+                percentHint: 0,
+                flags: flags,
+                children: children
+            )
+        )
+        return true
+    }
+
+    /// Whether exactly one node is left, which `finish` then answers as the tree.
+    public var isFinished: Bool { stack.count == 1 }
+
+    /// The tree, or `.none` when the pushes did not leave exactly one node.
+    public func finish() -> CSSCalcSwiftRoot {
+        guard stack.count == 1 else {
+            return .none
+        }
+        var root = stack.removeLast()
+        calcRestoreAnchorPrefixes(&root)
+        return CSSCalcSwiftRoot(root)
+    }
 }
 
 // MARK: - The calc grammar in Swift
@@ -3765,7 +3758,6 @@ private func calcSimplifyOwnedTree(
 /// The C++ `static_assert` checks only its own constant, so this literal must be edited with it.
 private let calcMaxExpressionDepth: Int32 = 100
 
-/// The parse options, formed once per parse.
 private struct CalcParseOptions {
     /// `Type::determinePercentHint(options.category)`.
     var percentageLeafHint: UInt8
@@ -3856,7 +3848,6 @@ private struct CalcParseState: ~Copyable {
         takeBuffer(calcOperandListCapacity)
     }
 
-    /// The spare if it has room for `capacity`, or a new allocation of exactly `capacity`.
     @inline(always)
     mutating func takeBuffer(_ capacity: Int) -> UniqueArray<CalcNode> {
         if spare.capacity >= capacity {
@@ -3878,7 +3869,6 @@ private struct CalcParseState: ~Copyable {
         return calcParseOperation(alternative, children, type)
     }
 
-    /// Keep the children buffer of `node` if it is empty and larger than the spare.
     @inline(always)
     mutating func recycleEmptyBuffer(_ node: inout CalcNode) {
         if node.children.isEmpty && node.children.capacity > spare.capacity {
@@ -3930,37 +3920,98 @@ private func calcFoldAtConstruction(
     state.recycleEmptyBuffer(&node)
 }
 
-/// The calc range's tokens, copied into Swift once per parse by
-/// `CSSCalcSwiftParseCursor::fillTokens`, and the C++ cursor for the upcalls that need the range
-/// itself (a symbol lookup, a `<random-key>`, a `calc-mix()` weight, an `<anchor-element>`).
+/// One token as the grammar reads it: the token's own storage, decoded one field at a time as a
+/// production asks, so a whitespace or block walk reads two bitfields and nothing else.
+///
+/// Each field answers what `CSSParserToken`'s accessor of the same name answers, and answers it only
+/// for the token types that accessor is for, as the C++ grammar asks: `numericValue` is 0 and
+/// `delimiter` is `\0` for any other type, because the union behind them holds another member then.
+/// The keyword `id`/`functionId` needs the range, so it is `CalcTokens.id(_:)`/`functionId(_:)`.
+private struct CalcToken {
+    let bits: WebCore.CSSParserTokenBits
+    let index: UInt32
+
+    @inline(always)
+    var type: WebCore.CSSParserTokenType { WebCore.CSSParserTokenType(rawValue: UInt8(truncatingIfNeeded: bits.type)) }
+    @inline(always)
+    var blockType: UInt8 { UInt8(truncatingIfNeeded: bits.blockType) }
+    @inline(always)
+    var unitRaw: UInt8 { UInt8(truncatingIfNeeded: bits.unit) }
+    @inline(always)
+    var numericValue: Double {
+        let t = type
+        return t == WebCore.NumberToken || t == WebCore.PercentageToken || t == WebCore.DimensionToken ? bits.numericValue : 0
+    }
+    @inline(always)
+    var delimiter: UInt16 { type == WebCore.DelimiterToken ? bits.delimiter : 0 }
+    /// For a `DimensionToken`: `conversionToCanonicalUnitRequiresConversionData(unit)`.
+    @inline(always)
+    var unitNeedsConversionData: Bool { WebCore.CSSCalc.cssCalcSwiftUnitNeedsConversionData(unitRaw) }
+}
+
+/// The tokens of one `calc()`, copied out of the range as their storage in one crossing per parse
+/// (`CSSCalcSwiftParseCursor::fillTokenBits`) and decoded by `CalcToken` as they are read, and the
+/// C++ cursor for the upcalls that need the range itself (a symbol lookup, a `<random-key>`, a
+/// `calc-mix()` weight, an `<anchor-element>`).
 ///
 /// Reading the C++ token vector in place would need a bounds-carrying view of C++ storage
-/// (rdar://186723514).
+/// (rdar://186723514). A Swift-owned buffer that C++ fills through a `__counted_by` + `noescape`
+/// parameter needs none.
 ///
 /// `~Escapable` because `tokens` is a `Span` over the caller's stack buffer.
 private struct CalcTokens: ~Escapable {
     let cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor
-    /// `tokenCount() + 1` tokens: the range, then the `EOFToken` `CSSParserTokenRange::peek`
-    /// returns past its end.
-    let tokens: Span<WebCore.CSSCalc.CSSCalcSwiftToken>
+    /// The range's `tokenCount()` tokens. The `EOFToken` `CSSParserTokenRange::peek` answers past the
+    /// end is `token`'s, not a slot.
+    let tokens: Span<WebCore.CSSParserTokenBits>
 
     @inline(always)
     @_lifetime(copy tokens)
-    init(_ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor, _ tokens: Span<WebCore.CSSCalc.CSSCalcSwiftToken>) {
+    init(_ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor, _ tokens: Span<WebCore.CSSParserTokenBits>) {
         self.cursor = cursor
         self.tokens = tokens
     }
 
     /// The token at `index`, or the EOF token at or past the end of the range, as `peek` answers.
     @inline(always)
-    func token(_ index: UInt32) -> WebCore.CSSCalc.CSSCalcSwiftToken {
-        let last = tokens.count &- 1
+    func token(_ index: UInt32) -> CalcToken {
         let i = Int(index)
-        return tokens[i < last ? i : last]
+        if i < tokens.count { return CalcToken(bits: tokens[i], index: index) }
+        // `CSSParserTokenRange::eofToken()`'s storage: `CSSParserToken(EOFToken)`, no block, no value.
+        var eof = WebCore.CSSParserTokenBits()
+        eof.type = UInt32(WebCore.EOFToken.rawValue)
+        return CalcToken(bits: eof, index: index)
     }
 
+    /// `id()`: the `CSSValueID` of an `IdentToken`, `CSSValueInvalid` for any other.
     @inline(always)
-    func tokenCount() -> UInt32 { UInt32(truncatingIfNeeded: tokens.count &- 1) }
+    func id(_ token: CalcToken) -> UInt16 { token.type == WebCore.IdentToken ? keyword(token) : 0 }
+    /// `functionId()`: the `CSSValueID` of a `FunctionToken`, `CSSValueInvalid` for any other.
+    @inline(always)
+    func functionId(_ token: CalcToken) -> UInt16 { token.type == WebCore.FunctionToken ? keyword(token) : 0 }
+    /// The token's keyword cache when it is filled, and C++ otherwise.
+    ///
+    /// The same test as `identOrFunctionId`.
+    @inline(always)
+    private func keyword(_ token: CalcToken) -> UInt16 {
+        let cached = token.bits.id
+        return cached >= 0 ? UInt16(truncatingIfNeeded: cached) : cursor.keywordId(token.index)
+    }
+    /// For a `FunctionToken`: `calc()` or `-webkit-calc()` specifically.
+    ///
+    /// A function block that is neither this nor `isCalcFunction` is a parse failure, which is what
+    /// the C++ path does with it.
+    @inline(always)
+    func isPlainCalcFunction(_ token: CalcToken) -> Bool {
+        let f = functionId(token)
+        return f == UInt16(WebCore.CSSValueCalc.rawValue) || f == UInt16(WebCore.CSSValueWebkitCalc.rawValue)
+    }
+    /// For a `FunctionToken`: `isCalcFunction(functionId)`.
+    @inline(always)
+    func isCalcFunction(_ token: CalcToken) -> Bool { WebCore.CSSCalc.cssCalcSwiftIsCalcFunction(functionId(token)) }
+
+    @inline(always)
+    func tokenCount() -> UInt32 { UInt32(truncatingIfNeeded: tokens.count) }
     @inline(always)
     func lookupSymbol(_ valueID: UInt16) -> WebCore.CSSCalc.CSSCalcSwiftSymbolResult {
         cursor.lookupSymbol(valueID)
@@ -3979,20 +4030,19 @@ private struct CalcTokens: ~Escapable {
     }
 }
 
-/// `body` over the range's tokens, in a `withTemporaryAllocation` buffer.
 @inline(always)
-private func withCalcTokens<R>(
+private func withCalcTokens<R: ~Copyable>(
     _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
     _ body: (borrowing CalcTokens) -> R
 ) -> R {
-    let count = Int(cursor.tokenCount()) &+ 1
-    return withTemporaryAllocation(of: WebCore.CSSCalc.CSSCalcSwiftToken.self, capacity: count) { buffer in
+    let count = Int(cursor.tokenCount())
+    return withTemporaryAllocation(of: WebCore.CSSParserTokenBits.self, capacity: count) { buffer in
         // Initialised before C++ writes it, because `MutableSpan` covers initialised elements only.
         while !buffer.isFull {
-            buffer.append(WebCore.CSSCalc.CSSCalcSwiftToken())
+            buffer.append(WebCore.CSSParserTokenBits())
         }
         var slots = buffer.mutableSpan
-        cursor.fillTokens(&slots)
+        cursor.fillTokenBits(&slots)
         _ = consume slots
         return body(CalcTokens(cursor, buffer.span))
     }
@@ -4003,7 +4053,7 @@ private func calcToken(
     _ cursor: borrowing CalcTokens,
     _ state: inout CalcParseState,
     _ index: UInt32
-) -> WebCore.CSSCalc.CSSCalcSwiftToken {
+) -> CalcToken {
     cursor.token(index)
 }
 
@@ -4050,7 +4100,7 @@ private func calcFindBlockEnd(
 private let calcBlockStart: UInt8 = 1
 private let calcBlockEnd: UInt8 = 2
 
-// MARK: The grammar's output: `CalcNode`s, not `Child`s
+// MARK: The grammar's output
 
 /// One parsed subtree, owned, and the `Type` the grammar computed for it.
 private struct CalcParsed: ~Copyable {
@@ -4075,10 +4125,9 @@ private func calcParseLeaf(
     return CalcNode(
         value: value,
         type: CalcType(),
-        // `calcNoPayload`: a parsed node has no original tree to index. The exception is a
-        // `calc-mix()` weight carrier with `CalcNodeFlags.calcMixWeightIsCalc`, which stores its
-        // payload-table index; it is never emitted as a node (`calcEmitParsedCalcMix` steps past
-        // it).
+        // The sentinel, except on a `calc-mix()`'s interleaved weight carrier whose weight is a math
+        // function (`CalcNodeFlags.calcMixWeightIsCalc`), which names its payload. A weight carrier is
+        // never emitted as a node: `calcEmitParsedCalcMix` reads it and steps past it.
         origin: origin,
         valueID: 0,
         unitType: narrowUnit,
@@ -4089,7 +4138,6 @@ private func calcParseLeaf(
     )
 }
 
-/// An operation over `children`, which it takes ownership of in order.
 @inline(always)
 private func calcParseOperation(
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
@@ -4104,9 +4152,9 @@ private func calcParseOperation(
         // The type the grammar computed: `copyAndSimplify` ends at `makeChild(..., getType(root))`,
         // and a fresh `toType` over simplified operands can differ.
         type: type,
-        // `calcNoPayload`, except on a parsed `Anchor`, `AnchorSize` or `Random`, where it is the
-        // payload-table index of the `<anchor-element>` or `<random-key>` that `buildAnchor` and
-        // `buildRandom` read back.
+        // The sentinel for every operation but three: on an `Anchor`, `AnchorSize` or `Random` it is
+        // the index of the payload the parse resolved, an `<anchor-element>` or a `<random-key>`,
+        // which `buildAnchor` and `buildRandom` read back.
         origin: origin,
         valueID: valueID,
         unitType: 0,
@@ -4242,26 +4290,28 @@ private func calcParseValue(
         return CalcParsed(node: me, type: percentType)
 
     case WebCore.DimensionToken:
-        if token.unit == WebCore.CSSUnitType.Unknown { return nil }
-        if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenUnitNeedsConversionData != 0 {
-            // `absoluteLengthUnitsOnly` makes this invalid input.
+        // Never nil: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
+        guard let unit = WebCore.CSSUnitType(rawValue: token.unitRaw) else { return nil }
+        if unit == WebCore.CSSUnitType.Unknown { return nil }
+        if token.unitNeedsConversionData {
+            // `absoluteLengthUnitsOnly` makes this invalid input, not a decline.
             if state.options.absoluteLengthUnitsOnly { return nil }
             state.requiresConversionData = true
         }
         guard
             let alternative = calcNumericAlternativeForLeafKind(
-                WebCore.CSSCalc.cssCalcSwiftLeafKindForUnit(UInt16(token.unit.rawValue))
+                WebCore.CSSCalc.cssCalcSwiftLeafKindForUnit(UInt16(token.unitRaw))
             )
         else { return nil }
         guard
             let me = calcParseLeaf(
                 alternative,
                 token.numericValue,
-                UInt16(token.unit.rawValue),
+                UInt16(token.unitRaw),
                 0
             )
         else { return nil }
-        return CalcParsed(node: me, type: CalcType.determineType(token.unit))
+        return CalcParsed(node: me, type: CalcType.determineType(unit))
 
     case WebCore.IdentToken:
         return calcParseKeyword(cursor, &state, token)
@@ -4280,10 +4330,10 @@ private func calcParseValue(
 private func calcParseKeyword(
     _ cursor: borrowing CalcTokens,
     _ state: inout CalcParseState,
-    _ token: WebCore.CSSCalc.CSSCalcSwiftToken
+    _ token: CalcToken
 ) -> CalcParsed? {
     if state.options.hasAllowedSymbols {
-        let symbol = cursor.lookupSymbol(token.id)
+        let symbol = cursor.lookupSymbol(cursor.id(token))
         if symbol.resolved {
             if symbol.needsConversionData {
                 if state.options.absoluteLengthUnitsOnly { return nil }
@@ -4295,12 +4345,12 @@ private func calcParseKeyword(
             }
             // From the symbol's unit, not its value: the value is not known until simplification.
             let type = CalcType.determineType(unit)
-            guard let me = calcParseSymbol(token.id, symbol.unitType) else { return nil }
+            guard let me = calcParseSymbol(cursor.id(token), symbol.unitType) else { return nil }
             return CalcParsed(node: me, type: type)
         }
     }
 
-    let constant = WebCore.CSSCalc.cssCalcSwiftLookupConstantNumber(token.id)
+    let constant = WebCore.CSSCalc.cssCalcSwiftLookupConstantNumber(cursor.id(token))
     guard constant.resolved else { return nil }
     guard
         let me = calcParseLeaf(
@@ -4313,7 +4363,6 @@ private func calcParseKeyword(
     return CalcParsed(node: me, type: CalcType())
 }
 
-/// A `Symbol` leaf, or nil if its unit does not fit.
 @inline(always)
 private func calcParseSymbol(
     _ valueID: UInt16,
@@ -4335,14 +4384,14 @@ private func calcParseSymbol(
     )
 }
 
-/// Which of the four numeric alternatives a `CSSCalcSwiftNodeKind` leaf answer names.
+/// Which of the four numeric alternatives the answer of `cssCalcSwiftLeafKindForUnit` names.
 @inline(always)
-private func calcNumericAlternativeForLeafKind(_ kind: UInt8) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
-    switch kind {
-    case WebCore.CSSCalc.CSSCalcSwiftNodeKind.Number.rawValue: return .Number
-    case WebCore.CSSCalc.CSSCalcSwiftNodeKind.Percentage.rawValue: return .Percentage
-    case WebCore.CSSCalc.CSSCalcSwiftNodeKind.CanonicalDimension.rawValue: return .CanonicalDimension
-    case WebCore.CSSCalc.CSSCalcSwiftNodeKind.NonCanonicalDimension.rawValue: return .NonCanonicalDimension
+private func calcNumericAlternativeForLeafKind(_ raw: UInt8) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
+    switch raw {
+    case CalcAlternative.Number.rawValue: return .Number
+    case CalcAlternative.Percentage.rawValue: return .Percentage
+    case CalcAlternative.CanonicalDimension.rawValue: return .CanonicalDimension
+    case CalcAlternative.NonCanonicalDimension.rawValue: return .NonCanonicalDimension
     default: return nil
     }
 }
@@ -4355,16 +4404,16 @@ private func calcParseBlock(
     _ end: UInt32,
     _ depth: Int32,
     _ state: inout CalcParseState,
-    _ token: WebCore.CSSCalc.CSSCalcSwiftToken
+    _ token: CalcToken
 ) -> CalcParsed? {
     // `parseCalcValue`'s `findBlock`: a `LeftParenthesisToken` or a `calc()` / `-webkit-calc()`
     // function is a nested `<calc-sum>`. A math function not listed in
     // `calcParseFunctionAlternative` is refused; any other function block is invalid input.
     let isPlainCalc =
         token.type == WebCore.LeftParenthesisToken
-        || token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsPlainCalcFunction != 0
+        || cursor.isPlainCalcFunction(token)
     if !isPlainCalc {
-        if let function = calcParseFunctionAlternative(token.functionId) {
+        if let function = calcParseFunctionAlternative(cursor.functionId(token)) {
             return calcParseFunctionBlock(
                 cursor,
                 &index,
@@ -4375,9 +4424,9 @@ private func calcParseBlock(
                 function.arguments
             )
         }
-        if token.flags & WebCore.CSSCalc.cssCalcSwiftTokenIsCalcFunction != 0 {
+        if cursor.isCalcFunction(token) {
             state.declined = true
-            state.declineReason = calcParseDeclineReasonForFunction(token.functionId)
+            state.declineReason = calcParseDeclineReasonForFunction(cursor.functionId(token))
         }
         return nil
     }
@@ -4615,7 +4664,7 @@ private func calcParseFunctionBlock(
 ///
 ///   * `treeCountingAllowed` clear: invalid input, as the C++ returns `{ }`.
 ///   * a fold would run (`CalcParseState.conversionDataFoldsRun`): refused with `.TreeCounting`,
-///     because the fold needs the original `CSSCalc::Child`.
+///     because the fold is C++'s and needs a `CSSCalc::Child`.
 ///   * otherwise: the leaf, unfolded, as `copyAndSimplify` leaves it.
 @inline(never)
 private func calcParseZeroArguments(
@@ -4734,7 +4783,7 @@ private func calcParseSumOrNone(
     _ depth: Int32,
     _ state: inout CalcParseState
 ) -> CalcParsedSumOrNone? {
-    if index < end, calcToken(cursor, &state, index).id == UInt16(WebCore.CSSValueNone.rawValue) {
+    if index < end, cursor.id(calcToken(cursor, &state, index)) == UInt16(WebCore.CSSValueNone.rawValue) {
         index += 1
         calcSkipWhitespace(cursor, &index, end, &state)
         return CalcParsedSumOrNone(node: nil, type: CalcType(), isNone: true)
@@ -4836,7 +4885,7 @@ private func calcParseRound(
     calcSkipWhitespace(cursor, &index, end, &state)
 
     var alternative = WebCore.CSSCalc.CSSCalcSwiftAlternative.RoundNearest
-    if index < end, let selected = calcRoundingStrategyAlternative(calcToken(cursor, &state, index).id) {
+    if index < end, let selected = calcRoundingStrategyAlternative(cursor.id(calcToken(cursor, &state, index))) {
         index += 1
         calcSkipWhitespace(cursor, &index, end, &state)
         guard calcParseComma(cursor, &index, end, &state) else { return nil }
@@ -4965,7 +5014,7 @@ private func calcParseProgress(
     calcSkipWhitespace(cursor, &index, end, &state)
 
     var alternative = WebCore.CSSCalc.CSSCalcSwiftAlternative.Progress
-    if index < end, calcToken(cursor, &state, index).id == UInt16(WebCore.CSSValueNoClamp.rawValue) {
+    if index < end, cursor.id(calcToken(cursor, &state, index)) == UInt16(WebCore.CSSValueNoClamp.rawValue) {
         index += 1
         calcSkipWhitespace(cursor, &index, end, &state)
         alternative = .ProgressNoClamp
@@ -5172,10 +5221,10 @@ private func calcParseAnchorKeyword(
 ) -> UInt16 {
     guard index < end else { return 0 }
     let token = calcToken(cursor, &state, index)
-    guard token.type == WebCore.IdentToken, token.id != 0, accepts(token.id) else { return 0 }
+    guard token.type == WebCore.IdentToken, cursor.id(token) != 0, accepts(cursor.id(token)) else { return 0 }
     index += 1
     calcSkipWhitespace(cursor, &index, end, &state)
-    return token.id
+    return cursor.id(token)
 }
 
 /// Whether `id` is one of the keywords of `<anchor-side>`.
@@ -5227,7 +5276,7 @@ private func calcParseAnchorSlotValue(
     let token = calcToken(cursor, &state, index)
     // A bare parenthesised group is not a legal anchor slot.
     if token.type == WebCore.LeftParenthesisToken { return nil }
-    let wasFunction = token.functionId != 0
+    let wasFunction = cursor.functionId(token) != 0
     guard let value = calcParseValue(cursor, &index, end, depth, &state) else { return nil }
     let type = value.type
     return CalcParsedAnchorSlot(node: value.node, type: type, wasFunction: wasFunction)
@@ -5284,7 +5333,7 @@ private func calcParseAnchor(
     if depth > calcMaxExpressionDepth { return nil }
     if !state.options.anchorAllowed { return nil }
     // Refused rather than invalid: with conversion data the C++ evaluates the anchor, which needs
-    // the original `CSSCalc::Child`.
+    // a `CSSCalc::Child`.
     if state.conversionDataFoldsRun {
         state.declined = true
         state.declineReason = .AnchorEvaluation
@@ -5453,8 +5502,8 @@ private func calcParseAnchorSize(
 
 /// `consumeRandom`: `random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )`.
 ///
-/// `Random::Sharing` holds text a `CSSCalcSwiftToken` does not carry, so `cursor.consumeRandomKey`
-/// resolves the `<random-key>` in C++ into the payload table and `origin` holds the index.
+/// `Random::Sharing` holds text a `CalcToken` does not read, so `cursor.consumeRandomKey` resolves
+/// the `<random-key>` in C++ into the payload table and `origin` holds the index.
 ///
 /// `cssRandomFunctionCount` must be read and incremented in source order, before the arguments, so
 /// a nested `random()` sees the incremented value. `consumeRandomKey` does both at that point in
@@ -5472,7 +5521,7 @@ private func calcParseRandom(
     if depth > calcMaxExpressionDepth { return nil }
     if !state.options.randomAllowed { return nil }
     // Refused rather than invalid, as in `calcParseAnchor`: with conversion data
-    // `simplify(Random&)` evaluates the node through the original `CSSCalc::Child`.
+    // `simplify(Random&)` evaluates the node through a `CSSCalc::Child`.
     if state.conversionDataFoldsRun {
         state.declined = true
         state.declineReason = .RandomEvaluation
@@ -5727,14 +5776,14 @@ private func calcSumMergesIntoHead(_ head: borrowing CalcNode, _ operand: borrow
 }
 
 /// What one attempt at the whole parse produced.
-private struct CalcParseAttempt {
+private struct CalcParseAttempt: ~Copyable {
     /// Nil when the descent failed or refused; the flags say which.
     var type: CalcType?
+    /// The simplified tree, when `type` is not nil.
+    var root: CalcNode? = nil
     /// A fold refused the tree (`CalcFold.declined`), as `simplifyParsedCalcMix` and
     /// `calcMixFoldToZero` can.
     var foldRefused = false
-    /// `calcEmitParsed` refused, a boundary contract violation reported as `ContractViolation`.
-    var emitRefused = false
     /// How many tokens the descent consumed, for `CalcParseOptions.bareCalcSum`, whose C++ caller
     /// advances its range by exactly this.
     ///
@@ -5742,16 +5791,21 @@ private struct CalcParseAttempt {
     var consumedTokens: UInt32 = 0
 }
 
-/// Parse the token range inside a `calc()`, simplify it, and materialise the result once.
+/// Parse the token range inside a `calc()` and simplify it.
+///
+/// The root means nothing unless `outcome` is `Parsed`.
 @_expose(Cxx)
 public func cssCalcParseSwift(
     _ cursor: WebCore.CSSCalc.CSSCalcSwiftParseCursor,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
     _ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions,
     _ simplificationOptions: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
-    _ simplify: Bool
-) -> WebCore.CSSCalc.CSSCalcSwiftParseResult {
-    var result = WebCore.CSSCalc.CSSCalcSwiftParseResult()
+    _ simplify: Bool,
+    _ outcome: inout WebCore.CSSCalc.CSSCalcSwiftParseResult
+) -> CSSCalcSwiftRoot {
+    // Named `outcome`, not `result`: the generated C++ thunk names its return buffer `result`, and
+    // a parameter of that name is shadowed by it.
+    outcome = WebCore.CSSCalc.CSSCalcSwiftParseResult()
     let parseOptions = CalcParseOptions(options)
     var state = CalcParseState(parseOptions)
 
@@ -5759,7 +5813,7 @@ public func cssCalcParseSwift(
     // `random()` draw, so a descent that produces no tree puts the count back.
     let savedRandomCount = cursor.randomFunctionCount()
 
-    let attempt = withCalcTokens(cursor) { tokens in
+    var attempt = withCalcTokens(cursor) { tokens in
         calcParseAttempt(tokens, &builder, simplificationOptions, simplify, &state)
     }
 
@@ -5767,34 +5821,32 @@ public func cssCalcParseSwift(
         cursor.setRandomFunctionCount(savedRandomCount)
 
         if attempt.foldRefused {
-            result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
-            result.declineReason = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None.rawValue)
-            return result
+            outcome.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
+            outcome.declineReason = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None.rawValue)
+            return .none
         }
-        if attempt.emitRefused {
-            result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
-            result.declineReason = UInt8(
-                WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.ContractViolation.rawValue
-            )
-            return result
-        }
-        result.outcome = UInt8(
+        outcome.outcome = UInt8(
             state.declined
                 ? WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue
                 : WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Failed.rawValue
         )
-        result.declineReason = UInt8(state.declineReason.rawValue)
-        return result
+        outcome.declineReason = UInt8(state.declineReason.rawValue)
+        return .none
     }
 
-    result.type = type
-    result.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Parsed.rawValue)
-    result.requiresConversionData = state.requiresConversionData
-    result.consumedTokens = attempt.consumedTokens
-    return result
+    outcome.type = type
+    outcome.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Parsed.rawValue)
+    outcome.requiresConversionData = state.requiresConversionData
+    outcome.consumedTokens = attempt.consumedTokens
+    guard let root = attempt.root.take() else {
+        outcome.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
+        outcome.declineReason = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.ContractViolation.rawValue)
+        return .none
+    }
+    return CSSCalcSwiftRoot(root)
 }
 
-/// One attempt at parse, simplify and emit.
+/// One attempt at parse and simplify.
 @inline(never)
 private func calcParseAttempt(
     _ cursor: borrowing CalcTokens,
@@ -5901,34 +5953,26 @@ private func calcParseAttempt(
         }
     }
 
-    guard calcEmitParsed(parsed.node, true, &builder) else {
-        attempt.emitRefused = true
-        return attempt
-    }
-
+    calcRestoreAnchorPrefixes(&parsed.node)
     attempt.type = parsed.type
+    attempt.root = consume parsed.node
     return attempt
 }
 
 // MARK: - Evaluation
 
-/// `evaluateDouble`, over the borrowed `CSSCalc::Child`.
+/// `evaluateDouble` (`CSSCalcTree+Evaluation.cpp`), over the stored tree.
 ///
-/// Nothing is built: each node is read through `swiftNodeInfo` and its children through
-/// `Child::operator[]`, so the upcalls that need the original node are handed the node the walk is
-/// on.
-///
-/// Separate from the simplifier because `evaluateDouble` is a different computation: it resolves a
-/// percentage to its value, multiplies left to right as written where `simplify(Product&)` folds
-/// numbers first, and reads a present but unresolvable optional argument as omitted where
-/// `simplify` refuses. The arithmetic goes through `CalcExecutor`.
+/// Nothing is built and nothing is allocated, except for the style-coupled functions, whose upcall
+/// is asked about the node built as a `Child` (`resolveStyleCoupled`).
 ///
 /// A nil answer is an evaluation to nothing, where `evaluateDouble` has none. A node
 /// `isSimplifiableAlternative` refuses (an arity no parse produces) sets `refused`, and the whole
 /// evaluation is handed back unevaluated (see `cssCalcEvaluateSwift`).
 private struct CalcEvaluation: ~Copyable {
     let units: CalcSimplification
-    let builder: WebCore.CSSCalc.CSSCalcSwiftBuilder
+    /// Mutable only for `resolveStyleCoupled`, which builds a node on the operand stack.
+    var builder: WebCore.CSSCalc.CSSCalcSwiftBuilder
     /// The alternative where a nil started, not an ancestor it was passed up through.
     var blame: CalcAlternative? = nil
     /// The walk reached a node it does not handle.
@@ -5937,6 +5981,20 @@ private struct CalcEvaluation: ~Copyable {
     init(units: CalcSimplification, builder: WebCore.CSSCalc.CSSCalcSwiftBuilder) {
         self.units = units
         self.builder = builder
+    }
+
+    /// `resolveStyleCoupledValue` for `node`, which the upcall reads as a `Child`.
+    mutating func resolveStyleCoupled(_ node: borrowing CalcNode) -> WebCore.CSSCalc.CSSCalcSwiftNumericResult {
+        guard calcEmitParsed(node, false, &builder) else {
+            return WebCore.CSSCalc.CSSCalcSwiftNumericResult(
+                value: 0,
+                unitType: 0,
+                resolved: false,
+                alternative: node.alternative,
+                substituteFallback: false
+            )
+        }
+        return builder.resolveStyleCoupledValueOfTop()
     }
 
     @inline(always)
@@ -5948,20 +6006,20 @@ private struct CalcEvaluation: ~Copyable {
     }
 
     @inline(always)
-    mutating func child(_ node: borrowing WebCore.CSSCalc.Child, _ k: Int) -> Double? {
+    mutating func child(_ node: borrowing CalcNode, _ k: Int) -> Double? {
         evaluateNode(node[k])
     }
 
-    /// `evaluate(node)`, for a node reached through `Child::operator[]`.
+    /// `evaluate(node)`, for a node whose `info` has not been asked for.
     @inline(always)
-    mutating func evaluateNode(_ node: borrowing WebCore.CSSCalc.Child) -> Double? {
-        evaluate(node, WebCore.CSSCalc.swiftNodeInfo(node))
+    mutating func evaluateNode(_ node: borrowing CalcNode) -> Double? {
+        evaluate(node, node.info)
     }
 
     /// `evaluate(node[k])` with its blame discarded: a present but unresolvable optional argument
     /// is read as omitted, so it must not be the node a later nil is attributed to.
     @inline(always)
-    mutating func swallowedChild(_ node: borrowing WebCore.CSSCalc.Child, _ k: Int) -> Double? {
+    mutating func swallowedChild(_ node: borrowing CalcNode, _ k: Int) -> Double? {
         let saved = blame
         blame = nil
         let value = child(node, k)
@@ -5981,7 +6039,7 @@ private struct CalcEvaluation: ~Copyable {
     /// `k` is child `k`; its weight comes from the upcall that applies the evaluator's
     /// `Style::toStyle`.
     @inline(never)
-    mutating func evaluateCalcMix(_ node: borrowing WebCore.CSSCalc.Child, _ itemCount: Int) -> Double? {
+    mutating func evaluateCalcMix(_ node: borrowing CalcNode, _ itemCount: Int) -> Double? {
         if itemCount <= 8 {
             var items = InlineArray<8, CalcMixEvaluatedItem>(repeating: (value: 0, weight: nil))
             var span = items.mutableSpan
@@ -5994,7 +6052,7 @@ private struct CalcEvaluation: ~Copyable {
 
     /// The body of `evaluateCalcMix`, over `items`, which has room for at least `itemCount` items.
     mutating func evaluateCalcMixItems(
-        _ node: borrowing WebCore.CSSCalc.Child,
+        _ node: borrowing CalcNode,
         _ itemCount: Int,
         _ items: inout MutableSpan<CalcMixEvaluatedItem>
     ) -> Double? {
@@ -6007,7 +6065,8 @@ private struct CalcEvaluation: ~Copyable {
             guard let value = child(node, k) else {
                 return nil
             }
-            let weight = builder.resolveCalcMixItemWeight(node, UInt32(k))
+            let stored = node.calcMixWeight(k)
+            let weight = builder.resolveCalcMixWeight(stored.value, stored.present, node.calcMixWeightPayload(k))
             guard weight.resolved else {
                 return fail(.CalcMix)
             }
@@ -6035,9 +6094,8 @@ private struct CalcEvaluation: ~Copyable {
         return result
     }
 
-    /// The value of `node`, whose `swiftNodeInfo` is `info`, or nil if this walk does not evaluate
-    /// it.
-    mutating func evaluate(_ node: borrowing WebCore.CSSCalc.Child, _ info: WebCore.CSSCalc.CSSCalcSwiftNodeInfo) -> Double? {
+    /// The value of `node`, whose `info` is `info`, or nil if this walk does not evaluate it.
+    mutating func evaluate(_ node: borrowing CalcNode, _ info: CalcNodeInfo) -> Double? {
         let alternative = info.alternative
         let count = Int(info.childCount)
         guard isSimplifiableAlternative(alternative, info.childCount) else {
@@ -6220,7 +6278,7 @@ private struct CalcEvaluation: ~Copyable {
         // `evaluate(const SiblingCount&)` and `evaluate(const SiblingIndex&)`, through the upcall
         // the simplifier makes, with the evaluator's guards in its order.
         case .SiblingCount, .SiblingIndex:
-            let resolved = builder.resolveStyleCoupledValue(node)
+            let resolved = resolveStyleCoupled(node)
             guard resolved.resolved else {
                 return fail(alternative)
             }
@@ -6265,7 +6323,7 @@ private struct CalcEvaluation: ~Copyable {
                 return nil
             }
             let step: Double? = count == 3 ? swallowedChild(node, 2) : nil
-            let base = builder.resolveRandomBaseValueForEvaluation(node)
+            let base = builder.resolveRandomBaseValueForEvaluation(node.origin)
             guard base.resolved else {
                 return fail(alternative)
             }
@@ -6276,7 +6334,7 @@ private struct CalcEvaluation: ~Copyable {
         // property invalid if there is none). A fallback that answers nothing marks it invalid, in
         // the C++'s order. An `<anchor-side>` subtree is child 0; the fallback follows it.
         case .Anchor, .AnchorSize:
-            let answer = builder.resolveStyleCoupledValue(node)
+            let answer = resolveStyleCoupled(node)
             if answer.resolved {
                 return answer.value
             }
@@ -6297,8 +6355,8 @@ private struct CalcEvaluation: ~Copyable {
         // bound is not a child, and the kind says which are missing. A bound that answers nothing
         // fails the whole `clamp()`. All three are evaluated before any is tested.
         case .Clamp:
-            let minimumIsNone = info.kind == .ClampWithNoneMinimum || info.kind == .ClampWithNoneMinimumAndMaximum
-            let maximumIsNone = info.kind == .ClampWithNoneMaximum || info.kind == .ClampWithNoneMinimumAndMaximum
+            let minimumIsNone = info.kind == .clampWithNoneMinimum || info.kind == .clampWithNoneMinimumAndMaximum
+            let maximumIsNone = info.kind == .clampWithNoneMaximum || info.kind == .clampWithNoneMinimumAndMaximum
             let expected = 3 - (minimumIsNone ? 1 : 0) - (maximumIsNone ? 1 : 0)
             guard count == expected else {
                 return fail(alternative)
@@ -6350,8 +6408,7 @@ private struct CalcEvaluation: ~Copyable {
 /// nothing, as `evaluateDouble` would.
 @_expose(Cxx)
 public func cssCalcEvaluateSwift(
-    _ root: borrowing WebCore.CSSCalc.Child,
-    // `inout`, as `cssCalcSimplifySwift` takes it. Nothing is written through it.
+    _ stored: CSSCalcSwiftRoot,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
     _ hasConversionData: Bool
 ) -> WebCore.CSSCalc.CSSCalcSwiftNumericResult {
@@ -6363,9 +6420,10 @@ public func cssCalcEvaluateSwift(
         hasConversionData: hasConversionData
     )
 
-    let rootInfo = WebCore.CSSCalc.swiftNodeInfo(root)
+    let box = stored
+    let rootInfo = box.root.info
     var evaluation = CalcEvaluation(units: units, builder: builder)
-    let value = evaluation.evaluate(root, rootInfo)
+    let value = evaluation.evaluate(box.root, rootInfo)
 
     // A refused tree names the root. A tree that evaluates to nothing, where
     // `evaluateDouble` answers nothing, answers that, naming the node the walk stopped at.
@@ -6394,4 +6452,91 @@ public func cssCalcEvaluateSwift(
         alternative: .Number,
         substituteFallback: false
     )
+}
+
+// MARK: - Conversion to `Style::Calculation::Tree`
+
+/// `toStyle(const CSSCalc::Child&)` (StyleCalculationTree+Conversion.cpp), over the simplified
+/// tree, onto the operand stack of `builder`.
+///
+/// False only for a builder contract violation.
+///
+/// The order is the C++'s, because two steps read caches with side effects: a `random()`'s base
+/// value is resolved before its arguments, and each `calc-mix()` item's weight before its value.
+private func calcToStyle(
+    _ node: borrowing CalcNode,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftStyleBuilder
+) -> Bool {
+    let info = node.info
+    let count = Int(info.childCount)
+    let alternative = info.alternative
+    switch alternative {
+    case .Number:
+        builder.pushNumber(info.numericValue)
+        return true
+    case .Percentage:
+        builder.pushPercentage(info.numericValue)
+        return true
+    case .CanonicalDimension:
+        builder.pushCanonicalDimension(info.numericValue, UInt16(info.unitType))
+        return true
+    case .Symbol where info.valueID == UInt16(WebCore.CSSValueSize.rawValue):
+        builder.pushSize()
+        return true
+
+    // Resolved by simplification with conversion data, so never present here. The C++ asserts and
+    // answers the number 0 without converting any argument.
+    case .NonCanonicalDimension, .Symbol, .SiblingCount, .SiblingIndex, .Anchor, .AnchorSize:
+        builder.pushNumber(0)
+        return true
+
+    // The style tree has no `Deg2Rad` node.
+    case .Deg2Rad:
+        guard count == 1, calcToStyle(node[0], &builder) else {
+            return false
+        }
+        builder.pushNumber(Double.pi / 180.0)
+        return builder.buildOperation(.Product, 2, 0)
+    case .Random:
+        builder.pushRandomBaseValue(node.origin)
+    case .CalcMix:
+        var k = 0
+        while k < count {
+            let weight = node.calcMixWeight(k)
+            builder.pushCalcMixItemWeight(weight.value, weight.present, node.calcMixWeightPayload(k))
+            guard calcToStyle(node[k], &builder) else {
+                return false
+            }
+            k += 1
+        }
+        return builder.buildOperation(alternative, info.childCount, 0)
+    default:
+        break
+    }
+
+    var k = 0
+    while k < count {
+        guard calcToStyle(node[k], &builder) else {
+            return false
+        }
+        k += 1
+    }
+    let noneMask: UInt8
+    switch info.kind {
+    case .clampWithNoneMinimum: noneMask = 1
+    case .clampWithNoneMaximum: noneMask = 2
+    case .clampWithNoneMinimumAndMaximum: noneMask = 3
+    default: noneMask = 0
+    }
+    return builder.buildOperation(alternative, info.childCount, noneMask)
+}
+
+/// Convert a simplified tree to a `Style::Calculation::Tree`, left as the one operand on `builder`.
+@_expose(Cxx)
+public func cssCalcToStyleSwift(
+    _ stored: CSSCalcSwiftRoot,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftStyleBuilder
+) -> Bool {
+    let box = stored
+    return calcToStyle(box.root, &builder)
 }

@@ -48,12 +48,7 @@ RefPtr<CSSCalc::Value> CSSMathValue::toCSSCalcValue() const
     ComputedStyleDependencies dependencies;
     CSSCalc::collectComputedStyleDependencies(*node, dependencies);
 
-    return CSSCalc::Value::create(*category, CSS::All, CSSCalc::Tree {
-        .root = WTF::move(*node),
-        .type = type,
-        .stage = CSSCalc::Stage::Specified,
-        .requiresConversionData = !dependencies.isAbsolute(),
-    });
+    return CSSCalc::Value::create(*category, CSS::All, CSSCalc::makeTree(WTF::move(*node), type, CSSCalc::Stage::Specified, !dependencies.isAbsolute()));
 }
 
 RefPtr<CSSValue> CSSMathValue::toCSSValue() const

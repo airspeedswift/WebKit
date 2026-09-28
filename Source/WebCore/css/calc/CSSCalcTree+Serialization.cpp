@@ -799,303 +799,31 @@ template<typename Op> void serializeCalculationTree(StringBuilder& builder, cons
 // MARK: - Swift serialization support (CSSCalcSerializationSwift.swift)
 #if USE(SWIFT_CSS)
 //
-// What C++ does here is small: answer six questions about a node, append five things to a builder,
-// and hand the root over. Swift walks the `CSSCalc::Child` graph in place through these accessors,
-// so there is no serialized copy to build and no buffer to own; output goes into the caller's
-// `StringBuilder`, and number formatting and the CSSValueID name table are upcalls rather than
-// duplicated tables.
+// Swift walks its own `CalcNode` tree and calls back here for output: fixed spellings, numbers,
+// keyword names, and the arguments the tree keeps as payloads (`random()` keys, `<anchor-element>`
+// names, `calc-mix()` weights). Output goes into the caller's `StringBuilder`, and number formatting
+// and the CSSValueID name table are upcalls rather than duplicated tables.
 //
 // `formatCSSNumberValue` must stay in C++: Swift's `Double.description` is shortest-round-trip, a
 // different algorithm from CSS number serialization. The two agree on common values but diverge
 // on subnormals and 17-significant-digit values.
 
-// The outcome numbering is declared in Swift and reaches C++ through the generated header. Pinned
-// here so that reordering the Swift enum is a build failure rather than a silent reinterpretation
-// of every calc() serialization: `declined` read as `serialized` would emit nothing at all for
-// every math function on the page.
-static_assert(!static_cast<uint8_t>(CSSCalcSwiftOutcomeSerialized));
-static_assert(static_cast<uint8_t>(CSSCalcSwiftOutcomeDeclined) == 1);
-
-// The direct `Child`-typed children of a node are `Child::childCount()` and `Child::operator[]`
-// (CSSCalcTree.cpp). They answer for exactly the set `forAllChildNodes` yields, including the two
-// alternatives whose `tuple_size` 0 makes it under-report them, and they do so in O(1) per access
-// rather than by visiting every child. One definition of what a child is, on the type itself,
-// reachable from Swift as well as from here.
-
-// MARK: The operations this file serializes as plain math functions
-//
-// An allowlist, and the direction matters: these are the operations for which
-// `serializeMathFunctionPrefix` and `serializeMathFunctionArguments` both resolve to their generic
-// templates above, i.e. whose whole serialization is `nameLiteralForSerialization(Op::id)`, `(`,
-// the arguments joined with `, `, `)`. An operation added to CSSCalcTree.h is not in this list, so
-// it is handed to the C++ serializer until someone adds it here; a denylist would instead serialize
-// a new function through the generic path and be wrong if that function needed a prefix or argument
-// overload of its own.
-//
-// `round()`'s four strategies, `progress(no-clamp ...)`, `Sum`, `Product`, `Negate` and `Invert`
-// are absent because they have prefix overloads; `Random`, `CalcMix`, `Anchor` and `AnchorSize`
-// because their argument overloads are not a list of calculation trees; `Deg2Rad` because it has no
-// CSS spelling at all.
-template<typename T, typename... Ts> static constexpr bool isOneOf = (std::same_as<T, Ts> || ...);
-
-template<typename Op> static constexpr bool isGenericSerializedFunction = isOneOf<Op,
-    Min, Max, Mod, Rem, Sin, Cos, Tan, Asin, Acos, Atan, Atan2, Pow, Sqrt, Hypot, Log, Exp,
-    Abs, Sign, Progress>;
-
-template<typename Op> static constexpr bool isRoundingStrategy = isOneOf<Op,
-    RoundNearest, RoundUp, RoundDown, RoundToZero>;
-
-// Whether any of `Op`'s tuple elements is a `ChildOrNone`, the one argument shape a child count
-// cannot describe: `forAllChildren` visits a bound holding `none` and the serializer writes `none`
-// for it, while `forAllChildNodes`, which `Child::childCount()` uses, skips it entirely. `Clamp` is
-// the only such operation, handled by kind rather than by count; this `static_assert` makes a
-// second one a build failure rather than an argument silently dropped from a stylesheet.
-template<typename Op> static constexpr bool hasChildOrNoneArgument = []<size_t... I>(std::index_sequence<I...>) {
-    return (std::same_as<std::remove_cvref_t<std::tuple_element_t<I, Op>>, ChildOrNone> || ...);
-}(std::make_index_sequence<std::tuple_size_v<Op>> { });
-
-// Pins `CSSCalcSwiftAlternative` to `Node`'s alternative order. This lives here because this is
-// the nearest translation unit that can see both the enum and the variant.
-//
-// `Node` and the enum both expand from `CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE`, so a divergence is
-// not expressible in the source, but a change to that generation is, and this is the only place
-// where such a change fails loudly. `init?(rawValue:)` on an imported C++ enum never fails, so a
-// renumbered alternative would reach Swift as a valid case, be switched on, and produce a wrong
-// node, with no runtime check able to catch it.
-//
-// One assert per alternative, expanded from the same list that declares the enumerators, so an
-// enumerator that gained no assert is not expressible. `WTF::alternativeIndexV` carries its own
-// `static_assert(count == 1)`, so a type that appears twice in `Node` is rejected here too, and a
-// type that appears zero times fails to instantiate rather than silently answering the past-the-end
-// index.
+// Pins `CSSCalcSwiftAlternative` to `Node`'s alternative order, in the nearest translation unit
+// that can see both. `init?(rawValue:)` on an imported C++ enum never fails, so a renumbered
+// alternative would reach Swift as a valid case and build a wrong node with no runtime check able
+// to catch it. `WTF::alternativeIndexV` also rejects a type that appears twice in `Node` or not at
+// all.
 #define CSS_CALC_SWIFT_PIN_ALTERNATIVE(name, type) \
     static_assert(WTF::alternativeIndexV<type, Node> == static_cast<size_t>(CSSCalcSwiftAlternative::name), \
         "CSSCalcSwiftAlternative::" #name " is not Node's index for " #type);
 CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_PIN_ALTERNATIVE)
 #undef CSS_CALC_SWIFT_PIN_ALTERNATIVE
 
-// The count is what makes an added alternative a build failure rather than one this file simply
-// cannot name. The left side counts the list; the right side is the variant itself. Neither is
-// "the last enumerator + 1", which does not count an alternative inserted out of order.
-//
-// `WTF::VariantSizeV`, not `std::variant_size_v`: WTF's `Variant` is an alias for `mpark::variant`,
+// Makes an added alternative a build failure. `WTF::VariantSizeV`, not `std::variant_size_v`: WTF's `Variant` is an alias for `mpark::variant`,
 // so the `std` spelling instantiates an undefined template.
 static_assert(numberOfCSSCalcSwiftAlternatives == WTF::VariantSizeV<Node>);
 
-// 8 + 4 + 2 + 1 + 1 + 1 + 1 = 18 live bytes, aligned to 8. A field that grows the struct trips this
-// and has to justify moving the AArch64 return value out of registers.
-static_assert(sizeof(CSSCalcSwiftNodeInfo) == 24);
-
-CSSCalcSwiftNodeInfo swiftNodeInfo(const Child& node) noexcept
-{
-    // One `switchOn` over the 41-alternative Variant, answering every question about the node at
-    // once, so a leaf costs one discriminant dispatch rather than one per field.
-    CSSCalcSwiftNodeInfo out {
-        .numericValue = 0,
-        .childCount = 0,
-        .valueID = static_cast<uint16_t>(CSSValueInvalid),
-        .unitType = static_cast<uint8_t>(CSSUnitType::Unknown),
-        .kind = CSSCalcSwiftNodeKind::Operation,
-        .percentHint = 0,
-        // The variant's own discriminant, read directly. No switch and no table, on either side of
-        // the boundary: `CSSCalcSwiftAlternative` is pinned to `Node`'s alternative order by the
-        // asserts above, so the cast is the identity on the numbering rather than a mapping.
-        .alternative = static_cast<CSSCalcSwiftAlternative>(node.value.index()),
-        // False for every alternative but `Anchor`, whose lambda below answers it from the same
-        // visit.
-        .anchorSideIsSubtree = false,
-    };
-
-    // `childCount` is filled inside this visit rather than by a trailing `node.childCount()` call,
-    // which would be a second 41-alternative `WTF::switchOn` over a node whose concrete alternative
-    // the visit already has in hand. The four leaf lambdas need do nothing: `childCount` starts at
-    // 0 and `childNodeCountOf` is 0 for every `Leaf` by definition (CSSCalcTree+Traversal.h).
-    //
-    // `Anchor` and `AnchorSize` call `childCount()` anyway, because both declare `tuple_size` 0
-    // (FIXME: webkit.org/b/280798) and `CSSCalcTree.cpp`'s `anchorChildren` answers for them by hand
-    // from a `static` this file cannot see.
-    auto countOf = [&](const auto& operation) {
-        out.childCount = childNodeCountOf(*operation);
-    };
-
-    WTF::switchOn(node,
-        [&]<Numeric T>(const T& leaf) {
-            if constexpr (std::same_as<T, Number>)
-                out.kind = CSSCalcSwiftNodeKind::Number;
-            else if constexpr (std::same_as<T, Percentage>) {
-                out.kind = CSSCalcSwiftNodeKind::Percentage;
-                // `Type::PercentHint` is numbered from 1 so that 0 is `PercentHintValue`'s
-                // internal `None`; this is that representation unchanged, with no sentinel
-                // invented. Read here rather than through a second accessor because simplification
-                // needs it for every percentage it folds.
-                out.percentHint = leaf.hint ? static_cast<uint8_t>(*leaf.hint) : 0;
-            } else if constexpr (std::same_as<T, CanonicalDimension>)
-                out.kind = CSSCalcSwiftNodeKind::CanonicalDimension;
-            else
-                out.kind = CSSCalcSwiftNodeKind::NonCanonicalDimension;
-            out.numericValue = leaf.value;
-            out.unitType = static_cast<uint8_t>(toCSSUnit(leaf));
-        },
-        [&](const Symbol& leaf) {
-            out.kind = CSSCalcSwiftNodeKind::Symbol;
-            out.valueID = static_cast<uint16_t>(leaf.id);
-            // The node's own unit, not the symbol table's. `simplify(Symbol&)` is
-            // `makeNumeric(value->value, root.unit)`: the value comes from `CSSCalcSymbolTable` and
-            // the unit from `Symbol::unit`, which the parser took from `CSSCalcSymbolsAllowed`.
-            // Those are two independently populated `HashMap`s and they can disagree, so taking the
-            // unit from the table's answer would fold `Symbol{r, Deg}` under a `{r -> 1px}` table
-            // into a length where an angle is correct. `unitType` is inert for a `Symbol` otherwise,
-            // so this costs no space.
-            out.unitType = static_cast<uint8_t>(leaf.unit);
-        },
-        [&](const SiblingCount&) {
-            out.kind = CSSCalcSwiftNodeKind::SiblingCount;
-            out.valueID = static_cast<uint16_t>(SiblingCount::id);
-        },
-        [&](const SiblingIndex&) {
-            out.kind = CSSCalcSwiftNodeKind::SiblingIndex;
-            out.valueID = static_cast<uint16_t>(SiblingIndex::id);
-        },
-        // The four calc-operator nodes whose serialization is the grouping-parenthesis state machine.
-        [&](const IndirectNode<Sum>& op) {
-            out.kind = CSSCalcSwiftNodeKind::Sum;
-            countOf(op);
-        },
-        [&](const IndirectNode<Product>& op) {
-            out.kind = CSSCalcSwiftNodeKind::Product;
-            countOf(op);
-        },
-        [&](const IndirectNode<Negate>& op) {
-            out.kind = CSSCalcSwiftNodeKind::Negate;
-            countOf(op);
-        },
-        [&](const IndirectNode<Invert>& op) {
-            out.kind = CSSCalcSwiftNodeKind::Invert;
-            countOf(op);
-        },
-        // No CSS-level spelling: `serializeCalculationTree` emits this node's child in its place.
-        [&](const IndirectNode<Deg2Rad>& op) {
-            out.kind = CSSCalcSwiftNodeKind::Transparent;
-            countOf(op);
-        },
-        // These four each get their own kind because each has a different serialization shape and
-        // a different set of non-tree arguments; `valueID` is the function's own name in all four,
-        // exactly as for the generic ones, so none of them costs a name table on the Swift side.
-        [&](const IndirectNode<Anchor>& anchor) {
-            out.kind = CSSCalcSwiftNodeKind::AnchorFunction;
-            out.valueID = static_cast<uint16_t>(Anchor::id);
-            // Which form the `<anchor-side>` takes, answered here because this visit already has the
-            // node's concrete alternative in hand. A keyword side is an argument the serializer
-            // writes; a subtree side occupies child slot 0, which is what decides whether the
-            // fallback is slot 0 or slot 1.
-            out.anchorSideIsSubtree = !WTF::holdsAlternative<CSSValueID>((*anchor).side.value);
-            out.childCount = static_cast<uint32_t>(node.childCount());
-        },
-        [&](const IndirectNode<AnchorSize>&) {
-            out.kind = CSSCalcSwiftNodeKind::AnchorSizeFunction;
-            out.valueID = static_cast<uint16_t>(AnchorSize::id);
-            out.childCount = static_cast<uint32_t>(node.childCount());
-        },
-        // `clamp()`, and only because of its `none` bounds. `min` and `max` are `ChildOrNone`, so a
-        // bound holding the keyword is an argument the serializer emits but not a child node the
-        // walk can see: the kind carries it, and `childCount` stays the number of subtrees.
-        // Simplification rewrites a `clamp()` with both bounds `none` to `val`, so that shape is
-        // carried by its own kind rather than relied on being unreachable.
-        [&](const IndirectNode<Clamp>& clamp) {
-            out.valueID = static_cast<uint16_t>(Clamp::id);
-            countOf(clamp);
-            bool minIsNone = WTF::holdsAlternative<CSS::Keyword::None>(clamp->min);
-            bool maxIsNone = WTF::holdsAlternative<CSS::Keyword::None>(clamp->max);
-            if (minIsNone && maxIsNone)
-                out.kind = CSSCalcSwiftNodeKind::ClampWithNoneMinimumAndMaximum;
-            else if (minIsNone)
-                out.kind = CSSCalcSwiftNodeKind::ClampWithNoneMinimum;
-            else if (maxIsNone)
-                out.kind = CSSCalcSwiftNodeKind::ClampWithNoneMaximum;
-            else
-                out.kind = CSSCalcSwiftNodeKind::Function;
-        },
-        // The two whose `serializeMathFunctionArguments` overload is not a list of calculation
-        // trees: `Random`'s `<random-cache-key>` and `CalcMix`'s per-item weights. Both keep being
-        // named explicitly rather than falling into the generic lambda below, so that the allowlist
-        // there stays the only other thing that can hand a tree back.
-        [&](const IndirectNode<Random>& op) {
-            out.kind = CSSCalcSwiftNodeKind::RandomFunction;
-            out.valueID = static_cast<uint16_t>(Random::id);
-            countOf(op);
-        },
-        [&](const IndirectNode<CalcMix>& op) {
-            out.kind = CSSCalcSwiftNodeKind::CalcMixFunction;
-            out.valueID = static_cast<uint16_t>(CalcMix::id);
-            countOf(op);
-        },
-        // Everything else, classified by the shape of its serialization rather than one case per
-        // operation. These operations cost no name here or in Swift: `valueID` carries `Op::id` and
-        // is handed back to `nameLiteralForSerialization`, generated from CSSValueKeywords.in, so
-        // the keyword table is never duplicated.
-        [&](const auto& operation) {
-            using Op = std::remove_cvref_t<decltype(*operation)>;
-            static_assert(!hasChildOrNoneArgument<Op>,
-                "a second operation with a ChildOrNone argument needs its own kind the way Clamp has, "
-                "or a `none` bound will be dropped from the serialization");
-            countOf(operation);
-            // One place sets `valueID`, because every kind below wants the same thing from it: the
-            // operation's own `id`, which for `round()` is the rounding strategy (`nearest`, `up`,
-            // `down`, `to-zero`) rather than the function name, since all four share the name and
-            // differ only by the strategy.
-            if constexpr (isRoundingStrategy<Op> || std::same_as<Op, ProgressNoClamp> || isGenericSerializedFunction<Op>) {
-                out.valueID = static_cast<uint16_t>(Op::id);
-                out.kind = isRoundingStrategy<Op> ? CSSCalcSwiftNodeKind::RoundFunction
-                    : std::same_as<Op, ProgressNoClamp> ? CSSCalcSwiftNodeKind::ProgressNoClampFunction
-                    : CSSCalcSwiftNodeKind::Function;
-            } else {
-                // `Operation` means "the Swift serializer has not been taught this operation", and its
-                // only handling is to hand the tree to the C++ serializer, which the configuration
-                // that compiles the C++ serializer out has not got. So an unclassified operation is a
-                // build failure naming the operation, rather than a `RELEASE_ASSERT` that fires the
-                // first time the new function appears in a stylesheet.
-                //
-                // This is also what makes `CSSCalcSwiftNodeKind::Operation` producerless, and that is
-                // the whole justification for the Swift serializer's `.Operation` trap: it is
-                // unreachable by construction, established at compile time, not by inspection of
-                // producers. Every one of the 41 alternatives either has a lambda of its own above or
-                // satisfies the condition on the line this `#else` belongs to.
-                //
-                // Outside CSS_CALC_CPP_SERIALIZER_COMPILED_IN, so the proof holds in every
-                // configuration, not only the one without a C++ serializer.
-                static_assert(isRoundingStrategy<Op> || std::same_as<Op, ProgressNoClamp> || isGenericSerializedFunction<Op>,
-                    "an operation reached the generic classification with no kind of its own, and the Swift serializer cannot emit it. "
-                    "Add it to `isGenericSerializedFunction` if its serialization is `name(args...)`, or give it its own kind and teach "
-                    "CSSCalcSerializationSwift.swift, whichever is true of the new operation.");
-                out.kind = CSSCalcSwiftNodeKind::Operation;
-            }
-        }
-    );
-
-    return out;
-}
-
-// The `<anchor-size>` dimension as a `CSSValueID`, so callers can hand it to
-// `appendValueIDName` and the generated keyword table spells it.
-//
-// Deliberately not shared with `serializeAnchorSizeDimension` above, which keeps its own six
-// hardcoded string literals: sharing one table would mean a wrong entry produces the same wrong
-// output on both the Swift and C++ serialization paths, so a test comparing them could not
-// catch it. Two independent spellings keep that comparison meaningful.
-static CSSValueID anchorSizeDimensionValueID(Style::AnchorSizeDimension dimension)
-{
-    switch (dimension) {
-    case Style::AnchorSizeDimension::Width:      return CSSValueWidth;
-    case Style::AnchorSizeDimension::Height:     return CSSValueHeight;
-    case Style::AnchorSizeDimension::Block:      return CSSValueBlock;
-    case Style::AnchorSizeDimension::Inline:     return CSSValueInline;
-    case Style::AnchorSizeDimension::SelfBlock:  return CSSValueSelfBlock;
-    case Style::AnchorSizeDimension::SelfInline: return CSSValueSelfInline;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
-CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node) noexcept
+static CSSCalcSwiftOperationInfo randomSharingInfo(const Random::Sharing& sharing)
 {
     CSSCalcSwiftOperationInfo out {
         .valueID = static_cast<uint16_t>(CSSValueInvalid),
@@ -1109,57 +837,26 @@ CSSCalcSwiftOperationInfo swiftOperationInfo(const Child& node) noexcept
         .hasDimension = false,
         .hasFallback = false,
     };
-
-    // `get_if` on the three alternatives that carry anything, rather than a `WTF::switchOn` over
-    // all 41: the `switchOn` spelling instantiates its generic fallback once per alternative, ~22 KB
-    // of code. `CalcMix` is absent because all it needs is its child count and its per-item weights,
-    // and the weights are an upcall.
-    if (auto* random = get_if<IndirectNode<Random>>(&node)) {
-        WTF::switchOn((*random)->sharing,
-            [&](const Random::SharingAuto&) {
-                // Serializes as omitted; both flags stay false and nothing is written.
-            },
-            [&](const Random::Key& key) {
-                out.randomSharingIsKey = true;
-                out.randomKeyHasName = key.name.has_value();
-                out.randomKeyIsElementScoped = key.elementScoped.has_value();
-                if (key.propertyScoped) {
-                    out.randomKeyHasPropertyScope = true;
-                    out.valueID = static_cast<uint16_t>(WTF::switchOn(*key.propertyScoped,
-                        [](const Random::Key::PropertyScoped&) { return CSSValuePropertyScoped; },
-                        [](const Random::Key::PropertyIndexScoped&) { return CSSValuePropertyIndexScoped; }
-                    ));
-                }
-            },
-            [&](const Random::SharingFixed&) {
-                out.randomSharingIsFixed = true;
+    WTF::switchOn(sharing,
+        [&](const Random::SharingAuto&) {
+            // Serializes as omitted; both flags stay false and nothing is written.
+        },
+        [&](const Random::Key& key) {
+            out.randomSharingIsKey = true;
+            out.randomKeyHasName = key.name.has_value();
+            out.randomKeyIsElementScoped = key.elementScoped.has_value();
+            if (key.propertyScoped) {
+                out.randomKeyHasPropertyScope = true;
+                out.valueID = static_cast<uint16_t>(WTF::switchOn(*key.propertyScoped,
+                    [](const Random::Key::PropertyScoped&) { return CSSValuePropertyScoped; },
+                    [](const Random::Key::PropertyIndexScoped&) { return CSSValuePropertyIndexScoped; }
+                ));
             }
-        );
-        return out;
-    }
-
-    if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
-        out.hasElementName = (*anchor)->elementName.has_value();
-        out.hasFallback = (*anchor)->fallback.has_value();
-        if (auto* side = get_if<CSSValueID>(&(*anchor)->side.value)) {
-            out.anchorSideIsKeyword = true;
-            out.valueID = static_cast<uint16_t>(*side);
+        },
+        [&](const Random::SharingFixed&) {
+            out.randomSharingIsFixed = true;
         }
-        return out;
-    }
-
-    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
-        out.hasElementName = (*anchorSize)->elementName.has_value();
-        out.hasFallback = (*anchorSize)->fallback.has_value();
-        if ((*anchorSize)->dimension) {
-            out.hasDimension = true;
-            out.valueID = static_cast<uint16_t>(anchorSizeDimensionValueID(*(*anchorSize)->dimension));
-        }
-        return out;
-    }
-
-    // Every other kind: this is not called for them, and an all-inert record is what would come
-    // back if it ever were.
+    );
     return out;
 }
 
@@ -1245,78 +942,63 @@ void CSSCalcSwiftSink::appendValueIDName(uint16_t valueID) noexcept
     m_builder->append(nameLiteralForSerialization(static_cast<CSSValueID>(valueID)));
 }
 
-void CSSCalcSwiftSink::appendOperationArgument(const Child& node, uint8_t part, uint32_t index) noexcept
+
+CSSCalcSwiftOperationInfo CSSCalcSwiftSink::randomSharingInfo(uint32_t payload) const noexcept
 {
-    // Selected by name, like `appendLiteral`, so the numbering `CSSCalcSwiftOperationPart` declares
-    // in Swift is never transcribed here.
-    //
+    return CSSCalc::randomSharingInfo(storedPayload<Random::Sharing>(m_payloads, payload));
+}
+
+void CSSCalcSwiftSink::appendPayloadArgument(uint8_t part, uint32_t payload, double weight, bool present) noexcept
+{
     // Every branch makes the same `CSS::serializationForCSS` call the C++ serializer makes for that
     // argument, over the same typed CSS value, so the two cannot disagree about how a dashed-ident
-    // escapes or how a `<number [0,1]>` formats. That is why these are upcalls rather than doubles
-    // and strings crossing the boundary.
+    // escapes or how a `<number [0,1]>` formats.
     switch (part) {
     case CSSCalcSwiftOperationPartDashedIdent: {
-        // `random()`'s `<random-cache-key>` name, or `anchor()`/`anchor-size()`'s
-        // `<anchor-element>`. Which one is unambiguous from the node's own alternative, and this is
-        // only asked when `swiftOperationInfo` said there is one.
+        RELEASE_ASSERT(m_payloads && payload < m_payloads->size());
         const CSS::CustomIdent* ident = nullptr;
-        if (auto* random = get_if<IndirectNode<Random>>(&node)) {
-            if (auto* key = get_if<Random::Key>(&(*random)->sharing))
-                ident = key->name ? &*key->name : nullptr;
-        } else if (auto* anchor = get_if<IndirectNode<Anchor>>(&node))
-            ident = (*anchor)->elementName ? &*(*anchor)->elementName : nullptr;
-        else if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node))
-            ident = (*anchorSize)->elementName ? &*(*anchorSize)->elementName : nullptr;
+        if (auto* sharing = get_if<Random::Sharing>(&(*m_payloads)[payload])) {
+            auto* key = get_if<Random::Key>(sharing);
+            ident = key && key->name ? &*key->name : nullptr;
+        } else
+            ident = &storedPayload<CSS::CustomIdent>(m_payloads, payload);
         RELEASE_ASSERT(ident);
         CSS::serializationForCSS(*m_builder, *m_context, *ident);
         return;
     }
     case CSSCalcSwiftOperationPartRandomFixedValue: {
-        auto* random = get_if<IndirectNode<Random>>(&node);
-        RELEASE_ASSERT(random);
-        auto* fixed = get_if<Random::SharingFixed>(&(*random)->sharing);
+        auto* fixed = get_if<Random::SharingFixed>(&storedPayload<Random::Sharing>(m_payloads, payload));
         RELEASE_ASSERT(fixed);
         CSS::serializationForCSS(*m_builder, *m_context, fixed->value);
         return;
     }
-    case CSSCalcSwiftOperationPartCalcMixWeight: {
-        // The one presence test that stays in C++: the weight is per item, so exposing it here
-        // would need a per-index accessor beside the child index, for a value that has nowhere
-        // else to be spelled anyway. The leading space belongs to the weight, exactly as in
-        // `serializeMathFunctionArguments(IndirectNode<CalcMix>)`.
-        auto* calcMix = get_if<IndirectNode<CalcMix>>(&node);
-        RELEASE_ASSERT(calcMix);
-        RELEASE_ASSERT(index < (*calcMix)->children.size());
-        const auto& item = (*calcMix)->children[index];
-        if (!item.weight)
+    case CSSCalcSwiftOperationPartCalcMixWeight:
+        if (!present)
             return;
         m_builder->append(' ');
-        CSS::serializationForCSS(*m_builder, *m_context, *item.weight);
+        if (payload != cssCalcSwiftFlatNoNode)
+            CSS::serializationForCSS(*m_builder, *m_context, storedPayload<CalcMix::Item::Weight>(m_payloads, payload));
+        else
+            CSS::serializationForCSS(*m_builder, *m_context, CalcMix::Item::Weight { weight });
         return;
-    }
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-
 #if !CSS_CALC_CPP_SERIALIZER_COMPILED_IN
-// Whether the tree was serialized. Returns false to mean "run the C++ serializer", and in that case
-// guarantees nothing was appended: the decision is made before anything is emitted, because a
-// StringBuilder cannot be truncated back.
+// Whether the tree was serialized. On false nothing was appended: the decision is made before
+// anything is emitted, because a StringBuilder cannot be truncated back.
 //
 // `omitGroupingParenthesis` is the whole of the difference between the two entry points below, exactly
 // as it is the whole of the difference between the two `SerializationState`s the C++ builds for them.
 static bool trySerializeWithSwift(StringBuilder& builder, const Tree& tree, const SerializationOptions& options, bool omitGroupingParenthesis)
 {
-    CSSCalcSwiftSink sink { builder, options.serializationContext };
+    CSSCalcSwiftSink sink { builder, options.serializationContext, tree.stored.payloads() };
     // The stage and the range are the whole of `SerializationState` this cannot read for itself:
-    // `Stage` is on the `Tree` and the range is on the options, while what is passed in is the root
-    // `Child`. Two doubles rather than a `CSS::Range`, because `clampValue` reads `min` and `max`,
+    // `Stage` is on the `Tree` and the range is on the options, while what is passed in is the stored
+    // root. Two doubles rather than a `CSS::Range`, because `clampValue` reads `min` and `max`,
     // and the two `RangeParseTimeBehavior` members belong to the parser.
-    auto result = cssCalcSerializeSwift(tree.root, sink, tree.stage == Stage::Computed, options.range.min, options.range.max, omitGroupingParenthesis);
-    if (result.outcome != static_cast<uint8_t>(CSSCalcSwiftOutcomeSerialized))
-        return false;
-    return true;
+    return cssCalcSerializeSwift(tree.stored.root(), sink, tree.stage == Stage::Computed, options.range.min, options.range.max, omitGroupingParenthesis);
 }
 #endif // !CSS_CALC_CPP_SERIALIZER_COMPILED_IN
 #endif // USE(SWIFT_CSS)
@@ -1341,8 +1023,8 @@ void serializationForCSS(StringBuilder& builder, const Tree& tree, const Seriali
     // that as the answer. Stopping here is preferable to returning a truncated `cssText` for every
     // math function on the page.
     //
-    // The paths that reach here have no known producer: a childless `Sum`/`Product`, an `anchor()`
-    // whose child count disagrees with its record, and the generic `Operation` fall-through.
+    // The paths that reach here have no known producer: a childless `Sum`/`Product`, or an
+    // alternative `CalcNode.info` has no kind for.
     RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the Swift calc() serializer declined a tree");
 #endif
 }
@@ -1389,8 +1071,7 @@ void serializationForCSSAsFunctionArgument(StringBuilder& builder, const Tree& t
     if (trySerializeWithSwift(builder, tree, options, true))
         return;
 
-    // Same reasoning as `serializationForCSS` above: no failure channel. Both entry points share one
-    // walk, so the trees handed back are the same ones.
+    // Same reasoning as `serializationForCSS` above: no failure channel.
     RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the Swift calc() serializer declined a calc-size() argument");
 #endif
 }

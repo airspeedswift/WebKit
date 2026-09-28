@@ -159,37 +159,37 @@ static CSSCalcSwiftParseOptions swiftParseOptionsFor(CSS::PropertyParserState& p
     };
 }
 
-// Runs the Swift parser and turns its outcome into the answer both entry points need. The outer
-// optional is empty when the parser hands the input back; the inner one is `nullopt` when the input
-// is invalid. The two must stay distinct: turning a handed-back input into `nullopt` would drop a
-// valid declaration.
+// Runs the Swift parser and returns the tree, or `nullopt` when the input is invalid. The stored
+// root is built in place inside the returned `optional` (`CSSCalcSwiftParseRequest`). The printed
+// class for a Swift class moves by copying, so every C++ move is a retain/release pair; returning
+// the one named object on every path keeps NRVO.
+//
+// A decline may not become a `nullopt`, which would drop a valid declaration. The Swift parser
+// declines only folds that need conversion data (tree counting, `anchor()`, `anchor-size()`,
+// `random()`), and no caller combines conversion data with a policy that admits them: the only
+// caller that sets `SimplificationOptions::conversionData`, `SizesAttributeParser`, uses the default
+// property options and no `currentProperty`.
 //
 // `outConsumedTokens` is written only when a tree comes back.
-static std::optional<std::optional<Tree>> attemptSwiftParse(const CSSParserTokenRange& tokens, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, CSSValueID rootFunction, bool bareCalcSum, uint32_t& outConsumedTokens)
+static std::optional<Tree> attemptSwiftParse(const CSSParserTokenRange& tokens, CSS::PropertyParserState& propertyParserState, const ParserOptions& parserOptions, const SimplificationOptions& simplificationOptions, CSSValueID rootFunction, bool bareCalcSum, uint32_t& outConsumedTokens)
 {
-    Child swiftRoot = Number { .value = 0 };
-    auto swiftResult = cssCalcSwiftParseIntoChild(tokens, swiftParseOptionsFor(propertyParserState, parserOptions, rootFunction, bareCalcSum), parserOptions.allowedSymbols, simplificationOptions, swiftRoot, true, &propertyParserState);
+    CSSCalcSwiftParseResult result;
+    std::optional<Tree> tree;
+    // One argument, so `.stored` is copy-initialised from the request, which builds the root in that
+    // slot. Several arguments would move a finished `CSSCalcSwiftStoredRoot` in.
+    tree.emplace(CSSCalcSwiftParseRequest { tokens, swiftParseOptionsFor(propertyParserState, parserOptions, rootFunction, bareCalcSum), parserOptions.allowedSymbols, simplificationOptions, propertyParserState, result });
+    tree->type = result.type;
+    tree->stage = CSSCalc::Stage::Specified;
+    tree->requiresConversionData = result.requiresConversionData;
 
-    switch (static_cast<CSSCalcSwiftParseOutcome>(swiftResult.outcome)) {
-    case CSSCalcSwiftParseOutcome::Failed:
-        return std::optional<Tree> { std::nullopt };
-
-    case CSSCalcSwiftParseOutcome::Parsed:
-        // The type check `parseAndSimplify`'s C++ path performs, on the type the Swift parser computed.
-        if (!swiftResult.type.matches(parserOptions.category))
-            return std::optional<Tree> { std::nullopt };
-        outConsumedTokens = swiftResult.consumedTokens;
-        return std::optional<Tree> { Tree {
-            .root = WTF::move(swiftRoot),
-            .type = swiftResult.type,
-            .stage = CSSCalc::Stage::Specified,
-            .requiresConversionData = swiftResult.requiresConversionData,
-        } };
-
-    case CSSCalcSwiftParseOutcome::Declined:
-        break;
-    }
-    return std::nullopt;
+    auto outcome = static_cast<CSSCalcSwiftParseOutcome>(result.outcome);
+    RELEASE_ASSERT_WITH_MESSAGE(outcome != CSSCalcSwiftParseOutcome::Declined, "the Swift calc() parser declined");
+    // The type check `parseAndSimplify`'s C++ path performs, on the type the Swift parser computed.
+    if (outcome != CSSCalcSwiftParseOutcome::Parsed || !result.type.matches(parserOptions.category))
+        tree.reset();
+    else
+        outConsumedTokens = result.consumedTokens;
+    return tree;
 }
 #endif // !CSS_CALC_CPP_PARSER_COMPILED_IN
 
@@ -209,17 +209,9 @@ std::optional<Tree> parseAndSimplify(CSSParserTokenRange& range, CSS::PropertyPa
     {
         // Unread here: this entry requires the range exhausted, so the count is the whole range.
         uint32_t consumedTokens = 0;
-        if (auto answer = attemptSwiftParse(tokens, propertyParserState, parserOptions, simplificationOptions, function, false, consumedTokens))
-            return WTF::move(*answer);
+        return attemptSwiftParse(tokens, propertyParserState, parserOptions, simplificationOptions, function, false, consumedTokens);
     }
 
-    // A handed-back input may not become a `nullopt`, which would drop a valid declaration.
-    //
-    // The Swift parser hands back only folds that need conversion data (tree counting, `anchor()`,
-    // `anchor-size()`, `random()`), and no caller combines conversion data with a policy that admits
-    // them: the only caller that sets `SimplificationOptions::conversionData`, `SizesAttributeParser`,
-    // uses the default property options and no `currentProperty`.
-    RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the Swift calc() parser declined a function");
 #else
     ParserState state {
         .propertyParserState = propertyParserState,
@@ -267,17 +259,14 @@ std::optional<Tree> parseAndSimplifyCalcSum(CSSParserTokenRange& tokens, CSS::Pr
         uint32_t consumedTokens = 0;
         // `bareCalcSum` never consults the root function; `CSSValueInvalid` makes a use of it fail
         // rather than parse as `calc()`.
-        if (auto answer = attemptSwiftParse(tokens, propertyParserState, parserOptions, simplificationOptions, CSSValueInvalid, true, consumedTokens)) {
-            // The Swift entry takes the range by const reference, so the advance is replayed here.
-            // Clamped so that a count past the end cannot be a span violation.
-            if (*answer)
-                tokens = CSSParserTokenRange { tokens.span().subspan(std::min<size_t>(consumedTokens, tokens.size())) };
-            return WTF::move(*answer);
-        }
+        auto tree = attemptSwiftParse(tokens, propertyParserState, parserOptions, simplificationOptions, CSSValueInvalid, true, consumedTokens);
+        // The Swift entry takes the range by const reference, so the advance is replayed here.
+        // Clamped so that a count past the end cannot be a span violation.
+        if (tree)
+            tokens = CSSParserTokenRange { tokens.span().subspan(std::min<size_t>(consumedTokens, tokens.size())) };
+        return tree;
     }
 
-    // See `parseAndSimplify`. This entry's caller leaves `SimplificationOptions::conversionData` unset.
-    RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("the Swift calc() parser declined a bare <calc-sum>");
 #else
     ParserState state {
         .propertyParserState = propertyParserState,
@@ -1789,7 +1778,7 @@ static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
 // `functionId()` return for a token of the wrong type.
 static_assert(static_cast<uint16_t>(CSSValueInvalid) == 0);
 
-static_assert(static_cast<uint8_t>(PercentHint::Length) != 0, "CSSCalcSwiftLeaf::percentHint and CSSCalcSwiftNodeInfo::percentHint use 0 as \"no hint\"");
+static_assert(static_cast<uint8_t>(PercentHint::Length) != 0, "CSSCalcSwiftLeaf::percentHint uses 0 as \"no hint\"");
 
 // Which alternative `makeNumeric` builds for `unit`, answered by calling it so the unit
 // classification is not duplicated. Numeric alternatives are inline, so this does not allocate.
@@ -1797,18 +1786,17 @@ uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
 {
     auto child = makeNumeric(0, static_cast<CSSUnitType>(unit));
 
-    // Not `swiftNodeInfo`: its 41-way `WTF::switchOn` is far more work than these four tests.
     if (WTF::holdsAlternative<Number>(child))
-        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Number);
+        return static_cast<uint8_t>(CSSCalcSwiftAlternative::Number);
     if (WTF::holdsAlternative<Percentage>(child))
-        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Percentage);
+        return static_cast<uint8_t>(CSSCalcSwiftAlternative::Percentage);
     if (WTF::holdsAlternative<CanonicalDimension>(child))
-        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::CanonicalDimension);
+        return static_cast<uint8_t>(CSSCalcSwiftAlternative::CanonicalDimension);
     if (WTF::holdsAlternative<NonCanonicalDimension>(child))
-        return static_cast<uint8_t>(CSSCalcSwiftNodeKind::NonCanonicalDimension);
+        return static_cast<uint8_t>(CSSCalcSwiftAlternative::NonCanonicalDimension);
 
     // Unreachable for any unit the Swift parser asks about; `pushLeaf` treats it as a contract violation.
-    return static_cast<uint8_t>(CSSCalcSwiftNodeKind::Operation);
+    return cssCalcSwiftNoAlternative;
 }
 
 CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
@@ -1826,20 +1814,14 @@ CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
     };
 }
 
-// Whether canonicalizing `unit` needs conversion data.
-static uint8_t cssCalcSwiftUnitFlagsFor(CSSUnitType unit) noexcept
+bool cssCalcSwiftUnitNeedsConversionData(uint8_t unit) noexcept
 {
-    return conversionToCanonicalUnitRequiresConversionData(unit) ? cssCalcSwiftTokenUnitNeedsConversionData : 0;
+    return conversionToCanonicalUnitRequiresConversionData(static_cast<CSSUnitType>(unit));
 }
 
-static uint8_t cssCalcSwiftFunctionFlagsFor(CSSValueID functionId) noexcept
+bool cssCalcSwiftIsCalcFunction(uint16_t functionId) noexcept
 {
-    uint8_t flags = 0;
-    if (isCalcFunction(functionId))
-        flags |= cssCalcSwiftTokenIsCalcFunction;
-    if (functionId == CSSValueCalc || functionId == CSSValueWebkitCalc)
-        flags |= cssCalcSwiftTokenIsPlainCalcFunction;
-    return flags;
+    return isCalcFunction(static_cast<CSSValueID>(functionId));
 }
 
 // The Swift parser's `calcMaxExpressionDepth` repeats this value.
@@ -1864,26 +1846,16 @@ CSSCalcSwiftSymbolResult CSSCalcSwiftParseCursor::lookupSymbol(uint16_t valueID)
     };
 }
 
-void CSSCalcSwiftParseCursor::fillTokens(CSSCalcSwiftToken *__counted_by(count) out __attribute__((noescape)), uint32_t count) const noexcept
+void CSSCalcSwiftParseCursor::fillTokenBits(CSSParserTokenBits *__counted_by(count) out __attribute__((noescape)), uint32_t count) const noexcept
 {
-    // Past the end `peek` is the EOF token. `numericValue()` and `delimiter()` assert on a token of
-    // another type, so each accessor is called only for the types it answers for.
-    for (auto& slot : unsafeMakeSpan(out, count)) {
-        auto& token = m_range.peek(&slot - out);
-        auto type = token.type();
-        bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
-        auto functionId = type == FunctionToken ? token.functionId() : CSSValueInvalid;
-        slot = {
-            .numericValue = isNumeric ? token.numericValue() : 0,
-            .id = static_cast<uint16_t>(type == IdentToken ? token.id() : CSSValueInvalid),
-            .functionId = static_cast<uint16_t>(functionId),
-            .delimiter = type == DelimiterToken ? token.delimiter() : u'\0',
-            .unit = token.unitType(),
-            .type = type,
-            .blockType = static_cast<uint8_t>(token.getBlockType()),
-            .flags = type == DimensionToken ? cssCalcSwiftUnitFlagsFor(token.unitType()) : type == FunctionToken ? cssCalcSwiftFunctionFlagsFor(functionId) : uint8_t { 0 },
-        };
-    }
+    // `subspan` checks `count` against the range under libc++ hardening.
+    std::ranges::transform(m_range.span().subspan(0, count), unsafeMakeSpan(out, count).begin(), &CSSParserToken::bits);
+}
+
+uint16_t CSSCalcSwiftParseCursor::keywordId(uint32_t index) const noexcept
+{
+    auto& token = m_range.peek(index);
+    return static_cast<uint16_t>(token.type() == IdentToken ? token.id() : token.functionId());
 }
 
 CSSCalcSwiftConsumedPayload CSSCalcSwiftParseCursor::consumeRandomKey(uint32_t index) const noexcept

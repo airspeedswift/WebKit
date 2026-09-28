@@ -427,11 +427,7 @@ RefPtr<CSSValue> CSSUnitValue::toCSSValueWithProperty(CSSPropertyID propertyID) 
         sumChildren.append(WTF::move(*node));
         auto sum = CSSCalc::makeChild(CSSCalc::Sum { .children = WTF::move(sumChildren) }, type);
 
-        return CSSPrimitiveValue::create(CSSCalc::Value::create(category, range, CSSCalc::Tree {
-            .root = WTF::move(sum),
-            .type = type,
-            .stage = CSSCalc::Stage::Specified,
-        }));
+        return CSSPrimitiveValue::create(CSSCalc::Value::create(category, range, CSSCalc::makeTree(WTF::move(sum), type, CSSCalc::Stage::Specified)));
     }
     return toCSSValue();
 }

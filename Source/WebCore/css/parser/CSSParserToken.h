@@ -95,6 +95,8 @@ public:
     HashTokenType getHashTokenType() const { ASSERT(m_bits.type == HashToken); return m_bits.hashTokenType; }
     BlockType getBlockType() const { return static_cast<BlockType>(m_bits.blockType); }
     CSSUnitType unitType() const { return static_cast<CSSUnitType>(m_bits.unit); }
+    // For the Swift calc grammar, which decodes the fields itself.
+    const CSSParserTokenBits& bits() const LIFETIME_BOUND { return m_bits; }
     StringView NODELETE unitString() const;
     CSSValueID id() const;
     CSSValueID functionId() const;
