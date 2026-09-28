@@ -44,7 +44,6 @@ class CSSCalcSymbolTable;
 namespace CSSCalc {
 
 struct Anchor;
-struct Child;
 struct Tree;
 
 struct EvaluationOptions {
@@ -69,8 +68,6 @@ std::optional<double> evaluateWithoutFallback(const Anchor&, const EvaluationOpt
 // refused the tree, and a caller that needs the answer calls `evaluateDouble`; without it, a refused
 // tree is a `RELEASE_ASSERT`.
 std::optional<double> evaluateDoubleWithSwift(const Tree&, const EvaluationOptions&);
-// The same, for a subtree on its own.
-std::optional<double> evaluateDoubleWithSwift(const Child&, const EvaluationOptions&);
 
 // Resolves a random() <random-key> to its base value in [0, 1] against the builder state.
 // Shared by random()'s evaluation and random-item()'s substitution-time resolution.
