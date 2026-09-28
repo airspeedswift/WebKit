@@ -26,6 +26,7 @@
 #include "CSSCalcTree+ComputedStyleDependencies.h"
 
 #include "CSSCalcTree+Traversal.h"
+#include "CSSCalcTree.h"
 #include "CSSPrimitiveNumericTypes+ComputedStyleDependencies.h"
 #include "CSSPropertyNames.h"
 #include "CSSUnits.h"
@@ -84,7 +85,11 @@ void collectComputedStyleDependencies(const Child& root, ComputedStyleDependenci
 
 void collectComputedStyleDependencies(const Tree& tree, ComputedStyleDependencies& dependencies)
 {
+#if USE(SWIFT_CSS)
+    collectComputedStyleDependencies(materializedRoot(tree), dependencies);
+#else
     collectComputedStyleDependencies(tree.root, dependencies);
+#endif
 }
 
 } // namespace CSSCalc

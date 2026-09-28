@@ -167,12 +167,20 @@ template<typename Op> static ExceptionOr<Ref<CSSNumericValue>> reifyMathExpressi
 // https://drafts.css-houdini.org/css-typed-om/#reify-a-math-expression
 ExceptionOr<Ref<CSSNumericValue>> CSSNumericValue::reifyMathExpression(const CSS::UnevaluatedCalcBase& calc)
 {
+#if USE(SWIFT_CSS)
+    return CSSNumericValue::reifyMathExpression(CSSCalc::materializedRoot(calc.calcValue().tree()));
+#else
     return CSSNumericValue::reifyMathExpression(calc.calcValue().tree().root);
+#endif
 }
 
 ExceptionOr<Ref<CSSNumericValue>> CSSNumericValue::reifyMathExpression(const CSSCalc::Tree& tree)
 {
+#if USE(SWIFT_CSS)
+    return CSSNumericValue::reifyMathExpression(CSSCalc::materializedRoot(tree));
+#else
     return CSSNumericValue::reifyMathExpression(tree.root);
+#endif
 }
 
 ExceptionOr<Ref<CSSNumericValue>> CSSNumericValue::reifyMathExpression(const CSSCalc::Child& root)
