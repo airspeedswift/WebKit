@@ -396,17 +396,14 @@ std::optional<double> evaluateDouble(const Tree& tree, const EvaluationOptions& 
 #endif
 }
 
+#if CSS_CALC_CPP_EVALUATOR_COMPILED_IN
 std::optional<double> evaluateWithoutFallback(const Anchor& anchor, const EvaluationOptions& options)
 {
     CheckedPtr builderState = options.conversionData->styleBuilderState();
 
     auto side = WTF::switchOn(anchor.side,
         [&](const Child& percentage) -> Style::AnchorPositionEvaluator::Side {
-#if CSS_CALC_CPP_EVALUATOR_COMPILED_IN
             return evaluate(percentage, options).value_or(0) / 100;
-#else
-            return evaluateDoubleWithSwift(percentage, options).value_or(0) / 100;
-#endif
         },
         [&](CSSValueID sideID) -> Style::AnchorPositionEvaluator::Side {
             return sideID;
@@ -423,6 +420,7 @@ std::optional<double> evaluateWithoutFallback(const Anchor& anchor, const Evalua
 
     return Style::AnchorPositionEvaluator::evaluate(*builderState, anchorScopedName, side);
 }
+#endif // CSS_CALC_CPP_EVALUATOR_COMPILED_IN
 
 } // namespace CSSCalc
 } // namespace WebCore

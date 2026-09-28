@@ -108,9 +108,8 @@ struct SimplificationOptions {
 // Without it, a tree the Swift simplifier hands back is a `RELEASE_ASSERT`.
 //
 // What stays compiled either way has a caller outside that walk: `canonicalize`, which
-// CSSCalcTree+Evaluation.cpp also calls, and what the Swift simplifier's C++ builder calls:
-// `rebuildChildren`, `anchorSlotKeepingPrefix`, `evaluateAnchorFunction`,
-// `evaluateAnchorSizeFunction` and `percentageResolveToDimension`.
+// CSSCalcTree+Evaluation.cpp also calls, and `percentageResolveToDimension`, which the Swift
+// simplifier's options carry.
 #if USE(SWIFT_CSS)
 #define CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN 0
 #else
@@ -121,9 +120,7 @@ struct SimplificationOptions {
 // when the C++ simplifier is. With it off, `evaluateDouble` is the Swift evaluator, and a tree that
 // evaluator refuses is a `RELEASE_ASSERT`.
 //
-// What stays compiled has a caller outside the walk: `resolveRandomBaseValue`, and
-// `evaluateWithoutFallback`, which `evaluateAnchorFunction` calls and which evaluates the
-// `<anchor-side>` with the Swift evaluator.
+// What stays compiled has a caller outside the walk: `resolveRandomBaseValue`.
 #define CSS_CALC_CPP_EVALUATOR_COMPILED_IN CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
 
 // MARK: Can Simplify
