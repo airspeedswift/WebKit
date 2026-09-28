@@ -58,7 +58,196 @@ typealias CalcAlternative = WebCore.CSSCalc.CSSCalcSwiftAlternative
 ///
 /// The backticks are required: unescaped, `WebCore.CSSCalc.Type` parses as the metatype of the
 /// `WebCore.CSSCalc` namespace enum.
-typealias CalcType = WebCore.CSSCalc.`Type`
+public typealias CxxCalcType = WebCore.CSSCalc.`Type`
+
+/// `CSSCalc::Type` as the tree stores it: the same seven `int8_t` exponents and percent hint, lane
+/// for lane, with the same bytewise `==`.
+///
+/// A Swift struct because the imported `CSSCalc::Type()` is a constructor call the optimizer cannot
+/// fold (`PercentHintValue()` is user-provided), so a node holding one could not be statically
+/// initialised. Converted only where a `Type` crosses to C++: `init(_:)` and `cxx`.
+struct CalcType: BitwiseCopyable, Equatable {
+    /// `Type::PercentHintValue`, held as the raw byte of the `PercentHint`, 0 for none.
+    ///
+    /// The byte is the one `CSSCalcSwiftLeaf::percentHint` carries, so no crossing decodes one.
+    struct PercentHintValue: BitwiseCopyable, Equatable {
+        var rawValue: UInt8
+
+        @inline(always)
+        init() {
+            self.rawValue = 0
+        }
+
+        @inline(always)
+        init(rawValue: UInt8) {
+            self.rawValue = rawValue
+        }
+
+        @inline(always)
+        init(_ hint: WebCore.CSSCalc.PercentHint) {
+            self.rawValue = hint.rawValue
+        }
+
+        /// `operator*` asserts the hint is not `None`, which the comparison excludes.
+        @inline(always)
+        init(_ hint: CxxCalcType.PercentHintValue) {
+            self.rawValue = hint == CxxCalcType.PercentHintValue() ? 0 : hint.pointee.rawValue
+        }
+
+        /// `PercentHint(rawValue:)` on an imported scoped enum never fails (see
+        /// `percentHintFromRawValue`), and every byte stored here came from a `PercentHint`.
+        @inline(always)
+        var cxx: CxxCalcType.PercentHintValue {
+            guard rawValue != 0, let hint = WebCore.CSSCalc.PercentHint(rawValue: rawValue) else {
+                return CxxCalcType.PercentHintValue()
+            }
+            return CxxCalcType.PercentHintValue(hint)
+        }
+    }
+
+    /// The eight lanes packed into one word, byte `k` holding the `k`th field of the C++ struct
+    /// (`length` low, the hint high).
+    ///
+    /// One word so the optimizer keeps a type in one register; eight stored `Int8`s are scalarized
+    /// into eight live values, which spill across a loop. The C++ struct is passed as one `i64`, so
+    /// a crossing is a register move.
+    private var bits: UInt64 = 0
+
+    @inline(always)
+    private func lane(_ k: UInt64) -> Int8 {
+        Int8(truncatingIfNeeded: bits &>> (k &* 8))
+    }
+
+    @inline(always)
+    private mutating func setLane(_ k: UInt64, _ value: Int8) {
+        let shift = k &* 8
+        bits = (bits & ~(0xff &<< shift)) | (UInt64(UInt8(bitPattern: value)) &<< shift)
+    }
+
+    var length: Int8 {
+        @inline(always)
+        get { lane(0) }
+        @inline(always)
+        set { setLane(0, newValue) }
+    }
+    var angle: Int8 {
+        @inline(always)
+        get { lane(1) }
+        @inline(always)
+        set { setLane(1, newValue) }
+    }
+    var time: Int8 {
+        @inline(always)
+        get { lane(2) }
+        @inline(always)
+        set { setLane(2, newValue) }
+    }
+    var frequency: Int8 {
+        @inline(always)
+        get { lane(3) }
+        @inline(always)
+        set { setLane(3, newValue) }
+    }
+    var resolution: Int8 {
+        @inline(always)
+        get { lane(4) }
+        @inline(always)
+        set { setLane(4, newValue) }
+    }
+    var flex: Int8 {
+        @inline(always)
+        get { lane(5) }
+        @inline(always)
+        set { setLane(5, newValue) }
+    }
+    var percent: Int8 {
+        @inline(always)
+        get { lane(6) }
+        @inline(always)
+        set { setLane(6, newValue) }
+    }
+    var percentHint: PercentHintValue {
+        @inline(always)
+        get { PercentHintValue(rawValue: UInt8(truncatingIfNeeded: bits &>> 56)) }
+        @inline(always)
+        set { setLane(7, Int8(bitPattern: newValue.rawValue)) }
+    }
+
+    @inline(always)
+    init() {
+    }
+
+    @inline(always)
+    init(_ type: CxxCalcType) {
+        length = type.length
+        angle = type.angle
+        time = type.time
+        frequency = type.frequency
+        resolution = type.resolution
+        flex = type.flex
+        percent = type.percent
+        percentHint = PercentHintValue(type.percentHint)
+    }
+
+    @inline(always)
+    var cxx: CxxCalcType {
+        var type = CxxCalcType()
+        type.length = length
+        type.angle = angle
+        type.time = time
+        type.frequency = frequency
+        type.resolution = resolution
+        type.flex = flex
+        type.percent = percent
+        type.percentHint = percentHint.cxx
+        return type
+    }
+
+    // `Type::makeX()` (`CSSCalcType.h:106`-`:113`), the four this file uses.
+    @inline(always)
+    static func makeNumber() -> CalcType {
+        CalcType()
+    }
+
+    @inline(always)
+    static func makeLength() -> CalcType {
+        var type = CalcType()
+        type.length = 1
+        return type
+    }
+
+    @inline(always)
+    static func makeAngle() -> CalcType {
+        var type = CalcType()
+        type.angle = 1
+        return type
+    }
+
+    @inline(always)
+    static func makePercent() -> CalcType {
+        var type = CalcType()
+        type.percent = 1
+        return type
+    }
+
+    // Called rather than transcribed: each is a table over an enum the C++ owns
+    // (`CSSCalcType.cpp:202`, `:308`, `:362`).
+
+    @inline(always)
+    static func determineType(_ unit: WebCore.CSSUnitType) -> CalcType {
+        CalcType(CxxCalcType.determineType(unit))
+    }
+
+    @inline(always)
+    static func determinePercentHint(_ category: WebCore.CSS.Category) -> PercentHintValue {
+        PercentHintValue(CxxCalcType.determinePercentHint(category))
+    }
+
+    @inline(always)
+    func calculationCategory() -> WebCore.CSS.Category? {
+        cxx.calculationCategory().value
+    }
+}
 
 /// The value `CSSCalcSwiftLeaf.alternative` wants for one of the four numeric leaves.
 @inline(always)
@@ -119,33 +308,7 @@ private enum NumericKind {
     case nonCanonicalDimension
 }
 
-/// `Type::PercentHintValue` as the `uint8_t` the boundary carries. A decoder rather than a field
-/// read, since `PercentHintValue`'s storage is private and no accessor returns it: the value is
-/// identified by comparing against each enumerator's own construction.
-@inline(always)
-private func percentHintRawValue(_ hint: CalcType.PercentHintValue) -> UInt8 {
-    if hint == CalcType.PercentHintValue(.Length) {
-        return WebCore.CSSCalc.PercentHint.Length.rawValue
-    }
-    if hint == CalcType.PercentHintValue(.Angle) {
-        return WebCore.CSSCalc.PercentHint.Angle.rawValue
-    }
-    if hint == CalcType.PercentHintValue(.Time) {
-        return WebCore.CSSCalc.PercentHint.Time.rawValue
-    }
-    if hint == CalcType.PercentHintValue(.Frequency) {
-        return WebCore.CSSCalc.PercentHint.Frequency.rawValue
-    }
-    if hint == CalcType.PercentHintValue(.Resolution) {
-        return WebCore.CSSCalc.PercentHint.Resolution.rawValue
-    }
-    if hint == CalcType.PercentHintValue(.Flex) {
-        return WebCore.CSSCalc.PercentHint.Flex.rawValue
-    }
-    return 0
-}
-
-/// The inverse: the `Type::PercentHint` whose raw value this byte is, or `nil` for 0 or an
+/// The `Type::PercentHint` whose raw value this byte is, or `nil` for 0 or an
 /// unrecognized value.
 ///
 /// Explicit comparisons, because `init?(rawValue:)` on an imported C++ scoped enum accepts any raw
@@ -179,9 +342,7 @@ extension CalcType {
     /// The C++'s `if (type.percentHint)`.
     @inline(always)
     fileprivate var hasPercentHint: Bool {
-        // `!(… == …)`, not `!=`: C++20 synthesises the negation of a defaulted `operator==` and
-        // the ClangImporter does not.
-        !(percentHint == CalcType.PercentHintValue())
+        percentHint.rawValue != 0
     }
 
     /// css-typed-om step 2, shared by `Type::add` and `Type::multiply`.
@@ -593,7 +754,7 @@ private struct NumericLeaf {
             kind: .percentage,
             value: value,
             unitType: UInt16(WebCore.CSSUnitType.Percentage.rawValue),
-            percentHint: percentHintRawValue(hint)
+            percentHint: hint.rawValue
         )
     }
 }
@@ -1802,25 +1963,24 @@ public final class CSSCalcSwiftRoot: Sendable {
 
     /// The root an entry answers when it has none, beside the failure it reports. Not an `Optional`,
     /// because C++ holds a `swift::Optional`'s payload in heap storage and copies it through the
-    /// value-witness table. One shared object, so that a failed parse allocates nothing. The C++ reads
-    /// a root only from a `Parsed` outcome, a simplified result or a finished builder, so this one is
-    /// never read.
-    static var none: CSSCalcSwiftRoot { calcNoRoot }
-}
-
-private let calcNoRoot = CSSCalcSwiftRoot(
-    CalcNode(
-        value: 0,
-        type: CalcType(),
-        origin: calcNoPayload,
-        valueID: 0,
-        unitType: 0,
-        alternative: .Number,
-        percentHint: 0,
-        flags: 0,
-        children: UniqueArray()
+    /// value-witness table. Statically initialised, so that a failed parse allocates and retains
+    /// nothing; that needs every field of the node to fold, which is why `CalcType` is a Swift struct.
+    /// The C++ reads a root only from a `Parsed` outcome, a simplified result or a finished builder,
+    /// so this one is never read.
+    static let none = CSSCalcSwiftRoot(
+        CalcNode(
+            value: 0,
+            type: CalcType(),
+            origin: calcNoPayload,
+            valueID: 0,
+            unitType: 0,
+            alternative: .Number,
+            percentHint: 0,
+            flags: 0,
+            children: UniqueArray()
+        )
     )
-)
+}
 
 // MARK: The stored tree, read as the `CSSCalc::Child` it stands for
 
@@ -2614,7 +2774,7 @@ extension CalcFold {
             f &+= 1
         }
 
-        if success, let resolvedCategory = productType.calculationCategory().value,
+        if success, let resolvedCategory = productType.calculationCategory(),
             let folded = options.numericLeafForCategory(resolvedCategory, productValue)
         {
             setLeaf(&node, folded)
@@ -3161,7 +3321,7 @@ extension CalcFold {
     fileprivate mutating func calcMixFoldToZero(_ node: inout CalcNode) {
         guard node.children.count > 0,
             let childType = node.children[0].emittedType(options),
-            let category = childType.calculationCategory().value,
+            let category = childType.calculationCategory(),
             let zero = options.numericLeafForCategory(category, 0)
         else {
             declined = true
@@ -3391,7 +3551,7 @@ private func calcEmitParsed(
     return builder.buildOperation(
         node.alternative,
         UInt32(truncatingIfNeeded: k),
-        node.type,
+        node.type.cxx,
         isRoot,
         UInt8(truncatingIfNeeded: node.flags & CalcNodeFlags.clampNoneMask)
     )
@@ -3420,7 +3580,7 @@ private func calcEmitParsedCalcMix(
         }
         v &+= 2
     }
-    return builder.buildOperation(.CalcMix, UInt32(truncatingIfNeeded: count / 2), node.type, isRoot, 0)
+    return builder.buildOperation(.CalcMix, UInt32(truncatingIfNeeded: count / 2), node.type.cxx, isRoot, 0)
 }
 
 /// A parsed `random()`. `origin` indexes its `Random::Sharing` in the payload table.
@@ -3435,7 +3595,7 @@ private func calcEmitParsedRandom(
         guard calcEmitParsed(node.children[k], false, &builder) else { return false }
         k &+= 1
     }
-    return builder.buildRandom(UInt32(truncatingIfNeeded: k), node.type, isRoot, node.origin)
+    return builder.buildRandom(UInt32(truncatingIfNeeded: k), node.type.cxx, isRoot, node.origin)
 }
 
 /// A parsed `anchor()` or `anchor-size()`.
@@ -3460,7 +3620,7 @@ private func calcEmitParsedAnchor(
             CalcCoverage.bit(node.children[k].alternative) & CalcParsedEmitCoverage.leafMask != 0
         {
             guard let leafType = calcParsedLeafType(node.children[k]),
-                builder.buildOperation(.Sum, 1, leafType, false, 0)
+                builder.buildOperation(.Sum, 1, leafType.cxx, false, 0)
             else { return false }
         }
         k &+= 1
@@ -3468,7 +3628,7 @@ private func calcEmitParsedAnchor(
     return builder.buildAnchor(
         node.alternative,
         UInt32(truncatingIfNeeded: k),
-        node.type,
+        node.type.cxx,
         isRoot,
         node.valueID,
         node.origin
@@ -3592,12 +3752,12 @@ private func calcNodesEqual(
 
 /// `getType(tree.root)`.
 @_expose(Cxx)
-public func cssCalcSwiftRootType(_ stored: CSSCalcSwiftRoot) -> WebCore.CSSCalc.`Type` {
+public func cssCalcSwiftRootType(_ stored: CSSCalcSwiftRoot) -> CxxCalcType {
     let box = stored
     guard box.root.children.isEmpty, CalcCoverage.bit(box.root.alternative) & CalcParsedEmitCoverage.leafMask != 0 else {
-        return box.root.type
+        return box.root.type.cxx
     }
-    return calcParsedLeafType(box.root) ?? CalcType()
+    return (calcParsedLeafType(box.root) ?? CalcType()).cxx
 }
 
 /// The alternative of the root node of `stored`.
@@ -3676,11 +3836,12 @@ public final class CSSCalcSwiftStoreBuilder {
     public func pushOperation(
         _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
         _ childCount: UInt32,
-        _ type: WebCore.CSSCalc.`Type`,
+        _ cxxType: CxxCalcType,
         _ noneMask: UInt8,
         _ valueID: UInt16,
         _ origin: UInt32
     ) -> Bool {
+        let type = CalcType(cxxType)
         let count = Int(childCount)
         guard count <= stack.count else {
             return false
@@ -3783,7 +3944,7 @@ private struct CalcParseOptions {
 
     @inline(always)
     init(_ options: WebCore.CSSCalc.CSSCalcSwiftParseOptions) {
-        self.percentageLeafHint = percentHintRawValue(CalcType.determinePercentHint(options.category))
+        self.percentageLeafHint = CalcType.determinePercentHint(options.category).rawValue
         self.absoluteLengthUnitsOnly = options.absoluteLengthUnitsOnly
         self.hasAllowedSymbols = options.hasAllowedSymbols
         self.treeCountingAllowed = options.treeCountingAllowed
@@ -5834,7 +5995,7 @@ public func cssCalcParseSwift(
         return .none
     }
 
-    outcome.type = type
+    outcome.type = type.cxx
     outcome.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Parsed.rawValue)
     outcome.requiresConversionData = state.requiresConversionData
     outcome.consumedTokens = attempt.consumedTokens
