@@ -27,7 +27,6 @@
 #include "CSSCalcTree.h"
 
 #include "CSSCalcTree+Serialization.h"
-#include "CSSCalcTree+Traversal.h"
 #include "CSSSerializationContext.h"
 #include "CSSUnits.h"
 #include <wtf/TZoneMallocInlines.h>
@@ -70,6 +69,9 @@ WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(Sin);
 WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(Sqrt);
 WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(Sum);
 WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(Tan);
+#if USE(SWIFT_CSS)
+WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(CSSCalcSwiftFlatPayloadsBox);
+#endif
 
 // MARK: - Child
 
@@ -77,79 +79,6 @@ Child::Child(Child&&) = default;
 Child& Child::operator=(Child&&) = default;
 Child::~Child() = default;
 bool Child::operator==(const Child&) const = default;
-
-#if USE(SWIFT_CSS)
-// The two alternatives whose children this file answers for by hand.
-//
-// `Anchor` and `AnchorSize` declare `tuple_size` 0 (CSSCalcTree.h, FIXME webkit.org/b/280798: make
-// them tuple-like), so the generic tuple walk reports no children for them even though an `Anchor`
-// holds an `AnchorSide` that may be a `<percentage>` subtree and an optional fallback `Child`.
-// Fixing that at its source would change what simplification, evaluation and the
-// computed-style-dependency walk see, since all three traverse with `forAllChildNodes` too;
-// answering for these two here keeps the fix local.
-//
-// Fills `slots` in the order every other alternative reports children in -- for `Anchor` the
-// `<anchor-side>` subtree, when it is a `<percentage>` rather than a keyword, then the fallback,
-// which is the order `serializeMathFunctionArguments(IndirectNode<Anchor>)` writes them in.
-// `childCount` and `operator[]` share this, so the count and the indices cannot disagree. Returns
-// `nullopt` for every other alternative.
-static std::optional<size_t> anchorChildren(const Child& node, std::array<const Child*, 2>& slots)
-{
-    if (auto* anchor = get_if<IndirectNode<Anchor>>(&node)) {
-        size_t count = 0;
-        if (auto* side = get_if<Child>(&(*anchor)->side.value))
-            slots[count++] = side;
-        if ((*anchor)->fallback)
-            slots[count++] = &*(*anchor)->fallback;
-        return count;
-    }
-    if (auto* anchorSize = get_if<IndirectNode<AnchorSize>>(&node)) {
-        size_t count = 0;
-        if ((*anchorSize)->fallback)
-            slots[count++] = &*(*anchorSize)->fallback;
-        return count;
-    }
-    return std::nullopt;
-}
-
-size_t Child::childCount() const
-{
-    std::array<const Child*, 2> slots { };
-    if (auto count = anchorChildren(*this, slots))
-        return *count;
-
-    return WTF::switchOn(*this, [](const auto& alternative) -> size_t {
-        if constexpr (requires { *alternative; })
-            return childNodeCountOf(*alternative);
-        else
-            return 0;
-    });
-}
-
-const Child& Child::operator[](size_t index) const
-{
-    std::array<const Child*, 2> slots { };
-    if (auto count = anchorChildren(*this, slots)) {
-        // Not a clamp and not a null return: a disagreement between `childCount()` and this accessor
-        // means the tree changed under a borrow, and every alternative disposition converts that into
-        // a silently wrong computed style instead of a stop.
-        RELEASE_ASSERT(index < *count);
-        return *slots[index];
-    }
-
-    auto* found = WTF::switchOn(*this, [&](const auto& alternative) -> const Child* {
-        if constexpr (requires { *alternative; })
-            return childNodeAt(*alternative, static_cast<uint32_t>(index));
-        else
-            return nullptr;
-    });
-    // Not a clamp and not a null return: every caller indexes below the `childCount` it was just
-    // given, so reaching here means the two disagree -- the tree changed under a borrow -- and
-    // returning something else would turn that into a silently wrong answer instead of a stop.
-    RELEASE_ASSERT(found);
-    return *found;
-}
-#endif // USE(SWIFT_CSS)
 
 static_assert(sizeof(Child) <= 24, "Child should stay small");
 

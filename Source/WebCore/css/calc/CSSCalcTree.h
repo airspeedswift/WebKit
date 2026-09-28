@@ -43,6 +43,11 @@ namespace Style {
 enum class AnchorSizeDimension : uint8_t;
 }
 
+#if USE(SWIFT_CSS) && !defined(__swift__)
+// A Swift class. Swift sees its own definition, so the declaration is hidden from the importer.
+class CSSCalcSwiftRoot;
+#endif
+
 enum class CSSUnitType : uint8_t;
 
 namespace CSSCalc {
@@ -206,36 +211,18 @@ using Node = Variant<
 #undef CSS_CALC_NODE_ALTERNATIVE_REST
 #undef CSS_CALC_NODE_ALTERNATIVE_FIRST
 
-// Size and alignment of `Node`, so that the Swift-facing stand-in for `Child::value` below can be
-// declared without naming `Node` at all. Asserted against the real type in the branch that can see
-// it; if an alternative ever grows, the assert fires here rather than two views of a live `Child`
-// silently disagreeing on its layout.
+// Size and alignment of `Node`, so that the Swift-facing stand-in for `Child::value` can be declared
+// without naming `Node`. Asserted against the real type in the branch that can see it.
 inline constexpr size_t nodeStorageSize = 24;
 inline constexpr size_t nodeStorageAlignment = 8;
 
-// `Child::value` is hidden from Swift's Clang importer, and same-size opaque storage stands in for
-// it, for the same reason `Children`'s storage is hidden below: a pointer reachable through a data
-// member makes the enclosing type unsafe under -strict-memory-safety, and the unsafety propagates
-// to everything containing it. Here the pointer is one level down -- each `IndirectNode<Op>`
-// alternative holds a `UniqueRef<Op>` -- so without this, every use of a `Child` from Swift needs
-// an `unsafe` marker. Making the member private would not help; WebCore's Swift step passes
-// -enable-experimental-feature ImportNonPublicCxxMembers.
-//
-// This is not rdar://186742920, which is the importer odr-using a variant member's destructor over
-// incomplete alternatives: that applies to `std::variant` and not to `WTF::Variant`, which is a
-// vendored MPark.Variant and imports cleanly.
-//
-// Swift does not need the layout. It reaches the payload through the accessors and never touches
-// the storage, so the stand-in costs nothing at runtime and needs no `unsafe` marker.
-//
-// The template constructor has to be on this side of the `#if` whatever the importer would have
-// done with it, because its constraint names `Node`. Swift never constructs a `Child`, and an
-// unspecialized function template does not import as a usable generic API in any case
-// (rdar://151479317).
-//
-// `FORWARD_VARIANT_FUNCTIONS` likewise expands to member templates over `value`, so it is hidden
-// too. None of this changes anything a C++ caller sees: `__swift__` is defined only when the Clang
-// importer is parsing the header.
+// `Child::value` is hidden from Swift's Clang importer behind same-size opaque storage, for the reason
+// `Children`'s storage is hidden below: each `IndirectNode<Op>` alternative holds a `UniqueRef<Op>`,
+// and a pointer reachable through a data member makes the enclosing type unsafe under
+// -strict-memory-safety. Making the member private would not help, because WebCore's Swift step
+// passes -enable-experimental-feature ImportNonPublicCxxMembers. The template constructor and
+// `FORWARD_VARIANT_FUNCTIONS` name `Node` and `value`, so they are hidden too. `__swift__` is defined
+// only when the importer is parsing the header, so no C++ caller sees a difference.
 struct Child {
 #if !defined(__swift__)
     Node value;
@@ -247,44 +234,13 @@ struct Child {
     alignas(nodeStorageAlignment) unsigned char storage[nodeStorageSize];
 #endif
 
-    // Deleted so that Swift cannot synthesize one. For C++ this changes nothing: the user-declared
-    // move constructor below already suppresses the implicit default constructor, so `Child()` is
-    // ill-formed either way and only the diagnostic changes.
-    //
-    // The Clang importer otherwise hands Swift a zero-argument `init()` for an imported C++ class
-    // even when the class has no default constructor, and that initializer zero-fills the backing
-    // storage: here, a `Node` variant whose alternative 0 is `Number`. It is deprecated, but the
-    // diagnostic is not in any `-Werror` group WebKit's Swift step passes, and
-    // `-strict-memory-safety` does not reject it either.
-    //
-    // Swift reaches a `Child` only by borrowing one from a tree the C++ built. With this line, a
-    // `Child` that Swift invents is a build error rather than a zero-filled `Number` the serializer
-    // would walk.
+    // Deleted so that the importer does not give Swift a zero-argument `init()` that zero-fills the
+    // storage into a `Number`. For C++ the move constructor already suppresses the default one.
     Child() = delete;
     Child(Child&&);
     Child& operator=(Child&&);
     ~Child();
 
-    // MARK: The direct children of this node, by count and by index.
-    //
-    // The same set `forAllChildNodes` yields: a `ChildOrNone` holding the keyword and an absent
-    // `std::optional<Child>` are not children, and `Anchor`/`AnchorSize` are answered for by hand
-    // because they declare `tuple_size` 0 (see the FIXME at webkit.org/b/280798 below). One
-    // implementation serves both, so the count and the indices cannot disagree.
-    //
-    // Both are O(1) in the child count -- they walk the tuple SLOTS, of which the widest operation
-    // has four -- so reading a node's children one at a time is linear rather than quadratic.
-    //
-    // `operator[]` rather than a named accessor, because Swift's Clang importer maps `operator[]`
-    // to a `subscript` and `operator*` to `pointee`, and those two spellings alone yield a checked
-    // borrow of a non-copyable C++ type. The identical signature under any other name -- including
-    // with `[[clang::lifetimebound]]` or `swift_attr("@lifetime(borrow self)")` -- imports as
-    // `UnsafePointer<Child>` and is rejected under -strict-memory-safety. Only these two names,
-    // because `pointee` and `subscript` are synthesized as address accessors (rdar://108773658);
-    // extending borrow accessors to other imported C++ methods is rdar://140443562. Renaming this to
-    // a plain member would compile in C++ and remove the Swift code's only safe route into the tree.
-    size_t childCount() const;
-    const Child& operator[](size_t index) const LIFETIME_BOUND;
 
 #if !defined(__swift__)
     FORWARD_VARIANT_FUNCTIONS(Child, value)
@@ -311,17 +267,9 @@ struct ChildOrNone {
     bool operator==(const ChildOrNone&) const = default;
 };
 
-// `Children`'s storage is hidden from the importer for a different reason than `Child`'s, and one
-// that is easy to miss: a raw pointer data member makes the whole enclosing type unsafe under
-// -strict-memory-safety even when nothing in Swift touches it, and the unsafety propagates, so
-// every operation holding a `Children` -- Sum, Product, Min, Max, and the twelve others -- becomes
-// unsafe by containment. `WTF::Vector`'s buffer is a raw pointer, so `value` is exactly that case.
-// (WebCore's Swift step passes -enable-experimental-feature ImportNonPublicCxxMembers, so making
-// the member private would not help either.)
-//
-// The iterator typedefs and the begin/end family go with it: they name `Vector<Child>::iterator`,
-// which is `Child*`, and a pointer-returning accessor is an `unsafe` surface in its own right.
-// Swift reaches elements through `size()` and `operator[]` instead.
+// `Children`'s storage is hidden from the importer because `WTF::Vector`'s buffer is a raw pointer,
+// which makes every operation holding a `Children` unsafe by containment under -strict-memory-safety.
+// The iterator typedefs and the begin/end family name `Child*`, so they are hidden with it.
 inline constexpr size_t childrenStorageSize = 16;
 inline constexpr size_t childrenStorageAlignment = 8;
 
@@ -369,8 +317,44 @@ static_assert(alignof(Children) == childrenStorageAlignment, "Children's Swift-f
 
 enum class Stage : bool { Specified, Computed };
 
+#if USE(SWIFT_CSS)
+struct CSSCalcSwiftFlatPayloadsBox;
+
+// A tree's `CSSCalcSwiftRoot`, and the payloads its nodes name by index. The root is complete only
+// where the generated header is included, so it is held as bytes and every special member is defined
+// in CSSCalcTree+Simplification.cpp. They are declared, not defaulted, in every view of this header,
+// so that the importer sees a non-trivial type and passes a borrowed `Tree` by address.
+struct CSSCalcSwiftStoredRoot {
+#if !defined(__swift__)
+    WEBCORE_EXPORT CSSCalcSwiftStoredRoot(const CSSCalcSwiftRoot&, RefPtr<CSSCalcSwiftFlatPayloadsBox>&&);
+    // Not `explicit`: `Tree`'s aggregate initialisation copy-initialises `stored` from the request.
+    CSSCalcSwiftStoredRoot(const CSSCalcSwiftParseRequest&);
+    const CSSCalcSwiftRoot& root() const LIFETIME_BOUND;
+#endif
+    WEBCORE_EXPORT CSSCalcSwiftStoredRoot(const CSSCalcSwiftStoredRoot&);
+    WEBCORE_EXPORT CSSCalcSwiftStoredRoot(CSSCalcSwiftStoredRoot&&);
+    WEBCORE_EXPORT CSSCalcSwiftStoredRoot& operator=(const CSSCalcSwiftStoredRoot&);
+    WEBCORE_EXPORT CSSCalcSwiftStoredRoot& operator=(CSSCalcSwiftStoredRoot&&);
+    WEBCORE_EXPORT ~CSSCalcSwiftStoredRoot();
+    WEBCORE_EXPORT bool operator==(const CSSCalcSwiftStoredRoot&) const;
+
+    // Null when the tree has no payload.
+    const CSSCalcSwiftFlatPayloads* payloads() const;
+    RefPtr<CSSCalcSwiftFlatPayloadsBox> payloadsBox() const;
+
+private:
+    alignas(8) unsigned char m_root[8];
+    RefPtr<CSSCalcSwiftFlatPayloadsBox> m_payloads;
+};
+#endif
+
 struct Tree {
+#if USE(SWIFT_CSS)
+    // Every reader walks this. C++ that needs a `Child` builds one with `materializedRoot`.
+    CSSCalcSwiftStoredRoot stored;
+#else
     Child root;
+#endif
     Type type;
     Stage stage;
 
@@ -378,8 +362,17 @@ struct Tree {
     bool requiresConversionData = false;
 
     bool operator==(const Tree&) const = default;
+
+    WEBCORE_EXPORT bool rootEquals(const Tree&) const;
+    WEBCORE_EXPORT bool rootIsPercentage() const;
+    WEBCORE_EXPORT Type rootType() const;
 };
 
+WEBCORE_EXPORT Tree makeTree(Child&& root, Type, Stage, bool requiresConversionData = false);
+
+#if USE(SWIFT_CSS)
+WEBCORE_EXPORT Child materializedRoot(const Tree&);
+#endif
 
 struct Sum {
     WTF_MAKE_STRUCT_TZONE_ALLOCATED(Sum);
@@ -979,14 +972,33 @@ struct AnchorSize {
 std::optional<Style::AnchorSizeDimension> NODELETE cssValueIDToAnchorSizeDimension(CSSValueID);
 
 // A value the parse resolves for a `CalcNode`: an `<anchor-element>`, a `<random-key>`, or a
-// `calc-mix()` item weight that is a math function. The node names it by index in `origin`. The
-// payload table lives for one `cssCalcSwiftParseIntoChild` call.
+// `calc-mix()` item weight that is a math function. The node names it by index in `origin`.
 using CSSCalcSwiftFlatPayload = Variant<CSS::CustomIdent, Random::Sharing, CalcMix::Item::Weight>;
 
 // A named struct so that CSSCalcSwiftTypes.h can forward-declare it.
 struct CSSCalcSwiftFlatPayloads : Vector<CSSCalcSwiftFlatPayload> { };
 
+#if USE(SWIFT_CSS)
+// A stored tree's payloads, shared by every copy of the tree. Never mutated once built.
+struct CSSCalcSwiftFlatPayloadsBox : RefCounted<CSSCalcSwiftFlatPayloadsBox> {
+    WTF_MAKE_STRUCT_TZONE_ALLOCATED(CSSCalcSwiftFlatPayloadsBox);
+    explicit CSSCalcSwiftFlatPayloadsBox(CSSCalcSwiftFlatPayloads&& payloads)
+        : payloads(WTF::move(payloads))
+    {
+    }
+    CSSCalcSwiftFlatPayloads payloads;
+};
 
+// A stored node's index and its payload are written together, so a payload that is not a `T` is a
+// broken tree.
+template<typename T> const T& storedPayload(const CSSCalcSwiftFlatPayloads* payloads, uint32_t index)
+{
+    RELEASE_ASSERT(payloads && index < payloads->size());
+    auto* payload = get_if<T>(&(*payloads)[index]);
+    RELEASE_ASSERT(payload);
+    return *payload;
+}
+#endif
 
 // MARK: TextStream
 
