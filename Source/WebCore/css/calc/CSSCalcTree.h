@@ -350,7 +350,7 @@ private:
 
 struct Tree {
 #if USE(SWIFT_CSS)
-    // Every reader walks this. C++ that needs a `Child` builds one with `materializedRoot`.
+    // Every reader walks this.
     CSSCalcSwiftStoredRoot stored;
 #else
     Child root;
@@ -369,10 +369,6 @@ struct Tree {
 };
 
 WEBCORE_EXPORT Tree makeTree(Child&& root, Type, Stage, bool requiresConversionData = false);
-
-#if USE(SWIFT_CSS)
-WEBCORE_EXPORT Child materializedRoot(const Tree&);
-#endif
 
 struct Sum {
     WTF_MAKE_STRUCT_TZONE_ALLOCATED(Sum);

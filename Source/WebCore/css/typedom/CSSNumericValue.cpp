@@ -59,6 +59,10 @@
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 
+#if USE(SWIFT_CSS)
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
+
 namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CSSNumericValue);
@@ -81,6 +85,78 @@ template<typename T> static ExceptionOr<Ref<CSSNumericValue>> convertToException
     return upcast<CSSNumericValue>(WTF::move(input));
 }
 
+#if USE(SWIFT_CSS)
+namespace CSSCalc {
+
+struct CSSCalcSwiftNumericValueOperands {
+    Vector<Ref<CSSNumericValue>> values;
+    std::optional<Exception> exception;
+};
+
+bool CSSCalcSwiftNumericValueBuilder::pushUnitValue(double value, uint8_t unitType) noexcept
+{
+    m_operands->values.append(CSSUnitValue::create(value, static_cast<CSSUnitType>(unitType)));
+    return true;
+}
+
+bool CSSCalcSwiftNumericValueBuilder::buildOperation(CSSCalcSwiftAlternative alternative, uint32_t childCount) noexcept
+{
+    auto& values = m_operands->values;
+    RELEASE_ASSERT(childCount <= values.size());
+    auto take = [&] {
+        Vector<Ref<CSSNumericValue>> children;
+        children.reserveInitialCapacity(childCount);
+        for (size_t i = values.size() - childCount; i < values.size(); ++i)
+            children.append(WTF::move(values[i]));
+        values.shrink(values.size() - childCount);
+        return children;
+    };
+    auto result = [&] -> ExceptionOr<Ref<CSSNumericValue>> {
+        switch (alternative) {
+        case CSSCalcSwiftAlternative::Sum:
+            return convertToExceptionOrNumericValue(CSSMathSum::create(take()));
+        case CSSCalcSwiftAlternative::Product:
+            return convertToExceptionOrNumericValue(CSSMathProduct::create(take()));
+        case CSSCalcSwiftAlternative::Min:
+            return convertToExceptionOrNumericValue(CSSMathMin::create(take()));
+        case CSSCalcSwiftAlternative::Max:
+            return convertToExceptionOrNumericValue(CSSMathMax::create(take()));
+        case CSSCalcSwiftAlternative::Negate:
+            return convertToExceptionOrNumericValue(CSSMathNegate::create(values.takeLast()));
+        case CSSCalcSwiftAlternative::Invert:
+            return convertToExceptionOrNumericValue(CSSMathInvert::create(values.takeLast()));
+        case CSSCalcSwiftAlternative::Clamp:
+            if (childCount == 3) {
+                auto children = take();
+                return convertToExceptionOrNumericValue(CSSMathClamp::create(WTF::move(children[0]), WTF::move(children[1]), WTF::move(children[2])));
+            }
+            break;
+        default:
+            break;
+        }
+        // CSS Typed OM does not support unresolved symbols, tree counting or the other functions.
+        return Exception { ExceptionCode::UnknownError };
+    }();
+    if (result.hasException()) {
+        m_operands->exception = result.releaseException();
+        return false;
+    }
+    values.append(result.releaseReturnValue());
+    return true;
+}
+
+} // namespace CSSCalc
+
+static ExceptionOr<Ref<CSSNumericValue>> reifyStoredMathExpression(const CSSCalc::Tree& tree)
+{
+    CSSCalc::CSSCalcSwiftNumericValueOperands operands;
+    CSSCalc::CSSCalcSwiftNumericValueBuilder builder { operands };
+    if (!cssCalcReifySwift(tree.stored.root(), builder))
+        return WTF::move(*operands.exception);
+    RELEASE_ASSERT(operands.values.size() == 1);
+    return operands.values.takeLast();
+}
+#else
 static ExceptionOr<Vector<Ref<CSSNumericValue>>> reifyMathExpressions(const CSSCalc::Children& nodes)
 {
     Vector<Ref<CSSNumericValue>> values;
@@ -164,11 +240,13 @@ template<typename Op> static ExceptionOr<Ref<CSSNumericValue>> reifyMathExpressi
     return Exception { ExceptionCode::UnknownError };
 }
 
+#endif
+
 // https://drafts.css-houdini.org/css-typed-om/#reify-a-math-expression
 ExceptionOr<Ref<CSSNumericValue>> CSSNumericValue::reifyMathExpression(const CSS::UnevaluatedCalcBase& calc)
 {
 #if USE(SWIFT_CSS)
-    return CSSNumericValue::reifyMathExpression(CSSCalc::materializedRoot(calc.calcValue().tree()));
+    return reifyStoredMathExpression(calc.calcValue().tree());
 #else
     return CSSNumericValue::reifyMathExpression(calc.calcValue().tree().root);
 #endif
@@ -177,12 +255,13 @@ ExceptionOr<Ref<CSSNumericValue>> CSSNumericValue::reifyMathExpression(const CSS
 ExceptionOr<Ref<CSSNumericValue>> CSSNumericValue::reifyMathExpression(const CSSCalc::Tree& tree)
 {
 #if USE(SWIFT_CSS)
-    return CSSNumericValue::reifyMathExpression(CSSCalc::materializedRoot(tree));
+    return reifyStoredMathExpression(tree);
 #else
     return CSSNumericValue::reifyMathExpression(tree.root);
 #endif
 }
 
+#if !USE(SWIFT_CSS)
 ExceptionOr<Ref<CSSNumericValue>> CSSNumericValue::reifyMathExpression(const CSSCalc::Child& root)
 {
     return WTF::switchOn(root, [](const auto& child) { return WebCore::reifyMathExpression(child); });
@@ -195,6 +274,7 @@ ExceptionOr<Ref<CSSNumericValue>> CSSNumericValue::reifyMathExpression(const CSS
         [](const CSS::Keyword::None&) -> ExceptionOr<Ref<CSSNumericValue>> { return Exception { ExceptionCode::UnknownError }; }
     );
 }
+#endif
 
 static Ref<CSSNumericValue> negate(Ref<CSSNumericValue>&& value)
 {

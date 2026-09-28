@@ -31,6 +31,9 @@
 #include "CSSPropertyNames.h"
 #include "CSSUnits.h"
 #include "ComputedStyleDependencies.h"
+#if USE(SWIFT_CSS)
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
 
 namespace WebCore {
 namespace CSSCalc {
@@ -83,10 +86,31 @@ void collectComputedStyleDependencies(const Child& root, ComputedStyleDependenci
     );
 }
 
+#if USE(SWIFT_CSS)
+void CSSCalcSwiftDependencySink::addUnit(uint8_t unitType) const noexcept
+{
+    if (auto lengthUnit = CSS::toLengthUnit(static_cast<CSSUnitType>(unitType)))
+        CSS::collectComputedStyleDependencies(*m_dependencies, *lengthUnit);
+}
+
+void CSSCalcSwiftDependencySink::addCalcMixWeight(uint32_t payload) const noexcept
+{
+    auto* weight = m_payloads && payload < m_payloads->size() ? get_if<CalcMix::Item::Weight>(&(*m_payloads)[payload]) : nullptr;
+    RELEASE_ASSERT(weight);
+    CSS::collectComputedStyleDependencies(*m_dependencies, *weight);
+}
+
+void CSSCalcSwiftDependencySink::addFunctions(bool siblingFunctions, bool anchorFunctions) const noexcept
+{
+    m_dependencies->siblingFunctions |= siblingFunctions;
+    m_dependencies->anchorFunctions |= anchorFunctions;
+}
+#endif
+
 void collectComputedStyleDependencies(const Tree& tree, ComputedStyleDependencies& dependencies)
 {
 #if USE(SWIFT_CSS)
-    collectComputedStyleDependencies(materializedRoot(tree), dependencies);
+    cssCalcCollectDependenciesSwift(tree.stored.root(), CSSCalcSwiftDependencySink { dependencies, tree.stored.payloads() });
 #else
     collectComputedStyleDependencies(tree.root, dependencies);
 #endif

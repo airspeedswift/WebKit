@@ -1778,7 +1778,7 @@ static_assert(static_cast<uint8_t>(CSSParserToken::BlockEnd) == 2);
 // `functionId()` return for a token of the wrong type.
 static_assert(static_cast<uint16_t>(CSSValueInvalid) == 0);
 
-static_assert(static_cast<uint8_t>(PercentHint::Length) != 0, "CSSCalcSwiftLeaf::percentHint uses 0 as \"no hint\"");
+static_assert(static_cast<uint8_t>(PercentHint::Length) != 0, "a stored node's percentHint uses 0 as \"no hint\"");
 
 // Which alternative `makeNumeric` builds for `unit`, answered by calling it so the unit
 // classification is not duplicated. Numeric alternatives are inline, so this does not allocate.
@@ -1795,7 +1795,7 @@ uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
     if (WTF::holdsAlternative<NonCanonicalDimension>(child))
         return static_cast<uint8_t>(CSSCalcSwiftAlternative::NonCanonicalDimension);
 
-    // Unreachable for any unit the Swift parser asks about; `pushLeaf` treats it as a contract violation.
+    // Unreachable for any unit the Swift parser asks about.
     return cssCalcSwiftNoAlternative;
 }
 

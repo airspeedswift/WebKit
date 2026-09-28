@@ -51,6 +51,7 @@ namespace WebCore {
 
 class CSSParserTokenRange;
 class CSSCalcSymbolsAllowed;
+struct ComputedStyleDependencies;
 
 namespace CSS {
 struct SerializationContext;
@@ -64,7 +65,6 @@ struct Tree;
 struct CSSCalcSwiftStoredRoot;
 struct SimplificationOptions;
 struct EvaluationOptions;
-struct CSSCalcSwiftOperandStack;
 
 // Values a `CalcNode` names by index in its `origin`, which Swift never sees.
 struct CSSCalcSwiftFlatPayloads;
@@ -192,17 +192,46 @@ struct SWIFT_SAFE CSSCalcSwiftPayloadComparer {
 #endif
 };
 
-// MARK: - Simplification
+// `collectComputedStyleDependencies`, fed by a walk of the stored tree. A unit is a node's own, so
+// the one table of which unit depends on what stays `CSS::collectComputedStyleDependencies`.
+struct SWIFT_SAFE CSSCalcSwiftDependencySink {
+    CSSCalcSwiftDependencySink(ComputedStyleDependencies& dependencies LIFETIME_BOUND, const CSSCalcSwiftFlatPayloads* payloads LIFETIME_BOUND) noexcept
+        : m_dependencies(&dependencies)
+        , m_payloads(payloads)
+    {
+    }
 
-struct CSSCalcSwiftLeaf {
-    double value;
-    uint16_t unitType;
-    // A `CSSCalcSwiftAlternative`, needed because `unitType` cannot distinguish `Percentage`.
-    uint8_t alternative;
-    uint8_t percentHint;
-    uint16_t valueID;
+    WEBCORE_EXPORT void addUnit(uint8_t unitType) const noexcept;
+    // A `calc-mix()` weight that is a math function, whose own tree is in the payload.
+    WEBCORE_EXPORT void addCalcMixWeight(uint32_t payload) const noexcept;
+    WEBCORE_EXPORT void addFunctions(bool siblingFunctions, bool anchorFunctions) const noexcept;
+
+private:
+    ComputedStyleDependencies* m_dependencies;
+    const CSSCalcSwiftFlatPayloads* m_payloads;
 };
-static_assert(sizeof(CSSCalcSwiftLeaf) == 16);
+
+// `CSSNumericValue::reifyMathExpression`, fed post-order by a walk of the stored tree. Each call is
+// false once an exception is recorded, which ends the walk as the C++'s first exception ends its
+// recursion.
+struct CSSCalcSwiftNumericValueOperands;
+
+struct SWIFT_SAFE CSSCalcSwiftNumericValueBuilder {
+    CSSCalcSwiftNumericValueBuilder(CSSCalcSwiftNumericValueOperands& operands LIFETIME_BOUND) noexcept
+        : m_operands(&operands)
+    {
+    }
+
+    WEBCORE_EXPORT bool pushUnitValue(double value, uint8_t unitType) noexcept;
+    // `Sum`, `Product`, `Min`, `Max` over the last `childCount` values, `Negate` and `Invert` over the
+    // last one, `Clamp` over the last three. Any other alternative is `UnknownError`.
+    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount) noexcept;
+
+private:
+    CSSCalcSwiftNumericValueOperands* m_operands;
+};
+
+// MARK: - Simplification
 
 struct CSSCalcSwiftNumericResult {
     double value;
@@ -225,43 +254,20 @@ struct CSSCalcSwiftSimplificationOptions {
     bool percentageResolveToDimension;
 };
 
-// MARK: - Building the result tree
+// MARK: - Upcalls
 
 // No payload, or no such node.
 static constexpr uint32_t cssCalcSwiftFlatNoNode = UINT32_MAX;
 static constexpr uint8_t cssCalcSwiftNoAlternative = UINT8_MAX;
 
-// An operand stack that Swift fills post-order, so that no Swift container holds a `Child`.
-// `SWIFT_SAFE` is unchecked and holds only while every copy stays a parameter of the one recursion,
-// and because the stack is fresh storage the input tree cannot reach.
+// The upcalls Swift's folds and the evaluator make, over the options and the tree's payload table.
+// `SWIFT_SAFE` is unchecked and holds only while every copy stays a parameter of the one walk.
 struct SWIFT_SAFE CSSCalcSwiftBuilder {
-    CSSCalcSwiftBuilder(CSSCalcSwiftOperandStack& operands LIFETIME_BOUND, const SimplificationOptions& options LIFETIME_BOUND) noexcept
-        : m_operands(&operands)
-        , m_options(&options)
+    CSSCalcSwiftBuilder(const SimplificationOptions& options LIFETIME_BOUND, const CSSCalcSwiftFlatPayloads* payloads LIFETIME_BOUND) noexcept
+        : m_options(&options)
+        , m_payloads(payloads)
     {
     }
-
-    // `isRoot` constructs the node into the root slot, if there is one, rather than pushing it.
-    // Each `bool` return is false for a contract violation.
-
-    WEBCORE_EXPORT bool pushLeaf(CSSCalcSwiftLeaf, bool isRoot = false) noexcept;
-
-    // `payloadIndex` names a `Calc` weight, which no `double` can carry.
-    WEBCORE_EXPORT bool pushCalcMixItemWeight(double weight, bool present, uint32_t payloadIndex = cssCalcSwiftFlatNoNode) noexcept;
-
-    // `Type` is supplied rather than recomputed because `copyAndSimplify` keeps a node's type when
-    // its kind does not change: `calc((2 / 3px) * 4px)` keeps its parse-time type, where `toType` of
-    // the surviving `Product{6px, 4px}` is px^2. `noneMask` bit 0 means the minimum bound of
-    // `clamp()` is `none`, bit 1 the maximum; the `none` bound pushes no operand.
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot = false, uint8_t noneMask = 0) noexcept;
-
-    // `valueID` `CSSValueInvalid` means no dimension for `AnchorSize`, and for `Anchor` that the side
-    // is the `<percentage>` subtree in slot 0.
-    WEBCORE_EXPORT bool buildAnchor(CSSCalcSwiftAlternative, uint32_t childCount, Type, bool isRoot, uint16_t valueID, uint32_t elementNamePayload) noexcept;
-
-    // The sharing is carried whole: `resolveRandomBaseValue` hashes all of it into a
-    // `RandomCachingKey`, and a second derivation that disagreed would give one key two values.
-    WEBCORE_EXPORT bool buildRandom(uint32_t childCount, Type, bool isRoot, uint32_t sharingPayload) noexcept;
 
     // `simplify(Symbol&)`. The unit is the node's, not the table's: the table's would fold
     // `Symbol{r, Deg}` under `{r -> 1px}` into a length where `simplify` makes an angle.
@@ -269,28 +275,34 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
 
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const noexcept;
 
-    // May mark the property invalid at computed-value time. The mark has no clear, so a repeated
-    // call is harmless.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValue(const Child&) const noexcept;
+    // `sibling-count()` or `sibling-index()`, which need an element.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveTreeCounting(CSSCalcSwiftAlternative) const noexcept;
 
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveStyleCoupledValueOfTop() noexcept;
+    // `evaluateWithoutFallback` for `Anchor`, and its `AnchorSize` counterpart, without the fallback
+    // and without marking the property invalid. `valueID` is the node's: the side keyword, or
+    // `CSSValueInvalid` when the side is `sideFraction` (the `<percentage>` subtree evaluated, / 100);
+    // for `AnchorSize` the dimension, or `CSSValueInvalid` for none.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveAnchor(CSSCalcSwiftAlternative, uint32_t elementNamePayload, uint16_t valueID, double sideFraction) const noexcept;
 
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveCalcMixWeight(double value, bool present, uint32_t payload) const noexcept;
 
-    // Asked separately because `resolveRandomBaseValueForEvaluation` has a side effect.
+    // Asked separately because `resolveRandomBaseValue` has a side effect.
     WEBCORE_EXPORT bool hasStyleBuilderState() const noexcept;
 
-    // Unlike `resolveStyleCoupledValue`, this evaluates a `fixed` `Calc` value. It inserts into the
-    // random cache, so it is asked only where `evaluate(const IndirectNode<Random>&)` asks it.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRandomBaseValueForEvaluation(uint32_t payload) const noexcept;
+    // A `random()`'s base value. It inserts into the random cache, so it is asked only where the C++
+    // asks it. The sharing is read whole from the payload: `resolveRandomBaseValue` hashes all of it
+    // into a `RandomCachingKey`, and a second derivation that disagreed would give one key two values.
+    // A `fixed` `Calc` value is evaluated only with `evaluatesFixedCalc`, as
+    // `evaluate(const IndirectNode<Random>&)` does; `simplify(Random&)` leaves that node unfolded.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRandomBaseValue(uint32_t payload, bool evaluatesFixedCalc) const noexcept;
 
     WEBCORE_EXPORT void markCurrentPropertyInvalidAtComputedValueTime() const noexcept;
 
 private:
     template<typename T> const T* payloadFor(uint32_t index) const noexcept;
 
-    CSSCalcSwiftOperandStack* m_operands;
     const SimplificationOptions* m_options;
+    const CSSCalcSwiftFlatPayloads* m_payloads;
 };
 
 // MARK: - Parsing
