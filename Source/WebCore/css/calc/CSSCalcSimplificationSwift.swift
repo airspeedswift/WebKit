@@ -6752,11 +6752,6 @@ public func cssCalcToStyleSwift(
 // MARK: Construction
 
 @_expose(Cxx)
-public func styleCalcNumberSwift(_ value: Double) -> CSSCalcSwiftRoot {
-    CSSCalcSwiftRoot(styleCalcNumber(value))
-}
-
-@_expose(Cxx)
 public func styleCalcPercentageSwift(_ value: Double) -> CSSCalcSwiftRoot {
     CSSCalcSwiftRoot(styleCalcPercentage(value))
 }
@@ -6775,12 +6770,6 @@ public func styleCalcSizeSwift() -> CSSCalcSwiftRoot {
 @_expose(Cxx)
 public func styleCalcAddSwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
     CSSCalcSwiftRoot(styleCalcPair(.Sum, a.root.clone(), b.root.clone()))
-}
-
-/// `multiply`: `Product { a, b }`.
-@_expose(Cxx)
-public func styleCalcMultiplySwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
-    CSSCalcSwiftRoot(styleCalcPair(.Product, a.root.clone(), b.root.clone()))
 }
 
 /// `subtract`: `Sum { a, Negate { b } }`.
@@ -6935,11 +6924,6 @@ public func styleCalcDePercentifySwift(_ tree: CSSCalcSwiftRoot) -> CSSCalcSwift
 }
 
 // MARK: Queries
-
-@_expose(Cxx)
-public func styleCalcContainsSizeSwift(_ tree: CSSCalcSwiftRoot) -> Bool {
-    styleCalcContains(tree.root, .Symbol)
-}
 
 @_expose(Cxx)
 public func styleCalcContainsPercentageSwift(_ tree: CSSCalcSwiftRoot) -> Bool {

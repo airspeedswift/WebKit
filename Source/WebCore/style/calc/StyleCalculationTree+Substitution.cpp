@@ -231,11 +231,6 @@ Tree dePercentify(const Tree& tree)
     return Tree { Child { std::in_place, [&] { return styleCalcDePercentifySwift(tree.root.stored.root()); } } };
 }
 
-bool containsSize(const Tree& tree)
-{
-    return styleCalcContainsSizeSwift(tree.root.stored.root());
-}
-
 bool containsPercentage(const Tree& tree)
 {
     return styleCalcContainsPercentageSwift(tree.root.stored.root());

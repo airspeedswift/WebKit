@@ -404,11 +404,6 @@ bool Child::operator==(const Child& other) const
     return styleCalcRootsEqualSwift(stored.root(), other.stored.root());
 }
 
-Child number(double value)
-{
-    return Child { std::in_place, [&] { return styleCalcNumberSwift(value); } };
-}
-
 Child percentage(double value)
 {
     return Child { std::in_place, [&] { return styleCalcPercentageSwift(value); } };
@@ -422,11 +417,6 @@ Child dimension(double value)
 Child add(Child&& a, Child&& b)
 {
     return Child { std::in_place, [&] { return styleCalcAddSwift(a.stored.root(), b.stored.root()); } };
-}
-
-Child multiply(Child&& a, Child&& b)
-{
-    return Child { std::in_place, [&] { return styleCalcMultiplySwift(a.stored.root(), b.stored.root()); } };
 }
 
 Child subtract(Child&& a, Child&& b)
@@ -444,14 +434,9 @@ size_t computeDepth(const Tree& tree)
     return styleCalcDepthSwift(tree.root.stored.root());
 }
 
-size_t computeNodeCount(const Child& root)
-{
-    return styleCalcNodeCountSwift(root.stored.root());
-}
-
 size_t computeNodeCount(const Tree& tree)
 {
-    return computeNodeCount(tree.root);
+    return styleCalcNodeCountSwift(tree.root.stored.root());
 }
 
 TextStream& operator<<(TextStream& ts, const Tree& tree)

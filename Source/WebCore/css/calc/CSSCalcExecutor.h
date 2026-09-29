@@ -26,12 +26,16 @@
 #pragma once
 
 #include "CSSCalcOperator.h"
+#include "CSSCalcTree+Simplification.h"
 #include "CSSValueKeywords.h"
 #include <numbers>
 #include <numeric>
 #include <ranges>
 #include <wtf/Forward.h>
 #include <wtf/MathExtras.h>
+
+// The C++ math operations, which only the C++ evaluators and simplifier (CSSCalc and Style) call.
+#if CSS_CALC_CPP_EVALUATOR_COMPILED_IN
 
 namespace WebCore {
 namespace CSSCalc {
@@ -570,3 +574,5 @@ template<> struct OperatorExecutor<Operator::Random> {
 
 } // namespace CSSCalc
 } // namespace WebCore
+
+#endif // CSS_CALC_CPP_EVALUATOR_COMPILED_IN
