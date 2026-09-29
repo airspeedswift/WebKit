@@ -58,6 +58,7 @@ namespace CSSCalc {
 
 static constexpr int maxExpressionDepth = 100;
 
+#if CSS_CALC_CPP_PARSER_COMPILED_IN
 static std::optional<std::pair<Number, Type>> lookupConstantNumber(CSSValueID symbol)
 {
     static constexpr SortedArrayMap constantMap { WTF::toArray<std::pair<CSSValueID, double>>({
@@ -73,8 +74,6 @@ static std::optional<std::pair<Number, Type>> lookupConstantNumber(CSSValueID sy
 }
 
 // MARK: - Parser State
-
-#if CSS_CALC_CPP_PARSER_COMPILED_IN
 
 namespace {
 
@@ -1797,21 +1796,6 @@ uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept
 
     // Unreachable for any unit the Swift parser asks about.
     return cssCalcSwiftNoAlternative;
-}
-
-CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept
-{
-    auto constant = lookupConstantNumber(static_cast<CSSValueID>(id));
-    if (!constant)
-        return { .value = 0, .unitType = static_cast<uint16_t>(CSSUnitType::Unknown), .resolved = false, .alternative = CSSCalcSwiftAlternative::Number, .substituteFallback = false };
-    // `lookupConstantNumber` always builds a `Number` with an empty `Type`.
-    return {
-        .value = constant->first.value,
-        .unitType = static_cast<uint16_t>(CSSUnitType::Number),
-        .resolved = true,
-        .alternative = CSSCalcSwiftAlternative::Number,
-        .substituteFallback = false,
-    };
 }
 
 bool cssCalcSwiftUnitNeedsConversionData(uint8_t unit) noexcept

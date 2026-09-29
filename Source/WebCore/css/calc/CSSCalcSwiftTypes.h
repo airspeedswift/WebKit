@@ -410,7 +410,6 @@ static_assert(alignof(CSSCalcSwiftParseResult) == 8);
 // C++ answers because `makeNumeric` owns the seventy-case unit table.
 WEBCORE_EXPORT uint8_t cssCalcSwiftLeafKindForUnit(uint16_t unit) noexcept;
 
-WEBCORE_EXPORT CSSCalcSwiftNumericResult cssCalcSwiftLookupConstantNumber(uint16_t id) noexcept;
 
 // For `CSSCalcSwiftStoredRoot`'s parsing constructor. One argument so that
 // `std::optional<Tree>::emplace` can aggregate-initialise a `Tree` from it, building the stored root
