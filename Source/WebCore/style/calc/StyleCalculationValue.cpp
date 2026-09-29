@@ -74,8 +74,7 @@ Tree Value::copyTree() const
 
 Child Value::copyRoot() const
 {
-    auto tree = copyTree();
-    return { WTF::move(tree.root) };
+    return Calculation::copy(m_tree.root);
 }
 
 bool Value::operator==(const Value& other) const

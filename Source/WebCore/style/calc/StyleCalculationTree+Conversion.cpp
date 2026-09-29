@@ -417,10 +417,10 @@ Tree toStyle(const CSSCalc::Tree& tree, const ToStyleOptions& toStyleOptions)
 #else
     CSSCalc::CSSCalcSwiftBuilder builder { simplificationOptions, tree.stored.payloads() };
     bool converted = false;
-    auto root = cssCalcToStyleSwift(tree.stored.root(), builder, CSSCalc::swiftSimplificationOptions(simplificationOptions), converted);
+    Tree result { Child { std::in_place, [&] { return cssCalcToStyleSwift(tree.stored.root(), builder, CSSCalc::swiftSimplificationOptions(simplificationOptions), converted); } } };
     // There is no C++ conversion in this build to fall back to, and a `Tree` has no empty state.
     RELEASE_ASSERT_WITH_MESSAGE(converted, "the Swift calc() conversion to a style tree failed");
-    return Tree { Child { root } };
+    return result;
 #endif
 }
 

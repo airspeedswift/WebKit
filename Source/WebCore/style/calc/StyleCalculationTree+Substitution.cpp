@@ -220,15 +220,15 @@ bool containsPercentage(const Tree& tree)
 std::optional<Tree> substituteSize(const Tree& tree, const Child& insertion)
 {
     bool substituted = false;
-    auto root = styleCalcSubstituteSizeSwift(tree.root.stored.root(), insertion.stored.root(), maximumCalcSizeNodeCount, maximumSubstitutionTreeDepth, substituted);
+    Tree result { Child { std::in_place, [&] { return styleCalcSubstituteSizeSwift(tree.root.stored.root(), insertion.stored.root(), maximumCalcSizeNodeCount, maximumSubstitutionTreeDepth, substituted); } } };
     if (!substituted)
         return std::nullopt;
-    return Tree { Child { root } };
+    return result;
 }
 
 Tree dePercentify(const Tree& tree)
 {
-    return Tree { Child { styleCalcDePercentifySwift(tree.root.stored.root()) } };
+    return Tree { Child { std::in_place, [&] { return styleCalcDePercentifySwift(tree.root.stored.root()); } } };
 }
 
 bool containsSize(const Tree& tree)

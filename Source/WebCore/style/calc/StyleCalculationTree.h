@@ -249,7 +249,10 @@ struct Children {
 // (CSSCalcSimplificationSwift.swift). It is never mutated, so a copy shares it.
 struct Child {
 #if !defined(__swift__)
-    explicit Child(const CSSCalcSwiftRoot&);
+    template<typename Make> Child(std::in_place_t, const Make& make)
+        : stored { std::in_place, make }
+    {
+    }
 #endif
     Child(Size);
 
