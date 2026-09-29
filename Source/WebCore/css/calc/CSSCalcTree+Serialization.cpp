@@ -40,7 +40,7 @@
 #if USE(SWIFT_CSS)
 #include "WebCoreSwiftBoundaryTypes.h"
 #endif
-#include <atomic>
+#include <bit>
 #include <limits>
 #include <ranges>
 #include <wtf/text/StringBuilder.h>
@@ -860,74 +860,17 @@ static CSSCalcSwiftOperationInfo randomSharingInfo(const Random::Sharing& sharin
     return out;
 }
 
-void CSSCalcSwiftSink::appendLiteral(uint8_t literal) noexcept
+void CSSCalcSwiftSink::appendCharacters(uint64_t first, uint64_t second, uint8_t length) noexcept
 {
-    // Selected by name rather than by index, so the numbering `CSSCalcSwiftLiteral` declares in
-    // Swift is never transcribed here: reordering those cases cannot change which spelling is
-    // emitted, and adding one without teaching this switch is a `RELEASE_ASSERT_NOT_REACHED` rather
-    // than a silently wrong stylesheet. Hence a switch rather than a table indexed by the raw value.
-    switch (literal) {
-    case CSSCalcSwiftLiteralCalcOpen:
-        m_builder->append("calc("_s);
-        return;
-    case CSSCalcSwiftLiteralOpenParen:
-        m_builder->append('(');
-        return;
-    case CSSCalcSwiftLiteralCloseParen:
-        m_builder->append(')');
-        return;
-    case CSSCalcSwiftLiteralEmptyParens:
-        m_builder->append("()"_s);
-        return;
-    case CSSCalcSwiftLiteralPlus:
-        m_builder->append(" + "_s);
-        return;
-    case CSSCalcSwiftLiteralMinus:
-        m_builder->append(" - "_s);
-        return;
-    case CSSCalcSwiftLiteralTimes:
-        m_builder->append(" * "_s);
-        return;
-    case CSSCalcSwiftLiteralDividedBy:
-        m_builder->append(" / "_s);
-        return;
-    case CSSCalcSwiftLiteralNegateOpen:
-        m_builder->append("-1 * "_s);
-        return;
-    case CSSCalcSwiftLiteralInvertOpen:
-        m_builder->append("1 / "_s);
-        return;
-    case CSSCalcSwiftLiteralCommaSpace:
-        m_builder->append(", "_s);
-        return;
-    // `round(` is spelled through the generated name table rather than as the string "round", so
-    // there is still exactly one place in the program that decides how CSSValueRound is written:
-    // this is the same call the C++ rounding prefix makes.
-    case CSSCalcSwiftLiteralRoundOpen:
-        m_builder->append(nameLiteralForSerialization(CSSValueRound), '(');
-        return;
-    case CSSCalcSwiftLiteralNoClampOpen:
-        m_builder->append("(no-clamp "_s);
-        return;
-    // `clamp()`'s `none` bound. The same call `serializeCalculationTree(CSS::Keyword::None)` makes:
-    // `CSS::Keyword::None` is `Constant<CSSValueNone>`, whose `Serialize` specialization is exactly
-    // `nameLiteralForSerialization(CSSValueNone)` (CSSValueTypes.h).
-    case CSSCalcSwiftLiteralNoneKeyword:
-        m_builder->append(nameLiteralForSerialization(CSSValueNone));
-        return;
-    // `element-scoped` and `fixed` are named through the generated table for the same reason
-    // `round(` is: one place in the program decides how each keyword is written.
-    case CSSCalcSwiftLiteralSpace:
-        m_builder->append(' ');
-        return;
-    case CSSCalcSwiftLiteralRandomFixedPrefix:
-        m_builder->append(nameLiteralForSerialization(CSSValueFixed), ' ');
-        return;
-    case CSSCalcSwiftLiteralElementScoped:
-        m_builder->append(nameLiteralForSerialization(CSSValueElementScoped));
+    static_assert(std::endian::native == std::endian::little);
+    // Most spellings are one character, which `StringBuilder` appends inline.
+    if (length == 1) {
+        m_builder->append(static_cast<Latin1Character>(first));
         return;
     }
-    RELEASE_ASSERT_NOT_REACHED();
+    // Held as words rather than as characters: a character array would be given a stack protector.
+    std::array words { first, second };
+    m_builder->append(asBytes(std::span { words }).first(length));
 }
 
 void CSSCalcSwiftSink::appendNumber(double value, uint8_t unitType) noexcept
