@@ -394,13 +394,8 @@ TextStream& operator<<(TextStream& ts, const Tree& tree)
 #else
 // MARK: - The Swift tree (CSSCalcSimplificationSwift.swift)
 
-Child::Child(const CSSCalcSwiftRoot& root)
-    : stored { root, nullptr }
-{
-}
-
 Child::Child(Size)
-    : Child { styleCalcSizeSwift() }
+    : Child { std::in_place, [] { return styleCalcSizeSwift(); } }
 {
 }
 
@@ -411,37 +406,37 @@ bool Child::operator==(const Child& other) const
 
 Child number(double value)
 {
-    return Child { styleCalcNumberSwift(value) };
+    return Child { std::in_place, [&] { return styleCalcNumberSwift(value); } };
 }
 
 Child percentage(double value)
 {
-    return Child { styleCalcPercentageSwift(value) };
+    return Child { std::in_place, [&] { return styleCalcPercentageSwift(value); } };
 }
 
 Child dimension(double value)
 {
-    return Child { styleCalcDimensionSwift(value) };
+    return Child { std::in_place, [&] { return styleCalcDimensionSwift(value); } };
 }
 
 Child add(Child&& a, Child&& b)
 {
-    return Child { styleCalcAddSwift(a.stored.root(), b.stored.root()) };
+    return Child { std::in_place, [&] { return styleCalcAddSwift(a.stored.root(), b.stored.root()); } };
 }
 
 Child multiply(Child&& a, Child&& b)
 {
-    return Child { styleCalcMultiplySwift(a.stored.root(), b.stored.root()) };
+    return Child { std::in_place, [&] { return styleCalcMultiplySwift(a.stored.root(), b.stored.root()); } };
 }
 
 Child subtract(Child&& a, Child&& b)
 {
-    return Child { styleCalcSubtractSwift(a.stored.root(), b.stored.root()) };
+    return Child { std::in_place, [&] { return styleCalcSubtractSwift(a.stored.root(), b.stored.root()); } };
 }
 
 Child blend(Child&& from, Child&& to, double progress)
 {
-    return Child { styleCalcBlendSwift(from.stored.root(), to.stored.root(), progress) };
+    return Child { std::in_place, [&] { return styleCalcBlendSwift(from.stored.root(), to.stored.root(), progress); } };
 }
 
 size_t computeDepth(const Tree& tree)
