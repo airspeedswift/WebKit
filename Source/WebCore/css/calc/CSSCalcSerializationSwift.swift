@@ -59,11 +59,10 @@ extension WebCore.CSSCalc.CSSCalcSwiftSink {
 /// `appendPayloadArgument` upcall should write.
 @c
 enum CSSCalcSwiftOperationPart: UInt8 {
-    /// A `<random-cache-key>` name or an `<anchor-element>`, according to the node's kind.
+    /// An `<anchor-element>`.
     case dashedIdent = 0
-    case randomFixedValue = 1
     /// Preceded by a space, or nothing at all when the item has no weight.
-    case calcMixWeight = 2
+    case calcMixWeight = 1
 }
 
 /// The sort priority of a child that is not a numeric value at all.
@@ -438,35 +437,7 @@ private struct CalcSerialization {
         _ info: CalcNodeInfo,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let operation = node.operationInfo(sink)
-
-        if operation.randomSharingIsKey {
-            var wroteSomething = false
-            if operation.randomKeyHasName {
-                sink.appendPayloadArgument(CSSCalcSwiftOperationPart.dashedIdent.rawValue, node.origin, 0, true)
-                wroteSomething = true
-            }
-            if operation.randomKeyIsElementScoped {
-                if wroteSomething {
-                    sink.append(" ")
-                }
-                sink.append(keyword: WebCore.CSSValueElementScoped)
-                wroteSomething = true
-            }
-            if operation.randomKeyHasPropertyScope {
-                if wroteSomething {
-                    sink.append(" ")
-                }
-                sink.appendValueIDName(operation.valueID)
-            }
-            sink.append(", ")
-        } else if operation.randomSharingIsFixed {
-            sink.append(keyword: WebCore.CSSValueFixed)
-            sink.append(" ")
-            sink.appendPayloadArgument(CSSCalcSwiftOperationPart.randomFixedValue.rawValue, node.origin, 0, true)
-            sink.append(", ")
-        }
-        // else: `auto`, which serializes as omitted.
+        sink.appendRandomSharing(node.origin)
 
         // `min`, `max`, and the optional `step`.
         var index: UInt32 = 0
@@ -510,7 +481,7 @@ private struct CalcSerialization {
         _ node: borrowing CalcNode,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let operation = node.operationInfo(sink)
+        let operation = node.operationInfo
 
         if operation.hasElementName {
             sink.appendPayloadArgument(CSSCalcSwiftOperationPart.dashedIdent.rawValue, node.origin, 0, true)
@@ -537,7 +508,7 @@ private struct CalcSerialization {
         _ node: borrowing CalcNode,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let operation = node.operationInfo(sink)
+        let operation = node.operationInfo
 
         if operation.hasElementName {
             sink.appendPayloadArgument(CSSCalcSwiftOperationPart.dashedIdent.rawValue, node.origin, 0, true)

@@ -1966,37 +1966,11 @@ void CSSCalcSwiftBuilder::markCurrentPropertyInvalidAtComputedValueTime() const 
         m_options->conversionData->styleBuilderState()->setCurrentPropertyInvalidAtComputedValueTime();
 }
 
-CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID, uint16_t unit) const noexcept
+CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveSymbol(uint16_t valueID) const noexcept
 {
-    // The lookup `simplify(Symbol&)` makes.
+    // A miss leaves the `Symbol` unchanged. Not a failure.
     auto value = m_options->symbolTable.get(static_cast<CSSValueID>(valueID));
-    if (!value) {
-        // A miss leaves the `Symbol` unchanged. Not a failure.
-        return unresolvedNumber;
-    }
-
-    // The value from the table and the unit from the node, as `simplify(Symbol&)` does; the table's
-    // own unit is not read.
-    auto leaf = makeNumeric(value->value, static_cast<CSSUnitType>(unit));
-
-    // Read back off the node `makeNumeric` built, so its unit classification is not duplicated.
-    // The numeric alternatives are inline, so this does not allocate.
-    CSSCalcSwiftNumericResult out {
-        .value = 0,
-        .unitType = static_cast<uint16_t>(CSSUnitType::Unknown),
-        .resolved = true,
-        .alternative = static_cast<CSSCalcSwiftAlternative>(leaf.value.index()),
-        .substituteFallback = false,
-    };
-    WTF::switchOn(leaf,
-        [&]<Numeric T>(const T& numeric) {
-            out.value = numeric.value;
-            out.unitType = static_cast<uint16_t>(toCSSUnit(numeric));
-        },
-        // Unreachable: `makeNumeric` always returns a numeric leaf.
-        [&](const auto&) { }
-    );
-    return out;
+    return value ? resolvedNumber(value->value) : unresolvedNumber;
 }
 
 CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double value, uint16_t unitType) const noexcept
