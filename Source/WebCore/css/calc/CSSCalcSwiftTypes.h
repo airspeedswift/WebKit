@@ -132,25 +132,6 @@ enum class CSSCalcSwiftAlternative : uint8_t {
 static constexpr uint8_t numberOfCSSCalcSwiftAlternatives = 0 CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_COUNT_ALTERNATIVE);
 #undef CSS_CALC_SWIFT_COUNT_ALTERNATIVE
 
-// What an operation needs beyond its child subtrees. A field a kind does not carry is zero.
-struct CSSCalcSwiftOperationInfo {
-    uint16_t valueID;
-
-    // Both false means `auto`.
-    bool randomSharingIsKey;
-    bool randomSharingIsFixed;
-    bool randomKeyHasName;
-    bool randomKeyIsElementScoped;
-    bool randomKeyHasPropertyScope;
-
-    // When false, the `<anchor-side>` is a `<percentage>` subtree in child 0.
-    bool anchorSideIsKeyword;
-
-    bool hasElementName;
-    bool hasDimension;
-    bool hasFallback;
-};
-
 // Numbers are formatted in C++ because CSS number serialization is not Swift's shortest-round-trip
 // `Double.description`. `SWIFT_SAFE` is unchecked and holds only while no Swift type stores a sink:
 // every Swift signature takes it `inout`.
@@ -172,7 +153,8 @@ struct SWIFT_SAFE CSSCalcSwiftSink {
 
     WEBCORE_EXPORT void appendPayloadArgument(uint8_t part, uint32_t payload, double weight, bool present) noexcept;
 
-    WEBCORE_EXPORT CSSCalcSwiftOperationInfo randomSharingInfo(uint32_t payload) const noexcept;
+    // The `<random-key>` or `fixed <number>` of a `random()`, and the comma after it.
+    WEBCORE_EXPORT void appendRandomSharing(uint32_t payload) noexcept;
 
 private:
     WTF::StringBuilder* m_builder;
@@ -269,9 +251,10 @@ struct SWIFT_SAFE CSSCalcSwiftBuilder {
     {
     }
 
-    // `simplify(Symbol&)`. The unit is the node's, not the table's: the table's would fold
-    // `Symbol{r, Deg}` under `{r -> 1px}` into a length where `simplify` makes an angle.
-    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveSymbol(uint16_t valueID, uint16_t unit) const noexcept;
+    // The symbol table's value for `simplify(Symbol&)`, as a number. Swift pairs it with the node's
+    // unit, not the table's: the table's would fold `Symbol{r, Deg}` under `{r -> 1px}` into a
+    // length where `simplify` makes an angle.
+    WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveSymbol(uint16_t valueID) const noexcept;
 
     WEBCORE_EXPORT CSSCalcSwiftNumericResult resolveRelativeLength(double value, uint16_t unitType) const noexcept;
 
@@ -413,29 +396,9 @@ enum class CSSCalcSwiftParseOutcome : uint8_t {
     Declined,
 };
 
-// Why the Swift parser handed the input back. Appended to, never inserted into, so that each reason
-// keeps its number.
-enum class CSSCalcSwiftParseDeclineReason : uint8_t {
-    None,
-    MathFunction,
-    Symbol,
-    TreeCounting,
-    // No producer.
-    TooManyTokens,
-    // No producer.
-    CalcMixWeight,
-    // An `anchor()` or `anchor-size()` that `simplify` would evaluate, which needs the original
-    // `CSSCalc::Child`.
-    AnchorEvaluation,
-    // No input should produce it.
-    ContractViolation,
-    RandomEvaluation,
-};
-
 struct alignas(8) CSSCalcSwiftParseResult {
     Type type;
     uint8_t outcome;
-    uint8_t declineReason;
     bool requiresConversionData;
     // For `bareCalcSum`, and only for `Parsed`. Kept inside the asserted size, clear of the
     // `@_expose(Cxx)` return-struct tail-zeroing bug (rdar://186742920).

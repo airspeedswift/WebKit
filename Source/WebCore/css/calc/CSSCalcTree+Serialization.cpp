@@ -48,6 +48,52 @@
 namespace WebCore {
 namespace CSSCalc {
 
+// The `<random-key>` or `fixed <number>` of a `random()` and the comma after it, or nothing for
+// `auto`. Compiled in without the C++ serializer: `CSSCalcSwiftSink::appendRandomSharing` calls it.
+static void serializeRandomSharing(StringBuilder& builder, const CSS::SerializationContext& context, const Random::Sharing& sharing)
+{
+    WTF::switchOn(sharing,
+        [&](const Random::SharingAuto&) {
+            // `auto` serializes as omitted.
+        },
+        [&](const Random::Key& key) {
+            bool wroteSomething = false;
+            auto separate = [&] {
+                if (wroteSomething)
+                    builder.append(' ');
+                wroteSomething = true;
+            };
+            if (key.name) {
+                separate();
+                CSS::serializationForCSS(builder, context, *key.name);
+            }
+            if (key.elementScoped) {
+                separate();
+                builder.append(nameLiteralForSerialization(CSSValueElementScoped));
+            }
+            if (key.propertyScoped) {
+                separate();
+                WTF::switchOn(*key.propertyScoped,
+                    [&](const Random::Key::PropertyScoped&) {
+                        builder.append(nameLiteralForSerialization(CSSValuePropertyScoped));
+                    },
+                    [&](const Random::Key::PropertyIndexScoped&) {
+                        builder.append(nameLiteralForSerialization(CSSValuePropertyIndexScoped));
+                    }
+                );
+            }
+            // The parser never produces an empty <random-cache-key>.
+            ASSERT(wroteSomething);
+            builder.append(", "_s);
+        },
+        [&](const Random::SharingFixed& fixed) {
+            builder.append(nameLiteralForSerialization(CSSValueFixed), ' ');
+            CSS::serializationForCSS(builder, context, fixed.value);
+            builder.append(", "_s);
+        }
+    );
+}
+
 // The C++ serializer sits in three guarded regions, so that a build can compile it out entirely
 // and let the compiler name whatever still needs it. See CSSCalcTree+Serialization.h for the guard
 // and WebCore.xcconfig for the build setting. First region: the serialization state and the child
@@ -428,46 +474,7 @@ void serializeMathFunctionArguments(StringBuilder& builder, const IndirectNode<P
 
 void serializeMathFunctionArguments(StringBuilder& builder, const IndirectNode<Random>& fn, SerializationState& state)
 {
-    WTF::switchOn(fn->sharing,
-        [&](const Random::SharingAuto&) {
-            // `auto` serializes as omitted.
-        },
-        [&](const Random::Key& key) {
-            bool wroteSomething = false;
-            auto separate = [&] {
-                if (wroteSomething)
-                    builder.append(' ');
-                wroteSomething = true;
-            };
-            if (key.name) {
-                separate();
-                CSS::serializationForCSS(builder, state.serializationContext, *key.name);
-            }
-            if (key.elementScoped) {
-                separate();
-                builder.append(nameLiteralForSerialization(CSSValueElementScoped));
-            }
-            if (key.propertyScoped) {
-                separate();
-                WTF::switchOn(*key.propertyScoped,
-                    [&](const Random::Key::PropertyScoped&) {
-                        builder.append(nameLiteralForSerialization(CSSValuePropertyScoped));
-                    },
-                    [&](const Random::Key::PropertyIndexScoped&) {
-                        builder.append(nameLiteralForSerialization(CSSValuePropertyIndexScoped));
-                    }
-                );
-            }
-            // The parser never produces an empty <random-cache-key>.
-            ASSERT(wroteSomething);
-            builder.append(", "_s);
-        },
-        [&](const Random::SharingFixed& fixed) {
-            builder.append(nameLiteralForSerialization(CSSValueFixed), ' ');
-            CSS::serializationForCSS(builder, state.serializationContext, fixed.value);
-            builder.append(", "_s);
-        }
-    );
+    serializeRandomSharing(builder, state.serializationContext, fn->sharing);
 
     serializeCalculationTree(builder, fn->min, state);
     builder.append(", "_s);
@@ -823,43 +830,6 @@ CSS_CALC_SWIFT_FOR_EACH_ALTERNATIVE(CSS_CALC_SWIFT_PIN_ALTERNATIVE)
 // so the `std` spelling instantiates an undefined template.
 static_assert(numberOfCSSCalcSwiftAlternatives == WTF::VariantSizeV<Node>);
 
-static CSSCalcSwiftOperationInfo randomSharingInfo(const Random::Sharing& sharing)
-{
-    CSSCalcSwiftOperationInfo out {
-        .valueID = static_cast<uint16_t>(CSSValueInvalid),
-        .randomSharingIsKey = false,
-        .randomSharingIsFixed = false,
-        .randomKeyHasName = false,
-        .randomKeyIsElementScoped = false,
-        .randomKeyHasPropertyScope = false,
-        .anchorSideIsKeyword = false,
-        .hasElementName = false,
-        .hasDimension = false,
-        .hasFallback = false,
-    };
-    WTF::switchOn(sharing,
-        [&](const Random::SharingAuto&) {
-            // Serializes as omitted; both flags stay false and nothing is written.
-        },
-        [&](const Random::Key& key) {
-            out.randomSharingIsKey = true;
-            out.randomKeyHasName = key.name.has_value();
-            out.randomKeyIsElementScoped = key.elementScoped.has_value();
-            if (key.propertyScoped) {
-                out.randomKeyHasPropertyScope = true;
-                out.valueID = static_cast<uint16_t>(WTF::switchOn(*key.propertyScoped,
-                    [](const Random::Key::PropertyScoped&) { return CSSValuePropertyScoped; },
-                    [](const Random::Key::PropertyIndexScoped&) { return CSSValuePropertyIndexScoped; }
-                ));
-            }
-        },
-        [&](const Random::SharingFixed&) {
-            out.randomSharingIsFixed = true;
-        }
-    );
-    return out;
-}
-
 void CSSCalcSwiftSink::appendCharacters(uint64_t first, uint64_t second, uint8_t length) noexcept
 {
     static_assert(std::endian::native == std::endian::little);
@@ -886,9 +856,9 @@ void CSSCalcSwiftSink::appendValueIDName(uint16_t valueID) noexcept
 }
 
 
-CSSCalcSwiftOperationInfo CSSCalcSwiftSink::randomSharingInfo(uint32_t payload) const noexcept
+void CSSCalcSwiftSink::appendRandomSharing(uint32_t payload) noexcept
 {
-    return CSSCalc::randomSharingInfo(storedPayload<Random::Sharing>(m_payloads, payload));
+    serializeRandomSharing(*m_builder, *m_context, storedPayload<Random::Sharing>(m_payloads, payload));
 }
 
 void CSSCalcSwiftSink::appendPayloadArgument(uint8_t part, uint32_t payload, double weight, bool present) noexcept
@@ -897,24 +867,9 @@ void CSSCalcSwiftSink::appendPayloadArgument(uint8_t part, uint32_t payload, dou
     // argument, over the same typed CSS value, so the two cannot disagree about how a dashed-ident
     // escapes or how a `<number [0,1]>` formats.
     switch (part) {
-    case CSSCalcSwiftOperationPartDashedIdent: {
-        RELEASE_ASSERT(m_payloads && payload < m_payloads->size());
-        const CSS::CustomIdent* ident = nullptr;
-        if (auto* sharing = get_if<Random::Sharing>(&(*m_payloads)[payload])) {
-            auto* key = get_if<Random::Key>(sharing);
-            ident = key && key->name ? &*key->name : nullptr;
-        } else
-            ident = &storedPayload<CSS::CustomIdent>(m_payloads, payload);
-        RELEASE_ASSERT(ident);
-        CSS::serializationForCSS(*m_builder, *m_context, *ident);
+    case CSSCalcSwiftOperationPartDashedIdent:
+        CSS::serializationForCSS(*m_builder, *m_context, storedPayload<CSS::CustomIdent>(m_payloads, payload));
         return;
-    }
-    case CSSCalcSwiftOperationPartRandomFixedValue: {
-        auto* fixed = get_if<Random::SharingFixed>(&storedPayload<Random::Sharing>(m_payloads, payload));
-        RELEASE_ASSERT(fixed);
-        CSS::serializationForCSS(*m_builder, *m_context, fixed->value);
-        return;
-    }
     case CSSCalcSwiftOperationPartCalcMixWeight:
         if (!present)
             return;

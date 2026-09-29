@@ -2054,21 +2054,12 @@ extension CalcNode {
         )
     }
 
-    /// The sharing of a `random()` is read through `sink`, from the payload.
-    func operationInfo(_ sink: borrowing WebCore.CSSCalc.CSSCalcSwiftSink) -> WebCore.CSSCalc.CSSCalcSwiftOperationInfo {
-        if alternative == .Random {
-            return sink.randomSharingInfo(origin)
-        }
-        let isAnchor = alternative == .Anchor
-        let sideIsSubtree = isAnchor && flags & CalcNodeFlags.anchorSideIsSubtree != 0
-        return WebCore.CSSCalc.CSSCalcSwiftOperationInfo(
+    /// What `anchor()` and `anchor-size()` serialize beyond their child subtrees.
+    var operationInfo: CalcOperationInfo {
+        let sideIsSubtree = alternative == .Anchor && flags & CalcNodeFlags.anchorSideIsSubtree != 0
+        return CalcOperationInfo(
             valueID: valueID,
-            randomSharingIsKey: false,
-            randomSharingIsFixed: false,
-            randomKeyHasName: false,
-            randomKeyIsElementScoped: false,
-            randomKeyHasPropertyScope: false,
-            anchorSideIsKeyword: isAnchor && !sideIsSubtree,
+            anchorSideIsKeyword: alternative == .Anchor && !sideIsSubtree,
             hasElementName: origin != calcNoPayload,
             hasDimension: alternative == .AnchorSize && valueID != 0,
             hasFallback: children.count > (sideIsSubtree ? 1 : 0)
@@ -3136,7 +3127,7 @@ extension CalcFold {
         guard let builder else {
             return
         }
-        let resolved = builder.resolveSymbol(node.valueID, UInt16(node.unitType))
+        let resolved = calcResolveSymbol(builder, node.valueID, node.unitType)
         guard resolved.resolved else {
             return
         }
@@ -3845,7 +3836,6 @@ private struct CalcParseState: ~Copyable {
     }
 
     var requiresConversionData = false
-    var declineReason = WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None
     /// Set when the grammar hit something it does not handle, as opposed to invalid input.
     var declined = false
 
@@ -4420,6 +4410,37 @@ private func calcParseSymbol(
     )
 }
 
+/// The symbol table's value with the node's own unit, as `simplify(Symbol&)` folds it.
+///
+/// The alternative is the numeric leaf `makeNumeric` builds for that unit. A unit with no numeric
+/// leaf answers `.Symbol`, which every caller refuses.
+private func calcResolveSymbol(
+    _ builder: borrowing WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ valueID: UInt16,
+    _ unitType: UInt8
+) -> WebCore.CSSCalc.CSSCalcSwiftNumericResult {
+    var result = builder.resolveSymbol(valueID)
+    guard result.resolved else {
+        return result
+    }
+    let alternative =
+        calcNumericAlternativeForLeafKind(WebCore.CSSCalc.cssCalcSwiftLeafKindForUnit(UInt16(unitType))) ?? .Symbol
+    result.alternative = alternative
+    result.unitType = alternative == .Number ? UInt16(WebCore.CSSUnitType.Number.rawValue) : UInt16(unitType)
+    return result
+}
+
+/// `CalcNode.operationInfo`.
+struct CalcOperationInfo {
+    /// The `<anchor-side>` keyword, or the `<anchor-size>`.
+    let valueID: UInt16
+    /// When false, the `<anchor-side>` is a `<percentage>` subtree in child 0.
+    let anchorSideIsKeyword: Bool
+    let hasElementName: Bool
+    let hasDimension: Bool
+    let hasFallback: Bool
+}
+
 /// Which of the four numeric alternatives the answer of `cssCalcSwiftLeafKindForUnit` names.
 @inline(always)
 private func calcNumericAlternativeForLeafKind(_ raw: UInt8) -> WebCore.CSSCalc.CSSCalcSwiftAlternative? {
@@ -4462,7 +4483,6 @@ private func calcParseBlock(
         }
         if cursor.isCalcFunction(token) {
             state.declined = true
-            state.declineReason = calcParseDeclineReasonForFunction(cursor.functionId(token))
         }
         return nil
     }
@@ -4513,21 +4533,6 @@ private enum CalcFunctionArguments: UInt8 {
     /// `random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )`: `consumeRandom`. The
     /// `<random-key>` is not a child; see `calcParseRandom`.
     case random
-}
-
-/// Which `CSSCalcSwiftParseDeclineReason` an unhandled `isCalcFunction` belongs to.
-@inline(never)
-private func calcParseDeclineReasonForFunction(
-    _ functionId: UInt16
-)
-    -> WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason
-{
-    switch functionId {
-    case WebCore.CSSValueSiblingCount.rawValue, WebCore.CSSValueSiblingIndex.rawValue:
-        return .TreeCounting
-    default:
-        return .MathFunction
-    }
 }
 
 /// Which `CSSCalcSwiftAlternative` the `CSSValueID` of a `FunctionToken` names, and how its
@@ -4715,7 +4720,6 @@ private func calcParseZeroArguments(
     }
     if state.conversionDataFoldsRun {
         state.declined = true
-        state.declineReason = .TreeCounting
         return nil
     }
 
@@ -5372,7 +5376,6 @@ private func calcParseAnchor(
     // a `CSSCalc::Child`.
     if state.conversionDataFoldsRun {
         state.declined = true
-        state.declineReason = .AnchorEvaluation
         return nil
     }
 
@@ -5484,7 +5487,6 @@ private func calcParseAnchorSize(
     if !state.options.anchorSizeAllowed { return nil }
     if state.conversionDataFoldsRun {
         state.declined = true
-        state.declineReason = .AnchorEvaluation
         return nil
     }
 
@@ -5560,7 +5562,6 @@ private func calcParseRandom(
     // `simplify(Random&)` evaluates the node through a `CSSCalc::Child`.
     if state.conversionDataFoldsRun {
         state.declined = true
-        state.declineReason = .RandomEvaluation
         return nil
     }
 
@@ -5858,7 +5859,6 @@ public func cssCalcParseSwift(
 
         if attempt.foldRefused {
             outcome.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
-            outcome.declineReason = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.None.rawValue)
             return .none
         }
         outcome.outcome = UInt8(
@@ -5866,7 +5866,6 @@ public func cssCalcParseSwift(
                 ? WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue
                 : WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Failed.rawValue
         )
-        outcome.declineReason = UInt8(state.declineReason.rawValue)
         return .none
     }
 
@@ -5876,7 +5875,6 @@ public func cssCalcParseSwift(
     outcome.consumedTokens = attempt.consumedTokens
     guard let root = attempt.root.take() else {
         outcome.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
-        outcome.declineReason = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseDeclineReason.ContractViolation.rawValue)
         return .none
     }
     return CSSCalcSwiftRoot(root)
@@ -5950,7 +5948,6 @@ private func calcParseAttempt(
         // A top-level math function this grammar does not handle. The range is the function's
         // arguments, so parsing it as a `<calc-sum>` would be wrong.
         state.declined = true
-        state.declineReason = calcParseDeclineReasonForFunction(state.options.rootFunctionId)
         descent = nil
     }
 
@@ -6323,7 +6320,7 @@ private struct CalcEvaluation: ~Copyable {
         // `makeNumeric`, evaluated as the numeric leaf that builds. A miss answers nothing, as the
         // C++ does after its `ASSERT_NOT_REACHED`.
         case .Symbol:
-            let resolved = builder.resolveSymbol(info.valueID, UInt16(info.unitType))
+            let resolved = calcResolveSymbol(builder, info.valueID, info.unitType)
             guard resolved.resolved else {
                 return fail(alternative)
             }
