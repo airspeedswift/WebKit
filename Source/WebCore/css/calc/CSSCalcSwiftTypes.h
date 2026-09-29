@@ -162,9 +162,9 @@ struct SWIFT_SAFE CSSCalcSwiftSink {
     {
     }
 
-    // A `CSSCalcSwiftLiteral`, which this header cannot name because its generated header depends
-    // on this one.
-    WEBCORE_EXPORT void appendLiteral(uint8_t literal) noexcept;
+    // A fixed spelling of `length` characters, packed little-endian into two words. Keywords go
+    // through `appendValueIDName`.
+    WEBCORE_EXPORT void appendCharacters(uint64_t first, uint64_t second, uint8_t length) noexcept;
 
     WEBCORE_EXPORT void appendNumber(double value, uint8_t unitType) noexcept;
 

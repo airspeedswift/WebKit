@@ -51,8 +51,6 @@
 #if USE(SWIFT_CSS)
 #include "WebCoreSwiftBoundaryTypes.h"
 #endif
-#include <atomic>
-#include <bit>
 #include <wtf/StdLibExtras.h>
 #include <wtf/ZippedRange.h>
 
@@ -2065,16 +2063,6 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRelativeLength(double valu
 #endif // USE(SWIFT_CSS)
 
 #if USE(SWIFT_CSS)
-// The `<anchor-size>` dimension as the `CSSValueID` a stored `anchor-size()` carries, the inverse of
-// `cssValueIDToAnchorSizeDimension`.
-static CSSValueID anchorSizeDimensionValueID(Style::AnchorSizeDimension dimension)
-{
-    static constexpr std::array ids { CSSValueWidth, CSSValueHeight, CSSValueBlock, CSSValueInline, CSSValueSelfBlock, CSSValueSelfInline };
-    auto id = ids[static_cast<size_t>(dimension)];
-    ASSERT(cssValueIDToAnchorSizeDimension(id) == dimension);
-    return id;
-}
-
 template<typename Payload> static uint32_t storePayload(CSSCalcSwiftFlatPayloads& payloads, const Payload& payload)
 {
     payloads.append(payload);
@@ -2082,6 +2070,9 @@ template<typename Payload> static uint32_t storePayload(CSSCalcSwiftFlatPayloads
 }
 
 // Push `node` onto `builder`, children first, with its payloads copied into `payloads`.
+//
+// The producers are `Style::Calculation::toCSS` and the Typed OM, neither of which can build a tree
+// counting function or an anchor function, so those refuse.
 static bool storeNode(CSSCalcSwiftStoreBuilder& builder, CSSCalcSwiftFlatPayloads& payloads, const Child& node)
 {
     auto alternative = static_cast<CSSCalcSwiftAlternative>(node.value.index());
@@ -2089,8 +2080,8 @@ static bool storeNode(CSSCalcSwiftStoreBuilder& builder, CSSCalcSwiftFlatPayload
         builder.pushLeaf(alternative, value, static_cast<uint8_t>(unit), percentHint, static_cast<uint16_t>(valueID));
         return true;
     };
-    auto operation = [&](const auto& op, uint32_t count, uint8_t noneMask = 0, CSSValueID valueID = CSSValueInvalid, uint32_t origin = cssCalcSwiftFlatNoNode) {
-        return builder.pushOperation(alternative, count, op.type, noneMask, static_cast<uint16_t>(valueID), origin);
+    auto operation = [&](const auto& op, uint32_t count, uint8_t noneMask = 0, uint32_t origin = cssCalcSwiftFlatNoNode) {
+        return builder.pushOperation(alternative, count, op.type, noneMask, origin);
     };
     auto children = [&](const auto& op) {
         uint32_t count = 0;
@@ -2101,17 +2092,16 @@ static bool storeNode(CSSCalcSwiftStoreBuilder& builder, CSSCalcSwiftFlatPayload
         });
         return ok ? std::optional { count } : std::nullopt;
     };
-    auto elementName = [&](const std::optional<CSS::CustomIdent>& name) {
-        return name ? storePayload(payloads, *name) : cssCalcSwiftFlatNoNode;
-    };
     return WTF::switchOn(node,
         [&](const Number& number) { return leaf(number.value, CSSUnitType::Number); },
         [&](const Percentage& percentage) { return leaf(percentage.value, CSSUnitType::Percentage, percentage.hint ? static_cast<uint8_t>(*percentage.hint) : 0); },
         [&](const CanonicalDimension& dimension) { return leaf(dimension.value, toCSSUnit(dimension)); },
         [&](const NonCanonicalDimension& dimension) { return leaf(dimension.value, dimension.unit); },
         [&](const Symbol& symbol) { return leaf(0, symbol.unit, 0, symbol.id); },
-        [&](const SiblingCount&) { return leaf(0, CSSUnitType::Unknown); },
-        [&](const SiblingIndex&) { return leaf(0, CSSUnitType::Unknown); },
+        [&](const SiblingCount&) { return false; },
+        [&](const SiblingIndex&) { return false; },
+        [&](const IndirectNode<Anchor>&) { return false; },
+        [&](const IndirectNode<AnchorSize>&) { return false; },
         [&](const IndirectNode<CalcMix>& calcMix) {
             for (auto& item : calcMix->children) {
                 if (!storeNode(builder, payloads, item.value))
@@ -2121,22 +2111,9 @@ static bool storeNode(CSSCalcSwiftStoreBuilder& builder, CSSCalcSwiftFlatPayload
             }
             return operation(calcMix, calcMix->children.size() * 2);
         },
-        [&](const IndirectNode<Anchor>& anchor) {
-            auto* sideKeyword = get_if<CSSValueID>(&anchor->side.value);
-            if (!sideKeyword && !storeNode(builder, payloads, get<Child>(anchor->side.value)))
-                return false;
-            if (anchor->fallback && !storeNode(builder, payloads, *anchor->fallback))
-                return false;
-            return operation(anchor, !sideKeyword + anchor->fallback.has_value(), 0, sideKeyword ? *sideKeyword : CSSValueInvalid, elementName(anchor->elementName));
-        },
-        [&](const IndirectNode<AnchorSize>& anchorSize) {
-            if (anchorSize->fallback && !storeNode(builder, payloads, *anchorSize->fallback))
-                return false;
-            return operation(anchorSize, anchorSize->fallback.has_value(), 0, anchorSize->dimension ? anchorSizeDimensionValueID(*anchorSize->dimension) : CSSValueInvalid, elementName(anchorSize->elementName));
-        },
         [&](const IndirectNode<Random>& random) {
             auto count = children(random);
-            return count && operation(random, *count, 0, CSSValueInvalid, storePayload(payloads, random->sharing));
+            return count && operation(random, *count, 0, storePayload(payloads, random->sharing));
         },
         [&](const IndirectNode<Clamp>& clamp) {
             auto count = children(clamp);

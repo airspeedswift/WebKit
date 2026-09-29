@@ -211,50 +211,21 @@ using Node = Variant<
 #undef CSS_CALC_NODE_ALTERNATIVE_REST
 #undef CSS_CALC_NODE_ALTERNATIVE_FIRST
 
-// Size and alignment of `Node`, so that the Swift-facing stand-in for `Child::value` can be declared
-// without naming `Node`. Asserted against the real type in the branch that can see it.
-inline constexpr size_t nodeStorageSize = 24;
-inline constexpr size_t nodeStorageAlignment = 8;
-
-// `Child::value` is hidden from Swift's Clang importer behind same-size opaque storage, for the reason
-// `Children`'s storage is hidden below: each `IndirectNode<Op>` alternative holds a `UniqueRef<Op>`,
-// and a pointer reachable through a data member makes the enclosing type unsafe under
-// -strict-memory-safety. Making the member private would not help, because WebCore's Swift step
-// passes -enable-experimental-feature ImportNonPublicCxxMembers. The template constructor and
-// `FORWARD_VARIANT_FUNCTIONS` name `Node` and `value`, so they are hidden too. `__swift__` is defined
-// only when the importer is parsing the header, so no C++ caller sees a difference.
 struct Child {
-#if !defined(__swift__)
     Node value;
 
     template<typename T>
         requires std::constructible_from<Node, T>
     Child(T&&);
-#else
-    alignas(nodeStorageAlignment) unsigned char storage[nodeStorageSize];
-#endif
 
-    // Deleted so that the importer does not give Swift a zero-argument `init()` that zero-fills the
-    // storage into a `Number`. For C++ the move constructor already suppresses the default one.
-    Child() = delete;
     Child(Child&&);
     Child& operator=(Child&&);
     ~Child();
 
-
-#if !defined(__swift__)
     FORWARD_VARIANT_FUNCTIONS(Child, value)
-#endif
 
     bool operator==(const Child&) const;
 };
-
-#if !defined(__swift__)
-static_assert(sizeof(Node) == nodeStorageSize, "Child's Swift-facing stand-in storage is the wrong size");
-static_assert(alignof(Node) == nodeStorageAlignment, "Child's Swift-facing stand-in storage is the wrong alignment");
-static_assert(sizeof(Child) == nodeStorageSize, "Child holds more than the Node the stand-in accounts for");
-static_assert(alignof(Child) == nodeStorageAlignment, "Child is aligned more strictly than the stand-in");
-#endif
 
 struct ChildOrNone {
     Variant<Child, CSS::Keyword::None> value;
@@ -267,14 +238,7 @@ struct ChildOrNone {
     bool operator==(const ChildOrNone&) const = default;
 };
 
-// `Children`'s storage is hidden from the importer because `WTF::Vector`'s buffer is a raw pointer,
-// which makes every operation holding a `Children` unsafe by containment under -strict-memory-safety.
-// The iterator typedefs and the begin/end family name `Child*`, so they are hidden with it.
-inline constexpr size_t childrenStorageSize = 16;
-inline constexpr size_t childrenStorageAlignment = 8;
-
 struct Children {
-#if !defined(__swift__)
     using iterator = typename Vector<Child>::iterator;
     using reverse_iterator = typename Vector<Child>::reverse_iterator;
     using const_iterator = typename Vector<Child>::const_iterator;
@@ -295,9 +259,6 @@ struct Children {
     const_iterator end() const LIFETIME_BOUND;
     const_reverse_iterator rbegin() const LIFETIME_BOUND;
     const_reverse_iterator rend() const LIFETIME_BOUND;
-#else
-    alignas(childrenStorageAlignment) unsigned char storage[childrenStorageSize];
-#endif
 
     bool isEmpty() const;
     size_t size() const;
@@ -305,15 +266,8 @@ struct Children {
     Child& operator[](size_t i) LIFETIME_BOUND;
     const Child& operator[](size_t i) const LIFETIME_BOUND;
 
-#if !defined(__swift__)
     bool operator==(const Children&) const = default;
-#endif
 };
-
-#if !defined(__swift__)
-static_assert(sizeof(Children) == childrenStorageSize, "Children's Swift-facing stand-in storage is the wrong size");
-static_assert(alignof(Children) == childrenStorageAlignment, "Children's Swift-facing stand-in storage is the wrong alignment");
-#endif
 
 enum class Stage : bool { Specified, Computed };
 
@@ -1002,16 +956,9 @@ TextStream& operator<<(TextStream&, Tree);
 
 // MARK: Construction
 
-// `makeChild`'s indirect half, for a caller that constructs the `Child` in place with
-// `Vector<Child>::constructAndAppend`, which avoids the out-of-line `Child` move constructor.
-template<typename Op> IndirectNode<Op> makeIndirectNode(Op&& op, Type type)
-{
-    return IndirectNode<Op> { type, makeUniqueRef<Op>(WTF::move(op)) };
-}
-
 // Default implementation of ChildConstruction used for all indirect nodes.
 template<typename Op> struct ChildConstruction {
-    static Child make(Op&& op, Type type) { return Child { makeIndirectNode(WTF::move(op), type) }; }
+    static Child make(Op&& op, Type type) { return Child { IndirectNode<Op> { type, makeUniqueRef<Op>(WTF::move(op)) } }; }
 };
 
 // Specialized implementation of ChildConstruction for leaf nodes, needed to avoid `makeUniqueRef`.
@@ -1367,16 +1314,12 @@ template<size_t I> const auto& get(const CalcMix& root)
 
 // MARK: Child Definition
 
-// Hidden alongside the declaration: this names both `Node` and `value`, neither of which exists
-// on the importer's side of the `#if` above.
-#if !defined(__swift__)
 template<typename T>
     requires std::constructible_from<Node, T>
 Child::Child(T&& value)
     : value(std::forward<T>(value))
 {
 }
-#endif
 
 } // namespace CSSCalc
 } // namespace WebCore

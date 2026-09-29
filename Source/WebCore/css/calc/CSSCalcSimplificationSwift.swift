@@ -3722,9 +3722,7 @@ public final class CSSCalcSwiftStoreBuilder {
 
     /// Pop `childCount` nodes and push an operation over them.
     ///
-    /// `noneMask` is that of `clamp()`, as on `CSSCalcSwiftBuilder::buildOperation`. For `anchor()`,
-    /// `valueID` is the `<anchor-side>` keyword, or zero when the side is the first child; for
-    /// `anchor-size()` it is the dimension, or zero. `origin` names an `<anchor-element>` or
+    /// `noneMask` is that of `clamp()`, as on `CSSCalcSwiftBuilder::buildOperation`. `origin` names a
     /// `random()` sharing payload. False, with nothing pushed, when there are fewer than `childCount`
     /// nodes.
     public func pushOperation(
@@ -3732,7 +3730,6 @@ public final class CSSCalcSwiftStoreBuilder {
         _ childCount: UInt32,
         _ cxxType: CxxCalcType,
         _ noneMask: UInt8,
-        _ valueID: UInt16,
         _ origin: UInt32
     ) -> Bool {
         let type = CalcType(cxxType)
@@ -3745,29 +3742,13 @@ public final class CSSCalcSwiftStoreBuilder {
         while k < stack.count {
             children.append(stack.remove(at: k))
         }
-        var flags = UInt16(noneMask) & CalcNodeFlags.clampNoneMask
-        if alternative == .Anchor || alternative == .AnchorSize {
-            let sideSlots = alternative == .Anchor && valueID == 0 ? 1 : 0
-            if sideSlots == 1 {
-                flags |= CalcNodeFlags.anchorSideIsSubtree
-                calcMarkInsideAnchorSide(&children[0])
-            }
-            k = 0
-            while k < children.count {
-                // Not a leaf: if a fold makes it one, `calcRestoreAnchorPrefixes` keeps the `calc()`
-                // the C++ keeps.
-                if !children[k].children.isEmpty {
-                    flags |= k < sideSlots ? CalcNodeFlags.anchorSideWasFunction : CalcNodeFlags.anchorFallbackWasFunction
-                }
-                k &+= 1
-            }
-        }
+        let flags = UInt16(noneMask) & CalcNodeFlags.clampNoneMask
         stack.append(
             CalcNode(
                 value: 0,
                 type: type,
                 origin: origin,
-                valueID: valueID,
+                valueID: 0,
                 unitType: 0,
                 alternative: alternative,
                 percentHint: 0,

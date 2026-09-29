@@ -22,32 +22,37 @@
 // THE POSSIBILITY OF SUCH DAMAGE.
 
 public import WebCore_Private.CSSCalcSwiftTypes
+internal import WebCore_Private.Core
 
 // Swift port of CSSCalcTree+Serialization.cpp, used when WebCore is built with WK_USE_SWIFT_CSS.
-// Operator names and number formatting are C++ upcalls, because CSS number serialization is not
+// Keyword names and number formatting are C++ upcalls, because CSS number serialization is not
 // Swift's shortest-round-trip `Double.description`.
 
-/// Every fixed spelling this file emits, so that C++ owns the characters.
-@c
-enum CSSCalcSwiftLiteral: UInt8 {
-    case calcOpen = 0
-    case openParen = 1
-    case closeParen = 2
-    case emptyParens = 3
-    case plus = 4
-    case minus = 5
-    case times = 6
-    case dividedBy = 7
-    case negateOpen = 8
-    case invertOpen = 9
-    case commaSpace = 10
-    /// Fixed because the four rounding operations differ only by strategy.
-    case roundOpen = 11
-    case noClampOpen = 12
-    case noneKeyword = 13
-    case space = 14
-    case randomFixedPrefix = 15
-    case elementScoped = 16
+extension WebCore.CSSCalc.CSSCalcSwiftSink {
+    /// A fixed spelling, passed as its UTF-8 packed little-endian into two words.
+    ///
+    /// For a literal the optimizer folds the loop to three constants; `text.utf8.span` would instead
+    /// be an out-of-line standard library call per spelling, measured at ~20 instructions.
+    @inline(always)
+    mutating func append(_ text: Swift.String) {
+        var words: (UInt64, UInt64) = (0, 0)
+        var count = 0
+        for byte in text.utf8 {
+            precondition(count < 16, "a fixed spelling longer than two words")
+            if count < 8 {
+                words.0 |= UInt64(byte) << (8 * count)
+            } else {
+                words.1 |= UInt64(byte) << (8 * (count - 8))
+            }
+            count += 1
+        }
+        appendCharacters(words.0, words.1, UInt8(count))
+    }
+
+    /// A keyword, spelled by the generated name table so that there is one place that writes it.
+    mutating func append(keyword id: WebCore.CSSValueID) {
+        appendValueIDName(id.rawValue)
+    }
 }
 
 /// Which non-tree argument of `random()`, `calc-mix()`, `anchor()` or `anchor-size()` an
@@ -310,7 +315,7 @@ private struct CalcSerialization {
 
         case .siblingCount, .siblingIndex:
             sink.appendValueIDName(info.valueID)
-            sink.appendLiteral(CSSCalcSwiftLiteral.emptyParens.rawValue)
+            sink.append("()")
 
         case .transparent:
             // `Deg2Rad` has no CSS spelling, so its child takes its place.
@@ -332,23 +337,23 @@ private struct CalcSerialization {
         case .negate:
             // 4. If root is a Negate node: `(`, `-1 * `, the child, `)`.
             if includeGrouping {
-                sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
+                sink.append("(")
             }
-            sink.appendLiteral(CSSCalcSwiftLiteral.negateOpen.rawValue)
+            sink.append("-1 * ")
             serializeCalculationTree(node[0], includingGroupingParenthesis: true, &sink)
             if includeGrouping {
-                sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+                sink.append(")")
             }
 
         case .invert:
             // 5. If root is an Invert node: `(`, `1 / `, the child, `)`.
             if includeGrouping {
-                sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
+                sink.append("(")
             }
-            sink.appendLiteral(CSSCalcSwiftLiteral.invertOpen.rawValue)
+            sink.append("1 / ")
             serializeCalculationTree(node[0], includingGroupingParenthesis: true, &sink)
             if includeGrouping {
-                sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+                sink.append(")")
             }
 
         case .operation:
@@ -371,17 +376,18 @@ private struct CalcSerialization {
         switch info.kind {
         case .roundFunction:
             // `valueID` is the strategy here, because all four rounding operations share the name.
-            sink.appendLiteral(CSSCalcSwiftLiteral.roundOpen.rawValue)
+            sink.append(keyword: WebCore.CSSValueRound)
+            sink.append("(")
             sink.appendValueIDName(info.valueID)
-            sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+            sink.append(", ")
 
         case .progressNoClampFunction:
             sink.appendValueIDName(info.valueID)
-            sink.appendLiteral(CSSCalcSwiftLiteral.noClampOpen.rawValue)
+            sink.append("(no-clamp ")
 
         default:
             sink.appendValueIDName(info.valueID)
-            sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
+            sink.append("(")
         }
 
         // 4. For each child of the root node, serialize the calculation tree, then concatenate all of
@@ -405,25 +411,25 @@ private struct CalcSerialization {
             let trailingNone = info.kind == .clampWithNoneMaximum || info.kind == .clampWithNoneMinimumAndMaximum
             var index: UInt32 = leadingNone ? 1 : 0
             if leadingNone {
-                sink.appendLiteral(CSSCalcSwiftLiteral.noneKeyword.rawValue)
-                sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+                sink.append(keyword: WebCore.CSSValueNone)
+                sink.append(", ")
                 serializeCalculationTree(node[0], includingGroupingParenthesis: false, &sink)
             }
             while index < info.childCount {
                 if index > 0 {
-                    sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+                    sink.append(", ")
                 }
                 serializeCalculationTree(node[Int(index)], includingGroupingParenthesis: false, &sink)
                 index += 1
             }
             if trailingNone {
-                sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
-                sink.appendLiteral(CSSCalcSwiftLiteral.noneKeyword.rawValue)
+                sink.append(", ")
+                sink.append(keyword: WebCore.CSSValueNone)
             }
         }
 
         // 5. Append ")" to s.
-        sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+        sink.append(")")
     }
 
     /// `random( <random-key>? , <calc-sum>, <calc-sum>, <calc-sum>? )`.
@@ -442,22 +448,23 @@ private struct CalcSerialization {
             }
             if operation.randomKeyIsElementScoped {
                 if wroteSomething {
-                    sink.appendLiteral(CSSCalcSwiftLiteral.space.rawValue)
+                    sink.append(" ")
                 }
-                sink.appendLiteral(CSSCalcSwiftLiteral.elementScoped.rawValue)
+                sink.append(keyword: WebCore.CSSValueElementScoped)
                 wroteSomething = true
             }
             if operation.randomKeyHasPropertyScope {
                 if wroteSomething {
-                    sink.appendLiteral(CSSCalcSwiftLiteral.space.rawValue)
+                    sink.append(" ")
                 }
                 sink.appendValueIDName(operation.valueID)
             }
-            sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+            sink.append(", ")
         } else if operation.randomSharingIsFixed {
-            sink.appendLiteral(CSSCalcSwiftLiteral.randomFixedPrefix.rawValue)
+            sink.append(keyword: WebCore.CSSValueFixed)
+            sink.append(" ")
             sink.appendPayloadArgument(CSSCalcSwiftOperationPart.randomFixedValue.rawValue, node.origin, 0, true)
-            sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+            sink.append(", ")
         }
         // else: `auto`, which serializes as omitted.
 
@@ -465,7 +472,7 @@ private struct CalcSerialization {
         var index: UInt32 = 0
         while index < info.childCount {
             if index > 0 {
-                sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+                sink.append(", ")
             }
             serializeCalculationTree(node[Int(index)], includingGroupingParenthesis: false, &sink)
             index += 1
@@ -483,7 +490,7 @@ private struct CalcSerialization {
         var index: UInt32 = 0
         while index < info.childCount {
             if index > 0 {
-                sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+                sink.append(", ")
             }
             serializeCalculationTree(node[Int(index)], includingGroupingParenthesis: false, &sink)
             let weight = node.calcMixWeight(Int(index))
@@ -507,7 +514,7 @@ private struct CalcSerialization {
 
         if operation.hasElementName {
             sink.appendPayloadArgument(CSSCalcSwiftOperationPart.dashedIdent.rawValue, node.origin, 0, true)
-            sink.appendLiteral(CSSCalcSwiftLiteral.space.rawValue)
+            sink.append(" ")
         }
 
         // The `<anchor-side>`: a keyword, or a `<percentage>` subtree occupying child 0.
@@ -520,7 +527,7 @@ private struct CalcSerialization {
         }
 
         if operation.hasFallback {
-            sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+            sink.append(", ")
             serializeWithoutOmittingPrefix(node[Int(fallbackIndex)], &sink)
         }
     }
@@ -538,14 +545,14 @@ private struct CalcSerialization {
 
         if operation.hasDimension {
             if operation.hasElementName {
-                sink.appendLiteral(CSSCalcSwiftLiteral.space.rawValue)
+                sink.append(" ")
             }
             sink.appendValueIDName(operation.valueID)
         }
 
         if operation.hasFallback {
             if operation.hasElementName || operation.hasDimension {
-                sink.appendLiteral(CSSCalcSwiftLiteral.commaSpace.rawValue)
+                sink.append(", ")
             }
             serializeWithoutOmittingPrefix(node[0], &sink)
         }
@@ -576,7 +583,7 @@ private struct CalcSerialization {
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
         if includeGrouping {
-            sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
+            sink.append("(")
         }
 
         let count = Int(childCount)
@@ -595,7 +602,7 @@ private struct CalcSerialization {
         }
 
         if includeGrouping {
-            sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+            sink.append(")")
         }
     }
 
@@ -609,23 +616,23 @@ private struct CalcSerialization {
         switch childInfo.kind {
         case .negate:
             // 6.1. If child is a Negate node, append " - " and serialize the Negate's child.
-            sink.appendLiteral(CSSCalcSwiftLiteral.minus.rawValue)
+            sink.append(" - ")
             serializeCalculationTree(child[0], includingGroupingParenthesis: true, &sink)
 
         case .number, .percentage, .canonicalDimension, .nonCanonicalDimension:
             // 6.2. If child is a negative numeric value, append " - " and serialize its negation.
             // `-0.0` and NaN are not `< 0`, so both take the " + " branch, as in the C++.
             if childInfo.numericValue < 0 {
-                sink.appendLiteral(CSSCalcSwiftLiteral.minus.rawValue)
+                sink.append(" - ")
                 sink.appendNumber(-childInfo.numericValue, childInfo.unitType)
             } else {
-                sink.appendLiteral(CSSCalcSwiftLiteral.plus.rawValue)
+                sink.append(" + ")
                 sink.appendNumber(childInfo.numericValue, childInfo.unitType)
             }
 
         default:
             // 6.3. Otherwise, append " + " and serialize child.
-            sink.appendLiteral(CSSCalcSwiftLiteral.plus.rawValue)
+            sink.append(" + ")
             serializeCalculationTree(child, includingGroupingParenthesis: true, &sink)
         }
     }
@@ -638,7 +645,7 @@ private struct CalcSerialization {
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
         if includeGrouping {
-            sink.appendLiteral(CSSCalcSwiftLiteral.openParen.rawValue)
+            sink.append("(")
         }
 
         let count = Int(childCount)
@@ -656,7 +663,7 @@ private struct CalcSerialization {
         }
 
         if includeGrouping {
-            sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+            sink.append(")")
         }
     }
 
@@ -667,11 +674,11 @@ private struct CalcSerialization {
     ) {
         if child.info.kind == .invert {
             // 7.1. If child is an Invert node, append " / " and serialize the Invert's child.
-            sink.appendLiteral(CSSCalcSwiftLiteral.dividedBy.rawValue)
+            sink.append(" / ")
             serializeCalculationTree(child[0], includingGroupingParenthesis: true, &sink)
         } else {
             // 7.2. Otherwise, append " * " and serialize child.
-            sink.appendLiteral(CSSCalcSwiftLiteral.times.rawValue)
+            sink.append(" * ")
             serializeCalculationTree(child, includingGroupingParenthesis: true, &sink)
         }
     }
@@ -696,30 +703,30 @@ private struct CalcSerialization {
                 sink.appendNumber(clampValue(info.numericValue), info.unitType)
                 return
             }
-            sink.appendLiteral(CSSCalcSwiftLiteral.calcOpen.rawValue)
+            sink.append("calc(")
             sink.appendNumber(info.numericValue, info.unitType)
-            sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+            sink.append(")")
 
         case .symbol:
-            sink.appendLiteral(CSSCalcSwiftLiteral.calcOpen.rawValue)
+            sink.append("calc(")
             sink.appendValueIDName(info.valueID)
-            sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+            sink.append(")")
 
         case .siblingCount, .siblingIndex:
             sink.appendValueIDName(info.valueID)
-            sink.appendLiteral(CSSCalcSwiftLiteral.emptyParens.rawValue)
+            sink.append("()")
 
         case .sum:
             // 3. The prefix for a calc-operator node is "calc(". 4. Its argument is the calculation
             // tree with the grouping parenthesis omitted.
-            sink.appendLiteral(CSSCalcSwiftLiteral.calcOpen.rawValue)
+            sink.append("calc(")
             serializeSum(node, info.childCount, includingGroupingParenthesis: false, &sink)
-            sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+            sink.append(")")
 
         case .product:
-            sink.appendLiteral(CSSCalcSwiftLiteral.calcOpen.rawValue)
+            sink.append("calc(")
             serializeProduct(node, info.childCount, includingGroupingParenthesis: false, &sink)
-            sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+            sink.append(")")
 
         case .function, .roundFunction, .progressNoClampFunction,
             .clampWithNoneMinimum, .clampWithNoneMaximum, .clampWithNoneMinimumAndMaximum,
@@ -731,9 +738,9 @@ private struct CalcSerialization {
             // Steps 3 and 4 make `Negate(1px)` at the root `calc(-1 * 1px)`. This deliberately differs
             // from the C++ serializer, which drops the root's `-1 * ` or `1 / ` and emits `calc(1px)`,
             // a different value.
-            sink.appendLiteral(CSSCalcSwiftLiteral.calcOpen.rawValue)
+            sink.append("calc(")
             serializeCalculationTree(node, includingGroupingParenthesis: false, &sink)
-            sink.appendLiteral(CSSCalcSwiftLiteral.closeParen.rawValue)
+            sink.append(")")
 
         case .transparent:
             // `Deg2Rad` has no CSS spelling, so whether `calc(` appears is the child's decision.
