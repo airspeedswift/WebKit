@@ -4376,17 +4376,28 @@ private func calcParseKeyword(
         }
     }
 
-    let constant = WebCore.CSSCalc.cssCalcSwiftLookupConstantNumber(cursor.id(token))
-    guard constant.resolved else { return nil }
+    guard let constant = calcConstantNumber(cursor.id(token)) else { return nil }
     guard
         let me = calcParseLeaf(
             .Number,
-            constant.value,
+            constant,
             UInt16(WebCore.CSSUnitType.Number.rawValue),
             0
         )
     else { return nil }
     return CalcParsed(node: me, type: CalcType())
+}
+
+/// `<calc-keyword>`'s numeric constants, `lookupConstantNumber` in CSSCalcTree+Parser.cpp.
+private func calcConstantNumber(_ valueID: UInt16) -> Double? {
+    switch valueID {
+    case WebCore.CSSValueE.rawValue: return M_E
+    case WebCore.CSSValuePi.rawValue: return Double.pi
+    case WebCore.CSSValueInfinity.rawValue: return Double.infinity
+    case WebCore.CSSValueNegativeInfinity.rawValue: return -Double.infinity
+    case WebCore.CSSValueNaN.rawValue: return Double.nan
+    default: return nil
+    }
 }
 
 @inline(always)
