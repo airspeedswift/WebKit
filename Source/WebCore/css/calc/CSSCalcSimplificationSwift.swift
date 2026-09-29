@@ -6495,89 +6495,1079 @@ public func cssCalcEvaluateSwift(
     )
 }
 
-// MARK: - Conversion to `Style::Calculation::Tree`
+// MARK: - `Style::Calculation::Tree`, stored as the Swift tree
+//
+// A style calculation is a calc() tree in which everything but percentages has been resolved
+// (StyleCalculationTree.h). It is stored as the `CalcNode` tree a `CSSCalc::Tree` stores, restricted
+// to what a style calculation holds, so its storage, copies and walks are the ones CSS calc() has:
+//
+//   `Number`       `.Number`
+//   `Percentage`   `.Percentage`; its percent hint is not read
+//   `Dimension`    `.CanonicalDimension`; its unit is not read, `toCSS` writes the category's
+//   `Size`         `.Symbol` `size` in px, as `toCSS(const Size&)` writes it
+//   `Random`       `.Random` over min, max and an optional step, with its `Fixed` base value in
+//                  `value` and no payload
+//   `CalcMix`      `.CalcMix`, each item's value followed by a weight node, as in a CSS tree, whose
+//                  `value` is the resolved percentage
+//   the rest       their CSS alternatives, `clamp()`'s `none` bounds in `flags`
+//
+// Every node's `type` is empty. Nothing reads a style calculation's type; `toCSS` computes one.
+// A stored tree is never mutated, so every C++ copy of a `Child` shares it.
 
-/// `toStyle(const CSSCalc::Child&)` (StyleCalculationTree+Conversion.cpp), over the simplified
-/// tree, onto the operand stack of `builder`.
+private let styleCalcNumberUnit = UInt8(WebCore.CSSUnitType.Number.rawValue)
+private let styleCalcPercentageUnit = UInt8(WebCore.CSSUnitType.Percentage.rawValue)
+private let styleCalcDimensionUnit = UInt8(WebCore.CSSUnitType.Px.rawValue)
+private let styleCalcSizeValueID = UInt16(WebCore.CSSValueSize.rawValue)
+
+@inline(always)
+private func styleCalcLeaf(
+    _ alternative: CalcAlternative,
+    _ value: Double,
+    _ unitType: UInt8,
+    valueID: UInt16 = 0,
+    flags: UInt16 = 0
+) -> CalcNode {
+    CalcNode(
+        value: value,
+        type: CalcType(),
+        origin: calcNoPayload,
+        valueID: valueID,
+        unitType: unitType,
+        alternative: alternative,
+        percentHint: 0,
+        flags: flags,
+        children: UniqueArray()
+    )
+}
+
+@inline(always)
+private func styleCalcOperation(
+    _ alternative: CalcAlternative,
+    _ children: consuming UniqueArray<CalcNode>,
+    value: Double = 0,
+    flags: UInt16 = 0
+) -> CalcNode {
+    CalcNode(
+        value: value,
+        type: CalcType(),
+        origin: calcNoPayload,
+        valueID: 0,
+        unitType: 0,
+        alternative: alternative,
+        percentHint: 0,
+        flags: flags,
+        children: children
+    )
+}
+
+@inline(always)
+private func styleCalcNumber(_ value: Double) -> CalcNode {
+    styleCalcLeaf(.Number, value, styleCalcNumberUnit)
+}
+
+@inline(always)
+private func styleCalcPercentage(_ value: Double) -> CalcNode {
+    styleCalcLeaf(.Percentage, value, styleCalcPercentageUnit)
+}
+
+@inline(always)
+private func styleCalcDimension(_ value: Double) -> CalcNode {
+    styleCalcLeaf(.CanonicalDimension, value, styleCalcDimensionUnit)
+}
+
+@inline(always)
+private func styleCalcSize() -> CalcNode {
+    styleCalcLeaf(.Symbol, 0, styleCalcDimensionUnit, valueID: styleCalcSizeValueID)
+}
+
+/// A `calc-mix()` item's weight.
+@inline(always)
+private func styleCalcWeight(_ weight: Double) -> CalcNode {
+    styleCalcLeaf(.Percentage, weight, styleCalcPercentageUnit, flags: CalcNodeFlags.calcMixWeightPresent)
+}
+
+@inline(always)
+private func styleCalcPair(_ alternative: CalcAlternative, _ a: consuming CalcNode, _ b: consuming CalcNode) -> CalcNode {
+    var children = UniqueArray<CalcNode>(capacity: 2)
+    children.append(a)
+    children.append(b)
+    return styleCalcOperation(alternative, children)
+}
+
+extension CalcNode {
+    /// The stride over `children` that visits operands only: a `calc-mix()`'s weights are not.
+    @inline(always)
+    fileprivate var styleCalcOperandStride: Int { alternative == .CalcMix ? 2 : 1 }
+}
+
+// MARK: Conversion from a simplified `CSSCalc::Tree`
+
+/// `toStyle(const CSSCalc::Child&)`, over the simplified tree, in place.
 ///
-/// False only for a builder contract violation.
-///
-/// The order is the C++'s, because two steps read caches with side effects: a `random()`'s base
+/// The order is the C++'s, because two upcalls read caches with side effects: a `random()`'s base
 /// value is resolved before its arguments, and each `calc-mix()` item's weight before its value.
-private func calcToStyle(
-    _ node: borrowing CalcNode,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftStyleBuilder
-) -> Bool {
-    let info = node.info
-    let count = Int(info.childCount)
-    let alternative = info.alternative
-    switch alternative {
-    case .Number:
-        builder.pushNumber(info.numericValue)
-        return true
-    case .Percentage:
-        builder.pushPercentage(info.numericValue)
-        return true
-    case .CanonicalDimension:
-        builder.pushCanonicalDimension(info.numericValue, UInt16(info.unitType))
-        return true
-    case .Symbol where info.valueID == UInt16(WebCore.CSSValueSize.rawValue):
-        builder.pushSize()
-        return true
+private struct StyleCalcConversion: ~Copyable {
+    let builder: WebCore.CSSCalc.CSSCalcSwiftBuilder
+    /// An upcall answered nothing where the C++ conversion has no failure path.
+    var failed = false
 
-    // Resolved by simplification with conversion data, so never present here. The C++ asserts and
-    // answers the number 0 without converting any argument.
-    case .NonCanonicalDimension, .Symbol, .SiblingCount, .SiblingIndex, .Anchor, .AnchorSize:
-        builder.pushNumber(0)
-        return true
+    init(builder: WebCore.CSSCalc.CSSCalcSwiftBuilder) {
+        self.builder = builder
+    }
 
-    // The style tree has no `Deg2Rad` node.
-    case .Deg2Rad:
-        guard count == 1, calcToStyle(node[0], &builder) else {
-            return false
-        }
-        builder.pushNumber(Double.pi / 180.0)
-        return builder.buildOperation(.Product, 2, 0)
-    case .Random:
-        builder.pushRandomBaseValue(node.origin)
-    case .CalcMix:
-        var k = 0
-        while k < count {
-            let weight = node.calcMixWeight(k)
-            builder.pushCalcMixItemWeight(weight.value, weight.present, node.calcMixWeightPayload(k))
-            guard calcToStyle(node[k], &builder) else {
-                return false
+    /// `resolveLength(value, Px, ...)` of a canonical length, which without conversion data is the
+    /// value itself; any other canonical dimension as it is.
+    @inline(always)
+    func dimensionValue(_ node: borrowing CalcNode) -> Double {
+        if node.unitType == styleCalcDimensionUnit {
+            let resolved = builder.resolveRelativeLength(node.value, UInt16(node.unitType))
+            if resolved.resolved {
+                return resolved.value
             }
-            k += 1
         }
-        return builder.buildOperation(alternative, info.childCount, 0)
+        return node.value
+    }
+
+    mutating func convert(_ node: inout CalcNode) {
+        let origin = node.origin
+        // Nothing a style calculation reads is left behind: its type, a parse's payload index and
+        // bookkeeping flags.
+        node.type = CalcType()
+        node.origin = calcNoPayload
+        node.flags &= CalcNodeFlags.clampNoneMask
+        switch node.alternative {
+        case .Number, .Percentage:
+            return
+        case .CanonicalDimension:
+            node.value = dimensionValue(node)
+        case .Symbol where node.valueID == styleCalcSizeValueID:
+            return
+
+        // Resolved by simplification with conversion data, so never present here. The C++ asserts
+        // and answers the number 0 without converting any argument.
+        case .NonCanonicalDimension, .Symbol, .SiblingCount, .SiblingIndex, .Anchor, .AnchorSize:
+            node = styleCalcNumber(0)
+
+        // The style tree has no `Deg2Rad` node.
+        case .Deg2Rad:
+            guard node.children.count == 1 else {
+                failed = true
+                return
+            }
+            var angle = node.children.remove(at: 0)
+            convert(&angle)
+            node = styleCalcPair(.Product, angle, styleCalcNumber(Double.pi / 180.0))
+
+        case .Random:
+            // `resolveRandomFixed`: a `fixed` value, or the cache's base value, which is 0 where the
+            // cache has none (`value_or(0)`). Only a missing builder state fails, where the C++
+            // dereferences it.
+            let base = builder.resolveRandomBaseValue(origin, true)
+            guard base.resolved || builder.hasStyleBuilderState() else {
+                failed = true
+                return
+            }
+            node.value = base.resolved ? base.value : 0
+            var k = 0
+            while k < node.children.count {
+                convert(&node.children[k])
+                k &+= 1
+            }
+
+        case .CalcMix:
+            let items = node.children.count / 2
+            var k = 0
+            while k < items {
+                let stored = node.calcMixWeight(k)
+                let weight = builder.resolveCalcMixWeight(stored.value, stored.present, node.calcMixWeightPayload(k))
+                // A `calc-mix()` that survives simplification has a weight on every item.
+                guard weight.resolved, !weight.substituteFallback else {
+                    failed = true
+                    return
+                }
+                convert(&node.children[k &* 2])
+                node.children[k &* 2 &+ 1] = styleCalcWeight(weight.value)
+                k &+= 1
+            }
+
+        default:
+            var k = 0
+            while k < node.children.count {
+                convert(&node.children[k])
+                k &+= 1
+            }
+        }
+    }
+}
+
+/// `toStyle(const CSSCalc::Tree&)`: `copyAndSimplify` with `builder`'s options, then the conversion,
+/// as one tree.
+///
+/// `converted` is false, and the root means nothing, if the simplifier declined or an upcall failed.
+@_expose(Cxx)
+public func cssCalcToStyleSwift(
+    _ root: CSSCalcSwiftRoot,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
+    _ converted: inout Bool
+) -> CSSCalcSwiftRoot {
+    converted = true
+    let box = root
+    var conversion = StyleCalcConversion(builder: builder)
+    // `simplify` of these three leaves is a no-op, and a style calculation reads no leaf's unit or
+    // percent hint, so a leaf root is shared unless a length resolves to a new value.
+    switch box.root.alternative {
+    case .Number, .Percentage:
+        return copy root
+    case .CanonicalDimension:
+        let value = conversion.dimensionValue(box.root)
+        if value.bitPattern == box.root.value.bitPattern {
+            return copy root
+        }
+        return CSSCalcSwiftRoot(styleCalcDimension(value))
     default:
         break
     }
 
-    var k = 0
-    while k < count {
-        guard calcToStyle(node[k], &builder) else {
-            return false
-        }
-        k += 1
+    let simplification = CalcSimplification(
+        percentageResolveToDimension: options.percentageResolveToDimension,
+        allowZeroValueLengthRemovalFromSum: options.allowZeroValueLengthRemovalFromSum,
+        category: options.category,
+        hasConversionData: options.hasConversionData
+    )
+    var tree = box.root.clone()
+    var fold = CalcFold(options: simplification, builder: builder, refoldsStoredTree: true)
+    guard fold.simplifyParsed(&tree, true), !fold.declined else {
+        converted = false
+        return .none
     }
-    let noneMask: UInt8
-    switch info.kind {
-    case .clampWithNoneMinimum: noneMask = 1
-    case .clampWithNoneMaximum: noneMask = 2
-    case .clampWithNoneMinimumAndMaximum: noneMask = 3
-    default: noneMask = 0
+    conversion.convert(&tree)
+    guard !conversion.failed else {
+        converted = false
+        return .none
     }
-    return builder.buildOperation(alternative, info.childCount, noneMask)
+    return CSSCalcSwiftRoot(tree)
 }
 
-/// Convert a simplified tree to a `Style::Calculation::Tree`, left as the one operand on `builder`.
+// MARK: Construction
+
 @_expose(Cxx)
-public func cssCalcToStyleSwift(
-    _ stored: CSSCalcSwiftRoot,
-    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftStyleBuilder
-) -> Bool {
-    let box = stored
-    return calcToStyle(box.root, &builder)
+public func styleCalcNumberSwift(_ value: Double) -> CSSCalcSwiftRoot {
+    CSSCalcSwiftRoot(styleCalcNumber(value))
+}
+
+@_expose(Cxx)
+public func styleCalcPercentageSwift(_ value: Double) -> CSSCalcSwiftRoot {
+    CSSCalcSwiftRoot(styleCalcPercentage(value))
+}
+
+@_expose(Cxx)
+public func styleCalcDimensionSwift(_ value: Double) -> CSSCalcSwiftRoot {
+    CSSCalcSwiftRoot(styleCalcDimension(value))
+}
+
+@_expose(Cxx)
+public func styleCalcSizeSwift() -> CSSCalcSwiftRoot {
+    CSSCalcSwiftRoot(styleCalcSize())
+}
+
+/// `add`: `Sum { a, b }`.
+@_expose(Cxx)
+public func styleCalcAddSwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
+    CSSCalcSwiftRoot(styleCalcPair(.Sum, a.root.clone(), b.root.clone()))
+}
+
+/// `multiply`: `Product { a, b }`.
+@_expose(Cxx)
+public func styleCalcMultiplySwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
+    CSSCalcSwiftRoot(styleCalcPair(.Product, a.root.clone(), b.root.clone()))
+}
+
+/// `subtract`: `Sum { a, Negate { b } }`.
+@_expose(Cxx)
+public func styleCalcSubtractSwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
+    var negated = UniqueArray<CalcNode>(capacity: 1)
+    negated.append(b.root.clone())
+    return CSSCalcSwiftRoot(styleCalcPair(.Sum, a.root.clone(), styleCalcOperation(.Negate, negated)))
+}
+
+/// `blend`: `Sum { Product { from, 1 - progress }, Product { to, progress } }`, built in one call.
+@_expose(Cxx)
+public func styleCalcBlendSwift(_ from: CSSCalcSwiftRoot, _ to: CSSCalcSwiftRoot, _ progress: Double) -> CSSCalcSwiftRoot {
+    CSSCalcSwiftRoot(
+        styleCalcPair(
+            .Sum,
+            styleCalcPair(.Product, from.root.clone(), styleCalcNumber(1 - progress)),
+            styleCalcPair(.Product, to.root.clone(), styleCalcNumber(progress))
+        )
+    )
+}
+
+// MARK: Rewriting
+
+/// A copy of `node` in which every operand leaf `replace` answers for is replaced. A weight node is
+/// not an operand.
+private func styleCalcReplacingLeaves(
+    _ node: borrowing CalcNode,
+    _ replace: (borrowing CalcNode) -> CalcNode?
+) -> CalcNode {
+    if node.children.isEmpty {
+        if let replaced = replace(node) {
+            return replaced
+        }
+        return node.clone()
+    }
+    var children = UniqueArray<CalcNode>(capacity: node.children.count)
+    let stride = node.styleCalcOperandStride
+    var k = 0
+    while k < node.children.count {
+        if stride == 2 && k & 1 == 1 {
+            children.append(node.children[k].clone())
+        } else {
+            children.append(styleCalcReplacingLeaves(node.children[k], replace))
+        }
+        k &+= 1
+    }
+    return CalcNode(
+        value: node.value,
+        type: node.type,
+        origin: node.origin,
+        valueID: node.valueID,
+        unitType: node.unitType,
+        alternative: node.alternative,
+        percentHint: node.percentHint,
+        flags: node.flags,
+        children: children
+    )
+}
+
+private func styleCalcCountSize(_ node: borrowing CalcNode) -> Int {
+    if node.alternative == .Symbol {
+        return 1
+    }
+    var total = 0
+    let stride = node.styleCalcOperandStride
+    var k = 0
+    while k < node.children.count {
+        total += styleCalcCountSize(node.children[k])
+        k &+= stride
+    }
+    return total
+}
+
+private func styleCalcNodeCount(_ node: borrowing CalcNode) -> Int {
+    var total = 1
+    let stride = node.styleCalcOperandStride
+    var k = 0
+    while k < node.children.count {
+        total += styleCalcNodeCount(node.children[k])
+        k &+= stride
+    }
+    return total
+}
+
+/// `computeDepth`: a leaf is 1.
+private func styleCalcDepth(_ node: borrowing CalcNode) -> Int {
+    var deepest = 0
+    let stride = node.styleCalcOperandStride
+    var k = 0
+    while k < node.children.count {
+        deepest = Swift.max(deepest, styleCalcDepth(node.children[k]))
+        k &+= stride
+    }
+    return deepest + 1
+}
+
+private func styleCalcContains(_ node: borrowing CalcNode, _ alternative: CalcAlternative) -> Bool {
+    if node.children.isEmpty {
+        return node.alternative == alternative
+    }
+    let stride = node.styleCalcOperandStride
+    var k = 0
+    while k < node.children.count {
+        if styleCalcContains(node.children[k], alternative) {
+            return true
+        }
+        k &+= stride
+    }
+    return false
+}
+
+/// `substituteSize`: every `size` replaced with `insertion`. `substituted` is false if the result
+/// would have more than `maximumNodeCount` nodes or be deeper than `maximumDepth`.
+@_expose(Cxx)
+public func styleCalcSubstituteSizeSwift(
+    _ tree: CSSCalcSwiftRoot,
+    _ insertion: CSSCalcSwiftRoot,
+    _ maximumNodeCount: Int,
+    _ maximumDepth: Int,
+    _ substituted: inout Bool
+) -> CSSCalcSwiftRoot {
+    substituted = true
+    let occurrences = styleCalcCountSize(tree.root)
+    if occurrences == 0 {
+        return copy tree
+    }
+    // Avoid constructing an oversized tree in the first place.
+    let predictedNodeCount = styleCalcNodeCount(tree.root) - occurrences + occurrences * styleCalcNodeCount(insertion.root)
+    guard predictedNodeCount <= maximumNodeCount else {
+        substituted = false
+        return .none
+    }
+    let result = styleCalcReplacingLeaves(tree.root) { leaf in
+        leaf.alternative == .Symbol ? insertion.root.clone() : nil
+    }
+    guard styleCalcDepth(result) <= maximumDepth else {
+        substituted = false
+        return .none
+    }
+    return CSSCalcSwiftRoot(result)
+}
+
+/// `dePercentify`: every percentage P replaced with `size * (P / 100)`.
+@_expose(Cxx)
+public func styleCalcDePercentifySwift(_ tree: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
+    CSSCalcSwiftRoot(
+        styleCalcReplacingLeaves(tree.root) { leaf in
+            leaf.alternative == .Percentage ? styleCalcPair(.Product, styleCalcSize(), styleCalcNumber(leaf.value / 100.0)) : nil
+        }
+    )
+}
+
+// MARK: Queries
+
+@_expose(Cxx)
+public func styleCalcContainsSizeSwift(_ tree: CSSCalcSwiftRoot) -> Bool {
+    styleCalcContains(tree.root, .Symbol)
+}
+
+@_expose(Cxx)
+public func styleCalcContainsPercentageSwift(_ tree: CSSCalcSwiftRoot) -> Bool {
+    styleCalcContains(tree.root, .Percentage)
+}
+
+@_expose(Cxx)
+public func styleCalcNodeCountSwift(_ tree: CSSCalcSwiftRoot) -> Int {
+    styleCalcNodeCount(tree.root)
+}
+
+@_expose(Cxx)
+public func styleCalcDepthSwift(_ tree: CSSCalcSwiftRoot) -> Int {
+    styleCalcDepth(tree.root)
+}
+
+/// Whether two operations are equal, their operands compared by `styleCalcOperandsEqual`.
+///
+/// What the C++ defaulted comparisons compare, and no more: a leaf's value (so a NaN is unequal to
+/// itself), `random()`'s `Fixed`, `clamp()`'s `none` bounds, and the operands. A `calc-mix()` weight
+/// node is a percentage leaf, so its value is compared as one.
+@inline(never)
+private func styleCalcNodesEqual(_ a: borrowing CalcNode, _ b: borrowing CalcNode) -> Bool {
+    guard a.children.count == b.children.count else {
+        return false
+    }
+    switch a.alternative {
+    case .Random:
+        guard a.value == b.value else {
+            return false
+        }
+    case .Clamp:
+        guard a.flags & CalcNodeFlags.clampNoneMask == b.flags & CalcNodeFlags.clampNoneMask else {
+            return false
+        }
+    default:
+        break
+    }
+    var k = 0
+    while k < a.children.count {
+        guard styleCalcOperandsEqual(a, b, k) else {
+            return false
+        }
+        k &+= 1
+    }
+    return true
+}
+
+/// Child `k` of `a` against child `k` of `b`, a leaf compared inline and field by field, as
+/// `StyleCalcEvaluation.child` reads one.
+@inline(always)
+private func styleCalcOperandsEqual(_ a: borrowing CalcNode, _ b: borrowing CalcNode, _ k: Int) -> Bool {
+    let alternative = a.children[k].alternative
+    guard alternative == b.children[k].alternative else {
+        return false
+    }
+    switch alternative {
+    case .Number, .Percentage, .CanonicalDimension:
+        return a.children[k].value == b.children[k].value
+    case .Symbol:
+        return true
+    default:
+        return styleCalcNodesEqual(a.children[k], b.children[k])
+    }
+}
+
+/// `Child::operator==`. Structural even when `a` and `b` are one tree, as the C++'s is.
+@_expose(Cxx)
+public func styleCalcRootsEqualSwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> Bool {
+    let alternative = a.root.alternative
+    guard alternative == b.root.alternative else {
+        return false
+    }
+    switch alternative {
+    case .Number, .Percentage, .CanonicalDimension:
+        return a.root.value == b.root.value
+    case .Symbol:
+        return true
+    default:
+        return styleCalcNodesEqual(a.root, b.root)
+    }
+}
+
+// MARK: Evaluation
+
+/// `evaluate(const Tree&, const EvaluationOptions&)`. Nothing is allocated.
+private struct StyleCalcEvaluation {
+    let percentResolutionLength: Double
+    let usedZoom: Double
+    let sizeResolutionLength: Double
+
+    /// Operand `k` of `node`. A leaf is evaluated here, inline in its parent and read field by field
+    /// (borrowing the whole node copies all of it), and an operation out of line, so a leaf costs its
+    /// loads and not the operation switch's frame.
+    @inline(always)
+    func child(_ node: borrowing CalcNode, _ k: Int) -> Double {
+        switch node.children[k].alternative {
+        // A number is dimensionless, so zoom does not apply.
+        case .Number:
+            return node.children[k].value
+        case .Percentage:
+            return percentResolutionLength * node.children[k].value / 100.0
+        case .CanonicalDimension:
+            return node.children[k].value * usedZoom
+        // `size`: already a used value, so no zoom applies.
+        case .Symbol:
+            return sizeResolutionLength
+        default:
+            return evaluateOperation(node.children[k])
+        }
+    }
+
+    /// The four arithmetic operators, which is most of what a style calculation holds, in a frame
+    /// small enough not to spill; every function in `evaluateFunction`.
+    @inline(never)
+    func evaluateOperation(_ node: borrowing CalcNode) -> Double {
+        let count = node.children.count
+        switch node.alternative {
+        // The executors' folds, as `CalcEvaluation` has them.
+        case .Sum:
+            var sum: Double = 0
+            for k in 0..<count {
+                sum += child(node, k)
+            }
+            return sum
+        case .Product:
+            var product: Double = 1
+            for k in 0..<count {
+                product *= child(node, k)
+            }
+            return product
+        case .Negate:
+            return -child(node, 0)
+        case .Invert:
+            return CalcExecutor.invert(child(node, 0))
+        default:
+            return evaluateFunction(node)
+        }
+    }
+
+    @inline(never)
+    func evaluateFunction(_ node: borrowing CalcNode) -> Double {
+        let count = node.children.count
+        switch node.alternative {
+        case .Min, .Max:
+            let isMin = node.alternative == .Min
+            var result: Double? = nil
+            var sawNaN = false
+            for k in 0..<count {
+                let value = child(node, k)
+                if let current = result {
+                    if !sawNaN {
+                        if value.isNaN {
+                            result = value
+                            sawNaN = true
+                        } else {
+                            result = isMin ? CalcExecutor.minWithSignedZero(current, value) : CalcExecutor.maxWithSignedZero(current, value)
+                        }
+                    }
+                } else {
+                    result = value
+                }
+            }
+            return result ?? Double.nan
+        case .Hypot:
+            var sumOfSquares: Double = 0
+            var only: Double = 0
+            for k in 0..<count {
+                let value = child(node, k)
+                sumOfSquares += value * value
+                only = value
+            }
+            switch count {
+            case 0: return Double.nan
+            case 1: return CalcExecutor.abs(only)
+            default: return CalcExecutor.sqrt(sumOfSquares)
+            }
+
+        case .Sin:
+            return CalcExecutor.sin(child(node, 0))
+        case .Cos:
+            return CalcExecutor.cos(child(node, 0))
+        case .Tan:
+            return CalcExecutor.tan(child(node, 0))
+        case .Asin:
+            return CalcExecutor.asin(child(node, 0))
+        case .Acos:
+            return CalcExecutor.acos(child(node, 0))
+        case .Atan:
+            return CalcExecutor.atan(child(node, 0))
+        case .Sqrt:
+            return CalcExecutor.sqrt(child(node, 0))
+        case .Exp:
+            return CalcExecutor.exp(child(node, 0))
+        case .Abs:
+            return CalcExecutor.abs(child(node, 0))
+        case .Sign:
+            return CalcExecutor.sign(child(node, 0))
+
+        case .Atan2, .Pow, .Mod, .Rem:
+            let x = child(node, 0)
+            let y = child(node, 1)
+            switch node.alternative {
+            case .Atan2: return CalcExecutor.atan2(x, y)
+            case .Pow: return CalcExecutor.pow(x, y)
+            case .Mod: return CalcExecutor.mod(x, y)
+            default: return CalcExecutor.rem(x, y)
+            }
+
+        case .Progress, .ProgressNoClamp:
+            let x = child(node, 0)
+            let y = child(node, 1)
+            let z = child(node, 2)
+            return node.alternative == .Progress ? CalcExecutor.progress(x, y, z) : CalcExecutor.progressNoClamp(x, y, z)
+
+        // The second operand of `round()` and `log()` is present when there are two.
+        case .RoundNearest, .RoundUp, .RoundDown, .RoundToZero, .Log:
+            let x = child(node, 0)
+            let second: Double? = count == 2 ? child(node, 1) : nil
+            switch node.alternative {
+            case .RoundNearest: return CalcExecutor.roundNearest(x, second ?? 1.0)
+            case .RoundUp: return CalcExecutor.roundUp(x, second ?? 1.0)
+            case .RoundDown: return CalcExecutor.roundDown(x, second ?? 1.0)
+            case .RoundToZero: return CalcExecutor.roundToZero(x, second ?? 1.0)
+            default:
+                if let second {
+                    return CalcExecutor.log(x, second)
+                }
+                return CalcExecutor.log(x)
+            }
+
+        case .Random:
+            let minimum = child(node, 0)
+            let maximum = child(node, 1)
+            let step: Double? = count == 3 ? child(node, 2) : nil
+            return CalcExecutor.random(node.value, minimum, maximum, step)
+
+        // `OperatorExecutor<Operator::CalcMix>`: a running sum from `+0` of `value * (weight / 100)`.
+        case .CalcMix:
+            var total: Double = 0
+            var k = 0
+            while k + 1 < count {
+                total += child(node, k) * (node.children[k + 1].value / 100)
+                k += 2
+            }
+            return total
+
+        // A `none` bound is not a child. `clamp(none, VAL, none)` is `VAL`, `clamp(none, VAL, MAX)`
+        // the two-operand `min()`, `clamp(MIN, VAL, none)` the two-operand `max()`.
+        case .Clamp:
+            let minimumIsNone = node.flags & CalcNodeFlags.clampNoneMinimum != 0
+            let maximumIsNone = node.flags & CalcNodeFlags.clampNoneMaximum != 0
+            var next = 0
+            var minimum: Double? = nil
+            if !minimumIsNone {
+                minimum = child(node, 0)
+                next = 1
+            }
+            let value = child(node, next)
+            let maximum: Double? = maximumIsNone ? nil : child(node, next + 1)
+            switch (minimum, maximum) {
+            case (nil, nil): return value
+            case (nil, let maximum?): return CalcExecutor.min(value, maximum)
+            case (let minimum?, nil): return CalcExecutor.max(minimum, value)
+            case (let minimum?, let maximum?): return CalcExecutor.clamp(minimum, value, maximum)
+            }
+
+        default:
+            // No other alternative is stored in a style calculation.
+            return Double.nan
+        }
+    }
+}
+
+@_expose(Cxx)
+public func styleCalcEvaluateSwift(
+    _ tree: CSSCalcSwiftRoot,
+    _ percentResolutionLength: Double,
+    _ usedZoom: Float,
+    _ sizeResolutionLength: Double
+) -> Double {
+    // The root read field by field, as `child` reads an operand.
+    switch tree.root.alternative {
+    case .Number:
+        return tree.root.value
+    case .Percentage:
+        return percentResolutionLength * tree.root.value / 100.0
+    case .CanonicalDimension:
+        return tree.root.value * Double(usedZoom)
+    case .Symbol:
+        return sizeResolutionLength
+    default:
+        return StyleCalcEvaluation(
+            percentResolutionLength: percentResolutionLength,
+            usedZoom: Double(usedZoom),
+            sizeResolutionLength: sizeResolutionLength
+        ).evaluateOperation(tree.root)
+    }
+}
+
+// MARK: Conversion to a `CSSCalc::Tree`
+
+/// `getType` of a converted child, and `toType` of an operation over converted children: the input,
+/// merge and output policies of each operation (CSSCalcTree.h), in the C++'s operand order.
+private enum StyleCalcCSSType {
+    enum Input { case any, number, numberOrAngle }
+    enum Output { case none, numberMadeConsistent, angleMadeConsistent }
+
+    static func validated(_ type: CalcType?, _ input: Input) -> CalcType? {
+        guard let type else {
+            return nil
+        }
+        switch input {
+        case .any: return type
+        case .number: return type.matchesNumber ? type : nil
+        case .numberOrAngle: return type.matchesNumberOrAngle ? type : nil
+        }
+    }
+
+    static func transformed(_ type: CalcType?, _ output: Output) -> CalcType? {
+        guard let type else {
+            return nil
+        }
+        switch output {
+        case .none: return type
+        case .numberMadeConsistent: return CalcType.makeNumber().madeConsistent(with: type)
+        case .angleMadeConsistent: return CalcType.makeAngle().madeConsistent(with: type)
+        }
+    }
+
+    /// `types` are the operands' types in the C++'s order.
+    static func merged(_ types: borrowing [CalcType?], _ input: Input, same: Bool = false, _ output: Output) -> CalcType? {
+        guard !types.isEmpty else {
+            return nil
+        }
+        var type = validated(types[0], input)
+        for k in 1..<types.count {
+            guard let current = type, let next = validated(types[k], input) else {
+                return nil
+            }
+            type = same ? current.sameType(as: next) : current.consistentType(with: next)
+        }
+        return transformed(type, output)
+    }
+
+    static func of(_ alternative: CalcAlternative, _ types: [CalcType?], clampFlags: UInt16) -> CalcType? {
+        switch alternative {
+        case .Sum, .Product:
+            guard var type = types.first ?? nil else {
+                return nil
+            }
+            for k in 1..<types.count {
+                guard let next = types[k], let combined = alternative == .Sum ? type.added(to: next) : type.multiplied(by: next) else {
+                    return nil
+                }
+                type = combined
+            }
+            return type
+        case .Negate:
+            return types.first ?? nil
+        case .Invert:
+            return (types.first ?? nil)?.inverted()
+        case .Min, .Max, .Hypot, .Mod, .Rem, .CalcMix, .RoundNearest, .RoundUp, .RoundDown, .RoundToZero:
+            return merged(types, .any, .none)
+        case .Clamp:
+            // `toType(const Clamp&)` starts from the value, then the bounds that are not `none`.
+            let valueIndex = clampFlags & CalcNodeFlags.clampNoneMinimum != 0 ? 0 : 1
+            guard valueIndex < types.count else {
+                return nil
+            }
+            var ordered: [CalcType?] = [types[valueIndex]]
+            for k in 0..<types.count where k != valueIndex {
+                ordered.append(types[k])
+            }
+            return merged(ordered, .any, .none)
+        case .Sin, .Cos, .Tan:
+            return merged(types, .numberOrAngle, .numberMadeConsistent)
+        case .Asin, .Acos, .Atan:
+            return merged(types, .number, .angleMadeConsistent)
+        case .Atan2:
+            return merged(types, .any, .angleMadeConsistent)
+        case .Pow:
+            return merged(types, .number, .none)
+        case .Sqrt, .Exp, .Log:
+            return merged(types, .number, .numberMadeConsistent)
+        case .Abs:
+            return merged(types, .any, .none)
+        case .Sign, .Progress, .ProgressNoClamp:
+            return merged(types, .any, .numberMadeConsistent)
+        case .Random:
+            return merged(types, .any, same: true, .none)
+        default:
+            return nil
+        }
+    }
+}
+
+/// `toCSS(const Child&)`, over a style calculation, as a CSS tree with the types `makeChild` gives.
+private struct StyleCalcToCSS: ~Copyable {
+    let canonicalUnit: UInt8
+    /// `Type::determinePercentHint(category)`, as `CSSCalc::Percentage::hint` stores it.
+    let percentHint: UInt8
+    var failed = false
+
+    init(canonicalUnit: UInt8, percentHint: UInt8) {
+        self.canonicalUnit = canonicalUnit
+        self.percentHint = percentHint
+    }
+
+    /// The converted node, with its `getType` in `type`.
+    mutating func convert(
+        _ node: borrowing CalcNode,
+        _ payloads: inout WebCore.CSSCalc.StyleCalcSwiftPayloadSink,
+        _ type: inout CalcType?
+    ) -> CalcNode {
+        switch node.alternative {
+        case .Number:
+            type = CalcType()
+            return calcCSSLeaf(.Number, node.value, styleCalcNumberUnit)
+        case .Percentage:
+            var percentage = calcCSSLeaf(.Percentage, node.value, styleCalcPercentageUnit)
+            percentage.percentHint = percentHint
+            type = percentage.numericLeaf.flatMap(calcLeafType)
+            if type == nil {
+                failed = true
+            }
+            return percentage
+        case .CanonicalDimension:
+            guard let unit = WebCore.CSSUnitType(rawValue: canonicalUnit) else {
+                failed = true
+                type = nil
+                return styleCalcNumber(0)
+            }
+            type = CalcType.determineType(unit)
+            return calcCSSLeaf(.CanonicalDimension, node.value, canonicalUnit)
+        case .Symbol:
+            type = CalcType.determineType(WebCore.CSSUnitType.Px)
+            return styleCalcSize()
+        default:
+            break
+        }
+
+        var children = UniqueArray<CalcNode>(capacity: node.children.count)
+        var types: [CalcType?] = []
+        types.reserveCapacity(node.children.count)
+        let stride = node.styleCalcOperandStride
+        var k = 0
+        while k < node.children.count {
+            var childType: CalcType? = nil
+            children.append(convert(node.children[k], &payloads, &childType))
+            types.append(childType)
+            if stride == 2 {
+                // A raw `calc-mix()` weight, as `CalcMix::Item::Weight { item.weight }`.
+                children.append(calcCSSLeaf(.Percentage, node.children[k + 1].value, styleCalcPercentageUnit, flags: CalcNodeFlags.calcMixWeightPresent))
+            }
+            k &+= stride
+        }
+        guard let operationType = StyleCalcCSSType.of(node.alternative, types, clampFlags: node.flags) else {
+            failed = true
+            type = nil
+            return styleCalcNumber(0)
+        }
+        type = operationType
+        // `Random::SharingFixed { baseValue }`, held as a payload as a parsed sharing is.
+        let origin = node.alternative == .Random ? payloads.appendRandomFixed(node.value) : calcNoPayload
+        return CalcNode(
+            value: 0,
+            type: operationType,
+            origin: origin,
+            valueID: 0,
+            unitType: 0,
+            alternative: node.alternative,
+            percentHint: 0,
+            flags: node.flags & CalcNodeFlags.clampNoneMask,
+            children: children
+        )
+    }
+
+    /// A leaf as `CSSCalcSwiftStoreBuilder.pushLeaf` stores one.
+    @inline(always)
+    private func calcCSSLeaf(_ alternative: CalcAlternative, _ value: Double, _ unitType: UInt8, flags: UInt16 = 0) -> CalcNode {
+        styleCalcLeaf(alternative, value, unitType, flags: flags)
+    }
+}
+
+/// `toCSS(const Tree&)` before its `copyAndSimplify`: the tree, with dimensions in `canonicalUnit`,
+/// percentages hinted with `percentHint`, and each `random()`'s fixed base value added to
+/// `payloads`. `converted` is false if an operation has no type, where the C++ dereferences an empty
+/// `std::optional`.
+@_expose(Cxx)
+public func styleCalcToCSSSwift(
+    _ tree: CSSCalcSwiftRoot,
+    _ canonicalUnit: UInt8,
+    _ percentHint: UInt8,
+    _ payloads: inout WebCore.CSSCalc.StyleCalcSwiftPayloadSink,
+    _ converted: inout Bool
+) -> CSSCalcSwiftRoot {
+    var conversion = StyleCalcToCSS(canonicalUnit: canonicalUnit, percentHint: percentHint)
+    var type: CalcType? = nil
+    let result = conversion.convert(tree.root, &payloads, &type)
+    converted = !conversion.failed
+    return converted ? CSSCalcSwiftRoot(result) : .none
+}
+
+// MARK: Dumping
+
+/// `Op::op` of the style operation `alternative` stands for, for an operation the dump names.
+private func styleCalcOperator(_ alternative: CalcAlternative) -> WebCore.CSSCalc.Operator {
+    switch alternative {
+    case .Clamp: return .Clamp
+    case .RoundNearest: return .RoundNearest
+    case .RoundUp: return .RoundUp
+    case .RoundDown: return .RoundDown
+    case .RoundToZero: return .RoundToZero
+    case .Mod: return .Mod
+    case .Rem: return .Rem
+    case .Sin: return .Sin
+    case .Cos: return .Cos
+    case .Tan: return .Tan
+    case .Asin: return .Asin
+    case .Acos: return .Acos
+    case .Atan: return .Atan
+    case .Atan2: return .Atan2
+    case .Pow: return .Pow
+    case .Sqrt: return .Sqrt
+    case .Log: return .Log
+    case .Exp: return .Exp
+    case .Abs: return .Abs
+    case .Sign: return .Sign
+    case .Progress: return .Progress
+    case .ProgressNoClamp: return .ProgressNoClamp
+    case .Random: return .Random
+    case .CalcMix: return .CalcMix
+    case .Min: return .Min
+    case .Max: return .Max
+    case .Hypot: return .Hypot
+    case .Negate: return .Negate
+    case .Invert: return .Invert
+    case .Product: return .Product
+    default: return .Sum
+    }
+}
+
+/// `operator<<(TextStream&, const Child&)`, through `sink`, which formats numbers and operator
+/// names as the C++ does.
+private func styleCalcDump(_ node: borrowing CalcNode, _ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
+    func literal(_ text: Swift.String, _ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
+        for character in text.utf8 {
+            sink.appendCharacter(character)
+        }
+    }
+    func variadic(_ node: borrowing CalcNode, _ prefix: Swift.String, _ between: Swift.String, _ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
+        literal(prefix, &sink)
+        literal("(", &sink)
+        for k in 0..<node.children.count {
+            if k > 0 {
+                literal(between, &sink)
+            }
+            styleCalcDump(node.children[k], &sink)
+        }
+        literal(")", &sink)
+    }
+
+    switch node.alternative {
+    case .Number, .CanonicalDimension:
+        sink.appendNumber(node.value, true)
+    case .Percentage:
+        sink.appendNumber(node.value, true)
+        literal("%", &sink)
+    case .Symbol:
+        literal("size", &sink)
+    case .Sum:
+        variadic(node, "", " + ", &sink)
+    case .Product:
+        variadic(node, "", " * ", &sink)
+    case .Negate:
+        literal("-(", &sink)
+        styleCalcDump(node.children[0], &sink)
+        literal(")", &sink)
+    case .Invert:
+        literal("1.0 / (", &sink)
+        styleCalcDump(node.children[0], &sink)
+        literal(")", &sink)
+    case .Min:
+        variadic(node, "min", " * ", &sink)
+    case .Max:
+        variadic(node, "max", " * ", &sink)
+    case .Hypot:
+        variadic(node, "hypot", ", ", &sink)
+    default:
+        // The operator's name, then every field in declaration order.
+        sink.appendOperator(styleCalcOperator(node.alternative).rawValue)
+        literal("(", &sink)
+        var first = true
+        func separate(_ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
+            if !first {
+                literal(", ", &sink)
+            }
+            first = false
+        }
+        if node.alternative == .Random {
+            separate(&sink)
+            literal("fixed ", &sink)
+            sink.appendNumber(node.value, false)
+        }
+        let minimumIsNone = node.alternative == .Clamp && node.flags & CalcNodeFlags.clampNoneMinimum != 0
+        let maximumIsNone = node.alternative == .Clamp && node.flags & CalcNodeFlags.clampNoneMaximum != 0
+        if minimumIsNone {
+            separate(&sink)
+            sink.appendNone()
+        }
+        for k in 0..<node.children.count {
+            separate(&sink)
+            if node.alternative == .CalcMix && k & 1 == 1 {
+                sink.appendNumber(node.children[k].value, false)
+            } else {
+                styleCalcDump(node.children[k], &sink)
+            }
+        }
+        if maximumIsNone {
+            separate(&sink)
+            sink.appendNone()
+        }
+        literal(")", &sink)
+    }
+}
+
+@_expose(Cxx)
+public func styleCalcDumpSwift(_ tree: CSSCalcSwiftRoot, _ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
+    styleCalcDump(tree.root, &sink)
 }

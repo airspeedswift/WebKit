@@ -32,6 +32,7 @@ namespace WebCore {
 namespace Style {
 namespace Calculation {
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 static auto copy(const std::optional<Child>& root) -> std::optional<Child>;
 static auto copy(const Random::Fixed&) -> Random::Fixed;
 static auto copy(const CSS::Keyword::None&) -> CSS::Keyword::None;
@@ -102,6 +103,18 @@ template<typename Op> Child copy(const IndirectNode<Op>& root)
 {
     return makeChild(WTF::apply([](const auto& ...x) { return Op { copy(x)... }; } , *root));
 }
+#else
+// The tree is never mutated, so a copy shares it.
+Tree copy(const Tree& tree)
+{
+    return tree;
+}
+
+Child copy(const Child& root)
+{
+    return root;
+}
+#endif
 
 } // namespace Calculation
 } // namespace Style

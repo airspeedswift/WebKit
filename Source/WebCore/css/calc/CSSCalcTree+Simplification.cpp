@@ -1857,7 +1857,7 @@ template<typename T> const T* CSSCalcSwiftBuilder::payloadFor(uint32_t index) co
 }
 
 // The `SimplificationOptions` fields Swift reads, as a POD.
-static CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const SimplificationOptions& options)
+CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const SimplificationOptions& options)
 {
     return CSSCalcSwiftSimplificationOptions {
         .rangeMinimum = options.range.min,
@@ -1941,14 +1941,17 @@ CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveCalcMixWeight(double value
 CSSCalcSwiftNumericResult CSSCalcSwiftBuilder::resolveRandomBaseValue(uint32_t payload, bool evaluatesFixedCalc) const noexcept
 {
     auto* sharing = payloadFor<Random::Sharing>(payload);
-    if (!sharing || !hasStyleBuilderState())
+    if (!sharing)
         return unresolvedNumber;
-    if (auto* fixed = std::get_if<Random::SharingFixed>(sharing); fixed && !evaluatesFixedCalc) {
+    // `toStyle`, which also evaluates a fixed `Calc`, reads a fixed number without a builder state.
+    if (auto* fixed = std::get_if<Random::SharingFixed>(sharing); fixed && (evaluatesFixedCalc ? !hasStyleBuilderState() : hasStyleBuilderState())) {
         return WTF::switchOn(fixed->value,
             [](const CSS::Number<CSS::ClosedUnitRange>::Raw& raw) { return resolvedNumber(raw.value); },
             [](const CSS::Number<CSS::ClosedUnitRange>::Calc&) { return unresolvedNumber; }
         );
     }
+    if (!hasStyleBuilderState())
+        return unresolvedNumber;
     CheckedPtr builderState = m_options->conversionData->styleBuilderState();
     if (auto base = CSSCalc::resolveRandomBaseValue(*sharing, *builderState))
         return resolvedNumber(*base);

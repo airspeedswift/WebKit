@@ -32,6 +32,15 @@
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
 
+// Whether the C++ representation of a style calculation is compiled in: exactly when the Swift CSS
+// implementation is not. Without it, a `Child` is the Swift tree a `CSSCalc::Tree` stores.
+#if USE(SWIFT_CSS)
+#define STYLE_CALC_CPP_TREE_COMPILED_IN 0
+#include <WebCore/CSSCalcTree.h>
+#else
+#define STYLE_CALC_CPP_TREE_COMPILED_IN 1
+#endif
+
 namespace WebCore {
 namespace Style {
 namespace Calculation {
@@ -122,6 +131,7 @@ struct Size {
     bool operator==(const Size&) const = default;
 };
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 template<typename Op> struct IndirectNode {
     UniqueRef<Op> op;
 
@@ -234,6 +244,20 @@ struct Children {
 
     bool operator==(const Children&) const = default;
 };
+#else
+// The Swift tree a `CSSCalc::Tree` stores, restricted to what a style calculation holds
+// (CSSCalcSimplificationSwift.swift). It is never mutated, so a copy shares it.
+struct Child {
+#if !defined(__swift__)
+    explicit Child(const CSSCalcSwiftRoot&);
+#endif
+    Child(Size);
+
+    bool operator==(const Child&) const;
+
+    CSSCalc::CSSCalcSwiftStoredRoot stored;
+};
+#endif
 
 struct Tree {
     Child root;
@@ -248,6 +272,7 @@ size_t computeDepth(const Tree&);
 size_t computeNodeCount(const Tree&);
 size_t computeNodeCount(const Child&);
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 // Math Operators.
 
 struct Sum {
@@ -586,6 +611,7 @@ template<typename Op> Child makeChild(Op&& op)
 {
     return ChildConstruction<Op>::make(WTF::move(op));
 }
+#endif
 
 // Convenience constructors
 
@@ -601,6 +627,7 @@ Child blend(Child&& from, Child&& to, double progress);
 
 TextStream& operator<<(TextStream&, const Tree&);
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 // MARK: Tuple Conformance
 
 // get<> overload (along with std::tuple_size and std::tuple_element below) to support destructuring of operation nodes.
@@ -835,11 +862,13 @@ Child::Child(T&& value)
     : value(std::forward<T>(value))
 {
 }
+#endif
 
 } // namespace Calculation
 } // namespace Style
 } // namespace WebCore
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 namespace std {
 
 #define OP_TUPLE_LIKE_CONFORMANCE(op, numberOfArguments) \
@@ -885,3 +914,4 @@ OP_TUPLE_LIKE_CONFORMANCE(CalcMix, 1);
 #undef OP_TUPLE_LIKE_CONFORMANCE
 
 } // namespace std
+#endif
