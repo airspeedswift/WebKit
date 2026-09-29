@@ -25,7 +25,11 @@
 #include "config.h"
 #include "StyleCalculationTree+Evaluation.h"
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 #include "CSSCalcExecutor.h"
+#else
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
 #include "StyleCalculationTree.h"
 #include "StyleZoomPrimitives.h"
 #include <wtf/StdLibExtras.h>
@@ -34,6 +38,7 @@ namespace WebCore {
 namespace Style {
 namespace Calculation {
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 static auto evaluate(const CSS::Keyword::None&, const EvaluationOptions&) -> CSS::Keyword::None;
 static auto evaluate(const ChildOrNone&, const EvaluationOptions&) -> Variant<double, CSS::Keyword::None>;
 static auto evaluate(const std::optional<Child>&, const EvaluationOptions&) -> std::optional<double>;
@@ -166,10 +171,15 @@ template<typename Op> double evaluate(const IndirectNode<Op>& root, const Evalua
         return executeMathOperation<Op>(evaluate(x, options)...);
     } , *root);
 }
+#endif
 
 double evaluate(const Tree& tree, const EvaluationOptions& options)
 {
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
     return evaluate(tree.root, options);
+#else
+    return styleCalcEvaluateSwift(tree.root.stored.root(), options.percentResolutionLength, options.usedZoom.value, options.sizeResolutionLength.value_or(0));
+#endif
 }
 
 

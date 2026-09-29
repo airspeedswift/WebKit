@@ -26,7 +26,11 @@
 #include "StyleCalculationTree+Substitution.h"
 
 #include "StyleCalculationTree+Copy.h"
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 #include "StyleCalculationTree+Traversal.h"
+#else
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
 #include "StyleCalculationTree.h"
 #include <wtf/StdLibExtras.h>
 
@@ -36,6 +40,7 @@ namespace Calculation {
 
 static constexpr size_t maximumSubstitutionTreeDepth = 128;
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 // MARK: - Leaf mapping
 //
 // Replaces a leaf node with the result of the functor.
@@ -211,6 +216,31 @@ bool containsPercentage(const Tree& tree)
 {
     return contains<Percentage>(tree.root);
 }
+#else
+std::optional<Tree> substituteSize(const Tree& tree, const Child& insertion)
+{
+    bool substituted = false;
+    auto root = styleCalcSubstituteSizeSwift(tree.root.stored.root(), insertion.stored.root(), maximumCalcSizeNodeCount, maximumSubstitutionTreeDepth, substituted);
+    if (!substituted)
+        return std::nullopt;
+    return Tree { Child { root } };
+}
+
+Tree dePercentify(const Tree& tree)
+{
+    return Tree { Child { styleCalcDePercentifySwift(tree.root.stored.root()) } };
+}
+
+bool containsSize(const Tree& tree)
+{
+    return styleCalcContainsSizeSwift(tree.root.stored.root());
+}
+
+bool containsPercentage(const Tree& tree)
+{
+    return styleCalcContainsPercentageSwift(tree.root.stored.root());
+}
+#endif
 
 } // namespace Calculation
 } // namespace Style

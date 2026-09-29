@@ -45,6 +45,7 @@
 
 namespace WTF {
 class StringBuilder;
+class TextStream;
 }
 
 namespace WebCore {
@@ -426,37 +427,44 @@ struct CSSCalcSwiftParseRequest {
 };
 #endif
 
-// MARK: - Conversion to `Style::Calculation::Tree`
+// MARK: - `Style::Calculation::Tree`, stored as the Swift tree
 
-struct CSSCalcSwiftStyleOperands;
+#if !defined(__swift__)
+// The `SimplificationOptions` fields Swift reads.
+CSSCalcSwiftSimplificationOptions swiftSimplificationOptions(const SimplificationOptions&);
+#endif
 
-// Filled post-order as `CSSCalcSwiftBuilder` is. `SWIFT_SAFE` holds because it lives on the C++
-// stack for the one Swift call that takes it `inout`.
-struct SWIFT_SAFE CSSCalcSwiftStyleBuilder {
-    CSSCalcSwiftStyleBuilder(CSSCalcSwiftStyleOperands& operands LIFETIME_BOUND, const SimplificationOptions& options LIFETIME_BOUND, const CSSCalcSwiftFlatPayloads* payloads LIFETIME_BOUND) noexcept
-        : m_operands(&operands)
-        , m_options(&options)
-        , m_payloads(payloads)
+// `toCSS`'s payloads: a `random()`'s fixed base value, as the `Random::SharingFixed` a parsed tree
+// holds. `SWIFT_SAFE` holds because it lives on the C++ stack for the one Swift call that takes it
+// `inout`, as the ones below do.
+struct SWIFT_SAFE StyleCalcSwiftPayloadSink {
+    StyleCalcSwiftPayloadSink(CSSCalcSwiftFlatPayloads& payloads LIFETIME_BOUND) noexcept
+        : m_payloads(&payloads)
     {
     }
 
-    WEBCORE_EXPORT void pushNumber(double) noexcept;
-    WEBCORE_EXPORT void pushPercentage(double) noexcept;
-    WEBCORE_EXPORT void pushCanonicalDimension(double, uint16_t unitType) noexcept;
-    WEBCORE_EXPORT void pushSize() noexcept;
-
-    // Pushed before the arguments are converted, the order in which the C++ conversion fills the
-    // random cache.
-    WEBCORE_EXPORT void pushRandomBaseValue(uint32_t payload) noexcept;
-
-    WEBCORE_EXPORT void pushCalcMixItemWeight(double value, bool present, uint32_t payload) noexcept;
-
-    WEBCORE_EXPORT bool buildOperation(CSSCalcSwiftAlternative, uint32_t childCount, uint8_t noneMask = 0) noexcept;
+    WEBCORE_EXPORT uint32_t appendRandomFixed(double baseValue) noexcept;
 
 private:
-    CSSCalcSwiftStyleOperands* m_operands;
-    const SimplificationOptions* m_options;
-    const CSSCalcSwiftFlatPayloads* m_payloads;
+    CSSCalcSwiftFlatPayloads* m_payloads;
+};
+
+// `operator<<(TextStream&, const Style::Calculation::Tree&)`, with numbers, operator names and
+// `none` written by `TextStream` as the C++ dump writes them.
+struct SWIFT_SAFE StyleCalcSwiftDumpSink {
+    StyleCalcSwiftDumpSink(WTF::TextStream& ts LIFETIME_BOUND) noexcept
+        : m_ts(&ts)
+    {
+    }
+
+    WEBCORE_EXPORT void appendNumber(double, bool respectingIntegers) noexcept;
+    WEBCORE_EXPORT void appendCharacter(uint8_t) noexcept;
+    // A `CSSCalc::Operator`.
+    WEBCORE_EXPORT void appendOperator(uint8_t) noexcept;
+    WEBCORE_EXPORT void appendNone() noexcept;
+
+private:
+    WTF::TextStream* m_ts;
 };
 
 } // namespace CSSCalc

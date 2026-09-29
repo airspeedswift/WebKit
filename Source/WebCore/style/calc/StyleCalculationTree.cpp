@@ -25,7 +25,11 @@
 #include "config.h"
 #include "StyleCalculationTree.h"
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 #include "StyleCalculationTree+Traversal.h"
+#else
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/TextStream.h>
@@ -34,6 +38,7 @@ namespace WebCore {
 namespace Style {
 namespace Calculation {
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(Abs);
 WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(Acos);
 WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(Asin);
@@ -386,6 +391,81 @@ TextStream& operator<<(TextStream& ts, const Tree& tree)
 {
     return ts << tree.root;
 }
+#else
+// MARK: - The Swift tree (CSSCalcSimplificationSwift.swift)
+
+Child::Child(const CSSCalcSwiftRoot& root)
+    : stored { root, nullptr }
+{
+}
+
+Child::Child(Size)
+    : Child { styleCalcSizeSwift() }
+{
+}
+
+bool Child::operator==(const Child& other) const
+{
+    return styleCalcRootsEqualSwift(stored.root(), other.stored.root());
+}
+
+Child number(double value)
+{
+    return Child { styleCalcNumberSwift(value) };
+}
+
+Child percentage(double value)
+{
+    return Child { styleCalcPercentageSwift(value) };
+}
+
+Child dimension(double value)
+{
+    return Child { styleCalcDimensionSwift(value) };
+}
+
+Child add(Child&& a, Child&& b)
+{
+    return Child { styleCalcAddSwift(a.stored.root(), b.stored.root()) };
+}
+
+Child multiply(Child&& a, Child&& b)
+{
+    return Child { styleCalcMultiplySwift(a.stored.root(), b.stored.root()) };
+}
+
+Child subtract(Child&& a, Child&& b)
+{
+    return Child { styleCalcSubtractSwift(a.stored.root(), b.stored.root()) };
+}
+
+Child blend(Child&& from, Child&& to, double progress)
+{
+    return Child { styleCalcBlendSwift(from.stored.root(), to.stored.root(), progress) };
+}
+
+size_t computeDepth(const Tree& tree)
+{
+    return styleCalcDepthSwift(tree.root.stored.root());
+}
+
+size_t computeNodeCount(const Child& root)
+{
+    return styleCalcNodeCountSwift(root.stored.root());
+}
+
+size_t computeNodeCount(const Tree& tree)
+{
+    return computeNodeCount(tree.root);
+}
+
+TextStream& operator<<(TextStream& ts, const Tree& tree)
+{
+    CSSCalc::StyleCalcSwiftDumpSink sink { ts };
+    styleCalcDumpSwift(tree.root.stored.root(), sink);
+    return ts;
+}
+#endif // STYLE_CALC_CPP_TREE_COMPILED_IN
 
 } // namespace Calculation
 } // namespace Style
