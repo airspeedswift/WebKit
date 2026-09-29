@@ -61,6 +61,7 @@ namespace CSSCalc {
 // `copyAndSimplify(const Child&)`. See `CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN` for what stays compiled
 // without it.
 #if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
+static auto copyAndSimplify(const Random::Sharing&, const SimplificationOptions&) -> Random::Sharing;
 static auto copyAndSimplify(const CalcMix::Item&, const SimplificationOptions&) -> CalcMix::Item;
 static auto copyAndSimplify(const Vector<CalcMix::Item>&, const SimplificationOptions&) -> Vector<CalcMix::Item>;
 static auto copyAndSimplify(const CSS::Keyword::None&, const SimplificationOptions&) -> CSS::Keyword::None;
@@ -1636,37 +1637,6 @@ std::optional<Child> simplify(CalcMix& root, const SimplificationOptions& option
         }
     );
 }
-#endif // CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
-
-#if CSS_CALC_CPP_SIMPLIFIER_COMPILED_IN
-// MARK: - The `calc()` prefix an anchor slot carries
-//
-// `anchor()` and `anchor-size()` are not math functions, so a `calc()` written inside one keeps its
-// prefix in serialization. `consumeValueWithoutSimplifyingRootCalc` records it as a one-child `Sum`
-// in the slot, which css-values-4 8.3's one-term collapse (`simplify(Sum&)`) removes: a whole-tree
-// `copyAndSimplify` would turn `anchor(--a top, calc(1em * 2))` into `anchor(--a top, 2em)`.
-// `rebuildChildren` restores the wrapper, and the two substitution sites below drop it again once
-// the `anchor()` itself is gone.
-//
-// The slot as it came out of the pass, with the wrapper restored if the pass flattened a math
-// function into a leaf. `before` is the input slot, `after` the mapped one.
-static std::optional<Child> anchorSlotKeepingPrefix(const std::optional<Child>& before, std::optional<Child>&& after)
-{
-    if (!before || !after || isLeaf(*before) || !isLeaf(*after))
-        return WTF::move(after);
-    auto type = getType(*after);
-    return makeChild(Sum { Vector<Child>::from(WTF::move(*after)) }, type);
-}
-
-// The slot on its way out of the anchor node it takes the place of, with the wrapper removed. Left
-// in place, it would make the pass non-idempotent.
-static std::optional<Child> anchorSlotLeavingTheNode(std::optional<Child>&& slot)
-{
-    auto* sum = slot ? get_if<IndirectNode<Sum>>(&*slot) : nullptr;
-    if (sum && (*sum)->children.size() == 1)
-        return WTF::move((*sum)->children[0]);
-    return WTF::move(slot);
-}
 
 std::optional<Child> simplify(Anchor& anchor, const SimplificationOptions& options)
 {
@@ -1690,7 +1660,7 @@ std::optional<Child> simplify(Anchor& anchor, const SimplificationOptions& optio
             options.conversionData->styleBuilderState()->setCurrentPropertyInvalidAtComputedValueTime();
 
         // Replace the anchor node with the fallback node.
-        return anchorSlotLeavingTheNode(std::exchange(anchor.fallback, { }));
+        return std::exchange(anchor.fallback, { });
     }
     return CanonicalDimension { .value = *result, .dimension = CanonicalDimension::Dimension::Length };
 }
@@ -1716,13 +1686,18 @@ std::optional<Child> simplify(AnchorSize& anchorSize, const SimplificationOption
         if (!anchorSize.fallback)
             options.conversionData->styleBuilderState()->setCurrentPropertyInvalidAtComputedValueTime();
 
-        return anchorSlotLeavingTheNode(std::exchange(anchorSize.fallback, { }));
+        return std::exchange(anchorSize.fallback, { });
     }
 
     return CanonicalDimension { .value = *result, .dimension = CanonicalDimension::Dimension::Length };
 }
 
 // MARK: Copy & Simplify.
+
+Random::Sharing copyAndSimplify(const Random::Sharing& root, const SimplificationOptions&)
+{
+    return root;
+}
 
 CalcMix::Item copyAndSimplify(const CalcMix::Item& root, const SimplificationOptions& options)
 {
@@ -1761,44 +1736,23 @@ template<Leaf Op> static auto copyAndSimplifyChildren(const Op& op, const Simpli
     return op;
 }
 
-// One walk over an operation's tuple slots, parameterised by what each slot becomes.
-// FIXME: webkit.org/b/280798, make Anchor and AnchorSize tuple-like, and remove their two branches.
-//
-// An anchor's `side` is copied, not simplified, so `anchor(--a calc(25% + 25%))` does not fold to
-// `anchor(--a 50%)`. Its `fallback` is simplified, so its prefix has to be restored.
-//
-// `NOESCAPE` holds: `mapSlot` is only ever called here, never stored or captured.
-template<typename Op, typename MapSlot> static Op rebuildChildren(const IndirectNode<Op>& root, NOESCAPE MapSlot&& mapSlot)
-{
-    // `Random::Sharing` is the one tuple slot that is not a subtree.
-    //
-    // It is named rather than tested with `requires { mapSlot(slot); }`, which would silently pass
-    // through a slot shape a mapper does not handle.
-    //
-    // Without `ALWAYS_INLINE_LAMBDA`, `copyAndSimplify(const Children&)` gets `WTF::map` outlined,
-    // adding a call per node.
-    auto mapChildSlot = [&](const auto& slot) ALWAYS_INLINE_LAMBDA {
-        if constexpr (std::same_as<std::decay_t<decltype(slot)>, Random::Sharing>)
-            return slot;
-        else
-            return mapSlot(slot);
-    };
-
-    if constexpr (std::same_as<Op, Anchor>)
-        return Anchor { .elementName = root->elementName, .side = copy(root->side), .fallback = anchorSlotKeepingPrefix(root->fallback, mapSlot(root->fallback)) };
-    else if constexpr (std::same_as<Op, AnchorSize>)
-        return AnchorSize { .elementName = root->elementName, .dimension = root->dimension, .fallback = anchorSlotKeepingPrefix(root->fallback, mapSlot(root->fallback)) };
-    else
-        return WTF::apply([&](const auto& ...x) {
-            return Op { mapChildSlot(x)... };
-        }, *root);
-}
-
 template<typename Op> static auto copyAndSimplifyChildren(const IndirectNode<Op>& root, const SimplificationOptions& options) -> Op
 {
-    return rebuildChildren(root, [&](const auto& slot) {
-        return copyAndSimplify(slot, options);
-    });
+    return WTF::apply([&](const auto& ...x) { return Op { copyAndSimplify(x, options)... }; } , *root);
+}
+
+static auto copyAndSimplifyChildren(const IndirectNode<Anchor>& anchor, const SimplificationOptions& options) -> Anchor
+{
+    return Anchor { .elementName = anchor->elementName, .side = copy(anchor->side), .fallback = copyAndSimplify(anchor->fallback, options) };
+}
+
+static auto copyAndSimplifyChildren(const IndirectNode<AnchorSize>& anchorSize, const SimplificationOptions& options) -> AnchorSize
+{
+    return AnchorSize {
+        .elementName = anchorSize->elementName,
+        .dimension = anchorSize->dimension,
+        .fallback = copyAndSimplify(anchorSize->fallback, options)
+    };
 }
 
 Child copyAndSimplify(const Child& root, const SimplificationOptions& options)

@@ -1062,10 +1062,6 @@ constexpr CSSUnitType toCSSUnit(const NonCanonicalDimension& dimension) { return
 
 bool isNumeric(const Child& root);
 
-// True for the seven `Leaf` alternatives. `serializeWithoutOmittingPrefix`,
-// `consumeValueWithoutSimplifyingRootCalc` and `rebuildChildren` must agree on it.
-bool isLeaf(const Child& root);
-
 // Convenience constructors
 
 // Makes the appropriate child type (number, percentage, canonical-dimensions, non-canonical-dimension) based on the CSSUnitType.
