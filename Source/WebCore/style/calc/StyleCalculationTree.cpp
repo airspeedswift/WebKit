@@ -29,6 +29,8 @@
 #include "StyleCalculationTree+Traversal.h"
 #else
 #include "WebCoreSwiftBoundaryTypes.h"
+#include <wtf/MainThread.h>
+#include <wtf/NeverDestroyed.h>
 #endif
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -392,57 +394,76 @@ TextStream& operator<<(TextStream& ts, const Tree& tree)
     return ts << tree.root;
 }
 #else
-// MARK: - The Swift tree (CSSCalcSimplificationSwift.swift)
+// MARK: - The Swift store (CSSCalcSimplificationSwift.swift)
+
+// Style calculations are made and read on the main thread only, as `ValueHandleMap`, which holds
+// their `Value`s, already requires.
+StyleCalcStore& styleCalcStore()
+{
+    ASSERT(isMainThread());
+    static NeverDestroyed<StyleCalcStore> store { StyleCalcStore::init() };
+    return store;
+}
+
+void Child::retain(uint32_t handle)
+{
+    styleCalcStore().retain(handle);
+}
+
+void Child::release(uint32_t handle)
+{
+    styleCalcStore().release(handle);
+}
 
 Child::Child(Size)
-    : Child { std::in_place, [] { return styleCalcSizeSwift(); } }
+    : Child { styleCalcStore().size() }
 {
 }
 
 bool Child::operator==(const Child& other) const
 {
-    return styleCalcRootsEqualSwift(stored.root(), other.stored.root());
+    return styleCalcStore().equal(handle(), other.handle());
 }
 
 Child percentage(double value)
 {
-    return Child { std::in_place, [&] { return styleCalcPercentageSwift(value); } };
+    return Child::adopt(styleCalcStore().percentage(value));
 }
 
 Child dimension(double value)
 {
-    return Child { std::in_place, [&] { return styleCalcDimensionSwift(value); } };
+    return Child::adopt(styleCalcStore().dimension(value));
 }
 
 Child add(Child&& a, Child&& b)
 {
-    return Child { std::in_place, [&] { return styleCalcAddSwift(a.stored.root(), b.stored.root()); } };
+    return Child::adopt(styleCalcStore().add(a.handle(), b.handle()));
 }
 
 Child subtract(Child&& a, Child&& b)
 {
-    return Child { std::in_place, [&] { return styleCalcSubtractSwift(a.stored.root(), b.stored.root()); } };
+    return Child::adopt(styleCalcStore().subtract(a.handle(), b.handle()));
 }
 
 Child blend(Child&& from, Child&& to, double progress)
 {
-    return Child { std::in_place, [&] { return styleCalcBlendSwift(from.stored.root(), to.stored.root(), progress); } };
+    return Child::adopt(styleCalcStore().blend(from.handle(), to.handle(), progress));
 }
 
 size_t computeDepth(const Tree& tree)
 {
-    return styleCalcDepthSwift(tree.root.stored.root());
+    return styleCalcStore().depth(tree.root.handle());
 }
 
 size_t computeNodeCount(const Tree& tree)
 {
-    return styleCalcNodeCountSwift(tree.root.stored.root());
+    return styleCalcStore().nodeCount(tree.root.handle());
 }
 
 TextStream& operator<<(TextStream& ts, const Tree& tree)
 {
     CSSCalc::StyleCalcSwiftDumpSink sink { ts };
-    styleCalcDumpSwift(tree.root.stored.root(), sink);
+    styleCalcStore().dump(tree.root.handle(), sink);
     return ts;
 }
 #endif // STYLE_CALC_CPP_TREE_COMPILED_IN

@@ -781,6 +781,14 @@ private func mergeKey(_ leaf: NumericLeaf) -> Int {
 }
 
 // MARK: - The arithmetic
+extension Double {
+    /// `sign == .minus`, read from the bit. The stdlib's `sign` getter is not always inlined here, and
+    /// a call to it inside `StyleCalcStore`'s in-place evaluation would put a dynamic exclusivity
+    /// check on every access to the store's nodes (filing 75).
+    @inline(always)
+    fileprivate var calcSignIsMinus: Bool { bitPattern >> 63 != 0 }
+}
+
 private enum CalcExecutor {
     /// `deg2rad`.
     @inline(always)
@@ -809,7 +817,7 @@ private enum CalcExecutor {
     @inline(always)
     static func minWithSignedZero(_ a: Double, _ b: Double) -> Double {
         if a == b {
-            return a.sign == .minus ? a : b
+            return a.calcSignIsMinus ? a : b
         }
         return b < a ? b : a
     }
@@ -818,7 +826,7 @@ private enum CalcExecutor {
     @inline(always)
     static func maxWithSignedZero(_ a: Double, _ b: Double) -> Double {
         if a == b {
-            return a.sign == .minus ? b : a
+            return a.calcSignIsMinus ? b : a
         }
         return a < b ? b : a
     }
@@ -877,7 +885,7 @@ private enum CalcExecutor {
     @inline(always)
     static func roundNearest(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
         if valueToRound.isFinite && roundingInterval.isInfinite {
-            return valueToRound.sign == .minus ? -0.0 : 0.0
+            return valueToRound.calcSignIsMinus ? -0.0 : 0.0
         }
         let (lower, upper) = nearestMultiples(valueToRound, roundingInterval)
         return (upper - valueToRound).magnitude <= roundingInterval.magnitude / 2 ? upper : lower
@@ -891,7 +899,7 @@ private enum CalcExecutor {
             if valueToRound == 0 {
                 return valueToRound
             }
-            return valueToRound.sign == .minus ? -0.0 : Double.infinity
+            return valueToRound.calcSignIsMinus ? -0.0 : Double.infinity
         }
         return nearestMultiples(valueToRound, roundingInterval).upper
     }
@@ -903,7 +911,7 @@ private enum CalcExecutor {
             if valueToRound == 0 {
                 return valueToRound
             }
-            return valueToRound.sign == .minus ? -Double.infinity : 0.0
+            return valueToRound.calcSignIsMinus ? -Double.infinity : 0.0
         }
         return nearestMultiples(valueToRound, roundingInterval).lower
     }
@@ -912,7 +920,7 @@ private enum CalcExecutor {
     @inline(always)
     static func roundToZero(_ valueToRound: Double, _ roundingInterval: Double) -> Double {
         if valueToRound.isFinite && roundingInterval.isInfinite {
-            return valueToRound.sign == .minus ? -0.0 : 0.0
+            return valueToRound.calcSignIsMinus ? -0.0 : 0.0
         }
         let (lower, upper) = nearestMultiples(valueToRound, roundingInterval)
         return upper.magnitude < lower.magnitude ? upper : lower
@@ -923,14 +931,14 @@ private enum CalcExecutor {
     static func mod(_ a: Double, _ b: Double) -> Double {
         // "In mod(A, B) only, if B is infinite and A has opposite sign to B (including an
         // oppositely-signed zero), the result is NaN." https://drafts.csswg.org/css-values/#round-infinities
-        if b.isInfinite && (a.sign == .minus) != (b.sign == .minus) {
+        if b.isInfinite && (a.calcSignIsMinus) != (b.calcSignIsMinus) {
             return Double.nan
         }
         var result = a.truncatingRemainder(dividingBy: b)
         if result == 0 {
-            return b.sign == .minus ? -0.0 : 0.0
+            return b.calcSignIsMinus ? -0.0 : 0.0
         }
-        if (result.sign == .minus) != (b.sign == .minus) {
+        if (result.calcSignIsMinus) != (b.calcSignIsMinus) {
             result += b
         }
         return result
@@ -6703,28 +6711,27 @@ private struct StyleCalcConversion: ~Copyable {
 /// `toStyle(const CSSCalc::Tree&)`: `copyAndSimplify` with `builder`'s options, then the conversion,
 /// as one tree.
 ///
-/// `converted` is false, and the root means nothing, if the simplifier declined or an upcall failed.
-@_expose(Cxx)
-public func cssCalcToStyleSwift(
+/// `converted` is false, and the tree means nothing, if the simplifier declined or an upcall failed.
+private func styleCalcConvert(
     _ root: CSSCalcSwiftRoot,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
     _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
     _ converted: inout Bool
-) -> CSSCalcSwiftRoot {
+) -> CalcNode {
     converted = true
     let box = root
     var conversion = StyleCalcConversion(builder: builder)
     // `simplify` of these three leaves is a no-op, and a style calculation reads no leaf's unit or
-    // percent hint, so a leaf root is shared unless a length resolves to a new value.
+    // percent hint, so a leaf is copied as it is unless a length resolves to a new value.
     switch box.root.alternative {
     case .Number, .Percentage:
-        return copy root
+        return box.root.clone()
     case .CanonicalDimension:
         let value = conversion.dimensionValue(box.root)
         if value.bitPattern == box.root.value.bitPattern {
-            return copy root
+            return box.root.clone()
         }
-        return CSSCalcSwiftRoot(styleCalcDimension(value))
+        return styleCalcDimension(value)
     default:
         break
     }
@@ -6739,57 +6746,14 @@ public func cssCalcToStyleSwift(
     var fold = CalcFold(options: simplification, builder: builder, refoldsStoredTree: true)
     guard fold.simplifyParsed(&tree, true), !fold.declined else {
         converted = false
-        return .none
+        return tree
     }
     conversion.convert(&tree)
     guard !conversion.failed else {
         converted = false
-        return .none
+        return tree
     }
-    return CSSCalcSwiftRoot(tree)
-}
-
-// MARK: Construction
-
-@_expose(Cxx)
-public func styleCalcPercentageSwift(_ value: Double) -> CSSCalcSwiftRoot {
-    CSSCalcSwiftRoot(styleCalcPercentage(value))
-}
-
-@_expose(Cxx)
-public func styleCalcDimensionSwift(_ value: Double) -> CSSCalcSwiftRoot {
-    CSSCalcSwiftRoot(styleCalcDimension(value))
-}
-
-@_expose(Cxx)
-public func styleCalcSizeSwift() -> CSSCalcSwiftRoot {
-    CSSCalcSwiftRoot(styleCalcSize())
-}
-
-/// `add`: `Sum { a, b }`.
-@_expose(Cxx)
-public func styleCalcAddSwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
-    CSSCalcSwiftRoot(styleCalcPair(.Sum, a.root.clone(), b.root.clone()))
-}
-
-/// `subtract`: `Sum { a, Negate { b } }`.
-@_expose(Cxx)
-public func styleCalcSubtractSwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
-    var negated = UniqueArray<CalcNode>(capacity: 1)
-    negated.append(b.root.clone())
-    return CSSCalcSwiftRoot(styleCalcPair(.Sum, a.root.clone(), styleCalcOperation(.Negate, negated)))
-}
-
-/// `blend`: `Sum { Product { from, 1 - progress }, Product { to, progress } }`, built in one call.
-@_expose(Cxx)
-public func styleCalcBlendSwift(_ from: CSSCalcSwiftRoot, _ to: CSSCalcSwiftRoot, _ progress: Double) -> CSSCalcSwiftRoot {
-    CSSCalcSwiftRoot(
-        styleCalcPair(
-            .Sum,
-            styleCalcPair(.Product, from.root.clone(), styleCalcNumber(1 - progress)),
-            styleCalcPair(.Product, to.root.clone(), styleCalcNumber(progress))
-        )
-    )
+    return tree
 }
 
 // MARK: Rewriting
@@ -6882,62 +6846,45 @@ private func styleCalcContains(_ node: borrowing CalcNode, _ alternative: CalcAl
     return false
 }
 
-/// `substituteSize`: every `size` replaced with `insertion`. `substituted` is false if the result
-/// would have more than `maximumNodeCount` nodes or be deeper than `maximumDepth`.
-@_expose(Cxx)
-public func styleCalcSubstituteSizeSwift(
-    _ tree: CSSCalcSwiftRoot,
-    _ insertion: CSSCalcSwiftRoot,
+/// The outcome of `substituteSize`.
+private enum StyleCalcSubstitution: ~Copyable {
+    /// `tree` holds no `size`: the result is `tree` itself.
+    case unchanged
+    case substituted(CalcNode)
+    /// The result would have more than the maximum node count or depth.
+    case tooLarge
+}
+
+/// `substituteSize`: every `size` in `tree` replaced with `insertion`.
+private func styleCalcSubstituteSize(
+    _ tree: borrowing CalcNode,
+    _ insertion: borrowing CalcNode,
     _ maximumNodeCount: Int,
-    _ maximumDepth: Int,
-    _ substituted: inout Bool
-) -> CSSCalcSwiftRoot {
-    substituted = true
-    let occurrences = styleCalcCountSize(tree.root)
+    _ maximumDepth: Int
+) -> StyleCalcSubstitution {
+    let occurrences = styleCalcCountSize(tree)
     if occurrences == 0 {
-        return copy tree
+        return .unchanged
     }
     // Avoid constructing an oversized tree in the first place.
-    let predictedNodeCount = styleCalcNodeCount(tree.root) - occurrences + occurrences * styleCalcNodeCount(insertion.root)
+    let predictedNodeCount = styleCalcNodeCount(tree) - occurrences + occurrences * styleCalcNodeCount(insertion)
     guard predictedNodeCount <= maximumNodeCount else {
-        substituted = false
-        return .none
+        return .tooLarge
     }
-    let result = styleCalcReplacingLeaves(tree.root) { leaf in
-        leaf.alternative == .Symbol ? insertion.root.clone() : nil
+    let result = styleCalcReplacingLeaves(tree) { leaf in
+        leaf.alternative == .Symbol ? insertion.clone() : nil
     }
     guard styleCalcDepth(result) <= maximumDepth else {
-        substituted = false
-        return .none
+        return .tooLarge
     }
-    return CSSCalcSwiftRoot(result)
+    return .substituted(result)
 }
 
 /// `dePercentify`: every percentage P replaced with `size * (P / 100)`.
-@_expose(Cxx)
-public func styleCalcDePercentifySwift(_ tree: CSSCalcSwiftRoot) -> CSSCalcSwiftRoot {
-    CSSCalcSwiftRoot(
-        styleCalcReplacingLeaves(tree.root) { leaf in
-            leaf.alternative == .Percentage ? styleCalcPair(.Product, styleCalcSize(), styleCalcNumber(leaf.value / 100.0)) : nil
-        }
-    )
-}
-
-// MARK: Queries
-
-@_expose(Cxx)
-public func styleCalcContainsPercentageSwift(_ tree: CSSCalcSwiftRoot) -> Bool {
-    styleCalcContains(tree.root, .Percentage)
-}
-
-@_expose(Cxx)
-public func styleCalcNodeCountSwift(_ tree: CSSCalcSwiftRoot) -> Int {
-    styleCalcNodeCount(tree.root)
-}
-
-@_expose(Cxx)
-public func styleCalcDepthSwift(_ tree: CSSCalcSwiftRoot) -> Int {
-    styleCalcDepth(tree.root)
+private func styleCalcDePercentify(_ tree: borrowing CalcNode) -> CalcNode {
+    styleCalcReplacingLeaves(tree) { leaf in
+        leaf.alternative == .Percentage ? styleCalcPair(.Product, styleCalcSize(), styleCalcNumber(leaf.value / 100.0)) : nil
+    }
 }
 
 /// Whether two operations are equal, their operands compared by `styleCalcOperandsEqual`.
@@ -6991,23 +6938,90 @@ private func styleCalcOperandsEqual(_ a: borrowing CalcNode, _ b: borrowing Calc
 }
 
 /// `Child::operator==`. Structural even when `a` and `b` are one tree, as the C++'s is.
-@_expose(Cxx)
-public func styleCalcRootsEqualSwift(_ a: CSSCalcSwiftRoot, _ b: CSSCalcSwiftRoot) -> Bool {
-    let alternative = a.root.alternative
-    guard alternative == b.root.alternative else {
+private func styleCalcRootsEqual(_ a: borrowing CalcNode, _ b: borrowing CalcNode) -> Bool {
+    let alternative = a.alternative
+    guard alternative == b.alternative else {
         return false
     }
     switch alternative {
     case .Number, .Percentage, .CanonicalDimension:
-        return a.root.value == b.root.value
+        return a.value == b.value
     case .Symbol:
         return true
     default:
-        return styleCalcNodesEqual(a.root, b.root)
+        return styleCalcNodesEqual(a, b)
     }
 }
 
 // MARK: Evaluation
+
+/// Whether `node` holds an operation whose math goes through a function the optimizer cannot see
+/// into (a C library call; `squareRoot()` is one too). `sin`, `cos`, `log` and `exp` lower to
+/// intrinsics and are not among them.
+///
+/// `StyleCalcStore` evaluates in place, inside a read of its trees, and such a call there would put
+/// a dynamic exclusivity check on every access to them (filing 75), because the optimizer must
+/// assume the callee can reach the store. So `StyleCalcEvaluation` has no such call; a tree that
+/// needs one is copied out and folded by `styleCalcFoldOpaqueMath` first.
+private func styleCalcNeedsOpaqueMath(_ node: borrowing CalcNode) -> Bool {
+    switch node.alternative {
+    case .Tan, .Asin, .Acos, .Atan, .Atan2, .Pow, .Sqrt, .Hypot:
+        return true
+    default:
+        break
+    }
+    var k = 0
+    while k < node.children.count {
+        if styleCalcNeedsOpaqueMath(node.children[k]) {
+            return true
+        }
+        k &+= 1
+    }
+    return false
+}
+
+/// What `StyleCalcEvaluation` answers for an operation `styleCalcFoldOpaqueMath` should have folded.
+@inline(always)
+private func styleCalcUnfoldedOpaqueMath() -> Double {
+    assertionFailure("styleCalcNeedsOpaqueMath missed an operation")
+    return .nan
+}
+
+/// Replaces each operation in `node` that `styleCalcNeedsOpaqueMath` names with a number leaf holding
+/// its value under `evaluation`, innermost first, so that `evaluation` can finish the tree without
+/// calling out. A number leaf evaluates to its value as it is, as an operation's result does.
+private func styleCalcFoldOpaqueMath(_ node: inout CalcNode, _ evaluation: StyleCalcEvaluation) {
+    var k = 0
+    while k < node.children.count {
+        styleCalcFoldOpaqueMath(&node.children[k], evaluation)
+        k &+= 1
+    }
+    let value: Double
+    switch node.alternative {
+    case .Tan: value = CalcExecutor.tan(evaluation.child(node, 0))
+    case .Asin: value = CalcExecutor.asin(evaluation.child(node, 0))
+    case .Acos: value = CalcExecutor.acos(evaluation.child(node, 0))
+    case .Atan: value = CalcExecutor.atan(evaluation.child(node, 0))
+    case .Sqrt: value = CalcExecutor.sqrt(evaluation.child(node, 0))
+    case .Atan2: value = CalcExecutor.atan2(evaluation.child(node, 0), evaluation.child(node, 1))
+    case .Pow: value = CalcExecutor.pow(evaluation.child(node, 0), evaluation.child(node, 1))
+    case .Hypot:
+        // `StyleCalcEvaluation.evaluateFunction`'s `hypot()`, whose many-operand case this is.
+        let count = node.children.count
+        guard count >= 2 else {
+            return
+        }
+        var sumOfSquares: Double = 0
+        for k in 0..<count {
+            let operand = evaluation.child(node, k)
+            sumOfSquares += operand * operand
+        }
+        value = CalcExecutor.sqrt(sumOfSquares)
+    default:
+        return
+    }
+    node = styleCalcNumber(value)
+}
 
 /// `evaluate(const Tree&, const EvaluationOptions&)`. Nothing is allocated.
 private struct StyleCalcEvaluation {
@@ -7099,7 +7113,7 @@ private struct StyleCalcEvaluation {
             switch count {
             case 0: return Double.nan
             case 1: return CalcExecutor.abs(only)
-            default: return CalcExecutor.sqrt(sumOfSquares)
+            default: return styleCalcUnfoldedOpaqueMath()
             }
 
         case .Sin:
@@ -7107,15 +7121,15 @@ private struct StyleCalcEvaluation {
         case .Cos:
             return CalcExecutor.cos(child(node, 0))
         case .Tan:
-            return CalcExecutor.tan(child(node, 0))
+            return styleCalcUnfoldedOpaqueMath()
         case .Asin:
-            return CalcExecutor.asin(child(node, 0))
+            return styleCalcUnfoldedOpaqueMath()
         case .Acos:
-            return CalcExecutor.acos(child(node, 0))
+            return styleCalcUnfoldedOpaqueMath()
         case .Atan:
-            return CalcExecutor.atan(child(node, 0))
+            return styleCalcUnfoldedOpaqueMath()
         case .Sqrt:
-            return CalcExecutor.sqrt(child(node, 0))
+            return styleCalcUnfoldedOpaqueMath()
         case .Exp:
             return CalcExecutor.exp(child(node, 0))
         case .Abs:
@@ -7127,8 +7141,7 @@ private struct StyleCalcEvaluation {
             let x = child(node, 0)
             let y = child(node, 1)
             switch node.alternative {
-            case .Atan2: return CalcExecutor.atan2(x, y)
-            case .Pow: return CalcExecutor.pow(x, y)
+            case .Atan2, .Pow: return styleCalcUnfoldedOpaqueMath()
             case .Mod: return CalcExecutor.mod(x, y)
             default: return CalcExecutor.rem(x, y)
             }
@@ -7198,29 +7211,21 @@ private struct StyleCalcEvaluation {
     }
 }
 
-@_expose(Cxx)
-public func styleCalcEvaluateSwift(
-    _ tree: CSSCalcSwiftRoot,
-    _ percentResolutionLength: Double,
-    _ usedZoom: Float,
-    _ sizeResolutionLength: Double
-) -> Double {
-    // The root read field by field, as `child` reads an operand.
-    switch tree.root.alternative {
-    case .Number:
-        return tree.root.value
-    case .Percentage:
-        return percentResolutionLength * tree.root.value / 100.0
-    case .CanonicalDimension:
-        return tree.root.value * Double(usedZoom)
-    case .Symbol:
-        return sizeResolutionLength
-    default:
-        return StyleCalcEvaluation(
-            percentResolutionLength: percentResolutionLength,
-            usedZoom: Double(usedZoom),
-            sizeResolutionLength: sizeResolutionLength
-        ).evaluateOperation(tree.root)
+extension StyleCalcEvaluation {
+    /// The root read field by field, as `child` reads an operand.
+    func evaluateRoot(_ root: borrowing CalcNode) -> Double {
+        switch root.alternative {
+        case .Number:
+            return root.value
+        case .Percentage:
+            return percentResolutionLength * root.value / 100.0
+        case .CanonicalDimension:
+            return root.value * usedZoom
+        case .Symbol:
+            return sizeResolutionLength
+        default:
+            return evaluateOperation(root)
+        }
     }
 }
 
@@ -7413,9 +7418,8 @@ private struct StyleCalcToCSS: ~Copyable {
 /// percentages hinted with `percentHint`, and each `random()`'s fixed base value added to
 /// `payloads`. `converted` is false if an operation has no type, where the C++ dereferences an empty
 /// `std::optional`.
-@_expose(Cxx)
-public func styleCalcToCSSSwift(
-    _ tree: CSSCalcSwiftRoot,
+private func styleCalcToCSS(
+    _ tree: borrowing CalcNode,
     _ canonicalUnit: UInt8,
     _ percentHint: UInt8,
     _ payloads: inout WebCore.CSSCalc.StyleCalcSwiftPayloadSink,
@@ -7423,7 +7427,7 @@ public func styleCalcToCSSSwift(
 ) -> CSSCalcSwiftRoot {
     var conversion = StyleCalcToCSS(canonicalUnit: canonicalUnit, percentHint: percentHint)
     var type: CalcType? = nil
-    let result = conversion.convert(tree.root, &payloads, &type)
+    let result = conversion.convert(tree, &payloads, &type)
     converted = !conversion.failed
     return converted ? CSSCalcSwiftRoot(result) : .none
 }
@@ -7551,7 +7555,318 @@ private func styleCalcDump(_ node: borrowing CalcNode, _ sink: inout WebCore.CSS
     }
 }
 
+
+// MARK: - The store of style calculations
+
+/// One slot of `StyleCalcStore`: a tree and its bookkeeping, in one element so that a handle costs
+/// one bounds check.
+private struct StyleCalcStoredTree: ~Copyable {
+    /// References beyond the first. A slot on the free list has none.
+    var countMinusOne: UInt32
+    /// The next free slot, when this one is free; 0 ends the list.
+    var nextFree: UInt32
+    /// `styleCalcNeedsOpaqueMath` of the tree, so that `evaluate` knows whether it may read in place.
+    var needsOpaqueMath: Bool
+    var node: CalcNode
+}
+
+/// Every style calculation's tree (`Style::Calculation::Child`), held inline and referenced by a
+/// `UInt32` handle that C++ copies and destroys through `retain` and `release`.
+///
+/// A class because C++ cannot hold a `~Copyable` Swift value (filing 71). A C++ holder of a Swift
+/// class reference retains on every copy AND every move (filing 68), whereas a handle is an integer,
+/// so the store is the only such reference, held once by `styleCalcStore()`. Its counts are not
+/// atomic: style calculations are made and read on the main thread, which the C++ asserts.
+///
+/// No access to `trees` spans a call the optimizer cannot see into or an allocation: either would
+/// put a dynamic exclusivity check on every access to it (filing 75). So the array grows on a local
+/// swapped out of the property, a dead tree is swapped out before it is freed, and a read that
+/// allocates or calls out (`taking`) moves the tree out for its duration. Pure walks (`equal`,
+/// `depth`, the in-place `evaluate`) read in place.
 @_expose(Cxx)
-public func styleCalcDumpSwift(_ tree: CSSCalcSwiftRoot, _ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
-    styleCalcDump(tree.root, &sink)
+public final class StyleCalcStore {
+    private var trees = UniqueArray<StyleCalcStoredTree>()
+    private var freeHead: UInt32 = 0
+
+    public init() {
+        // Handle 0 is C++'s moved-from state and is never handed out.
+        var initial = UniqueArray<StyleCalcStoredTree>()
+        initial.append(StyleCalcStoredTree(countMinusOne: 0, nextFree: 0, needsOpaqueMath: false, node: styleCalcPlaceholder()))
+        swap(&initial, &trees)
+    }
+
+    // MARK: References
+
+    public func retain(_ handle: UInt32) {
+        // Traps on the 2^32nd reference, as `swift_retain` does on overflow, rather than wrapping
+        // to a count that frees a live tree.
+        trees[Int(handle)].countMinusOne += 1
+    }
+
+    public func release(_ handle: UInt32) {
+        let index = Int(handle)
+        if trees[index].countMinusOne != 0 {
+            trees[index].countMinusOne -= 1
+            return
+        }
+        var dead = styleCalcPlaceholder()
+        swap(&dead, &trees[index].node)
+        trees[index].nextFree = freeHead
+        freeHead = handle
+        // `dead` is freed here, after every access has ended.
+    }
+
+    /// Stores `node` with one reference, and answers its handle.
+    private func insert(_ node: consuming CalcNode, needsOpaqueMath: Bool) -> UInt32 {
+        var stored = node
+        if freeHead != 0 {
+            let handle = freeHead
+            let index = Int(handle)
+            freeHead = trees[index].nextFree
+            trees[index].countMinusOne = 0
+            trees[index].needsOpaqueMath = needsOpaqueMath
+            swap(&stored, &trees[index].node)
+            return handle
+        }
+        var grown = UniqueArray<StyleCalcStoredTree>()
+        swap(&grown, &trees)
+        grown.append(StyleCalcStoredTree(countMinusOne: 0, nextFree: 0, needsOpaqueMath: needsOpaqueMath, node: stored))
+        let handle = UInt32(grown.count - 1)
+        swap(&grown, &trees)
+        return handle
+    }
+
+    private func insert(_ node: consuming CalcNode) -> UInt32 {
+        let needsOpaqueMath = !node.children.isEmpty && styleCalcNeedsOpaqueMath(node)
+        return insert(node, needsOpaqueMath: needsOpaqueMath)
+    }
+
+    /// Whether a tree built over `a` and `b` and otherwise from arithmetic needs opaque math.
+    private func needOpaqueMath(_ a: UInt32, _ b: UInt32) -> Bool {
+        trees[Int(a)].needsOpaqueMath || trees[Int(b)].needsOpaqueMath
+    }
+
+    /// `body` over the tree at `handle`, moved out of `trees` meanwhile, so that it may allocate,
+    /// call out, or read the store.
+    private func taking<Result: ~Copyable>(_ handle: UInt32, _ body: (borrowing CalcNode) -> Result) -> Result {
+        var node = styleCalcPlaceholder()
+        swap(&node, &trees[Int(handle)].node)
+        let result = body(node)
+        swap(&node, &trees[Int(handle)].node)
+        return result
+    }
+
+    /// `body` over the tree at `handle`, read in place. Through an `inout` access, because a
+    /// borrow of the element straight from `trees` is copied (all 56 bytes) before any call the
+    /// optimizer cannot prove leaves it alone, and `body` makes one. `body` must be a pure walk:
+    /// no allocation and no opaque call, or every access to `trees` gets a dynamic check.
+    @inline(always)
+    private func reading<Result>(_ handle: UInt32, _ body: (borrowing CalcNode) -> Result) -> Result {
+        styleCalcBorrowInPlace(&trees[Int(handle)].node, body)
+    }
+
+    /// `taking` of two trees, which may be one.
+    private func taking<Result: ~Copyable>(_ a: UInt32, _ b: UInt32, _ body: (borrowing CalcNode, borrowing CalcNode) -> Result) -> Result {
+        taking(a) { first in
+            a == b ? body(first, first) : taking(b) { second in body(first, second) }
+        }
+    }
+
+    // MARK: Construction
+
+    public func size() -> UInt32 {
+        insert(styleCalcSize(), needsOpaqueMath: false)
+    }
+
+    public func percentage(_ value: Double) -> UInt32 {
+        insert(styleCalcPercentage(value), needsOpaqueMath: false)
+    }
+
+    public func dimension(_ value: Double) -> UInt32 {
+        insert(styleCalcDimension(value), needsOpaqueMath: false)
+    }
+
+    /// `add`: `Sum { a, b }`.
+    public func add(_ a: UInt32, _ b: UInt32) -> UInt32 {
+        let needsOpaqueMath = needOpaqueMath(a, b)
+        return insert(taking(a, b) { a, b in styleCalcPair(.Sum, a.clone(), b.clone()) }, needsOpaqueMath: needsOpaqueMath)
+    }
+
+    /// `subtract`: `Sum { a, Negate { b } }`.
+    public func subtract(_ a: UInt32, _ b: UInt32) -> UInt32 {
+        let needsOpaqueMath = needOpaqueMath(a, b)
+        return insert(taking(a, b) { a, b in
+            var negated = UniqueArray<CalcNode>(capacity: 1)
+            negated.append(b.clone())
+            return styleCalcPair(.Sum, a.clone(), styleCalcOperation(.Negate, negated))
+        }, needsOpaqueMath: needsOpaqueMath)
+    }
+
+    /// `blend`: `Sum { Product { from, 1 - progress }, Product { to, progress } }`, built in one call.
+    public func blend(_ from: UInt32, _ to: UInt32, _ progress: Double) -> UInt32 {
+        let needsOpaqueMath = needOpaqueMath(from, to)
+        return insert(taking(from, to) { from, to in
+            styleCalcPair(
+                .Sum,
+                styleCalcPair(.Product, from.clone(), styleCalcNumber(1 - progress)),
+                styleCalcPair(.Product, to.clone(), styleCalcNumber(progress))
+            )
+        }, needsOpaqueMath: needsOpaqueMath)
+    }
+
+    /// `toStyle(const CSSCalc::Tree&)`. 0, and `converted` false, if the conversion failed.
+    public func insertConverted(
+        _ root: CSSCalcSwiftRoot,
+        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+        _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
+        _ converted: inout Bool
+    ) -> UInt32 {
+        let tree = styleCalcConvert(root, &builder, options, &converted)
+        return converted ? insert(tree) : 0
+    }
+
+    // MARK: Rewriting
+
+    /// `substituteSize`. 0, and `substituted` false, if the result would be too large.
+    public func substituteSize(
+        _ tree: UInt32,
+        _ insertion: UInt32,
+        _ maximumNodeCount: Int,
+        _ maximumDepth: Int,
+        _ substituted: inout Bool
+    ) -> UInt32 {
+        let outcome = taking(tree, insertion) { tree, insertion in
+            styleCalcSubstituteSize(tree, insertion, maximumNodeCount, maximumDepth)
+        }
+        switch consume outcome {
+        case .unchanged:
+            substituted = true
+            retain(tree)
+            return tree
+        case .substituted(let result):
+            substituted = true
+            return insert(result)
+        case .tooLarge:
+            substituted = false
+            return 0
+        }
+    }
+
+    public func dePercentify(_ tree: UInt32) -> UInt32 {
+        insert(taking(tree) { styleCalcDePercentify($0) })
+    }
+
+    // MARK: Reading
+
+    /// `styleCalcRootsEqual`, with a leaf root compared field by field. An operation root borrows
+    /// both trees, and the second is copied: two overlapping `inout` accesses to `trees` would be
+    /// an exclusivity violation.
+    public func equal(_ a: UInt32, _ b: UInt32) -> Bool {
+        let first = Int(a)
+        let second = Int(b)
+        let alternative = trees[first].node.alternative
+        guard alternative == trees[second].node.alternative else {
+            return false
+        }
+        switch alternative {
+        case .Number, .Percentage, .CanonicalDimension:
+            return trees[first].node.value == trees[second].node.value
+        case .Symbol:
+            return true
+        default:
+            return styleCalcNodesEqual(trees[first].node, trees[second].node)
+        }
+    }
+
+    public func containsPercentage(_ tree: UInt32) -> Bool {
+        reading(tree) { styleCalcContains($0, .Percentage) }
+    }
+
+    public func nodeCount(_ tree: UInt32) -> Int {
+        reading(tree) { styleCalcNodeCount($0) }
+    }
+
+    public func depth(_ tree: UInt32) -> Int {
+        reading(tree) { styleCalcDepth($0) }
+    }
+
+    public func evaluate(_ tree: UInt32, _ percentResolutionLength: Double, _ usedZoom: Float, _ sizeResolutionLength: Double) -> Double {
+        let index = Int(tree)
+        if trees[index].needsOpaqueMath {
+            return evaluateFolded(tree, percentResolutionLength, usedZoom, sizeResolutionLength)
+        }
+        // The root read field by field, as `StyleCalcEvaluation.child` reads an operand: borrowing
+        // the whole node for the switch would copy all of it.
+        switch trees[index].node.alternative {
+        case .Number:
+            return trees[index].node.value
+        case .Percentage:
+            return percentResolutionLength * trees[index].node.value / 100.0
+        case .CanonicalDimension:
+            return trees[index].node.value * Double(usedZoom)
+        case .Symbol:
+            return sizeResolutionLength
+        default:
+            let evaluation = StyleCalcEvaluation(
+                percentResolutionLength: percentResolutionLength,
+                usedZoom: Double(usedZoom),
+                sizeResolutionLength: sizeResolutionLength
+            )
+            return reading(tree) { evaluation.evaluateOperation($0) }
+        }
+    }
+
+    /// `evaluate` of a tree that needs opaque math. Out of line, so that the common path's frame
+    /// does not carry this one's spills.
+    @inline(never)
+    private func evaluateFolded(_ tree: UInt32, _ percentResolutionLength: Double, _ usedZoom: Float, _ sizeResolutionLength: Double) -> Double {
+        let evaluation = StyleCalcEvaluation(
+            percentResolutionLength: percentResolutionLength,
+            usedZoom: Double(usedZoom),
+            sizeResolutionLength: sizeResolutionLength
+        )
+        return taking(tree) { root in
+            var folded = root.clone()
+            styleCalcFoldOpaqueMath(&folded, evaluation)
+            return evaluation.evaluateRoot(folded)
+        }
+    }
+
+    /// `toCSS(const Tree&)` before its `copyAndSimplify`; see `styleCalcToCSS`.
+    public func toCSS(
+        _ tree: UInt32,
+        _ canonicalUnit: UInt8,
+        _ percentHint: UInt8,
+        _ payloads: inout WebCore.CSSCalc.StyleCalcSwiftPayloadSink,
+        _ converted: inout Bool
+    ) -> CSSCalcSwiftRoot {
+        taking(tree) { styleCalcToCSS($0, canonicalUnit, percentHint, &payloads, &converted) }
+    }
+
+    public func dump(_ tree: UInt32, _ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
+        taking(tree) { styleCalcDump($0, &sink) }
+    }
+}
+
+/// `body` over `node`, passed on by address. See `StyleCalcStore.reading`.
+@inline(always)
+private func styleCalcBorrowInPlace<Result>(_ node: inout CalcNode, _ body: (borrowing CalcNode) -> Result) -> Result {
+    body(node)
+}
+
+/// What a moved-out or free slot of `StyleCalcStore` holds. It owns no allocation, and is built
+/// from literals: `styleCalcNumber` reads a lazily initialised global.
+@inline(always)
+private func styleCalcPlaceholder() -> CalcNode {
+    CalcNode(
+        value: 0,
+        type: CalcType(),
+        origin: 0,
+        valueID: 0,
+        unitType: 0,
+        alternative: .Number,
+        percentHint: 0,
+        flags: 0,
+        children: UniqueArray()
+    )
 }
