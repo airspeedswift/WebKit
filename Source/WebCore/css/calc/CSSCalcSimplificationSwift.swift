@@ -3663,7 +3663,17 @@ private func calcReify(_ node: borrowing CalcNode, _ builder: inout WebCore.CSSC
 /// before their parent, so Swift never reads a `Child`.
 @_expose(Cxx)
 public final class CSSCalcSwiftStoreBuilder {
+    /// Each method works on a local swapped out of this property, so that no access to it spans an
+    /// allocation, which would put a dynamic exclusivity check on every access (filing 75).
     var stack = UniqueArray<CalcNode>()
+
+    private func withStack<Result>(_ body: (inout UniqueArray<CalcNode>) -> Result) -> Result {
+        var local = UniqueArray<CalcNode>()
+        swap(&local, &stack)
+        let result = body(&local)
+        swap(&local, &stack)
+        return result
+    }
 
     /// An empty builder.
     public init() {
@@ -3679,7 +3689,7 @@ public final class CSSCalcSwiftStoreBuilder {
         _ percentHint: UInt8,
         _ valueID: UInt16
     ) {
-        stack.append(
+        withStack { $0.append(
             CalcNode(
                 value: value,
                 type: CalcType(),
@@ -3691,7 +3701,7 @@ public final class CSSCalcSwiftStoreBuilder {
                 flags: 0,
                 children: UniqueArray()
             )
-        )
+        ) }
     }
 
     /// A `calc-mix()` item's weight, pushed after the item's value: a number, the math function
@@ -3704,7 +3714,7 @@ public final class CSSCalcSwiftStoreBuilder {
                 flags |= CalcNodeFlags.calcMixWeightIsCalc
             }
         }
-        stack.append(
+        withStack { $0.append(
             CalcNode(
                 value: present && payload == calcNoPayload ? value : 0,
                 type: CalcType(),
@@ -3716,7 +3726,7 @@ public final class CSSCalcSwiftStoreBuilder {
                 flags: flags,
                 children: UniqueArray()
             )
-        )
+        ) }
     }
 
     /// Pop `childCount` nodes and push an operation over them.
@@ -3733,40 +3743,45 @@ public final class CSSCalcSwiftStoreBuilder {
     ) -> Bool {
         let type = CalcType(cxxType)
         let count = Int(childCount)
-        guard count <= stack.count else {
-            return false
-        }
-        var children = UniqueArray<CalcNode>(capacity: count)
-        var k = stack.count &- count
-        while k < stack.count {
-            children.append(stack.remove(at: k))
-        }
         let flags = UInt16(noneMask) & CalcNodeFlags.clampNoneMask
-        stack.append(
-            CalcNode(
-                value: 0,
-                type: type,
-                origin: origin,
-                valueID: 0,
-                unitType: 0,
-                alternative: alternative,
-                percentHint: 0,
-                flags: flags,
-                children: children
+        return withStack { stack in
+            guard count <= stack.count else {
+                return false
+            }
+            var children = UniqueArray<CalcNode>(capacity: count)
+            var k = stack.count &- count
+            while k < stack.count {
+                children.append(stack.remove(at: k))
+            }
+            stack.append(
+                CalcNode(
+                    value: 0,
+                    type: type,
+                    origin: origin,
+                    valueID: 0,
+                    unitType: 0,
+                    alternative: alternative,
+                    percentHint: 0,
+                    flags: flags,
+                    children: children
+                )
             )
-        )
-        return true
+            return true
+        }
     }
 
     /// Whether exactly one node is left, which `finish` then answers as the tree.
-    public var isFinished: Bool { stack.count == 1 }
+    public var isFinished: Bool { withStack { $0.count == 1 } }
 
     /// The tree, or `.none` when the pushes did not leave exactly one node.
     public func finish() -> CSSCalcSwiftRoot {
-        guard stack.count == 1 else {
+        var local = UniqueArray<CalcNode>()
+        swap(&local, &stack)
+        guard local.count == 1 else {
+            swap(&local, &stack)
             return .none
         }
-        var root = stack.removeLast()
+        var root = local.removeLast()
         calcRestoreAnchorPrefixes(&root)
         return CSSCalcSwiftRoot(root)
     }
