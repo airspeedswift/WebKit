@@ -26,13 +26,15 @@
 #pragma once
 
 #include <wtf/HashMap.h>
+#include <wtf/MainThread.h>
 #include <wtf/NeverDestroyed.h>
 
 namespace WebCore {
 namespace Style {
 
 // Side table for values that PrimitiveData refers to by handle rather than holding inline, which is
-// what lets it stay packed. Each value type gets its own map.
+// what lets it stay packed. Each value type gets its own map. Main thread only: the map is shared and
+// unlocked.
 template<typename ValueType> class ValueHandleMap {
 public:
     static ValueHandleMap& NODELETE singleton()
@@ -68,6 +70,7 @@ private:
 
 template<typename ValueType> unsigned ValueHandleMap<ValueType>::insert(Ref<ValueType>&& value)
 {
+    ASSERT(isMainThread());
     ASSERT(m_nextAvailableHandle);
 
     Entry entry(WTF::move(value));
@@ -82,6 +85,7 @@ template<typename ValueType> unsigned ValueHandleMap<ValueType>::insert(Ref<Valu
 
 template<typename ValueType> ValueType& NODELETE ValueHandleMap<ValueType>::get(unsigned handle) const
 {
+    ASSERT(isMainThread());
     auto entry = m_map.find(handle);
     ASSERT(entry != m_map.end());
 
@@ -90,6 +94,7 @@ template<typename ValueType> ValueType& NODELETE ValueHandleMap<ValueType>::get(
 
 template<typename ValueType> void ValueHandleMap<ValueType>::ref(unsigned handle)
 {
+    ASSERT(isMainThread());
     ASSERT(m_map.contains(handle));
 
     ++m_map.find(handle)->value.referenceCountMinusOne;
@@ -97,6 +102,7 @@ template<typename ValueType> void ValueHandleMap<ValueType>::ref(unsigned handle
 
 template<typename ValueType> void ValueHandleMap<ValueType>::deref(unsigned handle)
 {
+    ASSERT(isMainThread());
     ASSERT(m_map.contains(handle));
 
     auto it = m_map.find(handle);

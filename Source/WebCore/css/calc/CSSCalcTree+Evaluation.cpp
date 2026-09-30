@@ -128,8 +128,10 @@ std::optional<double> NODELETE evaluate(const Number& number, const EvaluationOp
     return number.value;
 }
 
-std::optional<double> NODELETE evaluate(const Percentage& percentage, const EvaluationOptions&)
+std::optional<double> NODELETE evaluate(const Percentage& percentage, const EvaluationOptions& options)
 {
+    if (options.percentageBasis)
+        return *options.percentageBasis * percentage.value / 100.0;
     return percentage.value;
 }
 
