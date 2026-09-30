@@ -1,0 +1,9 @@
+
+PASS calc(100px at the end of the style sheet
+PASS calc((100px at the end of the style sheet
+PASS calc(((100px at the end of the style sheet
+PASS calc((((((100px at the end of the style sheet
+PASS calc((100px) + (1px at the end of the style sheet
+PASS calc(1px + (2px at the end of the style sheet
+PASS calc(min(10px, (20px at the end of the style sheet
+
