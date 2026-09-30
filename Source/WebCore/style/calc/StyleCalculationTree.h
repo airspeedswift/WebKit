@@ -248,25 +248,22 @@ struct Children {
     bool operator==(const Children&) const = default;
 };
 #else
-// A reference to a tree in `StyleCalcStore` (CSSCalcSimplificationSwift.swift), which owns every
-// style calculation's tree and counts its references: a copy adds one, a move transfers it, and
-// destruction drops it. Trees are never mutated, so copies share one. 0 is the moved-from state.
+// The owner of a tree in `StyleCalcStore` (CSSCalcSimplificationSwift.swift), which holds every
+// style calculation's tree. Move-only, as the C++ tree's `Child` is: a tree has exactly one owner, a
+// move transfers it, destruction frees it, and a copy is an explicit `Calculation::copy`, a deep
+// copy. 0 is the moved-from state.
 struct Child {
-    // Takes over a reference the store has counted, as every store function returning one does.
+    // Takes ownership of a handle, as every store function that returns one hands it over.
     static Child adopt(uint32_t handle) { return Child { handle }; }
     Child(Size);
 
-    Child(const Child& other)
-        : m_handle { other.m_handle }
-    {
-        if (m_handle)
-            retain(m_handle);
-    }
+    Child(const Child&) = delete;
+    Child& operator=(const Child&) = delete;
     Child(Child&& other)
         : m_handle { std::exchange(other.m_handle, 0) }
     {
     }
-    Child& operator=(Child other)
+    Child& operator=(Child&& other)
     {
         std::swap(m_handle, other.m_handle);
         return *this;
@@ -280,13 +277,14 @@ struct Child {
     bool operator==(const Child&) const;
 
     uint32_t handle() const { return m_handle; }
+    // Gives up ownership, for a store function that consumes the tree.
+    uint32_t take() { return std::exchange(m_handle, 0); }
 
 private:
     explicit Child(uint32_t handle)
         : m_handle { handle }
     {
     }
-    WEBCORE_EXPORT static void retain(uint32_t);
     WEBCORE_EXPORT static void release(uint32_t);
 
     uint32_t m_handle;

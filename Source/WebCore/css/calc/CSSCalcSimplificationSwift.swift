@@ -7586,8 +7586,9 @@ private func styleCalcDump(_ node: borrowing CalcNode, _ sink: inout WebCore.CSS
 /// One slot of `StyleCalcStore`: a tree and its bookkeeping, in one element so that a handle costs
 /// one bounds check.
 private struct StyleCalcStoredTree: ~Copyable {
-    /// References beyond the first. A slot on the free list has none.
-    var countMinusOne: UInt32
+    /// Whether a C++ `Child` owns this slot. A tree has exactly one owner, as upstream's
+    /// `UniqueRef` tree does, so there is no count: false on the free list and for slot 0.
+    var live: Bool
     /// The next free slot, when this one is free; 0 ends the list.
     var nextFree: UInt32
     /// `styleCalcNeedsOpaqueMath` of the tree, so that `evaluate` knows whether it may read in place.
@@ -7596,12 +7597,13 @@ private struct StyleCalcStoredTree: ~Copyable {
 }
 
 /// Every style calculation's tree (`Style::Calculation::Child`), held inline and referenced by a
-/// `UInt32` handle that C++ copies and destroys through `retain` and `release`.
+/// `UInt32` handle. C++ `Child` is move-only and owns its handle: a move transfers it, destruction
+/// calls `release`, and a copy is an explicit `clone`, a deep copy into a new slot.
 ///
 /// A class because C++ cannot hold a `~Copyable` Swift value (filing 71). A C++ holder of a Swift
 /// class reference retains on every copy AND every move (filing 68), whereas a handle is an integer,
-/// so the store is the only such reference, held once by `styleCalcStore()`. Its counts are not
-/// atomic: style calculations are made and read on the main thread, which the C++ asserts.
+/// so the store is the only such reference, held once by `styleCalcStore()`. It is not thread-safe:
+/// style calculations are made and read on the main thread, which the C++ asserts.
 ///
 /// No access to `trees` spans a call the optimizer cannot see into or an allocation: either would
 /// put a dynamic exclusivity check on every access to it (filing 75). So the array grows on a local
@@ -7616,29 +7618,36 @@ public final class StyleCalcStore {
     public init() {
         // Handle 0 is C++'s moved-from state and is never handed out.
         var initial = UniqueArray<StyleCalcStoredTree>()
-        initial.append(StyleCalcStoredTree(countMinusOne: 0, nextFree: 0, needsOpaqueMath: false, node: styleCalcPlaceholder()))
+        initial.append(StyleCalcStoredTree(live: false, nextFree: 0, needsOpaqueMath: false, node: styleCalcPlaceholder()))
         swap(&initial, &trees)
     }
 
-    // MARK: References
+    // MARK: Ownership
 
-    public func retain(_ handle: UInt32) {
-        // Traps on the 2^32nd reference, as `swift_retain` does on overflow, rather than wrapping
-        // to a count that frees a live tree.
-        trees[Int(handle)].countMinusOne += 1
+    /// Destroys the tree its one owner held. Traps on a slot that is not live: a second release,
+    /// or a handle that was never handed out.
+    public func release(_ handle: UInt32) {
+        var dead = take(handle)
+        _ = consume dead
+        // `dead` is freed here, after every access has ended.
     }
 
-    public func release(_ handle: UInt32) {
+    /// Moves the tree out of its slot and frees the slot, for a function that consumes it.
+    private func take(_ handle: UInt32) -> CalcNode {
         let index = Int(handle)
-        if trees[index].countMinusOne != 0 {
-            trees[index].countMinusOne -= 1
-            return
-        }
-        var dead = styleCalcPlaceholder()
-        swap(&dead, &trees[index].node)
+        precondition(trees[index].live, "Style::Calculation handle released twice, or never handed out")
+        var node = styleCalcPlaceholder()
+        swap(&node, &trees[index].node)
+        trees[index].live = false
         trees[index].nextFree = freeHead
         freeHead = handle
-        // `dead` is freed here, after every access has ended.
+        return node
+    }
+
+    /// `Calculation::copy`: a deep copy into a new slot, which the caller owns.
+    public func clone(_ handle: UInt32) -> UInt32 {
+        let needsOpaqueMath = trees[Int(handle)].needsOpaqueMath
+        return insert(taking(handle) { $0.clone() }, needsOpaqueMath: needsOpaqueMath)
     }
 
     /// Stores `node` with one reference, and answers its handle.
@@ -7648,14 +7657,14 @@ public final class StyleCalcStore {
             let handle = freeHead
             let index = Int(handle)
             freeHead = trees[index].nextFree
-            trees[index].countMinusOne = 0
+            trees[index].live = true
             trees[index].needsOpaqueMath = needsOpaqueMath
             swap(&stored, &trees[index].node)
             return handle
         }
         var grown = UniqueArray<StyleCalcStoredTree>()
         swap(&grown, &trees)
-        grown.append(StyleCalcStoredTree(countMinusOne: 0, nextFree: 0, needsOpaqueMath: needsOpaqueMath, node: stored))
+        grown.append(StyleCalcStoredTree(live: true, nextFree: 0, needsOpaqueMath: needsOpaqueMath, node: stored))
         let handle = UInt32(grown.count - 1)
         swap(&grown, &trees)
         return handle
@@ -7711,32 +7720,36 @@ public final class StyleCalcStore {
         insert(styleCalcDimension(value), needsOpaqueMath: false)
     }
 
+    // `add`, `subtract` and `blend` consume both operands, as their C++ `Child&&` parameters say:
+    // each tree moves out of its slot into the result, so nothing is cloned.
+
     /// `add`: `Sum { a, b }`.
     public func add(_ a: UInt32, _ b: UInt32) -> UInt32 {
         let needsOpaqueMath = needOpaqueMath(a, b)
-        return insert(taking(a, b) { a, b in styleCalcPair(.Sum, a.clone(), b.clone()) }, needsOpaqueMath: needsOpaqueMath)
+        let first = take(a)
+        let second = take(b)
+        return insert(styleCalcPair(.Sum, first, second), needsOpaqueMath: needsOpaqueMath)
     }
 
     /// `subtract`: `Sum { a, Negate { b } }`.
     public func subtract(_ a: UInt32, _ b: UInt32) -> UInt32 {
         let needsOpaqueMath = needOpaqueMath(a, b)
-        return insert(taking(a, b) { a, b in
-            var negated = UniqueArray<CalcNode>(capacity: 1)
-            negated.append(b.clone())
-            return styleCalcPair(.Sum, a.clone(), styleCalcOperation(.Negate, negated))
-        }, needsOpaqueMath: needsOpaqueMath)
+        let first = take(a)
+        var negated = UniqueArray<CalcNode>(capacity: 1)
+        negated.append(take(b))
+        return insert(styleCalcPair(.Sum, first, styleCalcOperation(.Negate, negated)), needsOpaqueMath: needsOpaqueMath)
     }
 
     /// `blend`: `Sum { Product { from, 1 - progress }, Product { to, progress } }`, built in one call.
     public func blend(_ from: UInt32, _ to: UInt32, _ progress: Double) -> UInt32 {
         let needsOpaqueMath = needOpaqueMath(from, to)
-        return insert(taking(from, to) { from, to in
-            styleCalcPair(
-                .Sum,
-                styleCalcPair(.Product, from.clone(), styleCalcNumber(1 - progress)),
-                styleCalcPair(.Product, to.clone(), styleCalcNumber(progress))
-            )
-        }, needsOpaqueMath: needsOpaqueMath)
+        let first = take(from)
+        let second = take(to)
+        return insert(styleCalcPair(
+            .Sum,
+            styleCalcPair(.Product, first, styleCalcNumber(1 - progress)),
+            styleCalcPair(.Product, second, styleCalcNumber(progress))
+        ), needsOpaqueMath: needsOpaqueMath)
     }
 
     /// `toStyle(const CSSCalc::Tree&)`. 0, and `converted` false, if the conversion failed.
@@ -7765,9 +7778,9 @@ public final class StyleCalcStore {
         }
         switch consume outcome {
         case .unchanged:
+            // A new tree, as upstream copies here: the caller owns the result and `tree` both.
             substituted = true
-            retain(tree)
-            return tree
+            return clone(tree)
         case .substituted(let result):
             substituted = true
             return insert(result)
