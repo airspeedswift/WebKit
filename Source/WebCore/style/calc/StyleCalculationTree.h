@@ -33,15 +33,18 @@
 #include <wtf/Vector.h>
 
 // Whether the C++ representation of a style calculation is compiled in: exactly when the Swift CSS
-// implementation is not. Without it, a `Child` is the Swift tree a `CSSCalc::Tree` stores.
+// implementation is not. Without it, a `Child` refers to a tree in the Swift store of style
+// calculations.
 #if USE(SWIFT_CSS)
 #define STYLE_CALC_CPP_TREE_COMPILED_IN 0
-#include <WebCore/CSSCalcTree.h>
 #else
 #define STYLE_CALC_CPP_TREE_COMPILED_IN 1
 #endif
 
 namespace WebCore {
+#if !STYLE_CALC_CPP_TREE_COMPILED_IN && !defined(__swift__)
+class StyleCalcStore;
+#endif
 namespace Style {
 namespace Calculation {
 
@@ -245,21 +248,54 @@ struct Children {
     bool operator==(const Children&) const = default;
 };
 #else
-// The Swift tree a `CSSCalc::Tree` stores, restricted to what a style calculation holds
-// (CSSCalcSimplificationSwift.swift). It is never mutated, so a copy shares it.
+// A reference to a tree in `StyleCalcStore` (CSSCalcSimplificationSwift.swift), which owns every
+// style calculation's tree and counts its references: a copy adds one, a move transfers it, and
+// destruction drops it. Trees are never mutated, so copies share one. 0 is the moved-from state.
 struct Child {
-#if !defined(__swift__)
-    template<typename Make> Child(std::in_place_t, const Make& make)
-        : stored { std::in_place, make }
+    // Takes over a reference the store has counted, as every store function returning one does.
+    static Child adopt(uint32_t handle) { return Child { handle }; }
+    Child(Size);
+
+    Child(const Child& other)
+        : m_handle { other.m_handle }
+    {
+        if (m_handle)
+            retain(m_handle);
+    }
+    Child(Child&& other)
+        : m_handle { std::exchange(other.m_handle, 0) }
     {
     }
-#endif
-    Child(Size);
+    Child& operator=(Child other)
+    {
+        std::swap(m_handle, other.m_handle);
+        return *this;
+    }
+    ~Child()
+    {
+        if (m_handle)
+            release(m_handle);
+    }
 
     bool operator==(const Child&) const;
 
-    CSSCalc::CSSCalcSwiftStoredRoot stored;
+    uint32_t handle() const { return m_handle; }
+
+private:
+    explicit Child(uint32_t handle)
+        : m_handle { handle }
+    {
+    }
+    WEBCORE_EXPORT static void retain(uint32_t);
+    WEBCORE_EXPORT static void release(uint32_t);
+
+    uint32_t m_handle;
 };
+
+#if !defined(__swift__)
+// The one store, defined where the generated Swift header is visible (StyleCalculationTree.cpp).
+StyleCalcStore& styleCalcStore();
+#endif
 #endif
 
 struct Tree {

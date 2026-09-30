@@ -283,13 +283,6 @@ struct CSSCalcSwiftStoredRoot {
     WEBCORE_EXPORT CSSCalcSwiftStoredRoot(const CSSCalcSwiftRoot&, RefPtr<CSSCalcSwiftFlatPayloadsBox>&&);
     // Not `explicit`: `Tree`'s aggregate initialisation copy-initialises `stored` from the request.
     CSSCalcSwiftStoredRoot(const CSSCalcSwiftParseRequest&);
-    // Constructs the root in place from `make()`, a Swift thunk's prvalue, which is Swift's +1
-    // reference: a copy or a C++ move of the root would retain it again.
-    template<typename Make> CSSCalcSwiftStoredRoot(std::in_place_t, const Make& make)
-    {
-        static_assert(std::is_same_v<std::invoke_result_t<const Make&>, CSSCalcSwiftRoot>);
-        new (m_root) std::invoke_result_t<const Make&>(make());
-    }
     const CSSCalcSwiftRoot& root() const LIFETIME_BOUND;
 #endif
     WEBCORE_EXPORT CSSCalcSwiftStoredRoot(const CSSCalcSwiftStoredRoot&);

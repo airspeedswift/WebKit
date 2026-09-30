@@ -178,7 +178,7 @@ double evaluate(const Tree& tree, const EvaluationOptions& options)
 #if STYLE_CALC_CPP_TREE_COMPILED_IN
     return evaluate(tree.root, options);
 #else
-    return styleCalcEvaluateSwift(tree.root.stored.root(), options.percentResolutionLength, options.usedZoom.value, options.sizeResolutionLength.value_or(0));
+    return styleCalcStore().evaluate(tree.root.handle(), options.percentResolutionLength, options.usedZoom.value, options.sizeResolutionLength.value_or(0));
 #endif
 }
 
