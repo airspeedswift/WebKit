@@ -26,6 +26,9 @@
 #include "StyleCalculationTree+Copy.h"
 
 #include "StyleCalculationTree.h"
+#if !STYLE_CALC_CPP_TREE_COMPILED_IN
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
 #include <wtf/StdLibExtras.h>
 
 namespace WebCore {
@@ -104,15 +107,15 @@ template<typename Op> Child copy(const IndirectNode<Op>& root)
     return makeChild(WTF::apply([](const auto& ...x) { return Op { copy(x)... }; } , *root));
 }
 #else
-// The tree is never mutated, so a copy shares it.
+// A deep copy into a new slot of the store, as the C++ tree's copy is: a tree has one owner.
 Tree copy(const Tree& tree)
 {
-    return tree;
+    return Tree { copy(tree.root) };
 }
 
 Child copy(const Child& root)
 {
-    return root;
+    return Child::adopt(styleCalcStore().clone(root.handle()));
 }
 #endif
 

@@ -405,11 +405,6 @@ StyleCalcStore& styleCalcStore()
     return store;
 }
 
-void Child::retain(uint32_t handle)
-{
-    styleCalcStore().retain(handle);
-}
-
 void Child::release(uint32_t handle)
 {
     styleCalcStore().release(handle);
@@ -437,17 +432,17 @@ Child dimension(double value)
 
 Child add(Child&& a, Child&& b)
 {
-    return Child::adopt(styleCalcStore().add(a.handle(), b.handle()));
+    return Child::adopt(styleCalcStore().add(a.take(), b.take()));
 }
 
 Child subtract(Child&& a, Child&& b)
 {
-    return Child::adopt(styleCalcStore().subtract(a.handle(), b.handle()));
+    return Child::adopt(styleCalcStore().subtract(a.take(), b.take()));
 }
 
 Child blend(Child&& from, Child&& to, double progress)
 {
-    return Child::adopt(styleCalcStore().blend(from.handle(), to.handle(), progress));
+    return Child::adopt(styleCalcStore().blend(from.take(), to.take(), progress));
 }
 
 size_t computeDepth(const Tree& tree)
