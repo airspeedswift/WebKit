@@ -1,0 +1,22 @@
+<!DOCTYPE html><!-- webkit-test-runner [ OffscreenCanvasEnabled=true ] -->
+<html>
+<head>
+<script src="../../resources/testharness.js"></script>
+<script src="../../resources/testharnessreport.js"></script>
+</head>
+<body>
+<script>
+promise_test(async () => {
+    const worker = new Worker("resources/calc-font-worker.js");
+    const results = await new Promise((resolve, reject) => {
+        worker.onmessage = e => resolve(e.data);
+        worker.onerror = e => reject(new Error(e.message || "worker error"));
+        worker.postMessage("RUN");
+    });
+    assert_equals(results.length, 4, "every case ran");
+    for (const r of results)
+        assert_equals(r.actual, r.expected, `${r.calcFont} measures as ${r.pxFont} (font now "${r.font}")`);
+}, "calc() font sizes on an OffscreenCanvas in a dedicated worker");
+</script>
+</body>
+</html>
