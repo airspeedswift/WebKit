@@ -1,0 +1,40 @@
+<!DOCTYPE html><!-- webkit-test-runner [ OffscreenCanvasEnabled=true ] -->
+<html>
+<head>
+<script src="../../resources/testharness.js"></script>
+<script src="../../resources/testharnessreport.js"></script>
+</head>
+<body>
+<div id="host"></div>
+<script>
+// Stress test for the worker/main-thread race on Style::ValueHandleMap: workers set calc() fonts on OffscreenCanvases
+// while the main thread resolves calc() lengths in style. Both insert into and remove from the same table, which
+// has no lock. It passes if the process survives and each side did its work.
+promise_test(async () => {
+    const ms = 3000, workerCount = 4;
+    const host = document.getElementById("host");
+    for (let i = 0; i < 200; ++i)
+        host.appendChild(document.createElement("div"));
+    const workers = [...Array(workerCount)].map(() => new Worker("resources/calc-font-race-worker.js"));
+    const done = Promise.all(workers.map(w => new Promise((resolve, reject) => {
+        w.onmessage = e => resolve(e.data);
+        w.onerror = e => reject(new Error(e.message || "worker error"));
+        w.postMessage({ ms });
+    })));
+    let styleRounds = 0, finished = false;
+    done.then(() => { finished = true; });
+    while (!finished) {
+        let k = styleRounds;
+        for (const child of host.children)
+            child.style.width = `calc(${(++k) % 97}% + ${k % 13}px)`;
+        host.offsetWidth; // forces style resolution, which converts every calc() to a Style::Calculation
+        ++styleRounds;
+        await new Promise(r => setTimeout(r, 0));
+    }
+    const counts = await done;
+    assert_true(counts.every(n => n > 0), "every worker set fonts");
+    assert_true(styleRounds > 0, "the main thread resolved style meanwhile");
+}, "calc() fonts on worker OffscreenCanvases while the main thread resolves calc() styles");
+</script>
+</body>
+</html>
