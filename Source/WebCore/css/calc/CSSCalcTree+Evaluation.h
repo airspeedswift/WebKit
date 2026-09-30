@@ -58,6 +58,10 @@ struct EvaluationOptions {
 
     // `symbolTable` contains information needed to convert unresolved symbols into numeric values.
     const CSSCalcSymbolTable& symbolTable;
+
+    // `percentageBasis`, if set, is what a percentage resolves against, so that a <length-percentage>
+    // evaluates to a length without first being converted to a style value.
+    std::optional<double> percentageBasis { };
 };
 
 std::optional<double> evaluateDouble(const Tree&, const EvaluationOptions&);
