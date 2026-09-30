@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<script src="../../../../resources/testharness.js"></script>
+<script src="../../../../resources/testharnessreport.js"></script>
+<img id="mul" sizes="calc(2 * 450px)" srcset="../../../hidpi/resources/image-set-1x.png 400w, ../../../hidpi/resources/image-set-2x.png 800w">
+<img id="plain" sizes="calc(900px)" srcset="../../../hidpi/resources/image-set-1x.png 400w, ../../../hidpi/resources/image-set-2x.png 800w">
+<img id="second" sizes="(max-width: 1px) 400px, calc(900px)" srcset="../../../hidpi/resources/image-set-1x.png 400w, ../../../hidpi/resources/image-set-2x.png 800w">
+<script>
+// A calc() in `sizes` is evaluated against conversion data from the document. Each image here has a
+// calc() source size of 900px, so it picks the 800w candidate.
+promise_test(async () => {
+    await new Promise(resolve => window.addEventListener("load", resolve));
+    for (const id of ["mul", "plain", "second"])
+        assert_true(document.getElementById(id).currentSrc.endsWith("image-set-2x.png"), id);
+}, "calc() source sizes in the sizes attribute are evaluated");
+</script>
