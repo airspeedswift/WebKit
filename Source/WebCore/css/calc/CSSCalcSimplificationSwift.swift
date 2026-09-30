@@ -6042,10 +6042,13 @@ private struct CalcEvaluation: ~Copyable {
     var blame: CalcAlternative? = nil
     /// The walk reached a node it does not handle.
     var refused = false
+    /// `EvaluationOptions::percentageBasis`: what a percentage resolves against, if set.
+    let percentageBasis: Double?
 
-    init(units: CalcSimplification, builder: WebCore.CSSCalc.CSSCalcSwiftBuilder) {
+    init(units: CalcSimplification, builder: WebCore.CSSCalc.CSSCalcSwiftBuilder, percentageBasis: Double? = nil) {
         self.units = units
         self.builder = builder
+        self.percentageBasis = percentageBasis
     }
 
     /// `calcResolveStyleCoupled` for `node`, with the evaluator's `random()` semantics.
@@ -6166,9 +6169,14 @@ private struct CalcEvaluation: ~Copyable {
         }
 
         switch alternative {
-        // `evaluate(const Number&)`, `evaluate(const Percentage&)` and
-        // `evaluate(const CanonicalDimension&)`: the stored value, unconditionally.
-        case .Number, .Percentage, .CanonicalDimension:
+        // `evaluate(const Number&)` and `evaluate(const CanonicalDimension&)`: the stored value.
+        case .Number, .CanonicalDimension:
+            return info.numericValue
+        // `evaluate(const Percentage&)`: resolved against the basis if there is one.
+        case .Percentage:
+            if let basis = percentageBasis {
+                return basis * info.numericValue / 100.0
+            }
             return info.numericValue
 
         // `evaluate(const NonCanonicalDimension&)`: `canonicalize` against the conversion data, or
@@ -6474,7 +6482,9 @@ private struct CalcEvaluation: ~Copyable {
 public func cssCalcEvaluateSwift(
     _ stored: CSSCalcSwiftRoot,
     _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
-    _ hasConversionData: Bool
+    _ hasConversionData: Bool,
+    _ hasPercentageBasis: Bool,
+    _ percentageBasis: Double
 ) -> WebCore.CSSCalc.CSSCalcSwiftNumericResult {
     // `canonicalizedDimension` reads only `hasConversionData`.
     let units = CalcSimplification(
@@ -6486,7 +6496,7 @@ public func cssCalcEvaluateSwift(
 
     let box = stored
     let rootInfo = box.root.info
-    var evaluation = CalcEvaluation(units: units, builder: builder)
+    var evaluation = CalcEvaluation(units: units, builder: builder, percentageBasis: hasPercentageBasis ? percentageBasis : nil)
     let value = evaluation.evaluate(box.root, rootInfo)
 
     // A refused tree names the root. A tree that evaluates to nothing, where

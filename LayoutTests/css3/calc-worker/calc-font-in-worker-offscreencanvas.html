@@ -13,7 +13,7 @@ promise_test(async () => {
         worker.onerror = e => reject(new Error(e.message || "worker error"));
         worker.postMessage("RUN");
     });
-    assert_equals(results.length, 4, "every case ran");
+    assert_equals(results.length, 8, "every case ran");
     for (const r of results)
         assert_equals(r.actual, r.expected, `${r.calcFont} measures as ${r.pxFont} (font now "${r.font}")`);
 }, "calc() font sizes on an OffscreenCanvas in a dedicated worker");

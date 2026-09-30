@@ -111,6 +111,8 @@ public:
     double evaluate(const CSSToLengthConversionData&, const CSSCalcSymbolTable&) const;
     double evaluate(NoConversionDataRequiredToken) const;
     double evaluate(NoConversionDataRequiredToken, const CSSCalcSymbolTable&) const;
+    // A <length-percentage> as a length, its percentages resolved against `percentageBasis`.
+    double evaluate(NoConversionDataRequiredToken, double percentageBasis) const;
     double evaluateDeprecated() const;
 
     Style::UnevaluatedCalculationBase createCalculationValue(const Style::BuilderState&) const;

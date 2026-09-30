@@ -2178,7 +2178,7 @@ std::optional<double> evaluateDoubleWithSwift(const Tree& tree, const Evaluation
         .symbolTable = options.symbolTable,
     };
     CSSCalcSwiftBuilder builder { simplificationOptions, tree.stored.payloads() };
-    auto result = cssCalcEvaluateSwift(tree.stored.root(), builder, simplificationOptions.conversionData.has_value());
+    auto result = cssCalcEvaluateSwift(tree.stored.root(), builder, simplificationOptions.conversionData.has_value(), options.percentageBasis.has_value(), options.percentageBasis.value_or(0));
     if (result.resolved)
         return result.value;
 #if !CSS_CALC_CPP_EVALUATOR_COMPILED_IN

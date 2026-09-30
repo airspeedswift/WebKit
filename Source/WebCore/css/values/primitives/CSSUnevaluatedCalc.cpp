@@ -96,13 +96,14 @@ static inline double clampToPermittedRange(Category category, Range range, doubl
     return CSS::clampToRange<double>(value, range);
 }
 
-static double evaluate(const CSSCalc::Value& value, std::optional<CSSToLengthConversionData>&& conversionData, const CSSCalcSymbolTable& symbolTable)
+static double evaluate(const CSSCalc::Value& value, std::optional<CSSToLengthConversionData>&& conversionData, const CSSCalcSymbolTable& symbolTable, std::optional<double> percentageBasis = std::nullopt)
 {
     auto options = CSSCalc::EvaluationOptions {
         .category = value.category(),
         .range = value.range(),
         .conversionData = WTF::move(conversionData),
-        .symbolTable = symbolTable
+        .symbolTable = symbolTable,
+        .percentageBasis = percentageBasis
     };
     return clampToPermittedRange(value.category(), value.range(), evaluateDouble(value.tree(), options).value_or(0));
 }
@@ -356,6 +357,11 @@ double UnevaluatedCalcBase::evaluate(NoConversionDataRequiredToken) const
 double UnevaluatedCalcBase::evaluate(NoConversionDataRequiredToken, const CSSCalcSymbolTable& symbolTable) const
 {
     return CSS::evaluate(protect(calcValue()), std::nullopt, symbolTable);
+}
+
+double UnevaluatedCalcBase::evaluate(NoConversionDataRequiredToken, double percentageBasis) const
+{
+    return CSS::evaluate(protect(calcValue()), std::nullopt, CSSCalcSymbolTable { }, percentageBasis);
 }
 
 double UnevaluatedCalcBase::evaluateDeprecated() const
