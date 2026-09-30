@@ -1,0 +1,4 @@
+
+
+PASS calc() source sizes in the sizes attribute are evaluated
+

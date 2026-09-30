@@ -189,11 +189,14 @@ std::optional<float> SizesAttributeParser::parseFunction(CSSParserTokenRange tok
     if (!tree)
         return std::nullopt;
 
+    // `EvaluationOptions::symbolTable` is a reference, and a temporary bound to it here is destroyed
+    // at the end of this declaration, before `evaluateDouble` reads it.
+    CSSCalcSymbolTable symbolTable;
     auto evaluationOptions = CSSCalc::EvaluationOptions {
         .category = category,
         .range = range,
         .conversionData = conversionData,
-        .symbolTable = { },
+        .symbolTable = symbolTable,
     };
     auto result = CSSCalc::evaluateDouble(*tree, evaluationOptions);
     if (!result)
