@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<script src="../../resources/testharness.js"></script>
+<script src="../../resources/testharnessreport.js"></script>
+<div id="target"></div>
+<script>
+// CSS Syntax closes every open construct at the end of the input, so a calc() whose nested
+// parenthesised blocks are never closed parses as if they were.
+const cases = [
+    ["calc(100px", "100px"],
+    ["calc((100px", "100px"],
+    ["calc(((100px", "100px"],
+    ["calc((((((100px", "100px"],
+    ["calc((100px) + (1px", "101px"],
+    ["calc(1px + (2px", "3px"],
+    ["calc(min(10px, (20px", "10px"],
+];
+for (const [text, expected] of cases) {
+    test(() => {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(`#target { width: 1px; width: ${text}`);
+        document.adoptedStyleSheets = [sheet];
+        assert_equals(getComputedStyle(document.getElementById("target")).width, expected);
+    }, `${text} at the end of the style sheet`);
+}
+</script>

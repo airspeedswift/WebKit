@@ -4122,14 +4122,16 @@ private func calcSkipWhitespace(
     }
 }
 
-/// The index of the `BlockEnd` matching the `BlockStart` at `start`, or nil if the range ends
-/// first.
+/// The block that starts at `start`, as `CSSParserTokenRange::consumeBlock` finds it: `inner` is
+/// where its contents end, and `next` is the first token after it. A block the range ends inside is
+/// closed by the end of the range: CSS Syntax closes every open construct at end of input, so its
+/// contents run to `end` and there is no `BlockEnd` to step past.
 private func calcFindBlockEnd(
     _ cursor: borrowing CalcTokens,
     _ state: inout CalcParseState,
     _ start: UInt32,
     _ end: UInt32
-) -> UInt32? {
+) -> (inner: UInt32, next: UInt32) {
     var depth = 0
     var i = start
     while i < end {
@@ -4138,11 +4140,11 @@ private func calcFindBlockEnd(
             depth += 1
         } else if blockType == calcBlockEnd {
             depth -= 1
-            if depth == 0 { return i }
+            if depth == 0 { return (i, i + 1) }
         }
         i += 1
     }
-    return nil
+    return (end, end)
 }
 
 /// `CSSParserToken::BlockType`, pinned on the C++ side one enumerator per line.
@@ -4521,7 +4523,7 @@ private func calcParseBlock(
         return nil
     }
 
-    guard let blockEnd = calcFindBlockEnd(cursor, &state, index, end) else { return nil }
+    let (blockEnd, afterBlock) = calcFindBlockEnd(cursor, &state, index, end)
 
     var inner = index + 1
     calcSkipWhitespace(cursor, &inner, blockEnd, &state)
@@ -4530,7 +4532,7 @@ private func calcParseBlock(
     calcSkipWhitespace(cursor, &inner, blockEnd, &state)
     if inner != blockEnd { return nil }
 
-    index = blockEnd + 1
+    index = afterBlock
     calcSkipWhitespace(cursor, &index, end, &state)
     // A parenthesised group contributes no node of its own.
     return innerParsed
@@ -4620,7 +4622,7 @@ private func calcParseFunctionBlock(
     _ alternative: WebCore.CSSCalc.CSSCalcSwiftAlternative,
     _ arguments: CalcFunctionArguments
 ) -> CalcParsed? {
-    guard let blockEnd = calcFindBlockEnd(cursor, &state, index, end) else { return nil }
+    let (blockEnd, afterBlock) = calcFindBlockEnd(cursor, &state, index, end)
 
     var inner = index + 1
     let argumentsParsed: CalcParsed?
@@ -4729,7 +4731,7 @@ private func calcParseFunctionBlock(
     guard let parsed = consume argumentsParsed else { return nil }
     if inner != blockEnd { return nil }
 
-    index = blockEnd + 1
+    index = afterBlock
     calcSkipWhitespace(cursor, &index, end, &state)
     return parsed
 }
