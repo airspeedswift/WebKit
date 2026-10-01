@@ -32,6 +32,13 @@ WK_ENABLE_SLOW_BUILD_VERIFICATION = $(WK_ENABLE_SLOW_BUILD_VERIFICATION_$(CONFIG
 WK_ENABLE_SLOW_BUILD_VERIFICATION_Production = YES;
 __ALLOW_EXCLUDED_USER_SCRIPT_SANDBOXING_PHASE_NAMES = YES;
 
+// Selects the Swift implementation of CSS tokenizing, the property fast paths, and calc() parsing,
+// simplification, evaluation and serialization, and compiles out the C++ implementations it replaces.
+// Defined here because every target that includes WebCore's CSS headers must agree on it: WebCore and
+// TestWebKitAPI. On by default on macOS, where it has been tested; other platforms keep the C++.
+WK_USE_SWIFT_CSS = NO;
+WK_USE_SWIFT_CSS[sdk=macosx*] = YES;
+
 // Prefix Definitions
 //
 // WK_COMMON_ prefix is used to define variables in CommonBase.xcconfig

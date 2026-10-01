@@ -120,8 +120,9 @@ EXCLUDED_SOURCE_FILE_NAMES = $(EXCLUDED_SOURCE_FILE_NAMES_$(WK_COCOA_TOUCH));
 EXCLUDED_SOURCE_FILE_NAMES_ = *IOS.h *IOS.cpp *IOS.mm;
 EXCLUDED_SOURCE_FILE_NAMES_cocoatouch = *Mac.h *Mac.cpp *Mac.mm */mac/*;
 
-// Must match WebCore's setting of the same name: TestWebKitAPI includes WebCore headers whose
-// declarations depend on which CSS implementation WebCore was built with.
+// WK_USE_SWIFT_CSS is set in Configurations/CommonBase.xcconfig, so that it matches WebCore's:
+// TestWebKitAPI includes WebCore headers whose declarations depend on which CSS implementation
+// WebCore was built with.
 WK_USE_SWIFT_CSS_CFLAGS = $(WK_USE_SWIFT_CSS_CFLAGS_$(WK_USE_SWIFT_CSS));
 WK_USE_SWIFT_CSS_CFLAGS_YES = -DUSE_SWIFT_CSS=1;
 
