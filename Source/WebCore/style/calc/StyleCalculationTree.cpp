@@ -430,19 +430,27 @@ Child dimension(double value)
     return Child::adopt(styleCalcStore().dimension(value));
 }
 
-Child add(Child&& a, Child&& b)
+Child::Child(Operand&& tree)
+    : Child { tree.borrowed ? styleCalcStore().clone(tree.borrowed) : tree.owned.take() }
 {
-    return Child::adopt(styleCalcStore().add(a.take(), b.take()));
 }
 
-Child subtract(Child&& a, Child&& b)
+// Each operand as the store takes it: a tree it consumes, or one it clones.
+#define STYLE_CALC_OPERAND(x) x.owned.take(), x.borrowed
+
+Child add(Operand&& a, Operand&& b)
 {
-    return Child::adopt(styleCalcStore().subtract(a.take(), b.take()));
+    return Child::adopt(styleCalcStore().add(STYLE_CALC_OPERAND(a), STYLE_CALC_OPERAND(b)));
 }
 
-Child blend(Child&& from, Child&& to, double progress)
+Child subtract(Operand&& a, Operand&& b)
 {
-    return Child::adopt(styleCalcStore().blend(from.take(), to.take(), progress));
+    return Child::adopt(styleCalcStore().subtract(STYLE_CALC_OPERAND(a), STYLE_CALC_OPERAND(b)));
+}
+
+Child blend(Operand&& from, Operand&& to, double progress)
+{
+    return Child::adopt(styleCalcStore().blend(STYLE_CALC_OPERAND(from), STYLE_CALC_OPERAND(to), progress));
 }
 
 size_t computeDepth(const Tree& tree)
