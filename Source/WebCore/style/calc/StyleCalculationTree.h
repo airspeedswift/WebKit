@@ -41,10 +41,30 @@
 #define STYLE_CALC_CPP_TREE_COMPILED_IN 1
 #endif
 
-namespace WebCore {
-#if !STYLE_CALC_CPP_TREE_COMPILED_IN && !defined(__swift__)
-class StyleCalcStore;
+#if !STYLE_CALC_CPP_TREE_COMPILED_IN
+// The Swift store of style calculations, by handle, implemented by `@c @implementation` functions in
+// CSSCalcSimplificationSwift.swift (SE-0495), so that any header may call it.
+extern "C" {
+void styleCalcStoreRelease(uint32_t tree);
+uint32_t styleCalcStoreClone(uint32_t tree);
+uint32_t styleCalcStoreSize(void);
+uint32_t styleCalcStorePercentage(double);
+uint32_t styleCalcStoreDimension(double);
+uint32_t styleCalcStoreAdd(uint32_t a, uint32_t aBorrowed, uint32_t b, uint32_t bBorrowed);
+uint32_t styleCalcStoreSubtract(uint32_t a, uint32_t aBorrowed, uint32_t b, uint32_t bBorrowed);
+uint32_t styleCalcStoreBlend(uint32_t from, uint32_t fromBorrowed, uint32_t to, uint32_t toBorrowed, double progress);
+// 0 if the result would be too large.
+uint32_t styleCalcStoreSubstituteSize(uint32_t tree, uint32_t insertion, size_t maximumNodeCount, size_t maximumDepth);
+uint32_t styleCalcStoreDePercentify(uint32_t tree);
+bool styleCalcStoreEqual(uint32_t a, uint32_t b);
+bool styleCalcStoreContainsPercentage(uint32_t tree);
+size_t styleCalcStoreNodeCount(uint32_t tree);
+size_t styleCalcStoreDepth(uint32_t tree);
+double styleCalcStoreEvaluate(uint32_t tree, double percentResolutionLength, float usedZoom, double sizeResolutionLength);
+}
 #endif
+
+namespace WebCore {
 namespace Style {
 namespace Calculation {
 
@@ -258,7 +278,8 @@ struct Operand;
 struct Child {
     // Takes ownership of a handle, as every store function that returns one hands it over.
     static Child adopt(uint32_t handle) { return Child { handle }; }
-    Child(Size);
+    Child(Size)
+        : m_handle { styleCalcStoreSize() } { }
     Child(Operand&&);
 
     Child(const Child&) = delete;
@@ -275,10 +296,10 @@ struct Child {
     ~Child()
     {
         if (m_handle)
-            release(m_handle);
+            styleCalcStoreRelease(m_handle);
     }
 
-    bool operator==(const Child&) const;
+    bool operator==(const Child& other) const { return styleCalcStoreEqual(m_handle, other.m_handle); }
 
     uint32_t handle() const { return m_handle; }
     // Gives up ownership, for a store function that consumes the tree.
@@ -289,7 +310,6 @@ private:
         : m_handle { handle }
     {
     }
-    WEBCORE_EXPORT static void release(uint32_t);
 
     uint32_t m_handle;
 };
@@ -305,11 +325,6 @@ struct Operand {
     Child owned { Child::adopt(0) };
     uint32_t borrowed { 0 };
 };
-
-#if !defined(__swift__)
-// The one store, defined where the generated Swift header is visible (StyleCalculationTree.cpp).
-StyleCalcStore& styleCalcStore();
-#endif
 #endif
 
 struct Tree {
@@ -318,12 +333,18 @@ struct Tree {
     bool operator==(const Tree&) const = default;
 };
 
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
 size_t computeDepth(const Tree&);
 
 // Distinct from computeDepth(): substitution multiplies a tree rather than deepening it, so the two
 // bound different things.
 size_t computeNodeCount(const Tree&);
 size_t computeNodeCount(const Child&);
+#else
+inline size_t computeDepth(const Tree& tree) { return styleCalcStoreDepth(tree.root.handle()); }
+// Distinct from computeDepth(): substitution multiplies a tree rather than deepening it.
+inline size_t computeNodeCount(const Tree& tree) { return styleCalcStoreNodeCount(tree.root.handle()); }
+#endif
 
 #if STYLE_CALC_CPP_TREE_COMPILED_IN
 // Math Operators.
