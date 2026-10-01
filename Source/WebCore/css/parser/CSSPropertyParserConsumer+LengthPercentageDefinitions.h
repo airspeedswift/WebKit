@@ -30,6 +30,9 @@
 namespace WebCore {
 namespace CSSPropertyParserHelpers {
 
+struct LengthPercentageValidator;
+
+#if CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN
 struct LengthPercentageValidator {
     static constexpr std::optional<CSS::LengthPercentageUnit> validate(CSSUnitType unitType, CSS::PropertyParserState& state, CSSPropertyParserOptions options)
     {
@@ -51,18 +54,19 @@ struct LengthPercentageValidator {
         return LengthValidator::shouldAcceptUnitlessValue(value, state, options);
     }
 };
+#endif
 
 template<auto R, typename V> struct ConsumerDefinition<CSS::LengthPercentage<R, V>> {
     using FunctionToken = FunctionConsumerForCalcValues<CSS::LengthPercentage<R, V>>;
-    using DimensionToken = DimensionConsumer<CSS::LengthPercentage<R, V>, LengthPercentageValidator>;
-    using PercentageToken = PercentageConsumer<CSS::LengthPercentage<R, V>, LengthPercentageValidator>;
-    using NumberToken = NumberConsumerForUnitlessValues<CSS::LengthPercentage<R, V>, LengthPercentageValidator, CSS::LengthUnit::Px>;
+    using DimensionToken = NumericConsumer<DimensionConsumer<CSS::LengthPercentage<R, V>, LengthPercentageValidator>, CSS::LengthPercentage<R, V>>;
+    using PercentageToken = NumericConsumer<PercentageConsumer<CSS::LengthPercentage<R, V>, LengthPercentageValidator>, CSS::LengthPercentage<R, V>>;
+    using NumberToken = NumericConsumer<NumberConsumerForUnitlessValues<CSS::LengthPercentage<R, V>, LengthPercentageValidator, CSS::LengthUnit::Px>, CSS::LengthPercentage<R, V>>;
 };
 
 template<auto R, typename V> struct ConsumerDefinition<CSS::LengthPercentageRaw<R, V>> {
-    using DimensionToken = DimensionConsumer<CSS::LengthPercentage<R, V>, LengthPercentageValidator>;
-    using PercentageToken = PercentageConsumer<CSS::LengthPercentage<R, V>, LengthPercentageValidator>;
-    using NumberToken = NumberConsumerForUnitlessValues<CSS::LengthPercentage<R, V>, LengthPercentageValidator, CSS::LengthUnit::Px>;
+    using DimensionToken = NumericConsumer<DimensionConsumer<CSS::LengthPercentage<R, V>, LengthPercentageValidator>, CSS::LengthPercentage<R, V>>;
+    using PercentageToken = NumericConsumer<PercentageConsumer<CSS::LengthPercentage<R, V>, LengthPercentageValidator>, CSS::LengthPercentage<R, V>>;
+    using NumberToken = NumericConsumer<NumberConsumerForUnitlessValues<CSS::LengthPercentage<R, V>, LengthPercentageValidator, CSS::LengthUnit::Px>, CSS::LengthPercentage<R, V>>;
 };
 
 } // namespace CSSPropertyParserHelpers

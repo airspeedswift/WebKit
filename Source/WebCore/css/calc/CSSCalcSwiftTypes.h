@@ -469,3 +469,23 @@ private:
 
 } // namespace CSSCalc
 } // namespace WebCore
+
+// MARK: - The numeric primitive consumers (CSSPropertyParserConsumer+MetaConsumerDefinitions.h)
+
+// What a numeric consumer reads of `CSSPropertyParserOptions` and `PropertyParserState`, as bits.
+enum CSSNumericConsumerSwiftFlag : uint8_t {
+    CSSNumericConsumerSwiftUnitlessZeroLength = 1 << 0,
+    CSSNumericConsumerSwiftAbsoluteLengthUnitsOnly = 1 << 1,
+    CSSNumericConsumerSwiftResolvesToFloat = 1 << 2, // the primitive's `ResolvedValueType`, which a clamp rounds through
+};
+
+struct CSSNumericConsumerSwiftResult {
+    double value;
+    uint8_t unit; // the raw value of the primitive's unit enum
+    bool accepted;
+};
+
+// A `<number>`, `<percentage>` or `<dimension>` token for the primitive of `category` (a `CSS::Category`)
+// with range `[rangeMin, rangeMax]` and its `CSS::RangeParseTimeBehavior`s. `@c @implementation` in
+// CSSCalcSimplificationSwift.swift (SE-0495). Every argument is a scalar, so all of them are passed in registers.
+extern "C" CSSNumericConsumerSwiftResult cssConsumeNumericSwift(double value, double rangeMin, double rangeMax, uint8_t category, uint8_t tokenType, uint8_t unitType, uint8_t parserMode, uint16_t currentProperty, uint8_t minBehavior, uint8_t maxBehavior, uint8_t flags) noexcept;
