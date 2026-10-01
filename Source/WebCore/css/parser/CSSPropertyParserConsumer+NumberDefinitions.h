@@ -29,6 +29,9 @@
 namespace WebCore {
 namespace CSSPropertyParserHelpers {
 
+struct NumberValidator;
+
+#if CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN
 struct NumberValidator {
     static constexpr std::optional<CSS::NumberUnit> validate(CSSUnitType unitType, CSS::PropertyParserState&, CSSPropertyParserOptions)
     {
@@ -40,14 +43,15 @@ struct NumberValidator {
         return isValidCanonicalValue(raw);
     }
 };
+#endif
 
 template<auto R, typename V> struct ConsumerDefinition<CSS::Number<R, V>> {
     using FunctionToken = FunctionConsumerForCalcValues<CSS::Number<R, V>>;
-    using NumberToken = NumberConsumer<CSS::Number<R, V>, NumberValidator>;
+    using NumberToken = NumericConsumer<NumberConsumer<CSS::Number<R, V>, NumberValidator>, CSS::Number<R, V>>;
 };
 
 template<auto R, typename V> struct ConsumerDefinition<CSS::NumberRaw<R, V>> {
-    using NumberToken = NumberConsumer<CSS::Number<R, V>, NumberValidator>;
+    using NumberToken = NumericConsumer<NumberConsumer<CSS::Number<R, V>, NumberValidator>, CSS::Number<R, V>>;
 };
 
 } // namespace CSSPropertyParserHelpers
