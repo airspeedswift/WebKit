@@ -29,6 +29,9 @@
 namespace WebCore {
 namespace CSSPropertyParserHelpers {
 
+struct PercentageValidator;
+
+#if CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN
 struct PercentageValidator {
     static constexpr std::optional<CSS::PercentageUnit> validate(CSSUnitType unitType, CSS::PropertyParserState&, CSSPropertyParserOptions)
     {
@@ -40,14 +43,15 @@ struct PercentageValidator {
         return isValidCanonicalValue(raw);
     }
 };
+#endif
 
 template<auto R, typename V> struct ConsumerDefinition<CSS::Percentage<R, V>> {
     using FunctionToken = FunctionConsumerForCalcValues<CSS::Percentage<R, V>>;
-    using PercentageToken = PercentageConsumer<CSS::Percentage<R, V>, PercentageValidator>;
+    using PercentageToken = NumericConsumer<PercentageConsumer<CSS::Percentage<R, V>, PercentageValidator>, CSS::Percentage<R, V>>;
 };
 
 template<auto R, typename V> struct ConsumerDefinition<CSS::PercentageRaw<R, V>> {
-    using PercentageToken = PercentageConsumer<CSS::Percentage<R, V>, PercentageValidator>;
+    using PercentageToken = NumericConsumer<PercentageConsumer<CSS::Percentage<R, V>, PercentageValidator>, CSS::Percentage<R, V>>;
 };
 
 } // namespace CSSPropertyParserHelpers

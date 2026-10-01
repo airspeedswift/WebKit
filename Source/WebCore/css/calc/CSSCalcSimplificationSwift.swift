@@ -8087,8 +8087,9 @@ public func cssConsumeNumericSwift(
         unit = UInt8(WebCore.CSS.LengthUnit.Px.rawValue)
     case (WebCore.CSS.Category.LengthPercentage.rawValue, WebCore.PercentageToken.rawValue):
         unit = UInt8(WebCore.CSS.LengthPercentageUnit.Percentage.rawValue)
-    case (WebCore.CSS.Category.Number.rawValue, WebCore.NumberToken.rawValue):
-        // `NumberUnit` has one case, 0, which Swift does not import by name.
+    case (WebCore.CSS.Category.Number.rawValue, WebCore.NumberToken.rawValue),
+        (WebCore.CSS.Category.Percentage.rawValue, WebCore.PercentageToken.rawValue):
+        // `NumberUnit` and `PercentageUnit` have one case each, 0, which Swift does not import by name.
         unit = 0
     default:
         return rejected
