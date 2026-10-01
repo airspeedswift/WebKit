@@ -38,9 +38,14 @@ inline Calculation::Child copyCalculation(Ref<Calculation::Value> value)
     return value->copyRoot();
 }
 
-inline Calculation::Child copyCalculation(Calc auto const& value)
+// Without the C++ tree, a calculation is borrowed: the operation it is handed to copies it.
+inline Calculation::Operand copyCalculation(Calc auto const& value)
 {
+#if STYLE_CALC_CPP_TREE_COMPILED_IN
     return protect(value.calculation())->copyRoot();
+#else
+    return Calculation::Operand { value.calculation().tree().root };
+#endif
 }
 
 template<auto R, typename V> Calculation::Child copyCalculation(const Number<R, V>& value)
@@ -63,9 +68,9 @@ inline Calculation::Child copyCalculation(Numeric auto const& value)
     return Calculation::dimension(value.value);
 }
 
-inline Calculation::Child copyCalculation(DimensionPercentageNumeric auto const& value)
+inline Calculation::Operand copyCalculation(DimensionPercentageNumeric auto const& value)
 {
-    return WTF::switchOn(value, [](const auto& value) { return copyCalculation(value); });
+    return WTF::switchOn(value, [](const auto& value) -> Calculation::Operand { return copyCalculation(value); });
 }
 
 } // namespace Style

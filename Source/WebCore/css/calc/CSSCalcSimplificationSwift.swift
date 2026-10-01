@@ -7677,11 +7677,6 @@ public final class StyleCalcStore {
         return insert(node, needsOpaqueMath: needsOpaqueMath)
     }
 
-    /// Whether a tree built over `a` and `b` and otherwise from arithmetic needs opaque math.
-    private func needOpaqueMath(_ a: UInt32, _ b: UInt32) -> Bool {
-        trees[Int(a)].needsOpaqueMath || trees[Int(b)].needsOpaqueMath
-    }
-
     /// `body` over the tree at `handle`, moved out of `trees` meanwhile, so that it may allocate,
     /// call out, or read the store.
     private func taking<Result: ~Copyable>(_ handle: UInt32, _ body: (borrowing CalcNode) -> Result) -> Result {
@@ -7722,31 +7717,41 @@ public final class StyleCalcStore {
         insert(styleCalcDimension(value), needsOpaqueMath: false)
     }
 
-    // `add`, `subtract` and `blend` consume both operands, as their C++ `Child&&` parameters say:
-    // each tree moves out of its slot into the result, so nothing is cloned.
+    // An operand of `add`, `subtract` and `blend` (C++ `Operand`) is a tree the operation consumes
+    // (`owned`), which moves out of its slot into the result, or one its caller keeps (`borrowed`),
+    // which is cloned straight into it rather than into a slot of its own. The other handle is 0.
+
+    private func operand(_ owned: UInt32, _ borrowed: UInt32) -> CalcNode {
+        owned != 0 ? take(owned) : taking(borrowed) { $0.clone() }
+    }
+
+    /// Whether a tree built over the operands `a` and `b`, and otherwise from arithmetic, needs opaque math.
+    private func needOpaqueMath(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> Bool {
+        trees[Int(a | aBorrowed)].needsOpaqueMath || trees[Int(b | bBorrowed)].needsOpaqueMath
+    }
 
     /// `add`: `Sum { a, b }`.
-    public func add(_ a: UInt32, _ b: UInt32) -> UInt32 {
-        let needsOpaqueMath = needOpaqueMath(a, b)
-        let first = take(a)
-        let second = take(b)
+    public func add(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> UInt32 {
+        let needsOpaqueMath = needOpaqueMath(a, aBorrowed, b, bBorrowed)
+        let first = operand(a, aBorrowed)
+        let second = operand(b, bBorrowed)
         return insert(styleCalcPair(.Sum, first, second), needsOpaqueMath: needsOpaqueMath)
     }
 
     /// `subtract`: `Sum { a, Negate { b } }`.
-    public func subtract(_ a: UInt32, _ b: UInt32) -> UInt32 {
-        let needsOpaqueMath = needOpaqueMath(a, b)
-        let first = take(a)
+    public func subtract(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> UInt32 {
+        let needsOpaqueMath = needOpaqueMath(a, aBorrowed, b, bBorrowed)
+        let first = operand(a, aBorrowed)
         var negated = UniqueArray<CalcNode>(capacity: 1)
-        negated.append(take(b))
+        negated.append(operand(b, bBorrowed))
         return insert(styleCalcPair(.Sum, first, styleCalcOperation(.Negate, negated)), needsOpaqueMath: needsOpaqueMath)
     }
 
     /// `blend`: `Sum { Product { from, 1 - progress }, Product { to, progress } }`, built in one call.
-    public func blend(_ from: UInt32, _ to: UInt32, _ progress: Double) -> UInt32 {
-        let needsOpaqueMath = needOpaqueMath(from, to)
-        let first = take(from)
-        let second = take(to)
+    public func blend(_ from: UInt32, _ fromBorrowed: UInt32, _ to: UInt32, _ toBorrowed: UInt32, _ progress: Double) -> UInt32 {
+        let needsOpaqueMath = needOpaqueMath(from, fromBorrowed, to, toBorrowed)
+        let first = operand(from, fromBorrowed)
+        let second = operand(to, toBorrowed)
         return insert(styleCalcPair(
             .Sum,
             styleCalcPair(.Product, first, styleCalcNumber(1 - progress)),

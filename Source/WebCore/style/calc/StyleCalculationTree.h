@@ -247,15 +247,19 @@ struct Children {
 
     bool operator==(const Children&) const = default;
 };
+
+using Operand = Child;
 #else
 // The owner of a tree in `StyleCalcStore` (CSSCalcSimplificationSwift.swift), which holds every
 // style calculation's tree. Move-only, as the C++ tree's `Child` is: a tree has exactly one owner, a
 // move transfers it, destruction frees it, and a copy is an explicit `Calculation::copy`, a deep
 // copy. 0 is the moved-from state.
+struct Operand;
 struct Child {
     // Takes ownership of a handle, as every store function that returns one hands it over.
     static Child adopt(uint32_t handle) { return Child { handle }; }
     Child(Size);
+    Child(Operand&&);
 
     Child(const Child&) = delete;
     Child& operator=(const Child&) = delete;
@@ -288,6 +292,18 @@ private:
     WEBCORE_EXPORT static void release(uint32_t);
 
     uint32_t m_handle;
+};
+
+// An operand of `add`, `subtract` and `blend`: a tree they consume, or one its caller keeps, which the
+// store clones straight into the result. Borrowing, so it must not outlive the expression that made it.
+struct Operand {
+    Operand(Child&& tree)
+        : owned { WTF::move(tree) } { }
+    explicit Operand(const Child& tree LIFETIME_BOUND)
+        : borrowed { tree.handle() } { }
+
+    Child owned { Child::adopt(0) };
+    uint32_t borrowed { 0 };
 };
 
 #if !defined(__swift__)
@@ -655,10 +671,10 @@ template<typename Op> Child makeChild(Op&& op)
 Child number(double value);
 Child percentage(double value);
 Child dimension(double value);
-Child add(Child&& a, Child&& b);
+Child add(Operand&& a, Operand&& b);
 Child multiply(Child&& a, Child&& b);
-Child subtract(Child&& a, Child&& b);
-Child blend(Child&& from, Child&& to, double progress);
+Child subtract(Operand&& a, Operand&& b);
+Child blend(Operand&& from, Operand&& to, double progress);
 
 // MARK: Dumping
 
