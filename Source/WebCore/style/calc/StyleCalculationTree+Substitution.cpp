@@ -28,8 +28,6 @@
 #include "StyleCalculationTree+Copy.h"
 #if STYLE_CALC_CPP_TREE_COMPILED_IN
 #include "StyleCalculationTree+Traversal.h"
-#else
-#include "WebCoreSwiftBoundaryTypes.h"
 #endif
 #include "StyleCalculationTree.h"
 #include <wtf/StdLibExtras.h>
@@ -219,21 +217,20 @@ bool containsPercentage(const Tree& tree)
 #else
 std::optional<Tree> substituteSize(const Tree& tree, const Child& insertion)
 {
-    bool substituted = false;
-    auto result = styleCalcStore().substituteSize(tree.root.handle(), insertion.handle(), maximumCalcSizeNodeCount, maximumSubstitutionTreeDepth, substituted);
-    if (!substituted)
+    auto result = styleCalcStoreSubstituteSize(tree.root.handle(), insertion.handle(), maximumCalcSizeNodeCount, maximumSubstitutionTreeDepth);
+    if (!result)
         return std::nullopt;
     return Tree { Child::adopt(result) };
 }
 
 Tree dePercentify(const Tree& tree)
 {
-    return Tree { Child::adopt(styleCalcStore().dePercentify(tree.root.handle())) };
+    return Tree { Child::adopt(styleCalcStoreDePercentify(tree.root.handle())) };
 }
 
 bool containsPercentage(const Tree& tree)
 {
-    return styleCalcStore().containsPercentage(tree.root.handle());
+    return styleCalcStoreContainsPercentage(tree.root.handle());
 }
 #endif
 

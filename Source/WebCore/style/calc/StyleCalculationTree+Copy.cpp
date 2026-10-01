@@ -26,9 +26,6 @@
 #include "StyleCalculationTree+Copy.h"
 
 #include "StyleCalculationTree.h"
-#if !STYLE_CALC_CPP_TREE_COMPILED_IN
-#include "WebCoreSwiftBoundaryTypes.h"
-#endif
 #include <wtf/StdLibExtras.h>
 
 namespace WebCore {
@@ -115,7 +112,7 @@ Tree copy(const Tree& tree)
 
 Child copy(const Child& root)
 {
-    return Child::adopt(styleCalcStore().clone(root.handle()));
+    return Child::adopt(styleCalcStoreClone(root.handle()));
 }
 #endif
 

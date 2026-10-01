@@ -27,8 +27,6 @@
 
 #if STYLE_CALC_CPP_TREE_COMPILED_IN
 #include "CSSCalcExecutor.h"
-#else
-#include "WebCoreSwiftBoundaryTypes.h"
 #endif
 #include "StyleCalculationTree.h"
 #include "StyleZoomPrimitives.h"
@@ -178,7 +176,7 @@ double evaluate(const Tree& tree, const EvaluationOptions& options)
 #if STYLE_CALC_CPP_TREE_COMPILED_IN
     return evaluate(tree.root, options);
 #else
-    return styleCalcStore().evaluate(tree.root.handle(), options.percentResolutionLength, options.usedZoom.value, options.sizeResolutionLength.value_or(0));
+    return styleCalcStoreEvaluate(tree.root.handle(), options.percentResolutionLength, options.usedZoom.value, options.sizeResolutionLength.value_or(0));
 #endif
 }
 

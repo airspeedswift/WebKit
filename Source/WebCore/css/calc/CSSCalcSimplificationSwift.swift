@@ -7604,22 +7604,21 @@ private struct StyleCalcStoredTree: ~Copyable {
 /// `UInt32` handle. C++ `Child` is move-only and owns its handle: a move transfers it, destruction
 /// calls `release`, and a copy is an explicit `clone`, a deep copy into a new slot.
 ///
-/// A class because C++ cannot hold a `~Copyable` Swift value (filing 71). A C++ holder of a Swift
-/// class reference retains on every copy AND every move (filing 68), whereas a handle is an integer,
-/// so the store is the only such reference, held once by `styleCalcStore()`. It is not thread-safe:
-/// style calculations are made and read on the main thread, which the C++ asserts.
+/// C++ reaches it only through the C functions below, by handle: C++ cannot hold a `~Copyable` Swift
+/// value (filing 71), and a C++ holder of a Swift class reference retains on every copy AND every move
+/// (filing 68). Style calculations are made and read on the main thread only, which `insert` and
+/// `take` check.
 ///
 /// No access to `trees` spans a call the optimizer cannot see into or an allocation: either would
 /// put a dynamic exclusivity check on every access to it (filing 75). So the array grows on a local
 /// swapped out of the property, a dead tree is swapped out before it is freed, and a read that
 /// allocates or calls out (`taking`) moves the tree out for its duration. Pure walks (`equal`,
 /// `depth`, the in-place `evaluate`) read in place.
-@_expose(Cxx)
-public final class StyleCalcStore {
+final class StyleCalcStore {
     private var trees = UniqueArray<StyleCalcStoredTree>()
     private var freeHead: UInt32 = 0
 
-    public init() {
+    init() {
         // Handle 0 is C++'s moved-from state and is never handed out.
         var initial = UniqueArray<StyleCalcStoredTree>()
         initial.append(StyleCalcStoredTree(live: false, nextFree: 0, needsOpaqueMath: false, node: styleCalcPlaceholder()))
@@ -7630,7 +7629,7 @@ public final class StyleCalcStore {
 
     /// Destroys the tree its one owner held. Traps on a slot that is not live: a second release,
     /// or a handle that was never handed out.
-    public func release(_ handle: UInt32) {
+    func release(_ handle: UInt32) {
         var dead = take(handle)
         _ = consume dead
         // `dead` is freed here, after every access has ended.
@@ -7650,7 +7649,7 @@ public final class StyleCalcStore {
     }
 
     /// `Calculation::copy`: a deep copy into a new slot, which the caller owns.
-    public func clone(_ handle: UInt32) -> UInt32 {
+    func clone(_ handle: UInt32) -> UInt32 {
         let needsOpaqueMath = trees[Int(handle)].needsOpaqueMath
         return insert(taking(handle) { $0.clone() }, needsOpaqueMath: needsOpaqueMath)
     }
@@ -7709,15 +7708,15 @@ public final class StyleCalcStore {
 
     // MARK: Construction
 
-    public func size() -> UInt32 {
+    func size() -> UInt32 {
         insert(styleCalcSize(), needsOpaqueMath: false)
     }
 
-    public func percentage(_ value: Double) -> UInt32 {
+    func percentage(_ value: Double) -> UInt32 {
         insert(styleCalcPercentage(value), needsOpaqueMath: false)
     }
 
-    public func dimension(_ value: Double) -> UInt32 {
+    func dimension(_ value: Double) -> UInt32 {
         insert(styleCalcDimension(value), needsOpaqueMath: false)
     }
 
@@ -7735,7 +7734,7 @@ public final class StyleCalcStore {
     }
 
     /// `add`: `Sum { a, b }`.
-    public func add(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> UInt32 {
+    func add(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> UInt32 {
         let needsOpaqueMath = needOpaqueMath(a, aBorrowed, b, bBorrowed)
         let first = operand(a, aBorrowed)
         let second = operand(b, bBorrowed)
@@ -7743,7 +7742,7 @@ public final class StyleCalcStore {
     }
 
     /// `subtract`: `Sum { a, Negate { b } }`.
-    public func subtract(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> UInt32 {
+    func subtract(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> UInt32 {
         let needsOpaqueMath = needOpaqueMath(a, aBorrowed, b, bBorrowed)
         let first = operand(a, aBorrowed)
         var negated = UniqueArray<CalcNode>(capacity: 1)
@@ -7752,7 +7751,7 @@ public final class StyleCalcStore {
     }
 
     /// `blend`: `Sum { Product { from, 1 - progress }, Product { to, progress } }`, built in one call.
-    public func blend(_ from: UInt32, _ fromBorrowed: UInt32, _ to: UInt32, _ toBorrowed: UInt32, _ progress: Double) -> UInt32 {
+    func blend(_ from: UInt32, _ fromBorrowed: UInt32, _ to: UInt32, _ toBorrowed: UInt32, _ progress: Double) -> UInt32 {
         let needsOpaqueMath = needOpaqueMath(from, fromBorrowed, to, toBorrowed)
         let first = operand(from, fromBorrowed)
         let second = operand(to, toBorrowed)
@@ -7763,45 +7762,30 @@ public final class StyleCalcStore {
         ), needsOpaqueMath: needsOpaqueMath)
     }
 
-    /// `toStyle(const CSSCalc::Tree&)`. 0, and `converted` false, if the conversion failed.
-    public func insertConverted(
-        _ root: CSSCalcSwiftRoot,
-        _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
-        _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
-        _ converted: inout Bool
-    ) -> UInt32 {
-        let tree = styleCalcConvert(root, &builder, options, &converted)
-        return converted ? insert(tree) : 0
+    /// Stores a converted tree (`toStyle(const CSSCalc::Tree&)`).
+    func insertConverted(_ tree: consuming CalcNode) -> UInt32 {
+        insert(tree)
     }
 
     // MARK: Rewriting
 
-    /// `substituteSize`. 0, and `substituted` false, if the result would be too large.
-    public func substituteSize(
-        _ tree: UInt32,
-        _ insertion: UInt32,
-        _ maximumNodeCount: Int,
-        _ maximumDepth: Int,
-        _ substituted: inout Bool
-    ) -> UInt32 {
+    /// `substituteSize`. 0 if the result would be too large: a stored tree's handle is never 0.
+    func substituteSize(_ tree: UInt32, _ insertion: UInt32, _ maximumNodeCount: Int, _ maximumDepth: Int) -> UInt32 {
         let outcome = taking(tree, insertion) { tree, insertion in
             styleCalcSubstituteSize(tree, insertion, maximumNodeCount, maximumDepth)
         }
         switch consume outcome {
         case .unchanged:
             // A new tree, as upstream copies here: the caller owns the result and `tree` both.
-            substituted = true
             return clone(tree)
         case .substituted(let result):
-            substituted = true
             return insert(result)
         case .tooLarge:
-            substituted = false
             return 0
         }
     }
 
-    public func dePercentify(_ tree: UInt32) -> UInt32 {
+    func dePercentify(_ tree: UInt32) -> UInt32 {
         insert(taking(tree) { styleCalcDePercentify($0) })
     }
 
@@ -7810,7 +7794,7 @@ public final class StyleCalcStore {
     /// `styleCalcRootsEqual`, with a leaf root compared field by field. An operation root borrows
     /// both trees, and the second is copied: two overlapping `inout` accesses to `trees` would be
     /// an exclusivity violation.
-    public func equal(_ a: UInt32, _ b: UInt32) -> Bool {
+    func equal(_ a: UInt32, _ b: UInt32) -> Bool {
         let first = Int(a)
         let second = Int(b)
         let alternative = trees[first].node.alternative
@@ -7827,19 +7811,19 @@ public final class StyleCalcStore {
         }
     }
 
-    public func containsPercentage(_ tree: UInt32) -> Bool {
+    func containsPercentage(_ tree: UInt32) -> Bool {
         reading(tree) { styleCalcContains($0, .Percentage) }
     }
 
-    public func nodeCount(_ tree: UInt32) -> Int {
+    func nodeCount(_ tree: UInt32) -> Int {
         reading(tree) { styleCalcNodeCount($0) }
     }
 
-    public func depth(_ tree: UInt32) -> Int {
+    func depth(_ tree: UInt32) -> Int {
         reading(tree) { styleCalcDepth($0) }
     }
 
-    public func evaluate(_ tree: UInt32, _ percentResolutionLength: Double, _ usedZoom: Float, _ sizeResolutionLength: Double) -> Double {
+    func evaluate(_ tree: UInt32, _ percentResolutionLength: Double, _ usedZoom: Float, _ sizeResolutionLength: Double) -> Double {
         let index = Int(tree)
         if trees[index].needsOpaqueMath {
             return evaluateFolded(tree, percentResolutionLength, usedZoom, sizeResolutionLength)
@@ -7881,20 +7865,159 @@ public final class StyleCalcStore {
         }
     }
 
-    /// `toCSS(const Tree&)` before its `copyAndSimplify`; see `styleCalcToCSS`.
-    public func toCSS(
-        _ tree: UInt32,
-        _ canonicalUnit: UInt8,
-        _ percentHint: UInt8,
-        _ payloads: inout WebCore.CSSCalc.StyleCalcSwiftPayloadSink,
-        _ converted: inout Bool
-    ) -> CSSCalcSwiftRoot {
-        taking(tree) { styleCalcToCSS($0, canonicalUnit, percentHint, &payloads, &converted) }
+    /// `taking`'s two halves, for a read that hands the tree to C++ (`toCSS`, `dump`): it runs
+    /// outside the lock, which must not cover the caller's sink. Every `checkOut` is followed by
+    /// a `checkIn` of the same handle.
+    func checkOut(_ handle: UInt32) -> CalcNode {
+        var node = styleCalcPlaceholder()
+        swap(&node, &trees[Int(handle)].node)
+        return node
     }
 
-    public func dump(_ tree: UInt32, _ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
-        taking(tree) { styleCalcDump($0, &sink) }
+    func checkIn(_ handle: UInt32, _ node: inout CalcNode) {
+        swap(&node, &trees[Int(handle)].node)
     }
+}
+
+/// The holder of the one store, as a Swift global so that the C entry points below can reach it.
+///
+/// `@unchecked`, because the store is not thread-safe: it may be changed on WebCore's main thread
+/// only (`WTF::isMainThread()`, which is the WebThread where there is one, so not `MainActor`), and
+/// `insert` and `take`, through which every change goes, trap anywhere else. Reads are unchecked, as
+/// they were when C++ held the store: reaching a tree from another thread needs a
+/// `Calculation::Value` shared to it, whose non-atomic reference count already races in the C++
+/// build. Checking reads too was measured and rejected (+21 instructions, +20% cycles, per
+/// `evaluate`). So was a `Mutex`, which needs no `@unchecked` (+24 per `evaluate`, +140 per blend).
+/// A `nonisolated(unsafe)` global is an `unsafe` use, a `static let` of a non-`Sendable` class is an
+/// error, and `MainActor` is the wrong thread. See webkit-swift-ports/cimpl-0930.
+private final class StyleCalcStoreHolder: @unchecked Sendable {
+    private let store = StyleCalcStore()
+
+    @inline(always)
+    func with<Result: ~Copyable>(_ body: (StyleCalcStore) -> Result) -> Result {
+        body(store)
+    }
+}
+
+/// The one store.
+private let styleCalcTrees = StyleCalcStoreHolder()
+
+// MARK: C entry points (StyleCalculationTree.h), so that C++ calls the store inline from any header
+// (SE-0495) rather than through a forwarder in a file that can see the generated header.
+
+@c @implementation
+public func styleCalcStoreRelease(_ tree: UInt32) {
+    styleCalcTrees.with { $0.release(tree) }
+}
+
+@c @implementation
+public func styleCalcStoreClone(_ tree: UInt32) -> UInt32 {
+    styleCalcTrees.with { $0.clone(tree) }
+}
+
+@c @implementation
+public func styleCalcStoreSize() -> UInt32 {
+    styleCalcTrees.with { $0.size() }
+}
+
+@c @implementation
+public func styleCalcStorePercentage(_ value: Double) -> UInt32 {
+    styleCalcTrees.with { $0.percentage(value) }
+}
+
+@c @implementation
+public func styleCalcStoreDimension(_ value: Double) -> UInt32 {
+    styleCalcTrees.with { $0.dimension(value) }
+}
+
+@c @implementation
+public func styleCalcStoreAdd(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> UInt32 {
+    styleCalcTrees.with { $0.add(a, aBorrowed, b, bBorrowed) }
+}
+
+@c @implementation
+public func styleCalcStoreSubtract(_ a: UInt32, _ aBorrowed: UInt32, _ b: UInt32, _ bBorrowed: UInt32) -> UInt32 {
+    styleCalcTrees.with { $0.subtract(a, aBorrowed, b, bBorrowed) }
+}
+
+@c @implementation
+public func styleCalcStoreBlend(_ from: UInt32, _ fromBorrowed: UInt32, _ to: UInt32, _ toBorrowed: UInt32, _ progress: Double) -> UInt32 {
+    styleCalcTrees.with { $0.blend(from, fromBorrowed, to, toBorrowed, progress) }
+}
+
+@c @implementation
+public func styleCalcStoreSubstituteSize(_ tree: UInt32, _ insertion: UInt32, _ maximumNodeCount: Int, _ maximumDepth: Int) -> UInt32 {
+    styleCalcTrees.with { $0.substituteSize(tree, insertion, maximumNodeCount, maximumDepth) }
+}
+
+@c @implementation
+public func styleCalcStoreDePercentify(_ tree: UInt32) -> UInt32 {
+    styleCalcTrees.with { $0.dePercentify(tree) }
+}
+
+@c @implementation
+public func styleCalcStoreEqual(_ a: UInt32, _ b: UInt32) -> Bool {
+    styleCalcTrees.with { $0.equal(a, b) }
+}
+
+@c @implementation
+public func styleCalcStoreContainsPercentage(_ tree: UInt32) -> Bool {
+    styleCalcTrees.with { $0.containsPercentage(tree) }
+}
+
+@c @implementation
+public func styleCalcStoreNodeCount(_ tree: UInt32) -> Int {
+    styleCalcTrees.with { $0.nodeCount(tree) }
+}
+
+@c @implementation
+public func styleCalcStoreDepth(_ tree: UInt32) -> Int {
+    styleCalcTrees.with { $0.depth(tree) }
+}
+
+@c @implementation
+public func styleCalcStoreEvaluate(_ tree: UInt32, _ percentResolutionLength: Double, _ usedZoom: Float, _ sizeResolutionLength: Double) -> Double {
+    styleCalcTrees.with { $0.evaluate(tree, percentResolutionLength, usedZoom, sizeResolutionLength) }
+}
+
+// These three take C++ sink and builder types, so they are printed in the generated header. The
+// sink is used outside `with`: inside it, region isolation would merge it with the store.
+
+/// `toStyle(const CSSCalc::Tree&)`. 0, and `converted` false, if the conversion failed.
+@_expose(Cxx)
+public func styleCalcStoreInsertConverted(
+    _ root: CSSCalcSwiftRoot,
+    _ builder: inout WebCore.CSSCalc.CSSCalcSwiftBuilder,
+    _ options: WebCore.CSSCalc.CSSCalcSwiftSimplificationOptions,
+    _ converted: inout Bool
+) -> UInt32 {
+    var tree = Optional(styleCalcConvert(root, &builder, options, &converted))
+    guard converted else {
+        return 0
+    }
+    return styleCalcTrees.with { $0.insertConverted(tree.take()!) }
+}
+
+/// `toCSS(const Tree&)` before its `copyAndSimplify`; see `styleCalcToCSS`.
+@_expose(Cxx)
+public func styleCalcStoreToCSS(
+    _ tree: UInt32,
+    _ canonicalUnit: UInt8,
+    _ percentHint: UInt8,
+    _ payloads: inout WebCore.CSSCalc.StyleCalcSwiftPayloadSink,
+    _ converted: inout Bool
+) -> CSSCalcSwiftRoot {
+    var node = styleCalcTrees.with { $0.checkOut(tree) }
+    let root = styleCalcToCSS(node, canonicalUnit, percentHint, &payloads, &converted)
+    styleCalcTrees.with { $0.checkIn(tree, &node) }
+    return root
+}
+
+@_expose(Cxx)
+public func styleCalcStoreDump(_ tree: UInt32, _ sink: inout WebCore.CSSCalc.StyleCalcSwiftDumpSink) {
+    var node = styleCalcTrees.with { $0.checkOut(tree) }
+    styleCalcDump(node, &sink)
+    styleCalcTrees.with { $0.checkIn(tree, &node) }
 }
 
 /// `body` over `node`, passed on by address. See `StyleCalcStore.reading`.

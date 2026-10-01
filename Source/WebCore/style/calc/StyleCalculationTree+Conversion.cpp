@@ -381,7 +381,7 @@ CSSCalc::Tree toCSS(const Tree& tree, const ToCSSOptions& toCSSOptions)
     CSSCalc::StyleCalcSwiftPayloadSink sink { payloads };
     auto percentHint = CSSCalc::Type::determinePercentHint(toCSSOptions.category);
     bool converted = false;
-    auto root = styleCalcStore().toCSS(tree.root.handle(), static_cast<uint8_t>(CSSCalc::toCSSUnit(conversionOptions.canonicalDimension)), percentHint ? static_cast<uint8_t>(*percentHint) : 0, sink, converted);
+    auto root = styleCalcStoreToCSS(tree.root.handle(), static_cast<uint8_t>(CSSCalc::toCSSUnit(conversionOptions.canonicalDimension)), percentHint ? static_cast<uint8_t>(*percentHint) : 0, sink, converted);
     // Every operation a style calculation holds has a type; the C++ conversion dereferences it.
     RELEASE_ASSERT(converted);
     auto cssTree = CSSCalc::Tree { .stored = { root, payloads.isEmpty() ? nullptr : RefPtr { adoptRef(*new CSSCalc::CSSCalcSwiftFlatPayloadsBox(WTF::move(payloads))) } }, .type = { }, .stage = CSSCalc::Stage::Computed };
@@ -417,7 +417,7 @@ Tree toStyle(const CSSCalc::Tree& tree, const ToStyleOptions& toStyleOptions)
 #else
     CSSCalc::CSSCalcSwiftBuilder builder { simplificationOptions, tree.stored.payloads() };
     bool converted = false;
-    Tree result { Child::adopt(styleCalcStore().insertConverted(tree.stored.root(), builder, CSSCalc::swiftSimplificationOptions(simplificationOptions), converted)) };
+    Tree result { Child::adopt(styleCalcStoreInsertConverted(tree.stored.root(), builder, CSSCalc::swiftSimplificationOptions(simplificationOptions), converted)) };
     // There is no C++ conversion in this build to fall back to, and a `Tree` has no empty state.
     RELEASE_ASSERT_WITH_MESSAGE(converted, "the Swift calc() conversion to a style tree failed");
     return result;

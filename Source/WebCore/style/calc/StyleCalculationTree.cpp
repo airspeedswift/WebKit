@@ -396,42 +396,18 @@ TextStream& operator<<(TextStream& ts, const Tree& tree)
 #else
 // MARK: - The Swift store (CSSCalcSimplificationSwift.swift)
 
-// Style calculations are made and read on the main thread only, as `ValueHandleMap`, which holds
-// their `Value`s, already requires.
-StyleCalcStore& styleCalcStore()
-{
-    ASSERT(isMainThread());
-    static NeverDestroyed<StyleCalcStore> store { StyleCalcStore::init() };
-    return store;
-}
-
-void Child::release(uint32_t handle)
-{
-    styleCalcStore().release(handle);
-}
-
-Child::Child(Size)
-    : Child { styleCalcStore().size() }
-{
-}
-
-bool Child::operator==(const Child& other) const
-{
-    return styleCalcStore().equal(handle(), other.handle());
-}
-
 Child percentage(double value)
 {
-    return Child::adopt(styleCalcStore().percentage(value));
+    return Child::adopt(styleCalcStorePercentage(value));
 }
 
 Child dimension(double value)
 {
-    return Child::adopt(styleCalcStore().dimension(value));
+    return Child::adopt(styleCalcStoreDimension(value));
 }
 
 Child::Child(Operand&& tree)
-    : Child { tree.borrowed ? styleCalcStore().clone(tree.borrowed) : tree.owned.take() }
+    : Child { tree.borrowed ? styleCalcStoreClone(tree.borrowed) : tree.owned.take() }
 {
 }
 
@@ -440,33 +416,23 @@ Child::Child(Operand&& tree)
 
 Child add(Operand&& a, Operand&& b)
 {
-    return Child::adopt(styleCalcStore().add(STYLE_CALC_OPERAND(a), STYLE_CALC_OPERAND(b)));
+    return Child::adopt(styleCalcStoreAdd(STYLE_CALC_OPERAND(a), STYLE_CALC_OPERAND(b)));
 }
 
 Child subtract(Operand&& a, Operand&& b)
 {
-    return Child::adopt(styleCalcStore().subtract(STYLE_CALC_OPERAND(a), STYLE_CALC_OPERAND(b)));
+    return Child::adopt(styleCalcStoreSubtract(STYLE_CALC_OPERAND(a), STYLE_CALC_OPERAND(b)));
 }
 
 Child blend(Operand&& from, Operand&& to, double progress)
 {
-    return Child::adopt(styleCalcStore().blend(STYLE_CALC_OPERAND(from), STYLE_CALC_OPERAND(to), progress));
-}
-
-size_t computeDepth(const Tree& tree)
-{
-    return styleCalcStore().depth(tree.root.handle());
-}
-
-size_t computeNodeCount(const Tree& tree)
-{
-    return styleCalcStore().nodeCount(tree.root.handle());
+    return Child::adopt(styleCalcStoreBlend(STYLE_CALC_OPERAND(from), STYLE_CALC_OPERAND(to), progress));
 }
 
 TextStream& operator<<(TextStream& ts, const Tree& tree)
 {
     CSSCalc::StyleCalcSwiftDumpSink sink { ts };
-    styleCalcStore().dump(tree.root.handle(), sink);
+    styleCalcStoreDump(tree.root.handle(), sink);
     return ts;
 }
 #endif // STYLE_CALC_CPP_TREE_COMPILED_IN
