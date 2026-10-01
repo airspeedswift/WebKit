@@ -31,6 +31,9 @@
 #include "CSSPropertyParserOptions.h"
 #include "CSSPropertyParserState.h"
 #include "CSSUnevaluatedCalc.h"
+#if USE(SWIFT_CSS)
+#include "CSSCalcSwiftTypes.h"
+#endif
 
 namespace WebCore {
 namespace CSSPropertyParserHelpers {
@@ -237,6 +240,34 @@ template<typename Primitive> struct FunctionConsumerForCalcValues {
         return value;
     }
 };
+
+// With USE(SWIFT_CSS) a numeric token for a family whose validator is compiled out is consumed by
+// `cssConsumeNumericSwift`, which is the validator, the clamp and the range check.
+#if USE(SWIFT_CSS)
+#define CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN 0
+
+template<typename Primitive> struct SwiftNumericConsumer {
+    static std::optional<typename Primitive::Raw> consume(CSSParserTokenRange& range, CSS::PropertyParserState& state, CSSCalcSymbolsAllowed, CSSPropertyParserOptions options)
+    {
+        using Raw = typename Primitive::Raw;
+        constexpr auto R = Primitive::range;
+        constexpr uint8_t resolvesToFloat = std::same_as<typename Raw::ResolvedValueType, float> ? CSSNumericConsumerSwiftResolvesToFloat : 0;
+        auto& token = range.peek();
+        uint8_t flags = resolvesToFloat | (options.unitlessZeroLength == UnitlessZeroQuirk::Allow ? CSSNumericConsumerSwiftUnitlessZeroLength : 0) | (state.absoluteLengthUnitsOnly ? CSSNumericConsumerSwiftAbsoluteLengthUnitsOnly : 0);
+        auto result = cssConsumeNumericSwift(token.numericValue(), R.min, R.max, static_cast<uint8_t>(Raw::category), token.type(), static_cast<uint8_t>(token.unitType()), options.overrideParserMode.value_or(state.context.mode), static_cast<uint16_t>(state.currentProperty), static_cast<uint8_t>(R.minParseTimeBehavior), static_cast<uint8_t>(R.maxParseTimeBehavior), flags);
+        if (!result.accepted)
+            return std::nullopt;
+        range.consumeIncludingWhitespace();
+        return Raw { static_cast<typename Raw::UnitType>(result.unit), result.value };
+    }
+};
+
+// The family's C++ consumer, or Swift's when the family's validator is compiled out.
+template<typename CppConsumer, typename Primitive> using NumericConsumer = SwiftNumericConsumer<Primitive>;
+#else
+#define CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN 1
+template<typename CppConsumer, typename Primitive> using NumericConsumer = CppConsumer;
+#endif
 
 template<typename T> struct KeywordConsumer {
     static constexpr CSSParserTokenType tokenType = IdentToken;

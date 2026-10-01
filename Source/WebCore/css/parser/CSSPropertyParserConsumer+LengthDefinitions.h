@@ -32,6 +32,9 @@
 namespace WebCore {
 namespace CSSPropertyParserHelpers {
 
+struct LengthValidator;
+
+#if CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN
 struct LengthValidator {
     static constexpr std::optional<CSS::LengthUnit> validate(CSSUnitType unitType, CSS::PropertyParserState& state, CSSPropertyParserOptions options)
     {
@@ -62,16 +65,17 @@ struct LengthValidator {
         return mode == HTMLQuirksMode && CSSProperty::acceptsQuirkyLength(state.currentProperty);
     }
 };
+#endif
 
 template<auto R, typename V> struct ConsumerDefinition<CSS::Length<R, V>> {
     using FunctionToken = FunctionConsumerForCalcValues<CSS::Length<R, V>>;
-    using DimensionToken = DimensionConsumer<CSS::Length<R, V>, LengthValidator>;
-    using NumberToken = NumberConsumerForUnitlessValues<CSS::Length<R, V>, LengthValidator, CSS::LengthUnit::Px>;
+    using DimensionToken = NumericConsumer<DimensionConsumer<CSS::Length<R, V>, LengthValidator>, CSS::Length<R, V>>;
+    using NumberToken = NumericConsumer<NumberConsumerForUnitlessValues<CSS::Length<R, V>, LengthValidator, CSS::LengthUnit::Px>, CSS::Length<R, V>>;
 };
 
 template<auto R, typename V> struct ConsumerDefinition<CSS::LengthRaw<R, V>> {
-    using DimensionToken = DimensionConsumer<CSS::Length<R, V>, LengthValidator>;
-    using NumberToken = NumberConsumerForUnitlessValues<CSS::Length<R, V>, LengthValidator, CSS::LengthUnit::Px>;
+    using DimensionToken = NumericConsumer<DimensionConsumer<CSS::Length<R, V>, LengthValidator>, CSS::Length<R, V>>;
+    using NumberToken = NumericConsumer<NumberConsumerForUnitlessValues<CSS::Length<R, V>, LengthValidator, CSS::LengthUnit::Px>, CSS::Length<R, V>>;
 };
 
 } // namespace CSSPropertyParserHelpers

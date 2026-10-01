@@ -8042,3 +8042,123 @@ private func styleCalcPlaceholder() -> CalcNode {
         children: UniqueArray()
     )
 }
+
+// MARK: - The numeric primitive consumers (CSSPropertyParserConsumer+MetaConsumerDefinitions.h)
+
+/// `DimensionConsumer`, `NumberConsumer`, `NumberConsumerForUnitlessValues` and `PercentageConsumer`
+/// with the family's validator, for the families whose C++ validator is compiled out
+/// (`CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN`). In each, the validator decides the unit, then
+/// `performOptionalParseTimeClamp`, then the family's `isValid`.
+///
+/// A token type the family's `ConsumerDefinition` has no consumer for never comes here; `MetaConsumer`
+/// does not dispatch it. Answering one with a rejection is what that absent consumer would answer.
+@c @implementation
+public func cssConsumeNumericSwift(
+    _ value: Double,
+    _ rangeMin: Double,
+    _ rangeMax: Double,
+    _ category: UInt8,
+    _ tokenType: UInt8,
+    _ unitType: UInt8,
+    _ parserMode: UInt8,
+    _ currentProperty: UInt16,
+    _ minBehavior: UInt8,
+    _ maxBehavior: UInt8,
+    _ flags: UInt8
+) -> CSSNumericConsumerSwiftResult {
+    let rejected = CSSNumericConsumerSwiftResult(value: 0, unit: 0, accepted: false)
+    let range = NumericConsumerRange(
+        min: rangeMin,
+        max: rangeMax,
+        minBehavior: minBehavior,
+        maxBehavior: maxBehavior,
+        resolvesToFloat: flags & UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue) != 0
+    )
+    let unit: UInt8
+    switch (category, tokenType) {
+    case (WebCore.CSS.Category.Length.rawValue, WebCore.DimensionToken.rawValue),
+        (WebCore.CSS.Category.LengthPercentage.rawValue, WebCore.DimensionToken.rawValue):
+        // `LengthPercentageUnit`'s length cases are `LengthUnit`'s, in order (`UnitTraits<LengthPercentageUnit>::upcast`).
+        guard let length = numericConsumerLengthUnit(unitType, parserMode, flags) else { return rejected }
+        unit = length
+    case (WebCore.CSS.Category.Length.rawValue, WebCore.NumberToken.rawValue),
+        (WebCore.CSS.Category.LengthPercentage.rawValue, WebCore.NumberToken.rawValue):
+        guard numericConsumerAcceptsUnitlessLength(value, parserMode, currentProperty, flags) else { return rejected }
+        unit = UInt8(WebCore.CSS.LengthUnit.Px.rawValue)
+    case (WebCore.CSS.Category.LengthPercentage.rawValue, WebCore.PercentageToken.rawValue):
+        unit = UInt8(WebCore.CSS.LengthPercentageUnit.Percentage.rawValue)
+    default:
+        return rejected
+    }
+    let clamped = range.clamp(value)
+    guard range.isValid(clamped) else { return rejected }
+    return CSSNumericConsumerSwiftResult(value: clamped, unit: unit, accepted: true)
+}
+
+/// `LengthValidator::validate`: the `LengthUnit` of a `<dimension>` token's unit, if it is a length allowed here.
+@inline(always)
+private func numericConsumerLengthUnit(_ unitType: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> UInt8? {
+    // Never nil: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
+    guard let cssUnit = WebCore.CSSUnitType(rawValue: unitType) else { return nil }
+    if cssUnit == .QuirkyEm && parserMode != UInt8(WebCore.UASheetMode.rawValue) { return nil }
+    guard let unit = WebCore.CSS.toLengthUnit(cssUnit).value else { return nil }
+    if flags & UInt8(CSSNumericConsumerSwiftAbsoluteLengthUnitsOnly.rawValue) != 0
+        && WebCore.CSS.conversionToCanonicalUnitRequiresConversionData(unit)
+    {
+        return nil
+    }
+    return unit.rawValue
+}
+
+/// `LengthValidator::shouldAcceptUnitlessValue`.
+@inline(always)
+private func numericConsumerAcceptsUnitlessLength(_ value: Double, _ parserMode: UInt8, _ currentProperty: UInt16, _ flags: UInt8) -> Bool {
+    if value == 0 && flags & UInt8(CSSNumericConsumerSwiftUnitlessZeroLength.rawValue) != 0 { return true }
+    if parserMode == UInt8(WebCore.SVGAttributeMode.rawValue) { return true }
+    return parserMode == UInt8(WebCore.HTMLQuirksMode.rawValue)
+        && WebCore.CSSProperty.acceptsQuirkyLength(WebCore.CSSPropertyID(rawValue: currentProperty))
+}
+
+/// A `CSS::Range` and the primitive's `ResolvedValueType`.
+private struct NumericConsumerRange {
+    let min: Double
+    let max: Double
+    let minBehavior: UInt8
+    let maxBehavior: UInt8
+    let resolvesToFloat: Bool
+
+    // Computed, not stored: a stored static is a lazy global with a once-token on every access (filing 78).
+    static var clamp: UInt8 { UInt8(WebCore.CSS.RangeParseTimeBehavior.Clamp.rawValue) }
+    static var ignore: UInt8 { UInt8(WebCore.CSS.RangeParseTimeBehavior.Ignore.rawValue) }
+
+    /// `performOptionalParseTimeClamp`. `std::clamp`/`std::max`/`std::min` run in `ResolvedValueType`, so
+    /// a clamped value is rounded through it and an unclamped one is not; a NaN is returned unchanged.
+    @inline(always)
+    func clamp(_ value: Double) -> Double {
+        let clampsMin = minBehavior == Self.clamp
+        let clampsMax = maxBehavior == Self.clamp
+        guard clampsMin || clampsMax else { return value }
+        var v = resolved(value)
+        if clampsMin, v < resolved(min) { v = resolved(min) }
+        if clampsMax, resolved(max) < v { v = resolved(max) }
+        return v
+    }
+
+    @inline(always)
+    func resolved(_ value: Double) -> Double {
+        resolvesToFloat ? Double(Float(value)) : value
+    }
+
+    /// `isValidCanonicalValue`, which is also `isValidNonCanonicalizableDimensionValue` for the ranges
+    /// that one supports (bounds of 0 and +/-infinity).
+    @inline(always)
+    func isValid(_ value: Double) -> Bool {
+        if value.isInfinite { return false }
+        let effectiveMin = minBehavior == Self.ignore ? -Double.infinity : min
+        let effectiveMax = maxBehavior == Self.ignore ? Double.infinity : max
+        if effectiveMin == -.infinity && effectiveMax == .infinity { return true }
+        if effectiveMax == .infinity { return value >= effectiveMin }
+        if effectiveMin == -.infinity { return value <= effectiveMax }
+        return value >= effectiveMin && value <= effectiveMax
+    }
+}
