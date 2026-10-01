@@ -38,11 +38,10 @@ WK_SWIFT_PGO_GEN_FLAGS_YES = -Xfrontend -ir-profile-generate;
 GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_DEFINES);
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 
-// Selects the Swift implementation of CSS tokenizing, the property fast paths, and calc()
-// parsing, simplification, evaluation and serialization, and compiles out the C++
-// implementations it replaces. There is no fallback between them: input the Swift does not handle
-// is a build failure or a trap naming it.
-WK_USE_SWIFT_CSS = NO;
+// WK_USE_SWIFT_CSS (Configurations/CommonBase.xcconfig) selects the Swift implementation of CSS
+// tokenizing, the property fast paths, and calc() parsing, simplification, evaluation and serialization,
+// and compiles out the C++ implementations it replaces. There is no fallback between them: input the
+// Swift does not handle is a build failure or a trap naming it.
 WK_USE_SWIFT_CSS_DEFINES = $(WK_USE_SWIFT_CSS_DEFINES_$(WK_USE_SWIFT_CSS));
 WK_USE_SWIFT_CSS_DEFINES_YES = USE_SWIFT_CSS=1;
 
