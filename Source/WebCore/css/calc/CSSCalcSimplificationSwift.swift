@@ -33,6 +33,8 @@ internal import WebCore_Private.CSSUnitsSwiftTypes
 internal import WebCore_Private.Core
 // The <angle> conversion constants, which plain `import wtf` does not see.
 internal import wtf.Core.MathExtras
+// `isMainThread`, the thread the style calculation store belongs to.
+internal import wtf.Core.MainThread
 
 // calc() simplification, parsing and evaluation in Swift, used when WebCore is built with
 // WK_USE_SWIFT_CSS, in which the C++ simplifier, parser and evaluator are not compiled.
@@ -7636,6 +7638,7 @@ public final class StyleCalcStore {
 
     /// Moves the tree out of its slot and frees the slot, for a function that consumes it.
     private func take(_ handle: UInt32) -> CalcNode {
+        precondition(WTF.isMainThread(), "Style::Calculation used off the main thread")
         let index = Int(handle)
         precondition(trees[index].live, "Style::Calculation handle released twice, or never handed out")
         var node = styleCalcPlaceholder()
@@ -7654,6 +7657,7 @@ public final class StyleCalcStore {
 
     /// Stores `node` with one reference, and answers its handle.
     private func insert(_ node: consuming CalcNode, needsOpaqueMath: Bool) -> UInt32 {
+        precondition(WTF.isMainThread(), "Style::Calculation used off the main thread")
         var stored = node
         if freeHead != 0 {
             let handle = freeHead
