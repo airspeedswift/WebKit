@@ -119,10 +119,8 @@ private:
     std::span<const CSSParserToken> m_tokens;
 };
 
-// A Swift property parser reads `range` by index and creates its values through this. Swift sees the
-// tokens one at a time because `peek` returns a reference into the range, which it cannot import. The
-// values are created here because a `CSSValue` subclass does not import as a subclass of `CSSValue`
-// in Swift, so Swift could not pass a `CSSPrimitiveValue` where a `CSSValue` is wanted.
+// A Swift property parser reads `range` by index through this. Swift sees the tokens one at a time
+// because `peek` returns a reference into the range, which it cannot import.
 // `SWIFT_SAFE` holds because a cursor lives on the C++ stack for the one Swift call that borrows it.
 class SWIFT_SAFE CSSPropertyParserSwiftCursor {
 public:
@@ -130,9 +128,6 @@ public:
     CSSParserTokenBits bits(uint32_t i) const;
     uint16_t keywordId(uint32_t i) const;
 
-    CSSValue& keyword(uint16_t) const SWIFT_RETURNS_RETAINED;
-    CSSValue& lengthPercentage(double value, uint8_t unit) const SWIFT_RETURNS_RETAINED;
-    CSSValue& pair(CSSValue&, CSSValue&, bool coalescing) const SWIFT_RETURNS_RETAINED;
     // A `<length-percentage>` other than a plain numeric token (calc(), anchor(), ...) starting at
     // token `i`, through the `MetaResolver`. `nextIndex()` is the token after it.
     CSSValue* lengthPercentageNonnegativeAt(uint32_t i) const SWIFT_RETURNS_RETAINED;
