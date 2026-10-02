@@ -143,51 +143,29 @@ enum CSSSwiftFastPathKind : uint8_t {
     CSSSwiftFastPathKindOpacity,
 };
 
-// One transform function argument: the parsed double and its unit.
+// One transform function argument, or the length and opacity scans' result: the parsed double and its unit.
 struct CSSSwiftTransformArgument {
     double value;
     CSSUnitType unit;
 };
 
-// The transform functions the fast path recognises. Mapped to `CSSValueID` in CSSParserFastPaths.cpp.
-enum CSSSwiftTransformFunction : uint8_t {
-    CSSSwiftTransformFunctionTranslate = 0,
-    CSSSwiftTransformFunctionTranslateX,
-    CSSSwiftTransformFunctionTranslateY,
-    CSSSwiftTransformFunctionTranslateZ,
-    CSSSwiftTransformFunctionTranslate3d,
-    CSSSwiftTransformFunctionMatrix3d,
-    CSSSwiftTransformFunctionScale3d,
-    CSSSwiftTransformFunctionRotate,
-    CSSSwiftTransformFunctionRotateZ,
-};
-
-class CSSSwiftTransformListBuilder;
-
-// Receives each transform function the Swift scan recognises, in order. The caller discards the
-// list if the scan returns false. Stack-scoped with the same `SWIFT_SAFE` argument as
-// CSSSwiftTokenSink. A color scan gets one with no list.
+// A fast-path scan's outcome, and the length and opacity scans' number. Stack-scoped with the same `SWIFT_SAFE` argument as
+// CSSSwiftTokenSink.
 class SWIFT_SAFE CSSSwiftFastPathSink {
 public:
-    CSSSwiftFastPathSink() = default;
-    explicit CSSSwiftFastPathSink(CSSSwiftTransformListBuilder& list LIFETIME_BOUND)
-        : m_list(&list)
-    {
-    }
-
-    WEBCORE_EXPORT void append(uint8_t function,
-        const CSSSwiftTransformArgument *__counted_by(count) arguments __attribute__((noescape)), size_t count);
-
-    // The length and opacity scans' result.
     void setNumber(double value, CSSUnitType unit)
     {
         m_number = { value, unit };
     }
     CSSSwiftTransformArgument number() const { return m_number; }
 
+    // Every scan's outcome. The return value is the transform scan's `CSSValue`.
+    void setResult(CSSSwiftColor result) { m_result = result; }
+    CSSSwiftColor result() const { return m_result; }
+
 private:
-    CSSSwiftTransformListBuilder* m_list { nullptr };
     CSSSwiftTransformArgument m_number { 0, CSSUnitType::Number };
+    CSSSwiftColor m_result { 0, 0 };
 };
 
 } // namespace WebCore
