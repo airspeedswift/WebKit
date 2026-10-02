@@ -27,6 +27,12 @@
 
 #include "CSSParserTokenRange.h"
 #include "CSSPropertyParserOptions.h"
+#if USE(SWIFT_CSS)
+#include "CSSKeywordValue.h"
+#include "CSSPropertyParserConsumer+CSSPrimitiveValueResolver.h"
+#include "CSSValuePair.h"
+#include "CSSValuePool.h"
+#endif
 
 namespace WebCore {
 namespace CSSPropertyParserHelpers {
@@ -88,3 +94,59 @@ std::optional<CSSParserTokenRange> consumeArgument(CSSParserTokenRange& range, u
 
 } // namespace CSSPropertyParserHelpers
 } // namespace WebCore
+
+#if USE(SWIFT_CSS)
+namespace WebCore {
+
+uint32_t CSSPropertyParserSwiftCursor::tokenCount() const
+{
+    return m_range.size();
+}
+
+CSSParserTokenBits CSSPropertyParserSwiftCursor::bits(uint32_t i) const
+{
+    return m_range.peek(i).bits();
+}
+
+uint16_t CSSPropertyParserSwiftCursor::keywordId(uint32_t i) const
+{
+    return m_range.peek(i).id();
+}
+
+uint32_t CSSPropertyParserSwiftCursor::nextIndex() const
+{
+    return m_nextIndex;
+}
+
+void CSSPropertyParserSwiftCursor::setNextIndex(uint32_t i) const
+{
+    m_nextIndex = i;
+}
+
+static_assert(sizeof(CSSPropertyParserSwiftCursor) == 3 * sizeof(void*));
+
+CSSValue& CSSPropertyParserSwiftCursor::keyword(uint16_t id) const
+{
+    return CSSKeywordValue::create(static_cast<CSSValueID>(id)).leakRef();
+}
+
+CSSValue& CSSPropertyParserSwiftCursor::lengthPercentage(double value, uint8_t unit) const
+{
+    return CSSPrimitiveValue::create(value, CSS::toCSSUnitType(static_cast<CSS::LengthPercentageUnit>(unit))).leakRef();
+}
+
+CSSValue& CSSPropertyParserSwiftCursor::pair(CSSValue& first, CSSValue& second, bool coalescing) const
+{
+    return (coalescing ? CSSValuePair::create(Ref { first }, Ref { second }) : CSSValuePair::createNoncoalescing(Ref { first }, Ref { second })).leakRef();
+}
+
+CSSValue* CSSPropertyParserSwiftCursor::lengthPercentageNonnegativeAt(uint32_t i) const
+{
+    auto range = CSSParserTokenRange { m_range.span().subspan(i) };
+    auto value = CSSPropertyParserHelpers::CSSPrimitiveValueResolver<CSS::LengthPercentage<CSS::Nonnegative>>::consumeAndResolve(range, m_state);
+    m_nextIndex = range.begin() - m_range.begin();
+    return value.leakRef();
+}
+
+} // namespace WebCore
+#endif // USE(SWIFT_CSS)

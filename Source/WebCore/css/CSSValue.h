@@ -25,6 +25,7 @@
 #include <wtf/NoVirtualDestructorBase.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/RefPtr.h>
+#include <wtf/SwiftBridging.h>
 #include <wtf/TypeCasts.h>
 #include <wtf/Vector.h>
 #include <wtf/text/ASCIILiteral.h>
@@ -54,7 +55,7 @@ DECLARE_COMPACT_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSValue);
 
 // NOTE: This class is non-virtual for memory and performance reasons.
 // Don't go making it virtual again unless you know exactly what you're doing!
-class CSSValue : public NoVirtualDestructorBase {
+class SWIFT_SHARED_REFERENCE(.ref, .deref) CSSValue : public NoVirtualDestructorBase {
     WTF_MAKE_NONCOPYABLE(CSSValue);
     WTF_DEPRECATED_MAKE_FAST_COMPACT_ALLOCATED_WITH_HEAP_IDENTIFIER(CSSValue, CSSValue);
 public:
