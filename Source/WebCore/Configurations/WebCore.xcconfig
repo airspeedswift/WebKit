@@ -287,7 +287,10 @@ MODULE_VERIFIER_SUPPORTED_LANGUAGES = objective-c++;
 MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = c++23;
 MODULE_VERIFIER_KIND = builtin;
 
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+// -fno-exceptions matches the C++ (GCC_ENABLE_CPP_EXCEPTIONS = NO). Without it the importer's clang emits
+// C++ inline functions with the C++ personality, and LLVM will not inline those into Swift functions
+// ("incompatible personality"), so e.g. every `Ref<T>` destructor Swift runs stays an out-of-line call.
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;

@@ -8180,12 +8180,13 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
 
 // MARK: - CSS value creation
 
-// `asCSSValue()` is the upcast: a `CSSValue` subclass does not import as a Swift subclass of `CSSValue`.
+// A `CSSValue` subclass is a Swift subclass of `CSSValue` (`ForeignReferenceTypeInheritance`), so each
+// value upcasts with no refcount operation.
 private typealias RefCSSValue = WebCore.CSSValueListBuilder.ValueType
 
 @inline(always)
 private func cssKeywordValue(_ id: UInt16) -> WebCore.CSSValue {
-    WebCore.CSSKeywordValue.create(WebCore.CSSValueID(rawValue: id)).get().asCSSValue()
+    WebCore.CSSKeywordValue.create(WebCore.CSSValueID(rawValue: id)).get()
 }
 
 /// A `CSSPrimitiveValue` of a `LengthPercentageUnit` raw value, as `numericConsume` packs it.
@@ -8194,14 +8195,14 @@ private func cssLengthPercentageValue(_ value: Double, _ unit: UInt8) -> WebCore
     // Never nil: `unit` is a `LengthPercentageUnit` that `numericConsume` chose, and an imported C++ scoped
     // enum's `init?(rawValue:)` does not validate.
     guard let unit = WebCore.CSS.LengthPercentageUnit(rawValue: unit) else { return nil }
-    return WebCore.CSSPrimitiveValue.create(value, WebCore.CSS.toCSSUnitType(unit)).get().asCSSValue()
+    return WebCore.CSSPrimitiveValue.create(value, WebCore.CSS.toCSSUnitType(unit)).get()
 }
 
 @inline(always)
 private func cssValuePair(_ first: WebCore.CSSValue, _ second: WebCore.CSSValue, _ coalescing: Bool) -> WebCore.CSSValue {
     coalescing
-        ? WebCore.CSSValuePair.create(RefCSSValue(first), RefCSSValue(second)).get().asCSSValue()
-        : WebCore.CSSValuePair.createNoncoalescing(RefCSSValue(first), RefCSSValue(second)).get().asCSSValue()
+        ? WebCore.CSSValuePair.create(RefCSSValue(first), RefCSSValue(second)).get()
+        : WebCore.CSSValuePair.createNoncoalescing(RefCSSValue(first), RefCSSValue(second)).get()
 }
 
 @inline(always)
