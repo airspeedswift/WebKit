@@ -8116,6 +8116,79 @@ private func numericConsume(
     return CSSNumericConsumerSwiftResult(value: clamped, packed: UInt32(unit) | 0x100)
 }
 
+// MARK: - Property parsers
+
+/// `consumeBackgroundSize<property>` (CSSPropertyParserConsumer+Background.cpp), for `background-size`
+/// (`property` 0), `-webkit-background-size` (1) and `mask-size` (2). `flags` are the
+/// `CSSNumericConsumerSwiftFlag`s of the property, and nil is "not a <bg-size>". The token count it
+/// consumed is in `cursor.nextIndex()`.
+///
+/// `<bg-size> = [ <length-percentage [0,∞]> | auto ]{1,2} | cover | contain`
+@_expose(Cxx)
+public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ property: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> WebCore.CSSValue? {
+    let count = cursor.tokenCount()
+    guard count > 0 else { return nil }
+    let first = cursor.keywordId(0)
+    if first == UInt16(WebCore.CSSValueContain.rawValue) || first == UInt16(WebCore.CSSValueCover.rawValue) {
+        cursor.setNextIndex(skipWhitespace(cursor, 1))
+        return cursor.keyword(first)
+    }
+    var index: UInt32 = 0
+    // `consumeIdent<CSSValueAuto>`, then a `<length-percentage [0,∞]>`.
+    func component(_ allowAuto: Bool, _ coalescing: inout Bool) -> WebCore.CSSValue? {
+        // `index` is below `cursor.tokenCount()` (a `UInt32`) at each `&+= 1`: the token at it was read.
+        if cursor.keywordId(index) == UInt16(WebCore.CSSValueAuto.rawValue) {
+            index &+= 1
+            return cursor.keyword(UInt16(WebCore.CSSValueAuto.rawValue))
+        }
+        let bits = cursor.bits(index)
+        let type = UInt8(truncatingIfNeeded: bits.type)
+        if type == WebCore.NumberToken.rawValue || type == WebCore.PercentageToken.rawValue || type == WebCore.DimensionToken.rawValue {
+            let result = numericConsume(bits.numericValue, NumericConsumerRange(min: 0, max: .infinity, minBehavior: 0, maxBehavior: 0, flags: flags), WebCore.CSS.Category.LengthPercentage.rawValue, type, UInt8(truncatingIfNeeded: bits.unit), parserMode, flags)
+            guard result.packed & 0x100 != 0 else { return nil }
+            index &+= 1
+            coalescing = false
+            return cursor.lengthPercentage(result.value, UInt8(truncatingIfNeeded: result.packed))
+        }
+        guard let value = cursor.lengthPercentageNonnegativeAt(index) else { return nil }
+        index = cursor.nextIndex()
+        coalescing = false
+        return value
+    }
+    var coalescing = true
+    guard let horizontal = component(true, &coalescing) else { return nil }
+    index = skipWhitespace(cursor, index)
+    var unused = true
+    var vertical: WebCore.CSSValue? = nil
+    if index < count {
+        vertical = component(true, &unused)
+        if vertical != nil { index = skipWhitespace(cursor, index) }
+    }
+    cursor.setNextIndex(index)
+    let second: WebCore.CSSValue
+    if let vertical {
+        second = vertical
+    } else {
+        switch property {
+        case 1: second = horizontal // "-webkit-background-size: 10px" is "background-size: 10px 10px".
+        case 2: return horizontal
+        default: second = cursor.keyword(UInt16(WebCore.CSSValueAuto.rawValue))
+        }
+    }
+    return cursor.pair(horizontal, second, coalescing)
+}
+
+@inline(always)
+private func skipWhitespace(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ index: UInt32) -> UInt32 {
+    var i = index
+    while i < cursor.tokenCount() {
+        let type = UInt8(truncatingIfNeeded: cursor.bits(i).type)
+        guard type == WebCore.NonNewlineWhitespaceToken.rawValue || type == WebCore.NewlineToken.rawValue else { break }
+        i &+= 1
+    }
+    return i
+}
+
 /// `LengthValidator::validate`: the `LengthUnit` of a `<dimension>` token's unit, if it is a length allowed here.
 @inline(always)
 private func numericConsumerLengthUnit(_ unitType: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> UInt8? {
