@@ -8128,7 +8128,7 @@ private func numericConsume(
 public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ property: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> WebCore.CSSValue? {
     let count = cursor.tokenCount()
     guard count > 0 else { return nil }
-    let first = cursor.keywordId(0)
+    let first = identId(cursor, 0, count)
     if first == UInt16(WebCore.CSSValueContain.rawValue) || first == UInt16(WebCore.CSSValueCover.rawValue) {
         cursor.setNextIndex(skipWhitespace(cursor, 1))
         return cssKeywordValue(first)
@@ -8137,7 +8137,7 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
     // `consumeIdent<CSSValueAuto>`, then a `<length-percentage [0,∞]>`.
     func component(_ allowAuto: Bool, _ coalescing: inout Bool) -> WebCore.CSSValue? {
         // `index` is below `cursor.tokenCount()` (a `UInt32`) at each `&+= 1`: the token at it was read.
-        if cursor.keywordId(index) == UInt16(WebCore.CSSValueAuto.rawValue) {
+        if identId(cursor, index, count) == UInt16(WebCore.CSSValueAuto.rawValue) {
             index &+= 1
             return cssKeywordValue(UInt16(WebCore.CSSValueAuto.rawValue))
         }
@@ -8150,7 +8150,7 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
             coalescing = false
             return cssLengthPercentageValue(result.value, UInt8(truncatingIfNeeded: result.packed))
         }
-        guard let value = cursor.lengthPercentageNonnegativeAt(index) else { return nil }
+        guard let value = cursor.primitiveAt(index, count, .LengthPercentageNonnegative) else { return nil }
         index = cursor.nextIndex()
         coalescing = false
         return value
@@ -8178,6 +8178,295 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
     return cssValuePair(horizontal, second, coalescing)
 }
 
+// MARK: - Transform properties and functions
+
+/// `consumeRotate3dFunction` (`consumer` 0), `consumeTranslateFunction` (1), `consumeTranslate3dFunction` (2),
+/// `consumeTranslate` (3), `consumeRotate` (4) and `consumeScale` (5), CSSPropertyParserConsumer+Transform.cpp. `flags`
+/// are the `CSSNumericConsumerSwiftFlag`s of the property, and nil is "not this value". The token count it consumed
+/// is in `cursor.nextIndex()`.
+@_expose(Cxx)
+public func cssConsumeTransformSwift(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ consumer: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> WebCore.CSSValue? {
+    // The generated `consumeTransform` tries the three functions in turn on every transform function, so a function
+    // that is not this one is rejected on one token read, before any parser state is built. A read past the range is
+    // an `EOFToken`, so the range need not be measured for it.
+    if consumer < 3 && identId(cursor, 0, .max, WebCore.FunctionToken) != UInt16(transformFunctionName(consumer).rawValue) { return nil }
+    var parser = TransformParser(cursor: cursor, end: cursor.tokenCount(), index: 0, parserMode: parserMode, flags: flags)
+    let value: WebCore.CSSValue?
+    switch consumer {
+    case 0: value = parser.function(WebCore.CSSValueRotate3d) { $0.rotate3dArguments() }
+    case 1: value = parser.function(WebCore.CSSValueTranslate) { $0.translateArguments() }
+    case 2: value = parser.function(WebCore.CSSValueTranslate3d) { $0.translate3dArguments() }
+    case 3: value = parser.translate()
+    case 4: value = parser.rotate()
+    default: value = parser.scale()
+    }
+    if value != nil { cursor.setNextIndex(parser.index) }
+    return value
+}
+
+@inline(always)
+private func transformFunctionName(_ consumer: UInt8) -> WebCore.CSSValueID {
+    consumer == 0 ? WebCore.CSSValueRotate3d : consumer == 1 ? WebCore.CSSValueTranslate : WebCore.CSSValueTranslate3d
+}
+
+/// A `CSSParserTokenRange` over the cursor's tokens `[index, end)`; a read at or past `end` is an `EOFToken`.
+private struct TransformParser {
+    let cursor: WebCore.CSSPropertyParserSwiftCursor
+    let end: UInt32
+    var index: UInt32
+    let parserMode: UInt8
+    let flags: UInt8
+
+    var atEnd: Bool { index >= end }
+
+    func type(_ i: UInt32) -> WebCore.CSSParserTokenType {
+        i < end ? WebCore.CSSParserTokenType(rawValue: UInt8(truncatingIfNeeded: cursor.bits(i).type)) : WebCore.EOFToken
+    }
+
+    mutating func consumeWhitespace() {
+        // `index` is below `end` (a `UInt32`) at each `&+= 1`.
+        while type(index) == WebCore.NonNewlineWhitespaceToken || type(index) == WebCore.NewlineToken { index &+= 1 }
+    }
+
+    /// `consumeCommaIncludingWhitespace`.
+    mutating func consumeComma() -> Bool {
+        guard type(index) == WebCore.CommaToken else { return false }
+        index &+= 1
+        consumeWhitespace()
+        return true
+    }
+
+    /// `consumeIdent<CSSValueNone>`.
+    mutating func consumeNone() -> WebCore.CSSValue? {
+        guard identId(cursor, index, end) == UInt16(WebCore.CSSValueNone.rawValue) else { return nil }
+        index &+= 1
+        consumeWhitespace()
+        return cssKeywordValue(UInt16(WebCore.CSSValueNone.rawValue))
+    }
+
+    /// `name( arguments )`, as `range.peek().functionId() == name`, then `consumeFunction`, `arguments`, and `args.atEnd()`.
+    mutating func function(_ name: WebCore.CSSValueID, _ arguments: (inout TransformParser) -> WebCore.CSSValueListBuilder?) -> WebCore.CSSValue? {
+        guard identId(cursor, index, end, WebCore.FunctionToken) == UInt16(name.rawValue) else { return nil }
+        // `consumeBlock`: the tokens up to the matching `BlockEnd` (`CSSParserToken::BlockType` 2; `BlockStart` is
+        // 1), or to the end if there is none. `i` and `depth` are bounded by `end` (a `UInt32`).
+        var depth: UInt32 = 0
+        var i = index
+        var argumentsEnd = end
+        while i < end {
+            let blockType = cursor.bits(i).blockType
+            i &+= 1
+            if blockType == 1 { depth &+= 1 }
+            if blockType == 2 {
+                depth &-= 1
+                if depth == 0 { argumentsEnd = i &- 1; break }
+            }
+        }
+        var args = TransformParser(cursor: cursor, end: argumentsEnd, index: index &+ 1, parserMode: parserMode, flags: flags)
+        args.consumeWhitespace()
+        guard !args.atEnd, var list = arguments(&args), args.atEnd else { return nil }
+        index = i
+        consumeWhitespace()
+        var value = WebCore.CSSFunctionValue.create(name, consume list)
+        return value.leakRef()
+    }
+
+    /// A `CSSPrimitiveValueResolver<kind>::consumeAndResolve` (or `consumePercentageDividedBy100OrNumber`).
+    mutating func primitive(_ kind: WebCore.CSSPropertyParserSwiftPrimitive) -> TransformPrimitive? {
+        let tokenType = type(index)
+        if tokenType == WebCore.FunctionToken {
+            // Only `FunctionConsumerForCalcValues` consumes a function token, so the value is calculated.
+            guard let value = cursor.primitiveAt(index, end, kind) else { return nil }
+            assert(value.isCalculated())
+            index = cursor.nextIndex()
+            return TransformPrimitive(value: value, number: nil, isPercentage: false)
+        }
+        guard tokenType == WebCore.NumberToken || tokenType == WebCore.PercentageToken || tokenType == WebCore.DimensionToken else { return nil }
+        let bits = cursor.bits(index)
+        let category: WebCore.CSS.Category
+        var flags = self.flags & ~UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue)
+        switch kind {
+        case .LengthPercentage: category = .LengthPercentage; flags = self.flags
+        case .Length: category = .Length; flags = self.flags
+        case .Angle: category = .Angle
+        case .AngleOrUnitlessZero: category = .Angle; flags |= UInt8(CSSNumericConsumerSwiftUnitlessZeroAngle.rawValue)
+        case .PercentageDividedBy100OrNumber: category = tokenType == WebCore.PercentageToken ? .Percentage : .Number
+        default: category = .Number
+        }
+        let range = NumericConsumerRange(min: -.infinity, max: .infinity, minBehavior: 0, maxBehavior: 0, flags: flags)
+        let result = category == .Angle
+            ? angleConsume(bits.numericValue, tokenType, UInt8(truncatingIfNeeded: bits.unit), parserMode, flags)
+            : numericConsume(bits.numericValue, range, category.rawValue, tokenType.rawValue, UInt8(truncatingIfNeeded: bits.unit), parserMode, flags)
+        guard result.packed & 0x100 != 0 else { return nil }
+        index &+= 1
+        consumeWhitespace()
+        let unit = UInt8(truncatingIfNeeded: result.packed)
+        switch category {
+        case .LengthPercentage, .Length:
+            // `LengthUnit`'s cases are `LengthPercentageUnit`'s first cases, in order.
+            guard let value = cssLengthPercentageValue(result.value, unit) else { return nil }
+            return TransformPrimitive(value: value, number: result.value, isPercentage: unit == UInt8(WebCore.CSS.LengthPercentageUnit.Percentage.rawValue))
+        case .Angle:
+            // Never nil: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
+            guard let angle = WebCore.CSS.AngleUnit(rawValue: unit) else { return nil }
+            var value = WebCore.CSSPrimitiveValue.create(result.value, WebCore.CSS.toCSSUnitType(angle))
+            return TransformPrimitive(value: value.leakRef(), number: result.value, isPercentage: false)
+        default:
+            // `consumePercentageDividedBy100OrNumber` makes a `<percentage>` a `<number>`.
+            let number = category == .Percentage ? result.value / 100 : result.value
+            var value = WebCore.CSSPrimitiveValue.create(number, .Number)
+            return TransformPrimitive(value: value.leakRef(), number: number, isPercentage: false)
+        }
+    }
+
+    // rotate3d() = rotate3d( <number> , <number> , <number> , [ <angle> | <zero> ] )
+    mutating func rotate3dArguments() -> WebCore.CSSValueListBuilder? {
+        guard let x = primitive(.Number), consumeComma(), let y = primitive(.Number), consumeComma(),
+            let z = primitive(.Number), consumeComma(), let angle = primitive(.AngleOrUnitlessZero)
+        else { return nil }
+        return cssValueListBuilder(x.value, y.value, z.value, angle.value)
+    }
+
+    // translate() = translate( <length-percentage> , <length-percentage>? )
+    mutating func translateArguments() -> WebCore.CSSValueListBuilder? {
+        guard let x = primitive(.LengthPercentage) else { return nil }
+        guard consumeComma() else { return cssValueListBuilder(x.value) }
+        guard let y = primitive(.LengthPercentage) else { return nil }
+        // A second value of `0` is the same as no second argument.
+        return y.isKnownZero ? cssValueListBuilder(x.value) : cssValueListBuilder(x.value, y.value)
+    }
+
+    // translate3d() = translate3d( <length-percentage> , <length-percentage> , <length> )
+    mutating func translate3dArguments() -> WebCore.CSSValueListBuilder? {
+        guard let x = primitive(.LengthPercentage), consumeComma(), let y = primitive(.LengthPercentage), consumeComma(),
+            let z = primitive(.Length)
+        else { return nil }
+        return cssValueListBuilder(x.value, y.value, z.value)
+    }
+
+    // none | <length-percentage> [ <length-percentage> <length>? ]?
+    mutating func translate() -> WebCore.CSSValue? {
+        if let none = consumeNone() { return none }
+        guard let x = primitive(.LengthPercentage) else { return nil }
+        consumeWhitespace()
+        if atEnd { return cssSpaceSeparated(x.value) }
+        guard let y = primitive(.LengthPercentage) else { return nil }
+        consumeWhitespace()
+        // Always include 0% in serialization per-spec.
+        let haveNonZeroY = y.number == nil || y.isPercentage || y.number != 0
+        if atEnd { return haveNonZeroY ? cssSpaceSeparated(x.value, y.value) : cssSpaceSeparated(x.value) }
+        guard let z = primitive(.Length) else { return nil }
+        let haveNonZeroZ = z.number == nil || z.isPercentage || z.number != 0
+        if !haveNonZeroY && !haveNonZeroZ { return cssSpaceSeparated(x.value) }
+        if !haveNonZeroZ { return cssSpaceSeparated(x.value, y.value) }
+        return cssSpaceSeparated(x.value, y.value, z.value)
+    }
+
+    // none | <angle> | [ x | y | z | <number>{3} ] && <angle>
+    mutating func rotate() -> WebCore.CSSValue? {
+        if let none = consumeNone() { return none }
+        var numbers: (TransformPrimitive?, TransformPrimitive?, TransformPrimitive?) = (nil, nil, nil)
+        var numberCount: UInt32 = 0
+        var angle: TransformPrimitive? = nil
+        var axis: UInt16 = 0
+        while !atEnd {
+            // A number first: a unitless 0 would be consumed as an angle.
+            if let number = primitive(.Number) {
+                guard axis == 0 else { return nil }
+                switch numberCount {
+                case 0: numbers.0 = number
+                case 1: numbers.1 = number
+                case 2: numbers.2 = number
+                default: break
+                }
+                // `numberCount` is at most the token count, a `UInt32`: each number consumed a token.
+                numberCount &+= 1
+                consumeWhitespace()
+                continue
+            }
+            if let parsed = primitive(.Angle) {
+                guard angle == nil, numberCount == 0 || numberCount == 3 else { return nil }
+                angle = parsed
+                consumeWhitespace()
+                continue
+            }
+            // `consumeIdent<CSSValueX, CSSValueY, CSSValueZ>`.
+            let id = identId(cursor, index, end)
+            guard id == UInt16(WebCore.CSSValueX.rawValue) || id == UInt16(WebCore.CSSValueY.rawValue) || id == UInt16(WebCore.CSSValueZ.rawValue),
+                axis == 0, numberCount == 0
+            else { return nil }
+            index &+= 1
+            axis = id
+            consumeWhitespace()
+        }
+        guard let angle else { return nil }
+        if numberCount == 3, let x = numbers.0, let y = numbers.1, let z = numbers.2 {
+            // A vector along one axis serializes as that axis.
+            if x.isKnownNonZero && y.isKnownZero && z.isKnownZero { return cssSpaceSeparated(cssKeywordValue(UInt16(WebCore.CSSValueX.rawValue)), angle.value) }
+            if x.isKnownZero && y.isKnownNonZero && z.isKnownZero { return cssSpaceSeparated(cssKeywordValue(UInt16(WebCore.CSSValueY.rawValue)), angle.value) }
+            if x.isKnownZero && y.isKnownZero && z.isKnownNonZero { return cssSpaceSeparated(angle.value) }
+            return cssSpaceSeparated(x.value, y.value, z.value, angle.value)
+        }
+        guard numberCount == 0 else { return nil }
+        if axis != 0 && axis != UInt16(WebCore.CSSValueZ.rawValue) { return cssSpaceSeparated(cssKeywordValue(axis), angle.value) }
+        return cssSpaceSeparated(angle.value)
+    }
+
+    // none | [ <number> | <percentage> ]{1,3}
+    mutating func scale() -> WebCore.CSSValue? {
+        if let none = consumeNone() { return none }
+        guard let x = primitive(.PercentageDividedBy100OrNumber) else { return nil }
+        consumeWhitespace()
+        if atEnd { return cssSpaceSeparated(x.value) }
+        guard let y = primitive(.PercentageDividedBy100OrNumber) else { return nil }
+        consumeWhitespace()
+        // `raw()` is nil for a calculated value; both units are `CSSUnitType::Number`.
+        let xIsY = x.number != nil && x.number == y.number
+        if atEnd { return xIsY ? cssSpaceSeparated(x.value) : cssSpaceSeparated(x.value, y.value) }
+        guard let z = primitive(.PercentageDividedBy100OrNumber) else { return nil }
+        if z.number != 1 { return cssSpaceSeparated(x.value, y.value, z.value) }
+        return xIsY ? cssSpaceSeparated(x.value) : cssSpaceSeparated(x.value, y.value)
+    }
+}
+
+/// A primitive the transform consumers parsed, with what they ask of it: `number` is the value of a
+/// non-calculated one (`raw()->value`), and nil for a calculated one, whose `isZero()` is unknown.
+private struct TransformPrimitive {
+    let value: WebCore.CSSValue
+    let number: Double?
+    let isPercentage: Bool
+
+    var isKnownZero: Bool { number == 0 }
+    var isKnownNonZero: Bool { number != nil && number != 0 }
+}
+
+/// The `CSSValueID` of token `i` if it is a `type` token (`id()`, or `functionId()`), and `CSSValueInvalid` otherwise.
+@inline(always)
+private func identId(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ i: UInt32, _ end: UInt32, _ type: WebCore.CSSParserTokenType = WebCore.IdentToken) -> UInt16 {
+    guard i < end else { return 0 }
+    let bits = cursor.bits(i)
+    guard UInt8(truncatingIfNeeded: bits.type) == type.rawValue else { return 0 }
+    // The token's keyword cache when it is filled, as `identOrFunctionId`.
+    return bits.id >= 0 ? UInt16(truncatingIfNeeded: bits.id) : cursor.keywordId(i)
+}
+
+/// A list of up to four values, in order. Not variadic: a variadic parameter is an `Array`.
+@inline(always)
+private func cssValueListBuilder(_ a: WebCore.CSSValue, _ b: WebCore.CSSValue? = nil, _ c: WebCore.CSSValue? = nil, _ d: WebCore.CSSValue? = nil) -> WebCore.CSSValueListBuilder {
+    var list = WebCore.CSSValueListBuilder()
+    list.append(consuming: RefCSSValue(a))
+    if let b { list.append(consuming: RefCSSValue(b)) }
+    if let c { list.append(consuming: RefCSSValue(c)) }
+    if let d { list.append(consuming: RefCSSValue(d)) }
+    return list
+}
+
+@inline(always)
+private func cssSpaceSeparated(_ a: WebCore.CSSValue, _ b: WebCore.CSSValue? = nil, _ c: WebCore.CSSValue? = nil, _ d: WebCore.CSSValue? = nil) -> WebCore.CSSValue {
+    var list = cssValueListBuilder(a, b, c, d)
+    var value = WebCore.CSSValueList.createSpaceSeparated(consume list)
+    return value.leakRef()
+}
+
 // MARK: - Transform fast path
 
 /// `parseSimpleTransformList`'s `CSSFunctionValue`s, for the transform fast path
@@ -8200,7 +8489,8 @@ func makeTransformList(_ sink: consuming TransformListSink) -> WebCore.CSSValue?
     guard !sink.list.isEmpty() else { return nil }
     // A whole-value move, so `list` is not copied (a `WTF::Vector` copy otherwise).
     var list = (consume sink).list
-    return WebCore.CSSTransformListValue.create(consume list).get()
+    var value = WebCore.CSSTransformListValue.create(consume list)
+    return value.leakRef()
 }
 
 // MARK: - CSS value creation
@@ -8211,7 +8501,8 @@ private typealias RefCSSValue = WebCore.CSSValueListBuilder.ValueType
 
 @inline(always)
 private func cssKeywordValue(_ id: UInt16) -> WebCore.CSSValue {
-    WebCore.CSSKeywordValue.create(WebCore.CSSValueID(rawValue: id)).get()
+    var value = WebCore.CSSKeywordValue.create(WebCore.CSSValueID(rawValue: id))
+    return value.leakRef()
 }
 
 /// A `CSSPrimitiveValue` of a `LengthPercentageUnit` raw value, as `numericConsume` packs it.
@@ -8220,14 +8511,16 @@ private func cssLengthPercentageValue(_ value: Double, _ unit: UInt8) -> WebCore
     // Never nil: `unit` is a `LengthPercentageUnit` that `numericConsume` chose, and an imported C++ scoped
     // enum's `init?(rawValue:)` does not validate.
     guard let unit = WebCore.CSS.LengthPercentageUnit(rawValue: unit) else { return nil }
-    return WebCore.CSSPrimitiveValue.create(value, WebCore.CSS.toCSSUnitType(unit)).get()
+    var primitive = WebCore.CSSPrimitiveValue.create(value, WebCore.CSS.toCSSUnitType(unit))
+    return primitive.leakRef()
 }
 
 @inline(always)
 private func cssValuePair(_ first: WebCore.CSSValue, _ second: WebCore.CSSValue, _ coalescing: Bool) -> WebCore.CSSValue {
-    coalescing
-        ? WebCore.CSSValuePair.create(RefCSSValue(first), RefCSSValue(second)).get()
-        : WebCore.CSSValuePair.createNoncoalescing(RefCSSValue(first), RefCSSValue(second)).get()
+    var pair = coalescing
+        ? WebCore.CSSValuePair.create(RefCSSValue(first), RefCSSValue(second))
+        : WebCore.CSSValuePair.createNoncoalescing(RefCSSValue(first), RefCSSValue(second))
+    return pair.leakRef()
 }
 
 @inline(always)
@@ -8263,6 +8556,32 @@ private func numericConsumerAcceptsUnitlessLength(_ value: Double, _ parserMode:
     if value == 0 && flags & UInt8(CSSNumericConsumerSwiftUnitlessZeroLength.rawValue) != 0 { return true }
     if parserMode == UInt8(WebCore.SVGAttributeMode.rawValue) { return true }
     return flags & UInt8(CSSNumericConsumerSwiftQuirkyLength.rawValue) != 0
+}
+
+/// `DimensionConsumer` and `NumberConsumerForUnitlessValues` with `AngleValidator`, for `CSS::Angle<CSS::All>`: the range
+/// has no bound, so there is no clamp and `isValid` is "finite". Separate from `numericConsume`, whose dispatch the
+/// generic `cssConsumeNumericSwift` entry shares: a case added there lengthens every numeric token's dispatch.
+private func angleConsume(_ value: Double, _ tokenType: WebCore.CSSParserTokenType, _ unitType: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> CSSNumericConsumerSwiftResult {
+    let rejected = CSSNumericConsumerSwiftResult(value: 0, packed: 0)
+    let unit: UInt8
+    if tokenType == WebCore.DimensionToken {
+        // `AngleValidator::validate`. Never nil: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
+        guard let cssUnit = WebCore.CSSUnitType(rawValue: unitType), let angle = WebCore.CSS.toAngleUnit(cssUnit).value else { return rejected }
+        unit = angle.rawValue
+    } else {
+        guard tokenType == WebCore.NumberToken, numericConsumerAcceptsUnitlessAngle(value, parserMode, flags) else { return rejected }
+        unit = WebCore.CSS.AngleUnit.Deg.rawValue
+    }
+    guard !value.isInfinite else { return rejected }
+    return CSSNumericConsumerSwiftResult(value: value, packed: UInt32(unit) | 0x100)
+}
+
+/// `AngleValidator::shouldAcceptUnitlessValue`, with the quirky-angle bit the caller's.
+@inline(always)
+private func numericConsumerAcceptsUnitlessAngle(_ value: Double, _ parserMode: UInt8, _ flags: UInt8) -> Bool {
+    if value == 0 && flags & UInt8(CSSNumericConsumerSwiftUnitlessZeroAngle.rawValue) != 0 { return true }
+    if parserMode == UInt8(WebCore.SVGAttributeMode.rawValue) { return true }
+    return flags & UInt8(CSSNumericConsumerSwiftQuirkyAngle.rawValue) != 0
 }
 
 /// A `CSS::Range` and the primitive's `ResolvedValueType`.

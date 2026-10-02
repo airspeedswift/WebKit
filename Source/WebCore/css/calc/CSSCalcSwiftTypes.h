@@ -478,6 +478,8 @@ enum CSSNumericConsumerSwiftFlag : uint8_t {
     CSSNumericConsumerSwiftAbsoluteLengthUnitsOnly = 1 << 1,
     CSSNumericConsumerSwiftResolvesToFloat = 1 << 2, // the primitive's `ResolvedValueType`, which a clamp rounds through
     CSSNumericConsumerSwiftQuirkyLength = 1 << 3, // `HTMLQuirksMode && CSSProperty::acceptsQuirkyLength(currentProperty)`
+    CSSNumericConsumerSwiftUnitlessZeroAngle = 1 << 4,
+    CSSNumericConsumerSwiftQuirkyAngle = 1 << 5, // `HTMLQuirksMode && CSSProperty::acceptsQuirkyAngle(currentProperty)`
 };
 
 // `packed` is the raw value of the primitive's unit enum, with bit 8 set if the token was accepted. A

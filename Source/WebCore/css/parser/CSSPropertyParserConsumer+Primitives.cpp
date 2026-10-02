@@ -28,7 +28,11 @@
 #include "CSSParserTokenRange.h"
 #include "CSSPropertyParserOptions.h"
 #if USE(SWIFT_CSS)
+#include "CSSPropertyParserConsumer+AngleDefinitions.h"
 #include "CSSPropertyParserConsumer+CSSPrimitiveValueResolver.h"
+#include "CSSPropertyParserConsumer+LengthDefinitions.h"
+#include "CSSPropertyParserConsumer+NumberDefinitions.h"
+#include "CSSPropertyParserConsumer+Percentage.h"
 #endif
 
 namespace WebCore {
@@ -95,38 +99,27 @@ std::optional<CSSParserTokenRange> consumeArgument(CSSParserTokenRange& range, u
 #if USE(SWIFT_CSS)
 namespace WebCore {
 
-uint32_t CSSPropertyParserSwiftCursor::tokenCount() const
-{
-    return m_range.size();
-}
-
-CSSParserTokenBits CSSPropertyParserSwiftCursor::bits(uint32_t i) const
-{
-    return m_range.peek(i).bits();
-}
-
 uint16_t CSSPropertyParserSwiftCursor::keywordId(uint32_t i) const
 {
-    return m_range.peek(i).id();
+    auto& token = m_range->peek(i);
+    return token.type() == FunctionToken ? token.functionId() : token.id();
 }
 
-uint32_t CSSPropertyParserSwiftCursor::nextIndex() const
+CSSPrimitiveValue* CSSPropertyParserSwiftCursor::primitiveAt(uint32_t i, uint32_t end, CSSPropertyParserSwiftPrimitive primitive) const
 {
-    return m_nextIndex;
-}
-
-void CSSPropertyParserSwiftCursor::setNextIndex(uint32_t i) const
-{
-    m_nextIndex = i;
-}
-
-static_assert(sizeof(CSSPropertyParserSwiftCursor) == 3 * sizeof(void*));
-
-CSSValue* CSSPropertyParserSwiftCursor::lengthPercentageNonnegativeAt(uint32_t i) const
-{
-    auto range = CSSParserTokenRange { m_range.span().subspan(i) };
-    auto value = CSSPropertyParserHelpers::CSSPrimitiveValueResolver<CSS::LengthPercentage<CSS::Nonnegative>>::consumeAndResolve(range, m_state);
-    m_nextIndex = range.begin() - m_range.begin();
+    using namespace CSSPropertyParserHelpers;
+    using enum CSSPropertyParserSwiftPrimitive;
+    auto range = CSSParserTokenRange { m_range->span().subspan(i, end - i) };
+    RefPtr<CSSPrimitiveValue> value;
+    switch (primitive) {
+    case LengthPercentageNonnegative: value = CSSPrimitiveValueResolver<CSS::LengthPercentage<CSS::Nonnegative>>::consumeAndResolve(range, *m_state); break;
+    case LengthPercentage: value = CSSPrimitiveValueResolver<CSS::LengthPercentage<>>::consumeAndResolve(range, *m_state); break;
+    case Length: value = CSSPrimitiveValueResolver<CSS::Length<>>::consumeAndResolve(range, *m_state); break;
+    case Number: value = CSSPrimitiveValueResolver<CSS::Number<>>::consumeAndResolve(range, *m_state); break;
+    case Angle: case AngleOrUnitlessZero: value = CSSPrimitiveValueResolver<CSS::Angle<>>::consumeAndResolve(range, *m_state, { .unitlessZeroAngle = primitive == Angle ? UnitlessZeroQuirk::Forbid : UnitlessZeroQuirk::Allow }); break;
+    case PercentageDividedBy100OrNumber: value = consumePercentageDividedBy100OrNumber(range, *m_state); break;
+    }
+    *m_nextIndex = range.begin() - m_range->begin();
     return value.leakRef();
 }
 
