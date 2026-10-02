@@ -184,7 +184,7 @@ public:
 
     [[nodiscard]] Ref copyRef() const & { return Ref(*m_ptr); }
 
-    [[nodiscard]] T& leakRef()
+    [[nodiscard]] T& leakRef() SWIFT_RETURNS_RETAINED
     {
         ASSERT(m_ptr);
 

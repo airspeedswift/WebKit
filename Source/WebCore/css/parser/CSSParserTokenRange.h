@@ -37,6 +37,7 @@
 
 namespace WebCore {
 
+class CSSPrimitiveValue;
 class StyleSheetContents;
 namespace CSS {
 struct PropertyParserState;
@@ -119,39 +120,47 @@ private:
     std::span<const CSSParserToken> m_tokens;
 };
 
+// The primitive a cursor's `primitiveAt` consumes.
+enum class CSSPropertyParserSwiftPrimitive : uint8_t {
+    LengthPercentageNonnegative,
+    LengthPercentage,
+    Length,
+    Number,
+    Angle,
+    AngleOrUnitlessZero,
+    PercentageDividedBy100OrNumber,
+};
+
 // A Swift property parser reads `range` by index through this. Swift sees the tokens one at a time
 // because `peek` returns a reference into the range, which it cannot import.
 // `SWIFT_SAFE` holds because a cursor lives on the C++ stack for the one Swift call that borrows it.
 class SWIFT_SAFE CSSPropertyParserSwiftCursor {
 public:
-    uint32_t tokenCount() const;
-    CSSParserTokenBits bits(uint32_t i) const;
+    uint32_t tokenCount() const { return m_range->size(); }
+    CSSParserTokenBits bits(uint32_t i) const { return m_range->peek(i).bits(); }
+    // `functionId()` for a `FunctionToken`, and `id()` otherwise.
     uint16_t keywordId(uint32_t i) const;
 
-    // A `<length-percentage>` other than a plain numeric token (calc(), anchor(), ...) starting at
-    // token `i`, through the `MetaResolver`. `nextIndex()` is the token after it.
-    CSSValue* lengthPercentageNonnegativeAt(uint32_t i) const SWIFT_RETURNS_RETAINED;
-    uint32_t nextIndex() const;
+    // A primitive other than a plain numeric token (calc(), anchor(), ...) starting at token `i`, in the
+    // tokens before `end`, through the `MetaResolver`. `nextIndex()` is the token after it.
+    CSSPrimitiveValue* primitiveAt(uint32_t i, uint32_t end, CSSPropertyParserSwiftPrimitive) const SWIFT_RETURNS_RETAINED;
     // The cursor is passed to Swift by value, so the index lives in the caller's frame.
-    void setNextIndex(uint32_t) const;
+    uint32_t nextIndex() const { return *m_nextIndex; }
+    void setNextIndex(uint32_t i) const { *m_nextIndex = i; }
 
 #if !defined(__swift__)
     CSSPropertyParserSwiftCursor(const CSSParserTokenRange& range, CSS::PropertyParserState& state, uint32_t& nextIndex)
-        : m_range(range)
-        , m_state(state)
-        , m_nextIndex(nextIndex)
+        : m_range(&range)
+        , m_state(&state)
+        , m_nextIndex(&nextIndex)
     {
     }
+#endif
 
 private:
-    const CSSParserTokenRange& m_range;
-    CSS::PropertyParserState& m_state;
-    uint32_t& m_nextIndex;
-#else
-    const void* m_rangeStandIn;
-    void* m_stateStandIn;
-    void* m_nextIndexStandIn;
-#endif
+    const CSSParserTokenRange* m_range;
+    CSS::PropertyParserState* m_state;
+    uint32_t* m_nextIndex;
 };
 
 } // namespace WebCore

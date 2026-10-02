@@ -49,10 +49,39 @@
 #include "StyleComputedStyle.h"
 #include "StyleTransform.h"
 #include "StyleValueTypes+CSSValueConversion.h"
+#if USE(SWIFT_CSS)
+#include "WebCoreSwiftBoundaryTypes.h"
+#endif
 
 namespace WebCore {
 namespace CSSPropertyParserHelpers {
 
+#if USE(SWIFT_CSS)
+#define CSS_CPP_TRANSFORM_CONSUMERS_COMPILED_IN 0
+// The six consumers below are `cssConsumeTransformSwift` (CSSCalcSimplificationSwift.swift), whose
+// `consumer` is the order they are declared in here.
+template<uint8_t consumer> static RefPtr<CSSValue> consumeTransformInSwift(CSSParserTokenRange& range, CSS::PropertyParserState& state)
+{
+    auto mode = state.context.mode;
+    auto quirkyAngle = mode == HTMLQuirksMode && CSSProperty::acceptsQuirkyAngle(state.currentProperty) ? CSSNumericConsumerSwiftQuirkyAngle : 0;
+    uint32_t nextIndex = 0;
+    RefPtr value = adoptRef(cssConsumeTransformSwift(CSSPropertyParserSwiftCursor { range, state, nextIndex }, consumer, mode, swiftNumericConsumerFlags(true, mode, state, { }) | quirkyAngle));
+    if (value)
+        range = range.span().subspan(nextIndex);
+    return value;
+}
+
+RefPtr<CSSValue> consumeRotate3dFunction(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumeTransformInSwift<0>(range, state); }
+RefPtr<CSSValue> consumeTranslateFunction(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumeTransformInSwift<1>(range, state); }
+RefPtr<CSSValue> consumeTranslate3dFunction(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumeTransformInSwift<2>(range, state); }
+RefPtr<CSSValue> consumeTranslate(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumeTransformInSwift<3>(range, state); }
+RefPtr<CSSValue> consumeRotate(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumeTransformInSwift<4>(range, state); }
+RefPtr<CSSValue> consumeScale(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumeTransformInSwift<5>(range, state); }
+#else
+#define CSS_CPP_TRANSFORM_CONSUMERS_COMPILED_IN 1
+#endif
+
+#if CSS_CPP_TRANSFORM_CONSUMERS_COMPILED_IN
 RefPtr<CSSValue> consumeRotate3dFunction(CSSParserTokenRange& range, CSS::PropertyParserState& state)
 {
     // https://drafts.csswg.org/css-transforms-2/#funcdef-rotate3d
@@ -428,6 +457,8 @@ RefPtr<CSSValue> consumeScale(CSSParserTokenRange& range, CSS::PropertyParserSta
 
     return CSSValueList::createSpaceSeparated(x.releaseNonNull());
 }
+
+#endif // CSS_CPP_TRANSFORM_CONSUMERS_COMPILED_IN
 
 std::optional<Style::Transform> parseTransformRaw(StringView string, const CSSParserContext& context, const Document& document)
 {
