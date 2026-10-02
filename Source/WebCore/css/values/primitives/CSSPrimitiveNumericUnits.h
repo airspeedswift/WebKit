@@ -606,7 +606,7 @@ constexpr CSSUnitType toCSSUnitType(LengthUnit lengthUnit)
     WTF_UNREACHABLE();
 }
 
-constexpr std::optional<LengthUnit> toLengthUnit(CSSUnitType cssUnit)
+ALWAYS_INLINE constexpr std::optional<LengthUnit> toLengthUnit(CSSUnitType cssUnit)
 {
     using enum LengthUnit;
 
