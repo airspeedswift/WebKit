@@ -28,10 +28,7 @@
 #include "CSSParserTokenRange.h"
 #include "CSSPropertyParserOptions.h"
 #if USE(SWIFT_CSS)
-#include "CSSKeywordValue.h"
 #include "CSSPropertyParserConsumer+CSSPrimitiveValueResolver.h"
-#include "CSSValuePair.h"
-#include "CSSValuePool.h"
 #endif
 
 namespace WebCore {
@@ -124,21 +121,6 @@ void CSSPropertyParserSwiftCursor::setNextIndex(uint32_t i) const
 }
 
 static_assert(sizeof(CSSPropertyParserSwiftCursor) == 3 * sizeof(void*));
-
-CSSValue& CSSPropertyParserSwiftCursor::keyword(uint16_t id) const
-{
-    return CSSKeywordValue::create(static_cast<CSSValueID>(id)).leakRef();
-}
-
-CSSValue& CSSPropertyParserSwiftCursor::lengthPercentage(double value, uint8_t unit) const
-{
-    return CSSPrimitiveValue::create(value, CSS::toCSSUnitType(static_cast<CSS::LengthPercentageUnit>(unit))).leakRef();
-}
-
-CSSValue& CSSPropertyParserSwiftCursor::pair(CSSValue& first, CSSValue& second, bool coalescing) const
-{
-    return (coalescing ? CSSValuePair::create(Ref { first }, Ref { second }) : CSSValuePair::createNoncoalescing(Ref { first }, Ref { second })).leakRef();
-}
 
 CSSValue* CSSPropertyParserSwiftCursor::lengthPercentageNonnegativeAt(uint32_t i) const
 {

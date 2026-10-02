@@ -8131,7 +8131,7 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
     let first = cursor.keywordId(0)
     if first == UInt16(WebCore.CSSValueContain.rawValue) || first == UInt16(WebCore.CSSValueCover.rawValue) {
         cursor.setNextIndex(skipWhitespace(cursor, 1))
-        return cursor.keyword(first)
+        return cssKeywordValue(first)
     }
     var index: UInt32 = 0
     // `consumeIdent<CSSValueAuto>`, then a `<length-percentage [0,∞]>`.
@@ -8139,7 +8139,7 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
         // `index` is below `cursor.tokenCount()` (a `UInt32`) at each `&+= 1`: the token at it was read.
         if cursor.keywordId(index) == UInt16(WebCore.CSSValueAuto.rawValue) {
             index &+= 1
-            return cursor.keyword(UInt16(WebCore.CSSValueAuto.rawValue))
+            return cssKeywordValue(UInt16(WebCore.CSSValueAuto.rawValue))
         }
         let bits = cursor.bits(index)
         let type = UInt8(truncatingIfNeeded: bits.type)
@@ -8148,7 +8148,7 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
             guard result.packed & 0x100 != 0 else { return nil }
             index &+= 1
             coalescing = false
-            return cursor.lengthPercentage(result.value, UInt8(truncatingIfNeeded: result.packed))
+            return cssLengthPercentageValue(result.value, UInt8(truncatingIfNeeded: result.packed))
         }
         guard let value = cursor.lengthPercentageNonnegativeAt(index) else { return nil }
         index = cursor.nextIndex()
@@ -8172,10 +8172,36 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
         switch property {
         case 1: second = horizontal // "-webkit-background-size: 10px" is "background-size: 10px 10px".
         case 2: return horizontal
-        default: second = cursor.keyword(UInt16(WebCore.CSSValueAuto.rawValue))
+        default: second = cssKeywordValue(UInt16(WebCore.CSSValueAuto.rawValue))
         }
     }
-    return cursor.pair(horizontal, second, coalescing)
+    return cssValuePair(horizontal, second, coalescing)
+}
+
+// MARK: - CSS value creation
+
+// `asCSSValue()` is the upcast: a `CSSValue` subclass does not import as a Swift subclass of `CSSValue`.
+private typealias RefCSSValue = WebCore.CSSValueListBuilder.ValueType
+
+@inline(always)
+private func cssKeywordValue(_ id: UInt16) -> WebCore.CSSValue {
+    WebCore.CSSKeywordValue.create(WebCore.CSSValueID(rawValue: id)).get().asCSSValue()
+}
+
+/// A `CSSPrimitiveValue` of a `LengthPercentageUnit` raw value, as `numericConsume` packs it.
+@inline(always)
+private func cssLengthPercentageValue(_ value: Double, _ unit: UInt8) -> WebCore.CSSValue? {
+    // Never nil: `unit` is a `LengthPercentageUnit` that `numericConsume` chose, and an imported C++ scoped
+    // enum's `init?(rawValue:)` does not validate.
+    guard let unit = WebCore.CSS.LengthPercentageUnit(rawValue: unit) else { return nil }
+    return WebCore.CSSPrimitiveValue.create(value, WebCore.CSS.toCSSUnitType(unit)).get().asCSSValue()
+}
+
+@inline(always)
+private func cssValuePair(_ first: WebCore.CSSValue, _ second: WebCore.CSSValue, _ coalescing: Bool) -> WebCore.CSSValue {
+    coalescing
+        ? WebCore.CSSValuePair.create(RefCSSValue(first), RefCSSValue(second)).get().asCSSValue()
+        : WebCore.CSSValuePair.createNoncoalescing(RefCSSValue(first), RefCSSValue(second)).get().asCSSValue()
 }
 
 @inline(always)

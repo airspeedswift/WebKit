@@ -62,6 +62,8 @@ public:
     static constexpr unsigned refCountFlagIsStatic = 0x1;
     static constexpr unsigned refCountIncrement = 0x2; // This allows us to ref / deref without disturbing the static CSSValue flag.
     void ref() const { m_refCount += refCountIncrement; }
+    // The base, for Swift: a subclass of a foreign reference type does not import as its subclass.
+    CSSValue& asCSSValue() SWIFT_RETURNS_UNRETAINED { return *this; }
     void deref() const;
     bool hasOneRef() const { return m_refCount == refCountIncrement; }
     unsigned refCount() const { return m_refCount / refCountIncrement; }
