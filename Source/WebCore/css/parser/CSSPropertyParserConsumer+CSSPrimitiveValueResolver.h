@@ -85,5 +85,37 @@ struct CSSPrimitiveValueResolver : MetaResolver<RefPtr<CSSPrimitiveValue>, CSSPr
     using MetaResolver<RefPtr<CSSPrimitiveValue>, CSSPrimitiveValueResolverBase, Ts...>::consumeAndResolve;
 };
 
+#if USE(SWIFT_CSS)
+// A `<length-percentage>` over `CSS::Nonnegative` or `CSS::All` (nearly every site, generated and
+// hand-written) has its numeric tokens consumed by a Swift entry with the range a constant, and the
+// value created here, rather than through the `MetaConsumer` and `MetaResolver` variants. A
+// function token (calc(), anchor(), ...) or an identifier is the `MetaResolver`'s.
+template<CSS::Range R>
+struct CSSPrimitiveValueResolver<CSS::LengthPercentage<R, float>> : MetaResolver<RefPtr<CSSPrimitiveValue>, CSSPrimitiveValueResolverBase, CSS::LengthPercentage<R, float>> {
+    using Base = MetaResolver<RefPtr<CSSPrimitiveValue>, CSSPrimitiveValueResolverBase, CSS::LengthPercentage<R, float>>;
+    using Base::resolve;
+
+    static RefPtr<CSSPrimitiveValue> consumeAndResolve(CSSParserTokenRange& range, CSS::PropertyParserState& state, CSSPropertyParserOptions options = { })
+    {
+        if constexpr (R == CSS::Nonnegative || R == CSS::All) {
+            auto& token = range.peek();
+            if (auto type = token.type(); type == NumberToken || type == PercentageToken || type == DimensionToken) {
+                auto mode = options.overrideParserMode.value_or(state.context.mode);
+                auto flags = swiftNumericConsumerFlags(true, mode, state, options);
+                auto unitType = static_cast<uint8_t>(token.unitType());
+                auto result = R == CSS::Nonnegative
+                    ? cssConsumeLengthPercentageNonnegativeSwift(token.numericValue(), type, unitType, mode, flags)
+                    : cssConsumeLengthPercentageAllSwift(token.numericValue(), type, unitType, mode, flags);
+                if (!result.accepted())
+                    return nullptr;
+                range.consumeIncludingWhitespace();
+                return CSSPrimitiveValue::create(result.value, CSS::toCSSUnitType(static_cast<CSS::LengthPercentageUnit>(result.unit())));
+            }
+        }
+        return Base::consumeAndResolve(range, state, options);
+    }
+};
+#endif
+
 } // namespace CSSPropertyParserHelpers
 } // namespace WebCore

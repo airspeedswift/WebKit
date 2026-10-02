@@ -8061,19 +8061,36 @@ public func cssConsumeNumericSwift(
     _ tokenType: UInt8,
     _ unitType: UInt8,
     _ parserMode: UInt8,
-    _ currentProperty: UInt16,
     _ minBehavior: UInt8,
     _ maxBehavior: UInt8,
     _ flags: UInt8
 ) -> CSSNumericConsumerSwiftResult {
-    let rejected = CSSNumericConsumerSwiftResult(value: 0, unit: 0, accepted: false)
-    let range = NumericConsumerRange(
-        min: rangeMin,
-        max: rangeMax,
-        minBehavior: minBehavior,
-        maxBehavior: maxBehavior,
-        resolvesToFloat: flags & UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue) != 0
-    )
+    numericConsume(value, NumericConsumerRange(min: rangeMin, max: rangeMax, minBehavior: minBehavior, maxBehavior: maxBehavior, flags: flags), category, tokenType, unitType, parserMode, flags)
+}
+
+/// `cssConsumeNumericSwift` for `CSS::LengthPercentage<CSS::Nonnegative, float>`, with the range a constant.
+@c @implementation
+public func cssConsumeLengthPercentageNonnegativeSwift(_ value: Double, _ tokenType: UInt8, _ unitType: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> CSSNumericConsumerSwiftResult {
+    numericConsume(value, NumericConsumerRange(min: 0, max: .infinity, minBehavior: 0, maxBehavior: 0, flags: flags), WebCore.CSS.Category.LengthPercentage.rawValue, tokenType, unitType, parserMode, flags)
+}
+
+/// `cssConsumeNumericSwift` for `CSS::LengthPercentage<CSS::All, float>`, with the range a constant.
+@c @implementation
+public func cssConsumeLengthPercentageAllSwift(_ value: Double, _ tokenType: UInt8, _ unitType: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> CSSNumericConsumerSwiftResult {
+    numericConsume(value, NumericConsumerRange(min: -.infinity, max: .infinity, minBehavior: 0, maxBehavior: 0, flags: flags), WebCore.CSS.Category.LengthPercentage.rawValue, tokenType, unitType, parserMode, flags)
+}
+
+@inline(always)
+private func numericConsume(
+    _ value: Double,
+    _ range: NumericConsumerRange,
+    _ category: UInt8,
+    _ tokenType: UInt8,
+    _ unitType: UInt8,
+    _ parserMode: UInt8,
+    _ flags: UInt8
+) -> CSSNumericConsumerSwiftResult {
+    let rejected = CSSNumericConsumerSwiftResult(value: 0, packed: 0)
     let unit: UInt8
     switch (category, tokenType) {
     case (WebCore.CSS.Category.Length.rawValue, WebCore.DimensionToken.rawValue),
@@ -8083,7 +8100,7 @@ public func cssConsumeNumericSwift(
         unit = length
     case (WebCore.CSS.Category.Length.rawValue, WebCore.NumberToken.rawValue),
         (WebCore.CSS.Category.LengthPercentage.rawValue, WebCore.NumberToken.rawValue):
-        guard numericConsumerAcceptsUnitlessLength(value, parserMode, currentProperty, flags) else { return rejected }
+        guard numericConsumerAcceptsUnitlessLength(value, parserMode, flags) else { return rejected }
         unit = UInt8(WebCore.CSS.LengthUnit.Px.rawValue)
     case (WebCore.CSS.Category.LengthPercentage.rawValue, WebCore.PercentageToken.rawValue):
         unit = UInt8(WebCore.CSS.LengthPercentageUnit.Percentage.rawValue)
@@ -8096,7 +8113,7 @@ public func cssConsumeNumericSwift(
     }
     let clamped = range.clamp(value)
     guard range.isValid(clamped) else { return rejected }
-    return CSSNumericConsumerSwiftResult(value: clamped, unit: unit, accepted: true)
+    return CSSNumericConsumerSwiftResult(value: clamped, packed: UInt32(unit) | 0x100)
 }
 
 /// `LengthValidator::validate`: the `LengthUnit` of a `<dimension>` token's unit, if it is a length allowed here.
@@ -8114,13 +8131,13 @@ private func numericConsumerLengthUnit(_ unitType: UInt8, _ parserMode: UInt8, _
     return unit.rawValue
 }
 
-/// `LengthValidator::shouldAcceptUnitlessValue`.
+/// `LengthValidator::shouldAcceptUnitlessValue`. The quirky-length bit is the caller's, because it is
+/// `CSSProperty::acceptsQuirkyLength`, a call, and a call here would cost every token a stack frame.
 @inline(always)
-private func numericConsumerAcceptsUnitlessLength(_ value: Double, _ parserMode: UInt8, _ currentProperty: UInt16, _ flags: UInt8) -> Bool {
+private func numericConsumerAcceptsUnitlessLength(_ value: Double, _ parserMode: UInt8, _ flags: UInt8) -> Bool {
     if value == 0 && flags & UInt8(CSSNumericConsumerSwiftUnitlessZeroLength.rawValue) != 0 { return true }
     if parserMode == UInt8(WebCore.SVGAttributeMode.rawValue) { return true }
-    return parserMode == UInt8(WebCore.HTMLQuirksMode.rawValue)
-        && WebCore.CSSProperty.acceptsQuirkyLength(WebCore.CSSPropertyID(rawValue: currentProperty))
+    return flags & UInt8(CSSNumericConsumerSwiftQuirkyLength.rawValue) != 0
 }
 
 /// A `CSS::Range` and the primitive's `ResolvedValueType`.
@@ -8130,6 +8147,15 @@ private struct NumericConsumerRange {
     let minBehavior: UInt8
     let maxBehavior: UInt8
     let resolvesToFloat: Bool
+
+    @inline(always)
+    init(min: Double, max: Double, minBehavior: UInt8, maxBehavior: UInt8, flags: UInt8) {
+        self.min = min
+        self.max = max
+        self.minBehavior = minBehavior
+        self.maxBehavior = maxBehavior
+        self.resolvesToFloat = flags & UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue) != 0
+    }
 
     // Computed, not stored: a stored static is a lazy global with a once-token on every access (filing 78).
     static var clamp: UInt8 { UInt8(WebCore.CSS.RangeParseTimeBehavior.Clamp.rawValue) }

@@ -33,6 +33,7 @@
 #include "CSSUnevaluatedCalc.h"
 #if USE(SWIFT_CSS)
 #include "CSSCalcSwiftTypes.h"
+#include "CSSProperty.h"
 #endif
 
 namespace WebCore {
@@ -246,19 +247,27 @@ template<typename Primitive> struct FunctionConsumerForCalcValues {
 #if USE(SWIFT_CSS)
 #define CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN 0
 
+// The `CSSNumericConsumerSwiftFlag`s for a token consumed under `state` and `options`.
+inline uint8_t swiftNumericConsumerFlags(bool resolvesToFloat, CSSParserMode mode, CSS::PropertyParserState& state, CSSPropertyParserOptions options)
+{
+    return (resolvesToFloat ? CSSNumericConsumerSwiftResolvesToFloat : 0)
+        | (options.unitlessZeroLength == UnitlessZeroQuirk::Allow ? CSSNumericConsumerSwiftUnitlessZeroLength : 0)
+        | (state.absoluteLengthUnitsOnly ? CSSNumericConsumerSwiftAbsoluteLengthUnitsOnly : 0)
+        | (mode == HTMLQuirksMode && CSSProperty::acceptsQuirkyLength(state.currentProperty) ? CSSNumericConsumerSwiftQuirkyLength : 0);
+}
+
 template<typename Primitive> struct SwiftNumericConsumer {
     static std::optional<typename Primitive::Raw> consume(CSSParserTokenRange& range, CSS::PropertyParserState& state, CSSCalcSymbolsAllowed, CSSPropertyParserOptions options)
     {
         using Raw = typename Primitive::Raw;
         constexpr auto R = Primitive::range;
-        constexpr uint8_t resolvesToFloat = std::same_as<typename Raw::ResolvedValueType, float> ? CSSNumericConsumerSwiftResolvesToFloat : 0;
         auto& token = range.peek();
-        uint8_t flags = resolvesToFloat | (options.unitlessZeroLength == UnitlessZeroQuirk::Allow ? CSSNumericConsumerSwiftUnitlessZeroLength : 0) | (state.absoluteLengthUnitsOnly ? CSSNumericConsumerSwiftAbsoluteLengthUnitsOnly : 0);
-        auto result = cssConsumeNumericSwift(token.numericValue(), R.min, R.max, static_cast<uint8_t>(Raw::category), token.type(), static_cast<uint8_t>(token.unitType()), options.overrideParserMode.value_or(state.context.mode), static_cast<uint16_t>(state.currentProperty), static_cast<uint8_t>(R.minParseTimeBehavior), static_cast<uint8_t>(R.maxParseTimeBehavior), flags);
-        if (!result.accepted)
+        auto mode = options.overrideParserMode.value_or(state.context.mode);
+        auto result = cssConsumeNumericSwift(token.numericValue(), R.min, R.max, static_cast<uint8_t>(Raw::category), token.type(), static_cast<uint8_t>(token.unitType()), mode, static_cast<uint8_t>(R.minParseTimeBehavior), static_cast<uint8_t>(R.maxParseTimeBehavior), swiftNumericConsumerFlags(std::same_as<typename Raw::ResolvedValueType, float>, mode, state, options));
+        if (!result.accepted())
             return std::nullopt;
         range.consumeIncludingWhitespace();
-        return Raw { static_cast<typename Raw::UnitType>(result.unit), result.value };
+        return Raw { static_cast<typename Raw::UnitType>(result.unit()), result.value };
     }
 };
 

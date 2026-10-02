@@ -477,15 +477,24 @@ enum CSSNumericConsumerSwiftFlag : uint8_t {
     CSSNumericConsumerSwiftUnitlessZeroLength = 1 << 0,
     CSSNumericConsumerSwiftAbsoluteLengthUnitsOnly = 1 << 1,
     CSSNumericConsumerSwiftResolvesToFloat = 1 << 2, // the primitive's `ResolvedValueType`, which a clamp rounds through
+    CSSNumericConsumerSwiftQuirkyLength = 1 << 3, // `HTMLQuirksMode && CSSProperty::acceptsQuirkyLength(currentProperty)`
 };
 
+// `packed` is the raw value of the primitive's unit enum, with bit 8 set if the token was accepted. A
+// `{ double; uint32_t }` comes back in two registers; a trailing `bool` field is repacked through the stack.
 struct CSSNumericConsumerSwiftResult {
     double value;
-    uint8_t unit; // the raw value of the primitive's unit enum
-    bool accepted;
+    uint32_t packed;
+
+    bool accepted() const { return packed & 0x100; }
+    uint8_t unit() const { return static_cast<uint8_t>(packed); }
 };
 
 // A `<number>`, `<percentage>` or `<dimension>` token for the primitive of `category` (a `CSS::Category`)
 // with range `[rangeMin, rangeMax]` and its `CSS::RangeParseTimeBehavior`s. `@c @implementation` in
 // CSSCalcSimplificationSwift.swift (SE-0495). Every argument is a scalar, so all of them are passed in registers.
-extern "C" CSSNumericConsumerSwiftResult cssConsumeNumericSwift(double value, double rangeMin, double rangeMax, uint8_t category, uint8_t tokenType, uint8_t unitType, uint8_t parserMode, uint16_t currentProperty, uint8_t minBehavior, uint8_t maxBehavior, uint8_t flags) noexcept;
+extern "C" CSSNumericConsumerSwiftResult cssConsumeNumericSwift(double value, double rangeMin, double rangeMax, uint8_t category, uint8_t tokenType, uint8_t unitType, uint8_t parserMode, uint8_t minBehavior, uint8_t maxBehavior, uint8_t flags) noexcept;
+// The same for `CSS::LengthPercentage<R, float>` with `R` = `CSS::Nonnegative` and `CSS::All`, the two ranges
+// of nearly every `<length-percentage>` site. The range is a constant in each, which makes it a leaf.
+extern "C" CSSNumericConsumerSwiftResult cssConsumeLengthPercentageNonnegativeSwift(double value, uint8_t tokenType, uint8_t unitType, uint8_t parserMode, uint8_t flags) noexcept;
+extern "C" CSSNumericConsumerSwiftResult cssConsumeLengthPercentageAllSwift(double value, uint8_t tokenType, uint8_t unitType, uint8_t parserMode, uint8_t flags) noexcept;
