@@ -3027,7 +3027,7 @@
 		71C916081D1483A300ACA47D /* UserInterfaceLayoutDirection.h in Headers */ = {isa = PBXBuildFile; fileRef = 71C916071D1483A300ACA47D /* UserInterfaceLayoutDirection.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		71D195762D61E2AB0085EB01 /* StyleOriginatedTimelinesController.h in Headers */ = {isa = PBXBuildFile; fileRef = 71D195742D61E2940085EB01 /* StyleOriginatedTimelinesController.h */; };
 		71D6EAFB2AFA914600A323CF /* AnimationEffectTiming.h in Headers */ = {isa = PBXBuildFile; fileRef = 71D6EAFA2AFA913800A323CF /* AnimationEffectTiming.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		71DB0FD929007C910071AC42 /* CSSTransformListValue.h in Headers */ = {isa = PBXBuildFile; fileRef = 71DB0FD829007C750071AC42 /* CSSTransformListValue.h */; };
+		71DB0FD929007C910071AC42 /* CSSTransformListValue.h in Headers */ = {isa = PBXBuildFile; fileRef = 71DB0FD829007C750071AC42 /* CSSTransformListValue.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		71DCB7021568197600862271 /* JSSVGZoomAndPan.h in Headers */ = {isa = PBXBuildFile; fileRef = 71DCB7001568197600862271 /* JSSVGZoomAndPan.h */; };
 		71E2C42621C935280024F8C8 /* AnimationEffectPhase.h in Headers */ = {isa = PBXBuildFile; fileRef = 71E2C42421C9351D0024F8C8 /* AnimationEffectPhase.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		71EADCD822087E720065A45F /* PointerID.h in Headers */ = {isa = PBXBuildFile; fileRef = 71EADCD622087E6D0065A45F /* PointerID.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -5149,7 +5149,7 @@
 		BC000BE82C60110B0033AA75 /* CSSCalcType.h in Headers */ = {isa = PBXBuildFile; fileRef = BC000BD82C5A96850033AA75 /* CSSCalcType.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC00F0150E0A189500FD04E3 /* JSFile.h in Headers */ = {isa = PBXBuildFile; fileRef = BC00F0110E0A189500FD04E3 /* JSFile.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC00F0170E0A189500FD04E3 /* JSFileList.h in Headers */ = {isa = PBXBuildFile; fileRef = BC00F0130E0A189500FD04E3 /* JSFileList.h */; };
-		BC02A63C0E09A9CF004B6D2B /* CSSFunctionValue.h in Headers */ = {isa = PBXBuildFile; fileRef = BC02A63B0E09A9CF004B6D2B /* CSSFunctionValue.h */; };
+		BC02A63C0E09A9CF004B6D2B /* CSSFunctionValue.h in Headers */ = {isa = PBXBuildFile; fileRef = BC02A63B0E09A9CF004B6D2B /* CSSFunctionValue.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC02CF5F2CE26E8B007DA764 /* CSSPrimitiveNumericRange.h in Headers */ = {isa = PBXBuildFile; fileRef = BC02CF5E2CE26E8B007DA764 /* CSSPrimitiveNumericRange.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC02CF742CE2E10A007DA764 /* JSDOMConvertUndefined.h in Headers */ = {isa = PBXBuildFile; fileRef = BC02CF732CE2E10A007DA764 /* JSDOMConvertUndefined.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC05ACCE2CEE610300750CB1 /* CSSSymbol.h in Headers */ = {isa = PBXBuildFile; fileRef = BC05ACCC2CEE600D00750CB1 /* CSSSymbol.h */; settings = {ATTRIBUTES = (Private, ); }; };

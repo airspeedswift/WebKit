@@ -1270,14 +1270,23 @@ private func scanSimpleNumber<Unit: CSSColorCodeUnit>(
 
 /// Up to sixteen arguments, the count of `matrix3d()`, held inline so a function costs no
 /// allocation.
-private typealias TransformArguments = InlineArray<16, WebCore.CSSSwiftTransformArgument>
+typealias TransformArguments = InlineArray<16, WebCore.CSSSwiftTransformArgument>
+
+/// The transform functions the fast path recognises, as their `CSSValueID`.
+typealias TransformFunction = WebCore.CSSValueID
+
+/// Receives each transform function `scanTransformList` recognises, in order. The caller discards
+/// what it received if the scan returns false.
+protocol TransformFunctionSink {
+    mutating func append(_ function: TransformFunction, _ arguments: Span<WebCore.CSSSwiftTransformArgument>)
+}
 
 /// `parseTransformTranslateArguments`.
 @inline(always)
 private func scanTranslateArguments<Unit: CSSColorCodeUnit>(
     _ cursor: inout ColorCursor<Unit>,
     _ expectedCount: Int,
-    _ function: WebCore.CSSSwiftTransformFunction,
+    _ function: TransformFunction,
     _ arguments: inout TransformArguments
 ) -> Bool {
     var remaining = expectedCount
@@ -1296,8 +1305,8 @@ private func scanTranslateArguments<Unit: CSSColorCodeUnit>(
             return false
         }
         if unit == WebCore.CSSUnitType.Percentage,
-            function == WebCore.CSSSwiftTransformFunctionTranslateZ
-                || (function == WebCore.CSSSwiftTransformFunctionTranslate3d && remaining == 1)
+            function == WebCore.CSSValueTranslateZ
+                || (function == WebCore.CSSValueTranslate3d && remaining == 1)
         {
             return false
         }
@@ -1329,9 +1338,9 @@ private func scanNumberArguments<Unit: CSSColorCodeUnit>(
 }
 
 /// `parseSimpleTransformValue`: one function, appended to `sink`.
-private func scanTransformValue<Unit: CSSColorCodeUnit>(
+private func scanTransformValue<Unit: CSSColorCodeUnit, Sink: TransformFunctionSink>(
     _ cursor: inout ColorCursor<Unit>,
-    _ sink: inout WebCore.CSSSwiftFastPathSink
+    _ sink: inout Sink
 ) -> Bool {
     // "rotate(0)". Also guarantees indexes up to [8] are in range.
     guard cursor.remaining >= 9 else {
@@ -1352,22 +1361,22 @@ private func scanTransformValue<Unit: CSSColorCodeUnit>(
         guard cursor.remaining >= 12 else {
             return false
         }
-        let function: WebCore.CSSSwiftTransformFunction
+        let function: TransformFunction
         var expectedArgumentCount = 1
         var argumentStart = 11
         let c9 = lower(9)
         if c9 == 0x78, raw(10) == 0x28 {
-            function = WebCore.CSSSwiftTransformFunctionTranslateX
+            function = WebCore.CSSValueTranslateX
         } else if c9 == 0x79, raw(10) == 0x28 {
-            function = WebCore.CSSSwiftTransformFunctionTranslateY
+            function = WebCore.CSSValueTranslateY
         } else if c9 == 0x7A, raw(10) == 0x28 {
-            function = WebCore.CSSSwiftTransformFunctionTranslateZ
+            function = WebCore.CSSValueTranslateZ
         } else if c9 == 0x28 {
-            function = WebCore.CSSSwiftTransformFunctionTranslate
+            function = WebCore.CSSValueTranslate
             expectedArgumentCount = 2
             argumentStart = 10
         } else if c9 == 0x33, lower(10) == 0x64, raw(11) == 0x28 {
-            function = WebCore.CSSSwiftTransformFunctionTranslate3d
+            function = WebCore.CSSValueTranslate3d
             expectedArgumentCount = 3
             argumentStart = 12
         } else {
@@ -1377,7 +1386,7 @@ private func scanTransformValue<Unit: CSSColorCodeUnit>(
         guard scanTranslateArguments(&cursor, expectedArgumentCount, function, &arguments) else {
             return false
         }
-        sink.append(function.rawValue, arguments.span.extracting(0..<expectedArgumentCount))
+        sink.append(function, arguments.span.extracting(0..<expectedArgumentCount))
         return true
     }
 
@@ -1388,7 +1397,7 @@ private func scanTransformValue<Unit: CSSColorCodeUnit>(
         guard scanNumberArguments(&cursor, 16, &arguments) else {
             return false
         }
-        sink.append(WebCore.CSSSwiftTransformFunctionMatrix3d.rawValue, arguments.span.extracting(0..<16))
+        sink.append(WebCore.CSSValueMatrix3d, arguments.span.extracting(0..<16))
         return true
     }
 
@@ -1399,18 +1408,18 @@ private func scanTransformValue<Unit: CSSColorCodeUnit>(
         guard scanNumberArguments(&cursor, 3, &arguments) else {
             return false
         }
-        sink.append(WebCore.CSSSwiftTransformFunctionScale3d.rawValue, arguments.span.extracting(0..<3))
+        sink.append(WebCore.CSSValueScale3d, arguments.span.extracting(0..<3))
         return true
     }
 
     if lower(0) == 0x72, lower(1) == 0x6F, lower(2) == 0x74, lower(3) == 0x61, lower(4) == 0x74, lower(5) == 0x65 {
-        let function: WebCore.CSSSwiftTransformFunction
+        let function: TransformFunction
         var argumentStart = 7
         let c6 = lower(6)
         if c6 == 0x28 {
-            function = WebCore.CSSSwiftTransformFunctionRotate
+            function = WebCore.CSSValueRotate
         } else if c6 == 0x7A, raw(7) == 0x28 {
-            function = WebCore.CSSSwiftTransformFunctionRotateZ
+            function = WebCore.CSSValueRotateZ
             argumentStart = 8
         } else {
             return false
@@ -1424,7 +1433,7 @@ private func scanTransformValue<Unit: CSSColorCodeUnit>(
         }
         cursor.skip(length + 1)
         arguments[0] = WebCore.CSSSwiftTransformArgument(value: value, unit: unit)
-        sink.append(function.rawValue, arguments.span.extracting(0..<1))
+        sink.append(function, arguments.span.extracting(0..<1))
         return true
     }
 
@@ -1434,9 +1443,9 @@ private func scanTransformValue<Unit: CSSColorCodeUnit>(
 /// `parseSimpleTransformList`: functions separated by `isCSSSpace`.
 ///
 /// On `notAColor` the caller discards whatever was appended.
-private func scanTransformList<Unit: CSSColorCodeUnit>(
+private func scanTransformList<Unit: CSSColorCodeUnit, Sink: TransformFunctionSink>(
     _ characters: Span<Unit>,
-    _ sink: inout WebCore.CSSSwiftFastPathSink
+    _ sink: inout Sink
 ) -> WebCore.CSSSwiftColor {
     var cursor = ColorCursor(characters)
     while !cursor.isEmpty {
@@ -1463,7 +1472,7 @@ private func scanTransformList<Unit: CSSColorCodeUnit>(
 //
 // - Swift re-enters C++ at three calls only: `cssSwiftFindNamedColor`, handed a Swift-owned
 //   `InlineArray`; `cssSwiftParseCSSNumber8`/`16`, handed a `const` sub-range of the candidate;
-//   and `CSSSwiftFastPathSink::append`, handed a Swift-owned `InlineArray`. None writes the
+//   and the `CSSValue` factories `makeTransformList` calls. None writes the
 //   characters, allocates against the string, or calls back into Swift.
 //
 // - `StringImpl` character storage is immutable and never relocated. An upcall that took a
@@ -1475,23 +1484,33 @@ private func scanTransformList<Unit: CSSColorCodeUnit>(
 ///
 /// The C++ passes `kind` as a constant at each call site.
 ///
-/// `sink` receives the transform, length and opacity scans' output; the color scans do not touch
-/// it.
+/// The outcome goes to `sink.setResult`. The transform scan returns its `CSSTransformListValue`
+/// (`makeTransformList`, CSSCalcSimplificationSwift.swift), and the length and opacity scans set
+/// `sink`'s number. Every other scan returns nil.
 @inline(always)
 private func scanFastPath<Unit: CSSColorCodeUnit>(
     _ characters: Span<Unit>,
     _ kind: WebCore.CSSSwiftFastPathKind,
     _ sink: inout WebCore.CSSSwiftFastPathSink
-) -> WebCore.CSSSwiftColor {
+) -> WebCore.CSSValue? {
+    let result: WebCore.CSSSwiftColor
+    var value: WebCore.CSSValue? = nil
     switch kind {
-    case WebCore.CSSSwiftFastPathKindHexColor: scanHexColor(characters)
-    case WebCore.CSSSwiftFastPathKindNamedColor: scanNamedColor(characters)
-    case WebCore.CSSSwiftFastPathKindNumericColor: scanNumericColor(characters)
-    case WebCore.CSSSwiftFastPathKindTransform: scanTransformList(characters, &sink)
-    case WebCore.CSSSwiftFastPathKindLength: scanSimpleNumber(characters, false, &sink)
-    case WebCore.CSSSwiftFastPathKindOpacity: scanSimpleNumber(characters, true, &sink)
-    default: notAColor
+    case WebCore.CSSSwiftFastPathKindHexColor: result = scanHexColor(characters)
+    case WebCore.CSSSwiftFastPathKindNamedColor: result = scanNamedColor(characters)
+    case WebCore.CSSSwiftFastPathKindNumericColor: result = scanNumericColor(characters)
+    case WebCore.CSSSwiftFastPathKindTransform:
+        var list = TransformListSink()
+        result = scanTransformList(characters, &list)
+        if result.outcome == CSSSwiftColorOutcome.parsed.rawValue {
+            value = makeTransformList(consume list)
+        }
+    case WebCore.CSSSwiftFastPathKindLength: result = scanSimpleNumber(characters, false, &sink)
+    case WebCore.CSSSwiftFastPathKindOpacity: result = scanSimpleNumber(characters, true, &sink)
+    default: result = notAColor
     }
+    sink.setResult(result)
+    return value
 }
 
 /// The fast paths over Latin-1 text.
@@ -1500,7 +1519,7 @@ public func cssParseFastPathSwift8(
     _ text: WebCore.CSSSwiftColorSpan8,
     _ kind: WebCore.CSSSwiftFastPathKind,
     _ sink: inout WebCore.CSSSwiftFastPathSink
-) -> WebCore.CSSSwiftColor {
+) -> WebCore.CSSValue? {
     // rdar://186723514; invariants above.
     scanFastPath(unsafe Span<UInt8>(_unsafeCxxSpan: text), kind, &sink)
 }
@@ -1511,7 +1530,7 @@ public func cssParseFastPathSwift16(
     _ text: WebCore.CSSSwiftColorSpan16,
     _ kind: WebCore.CSSSwiftFastPathKind,
     _ sink: inout WebCore.CSSSwiftFastPathSink
-) -> WebCore.CSSSwiftColor {
+) -> WebCore.CSSValue? {
     // rdar://186723514; invariants above.
     scanFastPath(unsafe Span<UInt16>(_unsafeCxxSpan: text), kind, &sink)
 }

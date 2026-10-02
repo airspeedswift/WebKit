@@ -8178,6 +8178,31 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
     return cssValuePair(horizontal, second, coalescing)
 }
 
+// MARK: - Transform fast path
+
+/// `parseSimpleTransformList`'s `CSSFunctionValue`s, for the transform fast path
+/// (`scanFastPath`, CSSParserFastPathsSwift.swift).
+struct TransformListSink: TransformFunctionSink {
+    var list = WebCore.CSSValueListBuilder()
+
+    mutating func append(_ function: TransformFunction, _ arguments: Span<WebCore.CSSSwiftTransformArgument>) {
+        var functionArguments = WebCore.CSSValueListBuilder()
+        for i in arguments.indices {
+            let argument = arguments[i]
+            functionArguments.append(consuming: RefCSSValue(WebCore.CSSPrimitiveValue.create(argument.value, argument.unit).get()))
+        }
+        list.append(consuming: RefCSSValue(WebCore.CSSFunctionValue.create(function, consume functionArguments).get()))
+    }
+}
+
+/// The `CSSTransformListValue` of the functions `sink` received, or nil if it received none.
+func makeTransformList(_ sink: consuming TransformListSink) -> WebCore.CSSValue? {
+    guard !sink.list.isEmpty() else { return nil }
+    // A whole-value move, so `list` is not copied (a `WTF::Vector` copy otherwise).
+    var list = (consume sink).list
+    return WebCore.CSSTransformListValue.create(consume list).get()
+}
+
 // MARK: - CSS value creation
 
 // A `CSSValue` subclass is a Swift subclass of `CSSValue` (`ForeignReferenceTypeInheritance`), so each

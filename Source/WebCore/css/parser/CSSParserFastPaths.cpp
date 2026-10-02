@@ -527,13 +527,15 @@ CSSSwiftDoubleScan cssSwiftParseCSSNumber16(const char16_t *__counted_by(length)
 #if !CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
 static CSSSwiftColor scanColorSwift(CSSSwiftColorSpan8 characters, CSSSwiftFastPathKind kind)
 {
-    CSSSwiftFastPathSink noList;
-    return cssParseFastPathSwift8(characters, kind, noList);
+    CSSSwiftFastPathSink sink;
+    RefPtr unused = adoptRef(cssParseFastPathSwift8(characters, kind, sink));
+    return sink.result();
 }
 static CSSSwiftColor scanColorSwift(CSSSwiftColorSpan16 characters, CSSSwiftFastPathKind kind)
 {
-    CSSSwiftFastPathSink noList;
-    return cssParseFastPathSwift16(characters, kind, noList);
+    CSSSwiftFastPathSink sink;
+    RefPtr unused = adoptRef(cssParseFastPathSwift16(characters, kind, sink));
+    return sink.result();
 }
 
 // The Swift scan never answers `Declined`, and there is no other scanner to hand the input to.
@@ -1091,59 +1093,24 @@ static RefPtr<CSSValue> parseSimpleTransformList(std::span<const CharacterType> 
 #endif // CSS_CPP_TRANSFORM_FAST_PATH_COMPILED_IN
 
 #if USE(SWIFT_CSS)
-// MARK: - Swift transform fast path (CSSParserFastPathsSwift.swift)
-//
-// The Swift scan hands each function here as (double, unit) pairs, which become the same
-// `CSSFunctionValue`s `parseSimpleTransformValue` builds.
-
-class CSSSwiftTransformListBuilder {
-public:
-    CSSValueListBuilder list;
-};
-
-static constexpr std::array swiftTransformFunctions {
-    CSSValueTranslate, CSSValueTranslateX, CSSValueTranslateY, CSSValueTranslateZ, CSSValueTranslate3d,
-    CSSValueMatrix3d, CSSValueScale3d, CSSValueRotate, CSSValueRotateZ,
-};
-static_assert(swiftTransformFunctions.size() == CSSSwiftTransformFunctionRotateZ + 1);
-static_assert(swiftTransformFunctions[CSSSwiftTransformFunctionTranslate3d] == CSSValueTranslate3d);
-static_assert(swiftTransformFunctions[CSSSwiftTransformFunctionRotateZ] == CSSValueRotateZ);
-
-void CSSSwiftFastPathSink::append(uint8_t function,
-    const CSSSwiftTransformArgument* __counted_by(count) arguments __attribute__((noescape)), size_t count)
-{
-    // `swiftTransformFunctions` is a hardened std::array, so an out-of-range function aborts.
-    CSSValueListBuilder functionArguments;
-    functionArguments.reserveInitialCapacity(count);
-    for (auto& argument : unsafeMakeSpan(arguments, count))
-        functionArguments.append(CSSPrimitiveValue::create(argument.value, argument.unit));
-    RELEASE_ASSERT(m_list);
-    m_list->list.append(CSSFunctionValue::create(swiftTransformFunctions[function], WTF::move(functionArguments)));
-}
-
 static bool scanSimpleNumber(StringView string, bool isOpacity, CSSUnitType& unit, double& number)
 {
     auto kind = isOpacity ? CSSSwiftFastPathKindOpacity : CSSSwiftFastPathKindLength;
     CSSSwiftFastPathSink sink;
-    auto result = string.is8Bit() ? cssParseFastPathSwift8(string.span8(), kind, sink) : cssParseFastPathSwift16(string.span16(), kind, sink);
-    if (result.outcome != CSSSwiftColorOutcomeParsed)
+    RefPtr unused = adoptRef(string.is8Bit() ? cssParseFastPathSwift8(string.span8(), kind, sink) : cssParseFastPathSwift16(string.span16(), kind, sink));
+    if (sink.result().outcome != CSSSwiftColorOutcomeParsed)
         return false;
     number = sink.number().value;
     unit = sink.number().unit;
     return true;
 }
 
+// `parseSimpleTransformList` is the Swift scan's `CSSSwiftFastPathKindTransform`.
 static RefPtr<CSSValue> parseSimpleTransform(StringView string)
 {
     ASSERT(!string.isEmpty());
-    CSSSwiftTransformListBuilder builder;
-    CSSSwiftFastPathSink sink { builder };
-    auto result = string.is8Bit()
-        ? cssParseFastPathSwift8(string.span8(), CSSSwiftFastPathKindTransform, sink)
-        : cssParseFastPathSwift16(string.span16(), CSSSwiftFastPathKindTransform, sink);
-    if (result.outcome != CSSSwiftColorOutcomeParsed || builder.list.isEmpty())
-        return nullptr;
-    return CSSTransformListValue::create(WTF::move(builder.list));
+    CSSSwiftFastPathSink sink;
+    return adoptRef(string.is8Bit() ? cssParseFastPathSwift8(string.span8(), CSSSwiftFastPathKindTransform, sink) : cssParseFastPathSwift16(string.span16(), CSSSwiftFastPathKindTransform, sink));
 }
 #endif // USE(SWIFT_CSS)
 
