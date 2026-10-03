@@ -246,6 +246,9 @@ template<typename Primitive> struct FunctionConsumerForCalcValues {
 // `cssConsumeNumericSwift`, which is the validator, the clamp and the range check.
 #if USE(SWIFT_CSS)
 #define CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN 0
+// The hand-written property consumers in +Transform.cpp, +SVG.cpp and +Timeline.cpp are
+// `cssConsumePropertySwift` (CSSCalcSimplificationSwift.swift).
+#define CSS_CPP_PROPERTY_CONSUMERS_COMPILED_IN 0
 
 // The `CSSNumericConsumerSwiftFlag`s for a token consumed under `state` and `options`.
 inline uint8_t swiftNumericConsumerFlags(bool resolvesToFloat, CSSParserMode mode, CSS::PropertyParserState& state, CSSPropertyParserOptions options)
@@ -273,8 +276,11 @@ template<typename Primitive> struct SwiftNumericConsumer {
 
 // The family's C++ consumer, or Swift's when the family's validator is compiled out.
 template<typename CppConsumer, typename Primitive> using NumericConsumer = SwiftNumericConsumer<Primitive>;
+// `cssConsumePropertySwift`'s `consumer` on `range`, which it advances past the value it returns.
+RefPtr<CSSValue> consumePropertyInSwift(CSSParserTokenRange&, CSS::PropertyParserState&, uint8_t consumer, CSSPropertyParserOptions = { });
 #else
 #define CSS_CPP_NUMERIC_CONSUMERS_COMPILED_IN 1
+#define CSS_CPP_PROPERTY_CONSUMERS_COMPILED_IN 1
 template<typename CppConsumer, typename Primitive> using NumericConsumer = CppConsumer;
 #endif
 
