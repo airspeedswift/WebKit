@@ -8180,12 +8180,13 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
 
 // MARK: - Transform properties and functions
 
-/// `consumeRotate3dFunction` (`consumer` 0), `consumeTranslateFunction` (1), `consumeTranslate3dFunction` (2),
-/// `consumeTranslate` (3), `consumeRotate` (4) and `consumeScale` (5), CSSPropertyParserConsumer+Transform.cpp. `flags`
-/// are the `CSSNumericConsumerSwiftFlag`s of the property, and nil is "not this value". The token count it consumed
-/// is in `cursor.nextIndex()`.
+/// The hand-written property consumers, by `consumer`: `consumeRotate3dFunction` (0), `consumeTranslateFunction` (1),
+/// `consumeTranslate3dFunction` (2), `consumeTranslate` (3), `consumeRotate` (4) and `consumeScale` (5)
+/// (CSSPropertyParserConsumer+Transform.cpp); `consumeStrokeDasharray` (6, +SVG.cpp); and `consumeSingleAnimationRange`
+/// for a start (7) and an end (8) (+Timeline.cpp). `flags` are the `CSSNumericConsumerSwiftFlag`s of the property, and
+/// nil is "not this value". The token count it consumed is in `cursor.nextIndex()`.
 @_expose(Cxx)
-public func cssConsumeTransformSwift(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ consumer: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> WebCore.CSSValue? {
+public func cssConsumePropertySwift(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ consumer: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> WebCore.CSSValue? {
     // The generated `consumeTransform` tries the three functions in turn on every transform function, so a function
     // that is not this one is rejected on one token read, before any parser state is built. A read past the range is
     // an `EOFToken`, so the range need not be measured for it.
@@ -8198,7 +8199,9 @@ public func cssConsumeTransformSwift(_ cursor: WebCore.CSSPropertyParserSwiftCur
     case 2: value = parser.function(WebCore.CSSValueTranslate3d) { $0.translate3dArguments() }
     case 3: value = parser.translate()
     case 4: value = parser.rotate()
-    default: value = parser.scale()
+    case 5: value = parser.scale()
+    case 6: value = parser.strokeDasharray()
+    default: value = parser.singleAnimationRange(isStart: consumer == 7)
     }
     if value != nil { cursor.setNextIndex(parser.index) }
     return value
@@ -8284,15 +8287,20 @@ private struct TransformParser {
         let bits = cursor.bits(index)
         let category: WebCore.CSS.Category
         var flags = self.flags & ~UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue)
+        // `CSS::Nonnegative` is [0, inf], rejecting (not clamping) outside it at parse time.
+        var min = -Double.infinity
         switch kind {
         case .LengthPercentage: category = .LengthPercentage; flags = self.flags
+        // The caller's `options` already carry stroke-dasharray's `unitlessZeroLength = Forbid` and its mode.
+        case .LengthPercentageNonnegative, .StrokeDashLengthPercentage: category = .LengthPercentage; flags = self.flags; min = 0
+        case .NumberNonnegative: category = .Number; min = 0
         case .Length: category = .Length; flags = self.flags
         case .Angle: category = .Angle
         case .AngleOrUnitlessZero: category = .Angle; flags |= UInt8(CSSNumericConsumerSwiftUnitlessZeroAngle.rawValue)
         case .PercentageDividedBy100OrNumber: category = tokenType == WebCore.PercentageToken ? .Percentage : .Number
         default: category = .Number
         }
-        let range = NumericConsumerRange(min: -.infinity, max: .infinity, minBehavior: 0, maxBehavior: 0, flags: flags)
+        let range = NumericConsumerRange(min: min, max: .infinity, minBehavior: 0, maxBehavior: 0, flags: flags)
         let result = category == .Angle
             ? angleConsume(bits.numericValue, tokenType, UInt8(truncatingIfNeeded: bits.unit), parserMode, flags)
             : numericConsume(bits.numericValue, range, category.rawValue, tokenType.rawValue, UInt8(truncatingIfNeeded: bits.unit), parserMode, flags)
@@ -8425,6 +8433,54 @@ private struct TransformParser {
         guard let z = primitive(.PercentageDividedBy100OrNumber) else { return nil }
         if z.number != 1 { return cssSpaceSeparated(x.value, y.value, z.value) }
         return xIsY ? cssSpaceSeparated(x.value) : cssSpaceSeparated(x.value, y.value)
+    }
+
+    // <'stroke-dasharray'> = none | [ [ <length-percentage> | <number> ]+ ]#
+    // https://svgwg.org/svg2-draft/painting.html#StrokeDashing
+    mutating func strokeDasharray() -> WebCore.CSSValue? {
+        if let none = consumeNone() { return none }
+        var dashes = WebCore.CSSValueListBuilder()
+        repeat {
+            // Each kind is the whole of C++'s `consumeAndResolve`, so `<number>` is tried only once `<length-percentage>`
+            // rejected. `parserMode` is the caller's `overrideParserMode` (the standard mode), so a unitless number other
+            // than 0 is never a length here, in any mode, and with `unitlessZeroLength = Forbid` neither is 0.
+            guard let dash = primitive(.StrokeDashLengthPercentage) ?? primitive(.NumberNonnegative) else { return nil }
+            // A trailing comma is invalid.
+            if consumeComma() && atEnd { return nil }
+            dashes.append(consuming: RefCSSValue(dash.value))
+        } while !atEnd
+        var value = WebCore.CSSValueList.createCommaSeparated(consume dashes)
+        return value.leakRef()
+    }
+
+    // <'animation-range-{start|end}'> = normal | <length-percentage> | <timeline-range-name> <length-percentage>?
+    // https://drafts.csswg.org/scroll-animations-1/#propdef-animation-range-start
+    mutating func singleAnimationRange(isStart: Bool) -> WebCore.CSSValue? {
+        let id = identId(cursor, index, end)
+        if id == UInt16(WebCore.CSSValueNormal.rawValue) || isTimelineRangeName(id) {
+            index &+= 1
+            consumeWhitespace()
+            let name = cssKeywordValue(id)
+            guard id != UInt16(WebCore.CSSValueNormal.rawValue), let offset = primitive(.LengthPercentage) else { return name }
+            // The default offset (0% for a start, 100% for an end) is omitted. A calc() offset is never the default.
+            if offset.isPercentage && offset.number == (isStart ? 0 : 100) { return name }
+            return cssValuePair(name, offset.value, false)
+        }
+        return primitive(.LengthPercentage)?.value
+    }
+}
+
+/// `isTimelineRangeName` (CSSPropertyParserConsumer+Timeline.cpp), which stays C++ for its other caller (+Animations.cpp).
+/// <timeline-range-name> = cover | contain | entry | exit | entry-crossing | exit-crossing | scroll
+@inline(always)
+private func isTimelineRangeName(_ id: UInt16) -> Bool {
+    switch id {
+    case UInt16(WebCore.CSSValueCover.rawValue), UInt16(WebCore.CSSValueContain.rawValue), UInt16(WebCore.CSSValueEntry.rawValue),
+        UInt16(WebCore.CSSValueExit.rawValue), UInt16(WebCore.CSSValueEntryCrossing.rawValue),
+        UInt16(WebCore.CSSValueExitCrossing.rawValue), UInt16(WebCore.CSSValueScroll.rawValue):
+        return true
+    default:
+        return false
     }
 }
 

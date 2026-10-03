@@ -61,12 +61,14 @@ bool isTimelineRangeName(CSSValueID id)
     >(id);
 }
 
+#if CSS_CPP_PROPERTY_CONSUMERS_COMPILED_IN
 static RefPtr<CSSValue> consumeTimelineRangeName(CSSParserTokenRange& range)
 {
     if (isTimelineRangeName(range.peek().id()))
         return CSSKeywordValue::create(CSS::Keyword { range.consumeIncludingWhitespace().id() });
     return nullptr;
 }
+#endif
 
 std::optional<Style::SingleAnimationRangeName> parseTimelineRangeNameRaw(StringView rangeString)
 {
@@ -197,6 +199,7 @@ std::optional<Style::ViewTimelineInsetItem> parseAbsoluteSingleViewTimelineInset
     return Style::toStyleFromCSSValue<Style::ViewTimelineInsetItem>(*CheckedPtr { dummyState.ptr() }, *parsedValue);
 }
 
+#if CSS_CPP_PROPERTY_CONSUMERS_COMPILED_IN
 RefPtr<CSSValue> consumeSingleAnimationRange(CSSParserTokenRange& range, CSS::PropertyParserState& state, Style::SingleAnimationRangeType type)
 {
     // <'animation-range-{start|end}'> = normal | <length-percentage> | <timeline-range-name> <length-percentage>?
@@ -230,6 +233,10 @@ RefPtr<CSSValue> consumeSingleAnimationRange(CSSParserTokenRange& range, CSS::Pr
     }
     return CSSPrimitiveValueResolver<CSS::LengthPercentage<>>::consumeAndResolve(range, state);
 }
+#else
+// `cssConsumePropertySwift`'s consumers 7 (start) and 8 (end).
+RefPtr<CSSValue> consumeSingleAnimationRange(CSSParserTokenRange& range, CSS::PropertyParserState& state, Style::SingleAnimationRangeType type) { return consumePropertyInSwift(range, state, type == Style::SingleAnimationRangeType::Start ? 7 : 8); }
+#endif
 
 RefPtr<CSSValue> consumeSingleAnimationRangeStart(CSSParserTokenRange& range, CSS::PropertyParserState& state)
 {

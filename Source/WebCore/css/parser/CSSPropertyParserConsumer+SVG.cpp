@@ -97,6 +97,7 @@ RefPtr<CSSValue> consumePaintOrder(CSSParserTokenRange& range, CSS::PropertyPars
     return CSSValueList::createSpaceSeparated(WTF::move(paintOrderList));
 }
 
+#if CSS_CPP_PROPERTY_CONSUMERS_COMPILED_IN
 RefPtr<CSSValue> consumeStrokeDasharray(CSSParserTokenRange& range, CSS::PropertyParserState& state)
 {
     // <'stroke-dasharray'> = none | [ [ <length-percentage> | <number> ]+ ]#
@@ -117,6 +118,10 @@ RefPtr<CSSValue> consumeStrokeDasharray(CSSParserTokenRange& range, CSS::Propert
     } while (!range.atEnd());
     return CSSValueList::createCommaSeparated(WTF::move(dashes));
 }
+#else
+// `cssConsumePropertySwift`'s consumer 6.
+RefPtr<CSSValue> consumeStrokeDasharray(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumePropertyInSwift(range, state, 6, { .overrideParserMode = HTMLStandardMode, .unitlessZeroLength = UnitlessZeroQuirk::Forbid }); }
+#endif
 
 } // namespace CSSPropertyParserHelpers
 } // namespace WebCore

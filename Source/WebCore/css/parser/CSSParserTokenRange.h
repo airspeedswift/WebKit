@@ -129,6 +129,8 @@ enum class CSSPropertyParserSwiftPrimitive : uint8_t {
     Angle,
     AngleOrUnitlessZero,
     PercentageDividedBy100OrNumber,
+    StrokeDashLengthPercentage,
+    NumberNonnegative,
 };
 
 // A Swift property parser reads `range` by index through this. Swift sees the tokens one at a time

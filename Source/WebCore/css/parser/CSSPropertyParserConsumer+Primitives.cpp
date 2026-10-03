@@ -33,6 +33,7 @@
 #include "CSSPropertyParserConsumer+LengthDefinitions.h"
 #include "CSSPropertyParserConsumer+NumberDefinitions.h"
 #include "CSSPropertyParserConsumer+Percentage.h"
+#include "WebCoreSwiftBoundaryTypes.h"
 #endif
 
 namespace WebCore {
@@ -118,9 +119,22 @@ CSSPrimitiveValue* CSSPropertyParserSwiftCursor::primitiveAt(uint32_t i, uint32_
     case Number: value = CSSPrimitiveValueResolver<CSS::Number<>>::consumeAndResolve(range, *m_state); break;
     case Angle: case AngleOrUnitlessZero: value = CSSPrimitiveValueResolver<CSS::Angle<>>::consumeAndResolve(range, *m_state, { .unitlessZeroAngle = primitive == Angle ? UnitlessZeroQuirk::Forbid : UnitlessZeroQuirk::Allow }); break;
     case PercentageDividedBy100OrNumber: value = consumePercentageDividedBy100OrNumber(range, *m_state); break;
+    case StrokeDashLengthPercentage: value = CSSPrimitiveValueResolver<CSS::LengthPercentage<CSS::Nonnegative>>::consumeAndResolve(range, *m_state, { .overrideParserMode = HTMLStandardMode, .unitlessZeroLength = UnitlessZeroQuirk::Forbid }); break;
+    case NumberNonnegative: value = CSSPrimitiveValueResolver<CSS::Number<CSS::Nonnegative>>::consumeAndResolve(range, *m_state); break;
     }
     *m_nextIndex = range.begin() - m_range->begin();
     return value.leakRef();
+}
+
+RefPtr<CSSValue> CSSPropertyParserHelpers::consumePropertyInSwift(CSSParserTokenRange& range, CSS::PropertyParserState& state, uint8_t consumer, CSSPropertyParserOptions options)
+{
+    auto mode = options.overrideParserMode.value_or(state.context.mode);
+    auto quirkyAngle = mode == HTMLQuirksMode && CSSProperty::acceptsQuirkyAngle(state.currentProperty) ? CSSNumericConsumerSwiftQuirkyAngle : 0;
+    uint32_t nextIndex = 0;
+    RefPtr value = adoptRef(cssConsumePropertySwift(CSSPropertyParserSwiftCursor { range, state, nextIndex }, consumer, mode, swiftNumericConsumerFlags(true, mode, state, options) | quirkyAngle));
+    if (value)
+        range = range.span().subspan(nextIndex);
+    return value;
 }
 
 } // namespace WebCore
