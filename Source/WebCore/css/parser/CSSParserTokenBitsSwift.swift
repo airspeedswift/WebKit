@@ -159,8 +159,7 @@ func makeNumericTokenBits(
     setParkedValue(&bits, valueOffset, valueLength, valueIsUnescaped, is8Bit)
     bits.pendingNumberRange.offset = numberOffset
     bits.pendingNumberRange.length = numberLength
-    // The union's discriminant. `bitsCarryPendingNumber` depends only on the type, so
-    // `takeChunk` also requires this before reading `pendingNumberRange`.
+    // The union's discriminant: `takeChunk` reads `pendingNumberRange` exactly when this is set.
     bits.hasParkedNumberRange = 1
     return bits
 }

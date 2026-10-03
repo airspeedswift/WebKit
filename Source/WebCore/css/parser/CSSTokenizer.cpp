@@ -294,12 +294,9 @@ bool CSSSwiftTokenSink::takeChunk(
         else
             resolveValuePointer<2>(bits, inputBytes);
 
-        if (bitsCarryPendingNumber(bits)) {
-            // bitsCarryPendingNumber depends only on the type, so hasParkedNumberRange is what
-            // says the union holds a range rather than a double. The range is bounded here
-            // because rangeAt only ASSERTs and substring clamps.
-            if (!bits.hasParkedNumberRange) [[unlikely]]
-                return false;
+        // The union's discriminant, which only Swift's numeric factory sets. The range is bounded
+        // here because rangeAt only ASSERTs and substring clamps.
+        if (bits.hasParkedNumberRange) {
             auto range = bits.pendingNumberRange;
             if (range.length > inputLength || range.offset > inputLength - range.length) [[unlikely]]
                 return false;

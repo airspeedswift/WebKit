@@ -159,18 +159,6 @@ enum CSSParserTokenType : uint8_t {
 
 constexpr std::underlying_type_t<CSSParserTokenType> numberOfCSSParserTokenTypes = LastCSSParserTokenType + 1;
 
-// NumberToken, PercentageToken and DimensionToken are contiguous, so a numeric type test is one
-// unsigned range check.
-constexpr unsigned firstNumericCSSParserTokenType = NumberToken;
-constexpr unsigned lastNumericCSSParserTokenType = DimensionToken;
-
-// Whether a token of this type owes a double. This depends only on the type, so takeChunk also
-// requires `hasParkedNumberRange` before reading the range.
-inline constexpr bool bitsCarryPendingNumber(const CSSParserTokenBits& bits)
-{
-    return bits.type - firstNumericCSSParserTokenType <= lastNumericCSSParserTokenType - firstNumericCSSParserTokenType;
-}
-
 // Turns a parked input offset into a pointer. A caller that finds
 // cssParserTokenBitsUnescapedValueTag set must intern the value and set the value fields itself.
 //
