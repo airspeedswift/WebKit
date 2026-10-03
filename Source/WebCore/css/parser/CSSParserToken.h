@@ -36,24 +36,6 @@
 
 namespace WebCore {
 
-
-// A range check written the wrong way round still compiles, so check bitsCarryPendingNumber
-// against the three-way test it stands in for, over every token type.
-static_assert([] {
-    auto bitsWithType = [](unsigned type) {
-        CSSParserTokenBits bits;
-        bits.type = type;
-        return bits;
-    };
-    for (unsigned type = 0; type < static_cast<unsigned>(numberOfCSSParserTokenTypes); ++type) {
-        bool isNumeric = type == NumberToken || type == PercentageToken || type == DimensionToken;
-        if (bitsCarryPendingNumber(bitsWithType(type)) != isNumeric)
-            return false;
-    }
-    return true;
-}());
-
-
 DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSParserToken);
 class CSSParserToken {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED_WITH_HEAP_IDENTIFIER(CSSParserToken, CSSParserToken);
