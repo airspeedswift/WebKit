@@ -8394,7 +8394,11 @@ private struct TransformParser {
     // none | <angle> | [ x | y | z | <number>{3} ] && <angle>
     mutating func rotate() -> WebCore.CSSValue? {
         if let none = consumeNone() { return none }
-        var numbers: (TransformPrimitive?, TransformPrimitive?, TransformPrimitive?) = (nil, nil, nil)
+        // Three locals, not a tuple of optionals: the tuple was destroyed through its value-witness table, a
+        // metadata lookup at each of rotate()'s ten exits.
+        var number0: TransformPrimitive? = nil
+        var number1: TransformPrimitive? = nil
+        var number2: TransformPrimitive? = nil
         var numberCount: UInt32 = 0
         var angle: TransformPrimitive? = nil
         var axis: UInt16 = 0
@@ -8403,9 +8407,9 @@ private struct TransformParser {
             if let number = primitive(.Number) {
                 guard axis == 0 else { return nil }
                 switch numberCount {
-                case 0: numbers.0 = number
-                case 1: numbers.1 = number
-                case 2: numbers.2 = number
+                case 0: number0 = number
+                case 1: number1 = number
+                case 2: number2 = number
                 default: break
                 }
                 // `numberCount` is at most the token count, a `UInt32`: each number consumed a token.
@@ -8429,7 +8433,7 @@ private struct TransformParser {
             consumeWhitespace()
         }
         guard let angle else { return nil }
-        if numberCount == 3, let x = numbers.0, let y = numbers.1, let z = numbers.2 {
+        if numberCount == 3, let x = number0, let y = number1, let z = number2 {
             // A vector along one axis serializes as that axis.
             if x.isKnownNonZero && y.isKnownZero && z.isKnownZero { return cssSpaceSeparated(cssKeywordValue(UInt16(WebCore.CSSValueX.rawValue)), angle.value) }
             if x.isKnownZero && y.isKnownNonZero && z.isKnownZero { return cssSpaceSeparated(cssKeywordValue(UInt16(WebCore.CSSValueY.rawValue)), angle.value) }
