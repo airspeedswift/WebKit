@@ -8541,21 +8541,29 @@ private func identId(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ i: UInt32
     return bits.id >= 0 ? UInt16(truncatingIfNeeded: bits.id) : cursor.keywordId(i)
 }
 
-/// A list of up to four values, in order. Not variadic: a variadic parameter is an `Array`.
+/// A space-separated list of up to four values, through `createSpaceSeparated`'s `Ref` overloads: no
+/// `CSSValueListBuilder` is built and moved across the boundary.
 @inline(always)
-private func cssValueListBuilder(_ a: WebCore.CSSValue, _ b: WebCore.CSSValue? = nil, _ c: WebCore.CSSValue? = nil, _ d: WebCore.CSSValue? = nil) -> WebCore.CSSValueListBuilder {
-    var list = WebCore.CSSValueListBuilder()
-    list.append(consuming: RefCSSValue(a))
-    if let b { list.append(consuming: RefCSSValue(b)) }
-    if let c { list.append(consuming: RefCSSValue(c)) }
-    if let d { list.append(consuming: RefCSSValue(d)) }
-    return list
+private func cssSpaceSeparated(_ a: WebCore.CSSValue) -> WebCore.CSSValue {
+    var value = WebCore.CSSValueList.createSpaceSeparated(RefCSSValue(a))
+    return value.leakRef()
 }
 
 @inline(always)
-private func cssSpaceSeparated(_ a: WebCore.CSSValue, _ b: WebCore.CSSValue? = nil, _ c: WebCore.CSSValue? = nil, _ d: WebCore.CSSValue? = nil) -> WebCore.CSSValue {
-    var list = cssValueListBuilder(a, b, c, d)
-    var value = WebCore.CSSValueList.createSpaceSeparated(consume list)
+private func cssSpaceSeparated(_ a: WebCore.CSSValue, _ b: WebCore.CSSValue) -> WebCore.CSSValue {
+    var value = WebCore.CSSValueList.createSpaceSeparated(RefCSSValue(a), RefCSSValue(b))
+    return value.leakRef()
+}
+
+@inline(always)
+private func cssSpaceSeparated(_ a: WebCore.CSSValue, _ b: WebCore.CSSValue, _ c: WebCore.CSSValue) -> WebCore.CSSValue {
+    var value = WebCore.CSSValueList.createSpaceSeparated(RefCSSValue(a), RefCSSValue(b), RefCSSValue(c))
+    return value.leakRef()
+}
+
+@inline(always)
+private func cssSpaceSeparated(_ a: WebCore.CSSValue, _ b: WebCore.CSSValue, _ c: WebCore.CSSValue, _ d: WebCore.CSSValue) -> WebCore.CSSValue {
+    var value = WebCore.CSSValueList.createSpaceSeparated(RefCSSValue(a), RefCSSValue(b), RefCSSValue(c), RefCSSValue(d))
     return value.leakRef()
 }
 
