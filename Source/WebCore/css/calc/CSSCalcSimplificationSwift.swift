@@ -8207,40 +8207,31 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
 
 // MARK: - Transform properties and functions
 
-/// The hand-written property consumers, by `consumer`: `consumeRotate3dFunction` (0), `consumeTranslateFunction` (1),
-/// `consumeTranslate3dFunction` (2), `consumeTranslate` (3), `consumeRotate` (4) and `consumeScale` (5)
-/// (CSSPropertyParserConsumer+Transform.cpp); `consumeStrokeDasharray` (6, +SVG.cpp); and `consumeSingleAnimationRange`
-/// for a start (7) and an end (8) (+Timeline.cpp). `flags` are the `CSSNumericConsumerSwiftFlag`s of the property, and
-/// nil is "not this value". The token count it consumed is in `cursor.nextIndex()`.
+/// The property consumers C++ calls, by `consumer`: the hand-written `consumeTranslate` (3), `consumeRotate` (4) and
+/// `consumeScale` (5) (CSSPropertyParserConsumer+Transform.cpp), `consumeStrokeDasharray` (6, +SVG.cpp) and
+/// `consumeSingleAnimationRange` for a start (7) and an end (8) (+Timeline.cpp); and from 16, the consumers
+/// process-css-properties.py generates (`consumeGenerated`, CSSPropertyParsingSwift.swift). `flags` are the
+/// `CSSNumericConsumerSwiftFlag`s of the property, and nil is "not this value". The token count it consumed is in
+/// `cursor.nextIndex()`.
 @_expose(Cxx)
 public func cssConsumePropertySwift(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ consumer: UInt8, _ parserMode: UInt8, _ flags: UInt8) -> WebCore.CSSValue? {
-    // The generated `consumeTransform` tries the three functions in turn on every transform function, so a function
-    // that is not this one is rejected on one token read, before any parser state is built. A read past the range is
-    // an `EOFToken`, so the range need not be measured for it.
-    if consumer < 3 && identId(cursor, 0, .max, WebCore.FunctionToken) != UInt16(transformFunctionName(consumer).rawValue) { return nil }
-    var parser = TransformParser(cursor: cursor, end: cursor.tokenCount(), index: 0, parserMode: parserMode, flags: flags)
+    var parser = PropertyParser(cursor: cursor, end: cursor.tokenCount(), index: 0, parserMode: parserMode, flags: flags)
     let value: WebCore.CSSValue?
     switch consumer {
-    case 0: value = parser.function(WebCore.CSSValueRotate3d) { $0.rotate3dArguments($1) }
-    case 1: value = parser.function(WebCore.CSSValueTranslate) { $0.translateArguments($1) }
-    case 2: value = parser.function(WebCore.CSSValueTranslate3d) { $0.translate3dArguments($1) }
     case 3: value = parser.translate()
     case 4: value = parser.rotate()
     case 5: value = parser.scale()
     case 6: value = parser.strokeDasharray()
-    default: value = parser.singleAnimationRange(isStart: consumer == 7)
+    case 7, 8: value = parser.singleAnimationRange(isStart: consumer == 7)
+    default: value = parser.consumeGenerated(consumer)
     }
     if value != nil { cursor.setNextIndex(parser.index) }
     return value
 }
 
-@inline(always)
-private func transformFunctionName(_ consumer: UInt8) -> WebCore.CSSValueID {
-    consumer == 0 ? WebCore.CSSValueRotate3d : consumer == 1 ? WebCore.CSSValueTranslate : WebCore.CSSValueTranslate3d
-}
-
-/// A `CSSParserTokenRange` over the cursor's tokens `[index, end)`; a read at or past `end` is an `EOFToken`.
-private struct TransformParser {
+/// A `CSSParserTokenRange` over the cursor's tokens `[index, end)`; a read at or past `end` is an `EOFToken`. The
+/// generated consumers (CSSPropertyParsingSwift.swift) are methods of it.
+struct PropertyParser {
     let cursor: WebCore.CSSPropertyParserSwiftCursor
     let end: UInt32
     var index: UInt32
@@ -8275,7 +8266,9 @@ private struct TransformParser {
     }
 
     /// `name( arguments )`, as `range.peek().functionId() == name`, then `consumeFunction`, `arguments`, and `args.atEnd()`.
-    mutating func function(_ name: WebCore.CSSValueID, _ arguments: (inout TransformParser, WebCore.CSSValueID) -> WebCore.CSSValue?) -> WebCore.CSSValue? {
+    /// With `requireArguments`, `name()` is rejected before `arguments` runs, as the hand-written consumers do; the
+    /// generated ones leave that to `arguments`, as the generated C++ does.
+    mutating func function(_ name: WebCore.CSSValueID, requireArguments: Bool = true, _ arguments: (inout PropertyParser, WebCore.CSSValueID) -> WebCore.CSSValue?) -> WebCore.CSSValue? {
         guard identId(cursor, index, end, WebCore.FunctionToken) == UInt16(name.rawValue) else { return nil }
         // `consumeBlock`: the tokens up to the matching `BlockEnd` (`CSSParserToken::BlockType` 2; `BlockStart` is
         // 1), or to the end if there is none. `i` and `depth` are bounded by `end` (a `UInt32`).
@@ -8291,12 +8284,12 @@ private struct TransformParser {
                 if depth == 0 { argumentsEnd = i &- 1; break }
             }
         }
-        var args = TransformParser(cursor: cursor, end: argumentsEnd, index: index &+ 1, parserMode: parserMode, flags: flags)
+        var args = PropertyParser(cursor: cursor, end: argumentsEnd, index: index &+ 1, parserMode: parserMode, flags: flags)
         args.consumeWhitespace()
         // `arguments` creates the `CSSFunctionValue` from its operands through the `Ref` overloads, so no
         // `CSSValueListBuilder` is built and moved across the boundary (four `Vector` moves and two
         // destructions per function before).
-        guard !args.atEnd, let value = arguments(&args, name), args.atEnd else { return nil }
+        guard !requireArguments || !args.atEnd, let value = arguments(&args, name), args.atEnd else { return nil }
         index = i
         consumeWhitespace()
         return value
@@ -8323,6 +8316,7 @@ private struct TransformParser {
         // categories to a double.
         var flags = category == .LengthPercentage || category == .Length ? self.flags : self.flags & ~UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue)
         if primitive.options.unitlessZeroAngle == .Allow { flags |= UInt8(CSSNumericConsumerSwiftUnitlessZeroAngle.rawValue) }
+        if primitive.options.unitlessZeroLength == .Forbid { flags &= ~UInt8(CSSNumericConsumerSwiftUnitlessZeroLength.rawValue) }
         if primitive.percentageDividedBy100OrNumber && tokenType == WebCore.PercentageToken { category = .Percentage }
         // `CSS::Nonnegative` is [0, inf], rejecting (not clamping) outside it at parse time. Stroke-dasharray's
         // `unitlessZeroLength = Forbid` and mode are in the caller's `flags` and `parserMode` already.
@@ -8351,6 +8345,12 @@ private struct TransformParser {
             return TransformPrimitive(value: value.leakRef(), number: number, isPercentage: false)
         }
     }
+
+    /// The grammar's `<rotate3d()-override-function>`, `<translate()-override-function>` and
+    /// `<translate3d()-override-function>` (CSSProperties.json), which the generated transform consumers call.
+    mutating func rotate3dFunction() -> WebCore.CSSValue? { function(WebCore.CSSValueRotate3d) { $0.rotate3dArguments($1) } }
+    mutating func translateFunction() -> WebCore.CSSValue? { function(WebCore.CSSValueTranslate) { $0.translateArguments($1) } }
+    mutating func translate3dFunction() -> WebCore.CSSValue? { function(WebCore.CSSValueTranslate3d) { $0.translate3dArguments($1) } }
 
     // rotate3d() = rotate3d( <number> , <number> , <number> , [ <angle> | <zero> ] )
     mutating func rotate3dArguments(_ name: WebCore.CSSValueID) -> WebCore.CSSValue? {
@@ -8556,9 +8556,22 @@ struct PropertyPrimitive {
     static var PercentageDividedBy100OrNumber: Self { Self(category: .Number, percentageDividedBy100OrNumber: true) }
 }
 
+extension PropertyPrimitive {
+    /// A grammar reference's builtin and its parameters (`unitless-zero`, `anchor`, `anchor-size`, the value range), as
+    /// process-css-properties.py writes them.
+    init(_ category: WebCore.CSS.Category, min: Double = -.infinity, max: Double = .infinity, forbidUnitlessZeroLength: Bool = false,
+        allowUnitlessZeroAngle: Bool = false, allowAnchor: Bool = false, allowAnchorSize: Bool = false, percentageDividedBy100OrNumber: Bool = false) {
+        self.init(category: category, min: min, max: max, percentageDividedBy100OrNumber: percentageDividedBy100OrNumber)
+        if forbidUnitlessZeroLength { options.unitlessZeroLength = .Forbid }
+        if allowUnitlessZeroAngle { options.unitlessZeroAngle = .Allow }
+        if allowAnchor { options.anchorPolicy = .Allow }
+        if allowAnchorSize { options.anchorSizePolicy = .Allow }
+    }
+}
+
 /// A primitive the transform consumers parsed, with what they ask of it: `number` is the value of a
 /// non-calculated one (`raw()->value`), and nil for a calculated one, whose `isZero()` is unknown.
-private struct TransformPrimitive {
+struct TransformPrimitive {
     let value: WebCore.CSSValue
     let number: Double?
     let isPercentage: Bool
@@ -8569,7 +8582,7 @@ private struct TransformPrimitive {
 
 /// The `CSSValueID` of token `i` if it is a `type` token (`id()`, or `functionId()`), and `CSSValueInvalid` otherwise.
 @inline(always)
-private func identId(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ i: UInt32, _ end: UInt32, _ type: WebCore.CSSParserTokenType = WebCore.IdentToken) -> UInt16 {
+func identId(_ cursor: WebCore.CSSPropertyParserSwiftCursor, _ i: UInt32, _ end: UInt32, _ type: WebCore.CSSParserTokenType = WebCore.IdentToken) -> UInt16 {
     guard i < end else { return 0 }
     let bits = cursor.bits(i)
     guard UInt8(truncatingIfNeeded: bits.type) == type.rawValue else { return 0 }
@@ -8633,10 +8646,10 @@ func makeTransformList(_ sink: consuming TransformListSink) -> WebCore.CSSValue?
 
 // A `CSSValue` subclass is a Swift subclass of `CSSValue` (`ForeignReferenceTypeInheritance`), so each
 // value upcasts with no refcount operation.
-private typealias RefCSSValue = WebCore.CSSValueListBuilder.ValueType
+typealias RefCSSValue = WebCore.CSSValueListBuilder.ValueType
 
 @inline(always)
-private func cssKeywordValue(_ id: UInt16) -> WebCore.CSSValue {
+func cssKeywordValue(_ id: UInt16) -> WebCore.CSSValue {
     var value = WebCore.CSSKeywordValue.create(WebCore.CSSValueID(rawValue: id))
     return value.leakRef()
 }

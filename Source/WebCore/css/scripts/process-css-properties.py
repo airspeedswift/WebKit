@@ -5561,10 +5561,63 @@ class GenerateCSSPropertyParsing:
         # Create a handler for each property and add it to the `property_consumers` map.
         self.property_consumers = {property: PropertyConsumer.make(property) for property in generation_context.properties_and_descriptors.all_properties_and_descriptors}
         self.shared_grammar_rule_consumers = {shared_grammar_rule: SharedGrammarRuleConsumer.make(shared_grammar_rule) for shared_grammar_rule in generation_context.shared_grammar_rules.all}
+        self.swift_consumers = self._select_swift_consumers()
 
     def generate(self):
         self.generate_css_property_parsing_h()
         self.generate_css_property_parsing_cpp()
+        self.generate_css_property_parsing_swift()
+
+    def _select_swift_consumers(self):
+        by_name = {}
+        for property, consumer in self.property_consumers.items():
+            if isinstance(consumer, GeneratedPropertyConsumer):
+                by_name[property.name] = (consumer, f"consume{property.name_for_parsing_methods}", property.codegen_properties.parser_grammar.root_term, consumer.keyword_fast_path_generator)
+        for shared_grammar_rule, consumer in self.shared_grammar_rule_consumers.items():
+            if isinstance(consumer, GeneratedSharedGrammarRuleConsumer):
+                by_name[shared_grammar_rule.name] = (consumer, f"consume{shared_grammar_rule.name_for_methods.id_without_prefix}", shared_grammar_rule.grammar.root_term, None)
+        result = []
+        for index, name in enumerate(SWIFT_GENERATED_CONSUMERS):
+            if name not in by_name:
+                raise Exception(f"SWIFT_GENERATED_CONSUMERS names '{name}', which is not a generated property or exported shared grammar rule consumer")
+            consumer, method_name, root_term, keyword_fast_path_generator = by_name[name]
+            try:
+                swift = SwiftConsumerGenerator(method_name, root_term, keyword_fast_path_generator)
+            except SwiftGenerationUnsupported as error:
+                raise Exception(f"SWIFT_GENERATED_CONSUMERS names '{name}', whose grammar the Swift generator cannot express: {error}")
+            consumer.swift_consumer_id = SWIFT_GENERATED_CONSUMER_BASE + index
+            result.append((consumer.swift_consumer_id, name, swift))
+        if SWIFT_GENERATED_CONSUMER_BASE + len(result) > 256:
+            raise Exception("too many Swift consumers for cssConsumePropertySwift's UInt8 consumer number")
+        return result
+
+    def generate_css_property_parsing_swift(self):
+        with open('CSSPropertyParsingSwift.swift', 'w') as output_file:
+            writer = Writer(output_file)
+
+            self.generation_context.generate_heading(
+                to=writer
+            )
+
+            writer.write(f"internal import WebCore_Private.Core")
+            writer.newline()
+            writer.write(f"// The property consumers that the generated C++ (CSSPropertyParsing.cpp) forwards to Swift under")
+            writer.write(f"// USE(SWIFT_CSS), as `PropertyParser` methods (CSSCalcSimplificationSwift.swift).")
+            writer.write(f"extension PropertyParser {{")
+            with writer.indent():
+                writer.write(f"/// The generated consumer numbered `consumer` (`cssConsumePropertySwift`).")
+                writer.write(f"mutating func consumeGenerated(_ consumer: UInt8) -> WebCore.CSSValue? {{")
+                with writer.indent():
+                    writer.write(f"switch consumer {{")
+                    for swift_consumer_id, name, swift in self.swift_consumers:
+                        writer.write(f"case {swift_consumer_id}: return {swift.name}() // {name}")
+                    writer.write(f"default: return nil")
+                    writer.write(f"}}")
+                writer.write(f"}}")
+                writer.newline()
+                for _, _, swift in self.swift_consumers:
+                    swift.generate(to=writer)
+            writer.write(f"}}")
 
     @property
     def properties_and_descriptors(self):
@@ -9933,6 +9986,257 @@ class KeywordFastPathGenerator:
 #   def generate_definition(self, *, to):
 #   var is_exported
 #
+# MARK: - Swift generation
+
+# Step 2 of the WebCore CSS Swift island: consumers whose grammar the Swift backend below can express are generated
+# a second time, in Swift, as methods of the Swift `PropertyParser` (CSSCalcSimplificationSwift.swift). Under
+# USE(SWIFT_CSS) the generated C++ consumer forwards to it through `consumePropertyInSwift`, and its own body is
+# compiled out. The Swift backend mirrors the C++ term generators above term for term: the same alternative order,
+# the same consumption on failure, the same values.
+
+# The consumers the generated C++ forwards to Swift, by property or shared grammar rule name. Generation raises if one
+# of them leaves the subset `SwiftConsumerGenerator` expresses.
+SWIFT_GENERATED_CONSUMERS = ['transform', '<transform-list>', '<transform-function>']
+
+# The `cssConsumePropertySwift` number of the first generated consumer. Below it are the hand-written ones.
+SWIFT_GENERATED_CONSUMER_BASE = 16
+
+# Override functions (`grammar-function` in CSSProperties.json) that are already Swift, as `PropertyParser` methods.
+SWIFT_OVERRIDE_FUNCTIONS = {
+    'consumeRotate3dFunction': 'rotate3dFunction',
+    'consumeTranslateFunction': 'translateFunction',
+    'consumeTranslate3dFunction': 'translate3dFunction',
+}
+
+
+class SwiftGenerationUnsupported(Exception):
+    pass
+
+
+def swift_value_id(value_id):
+    # 'CSSValueID::CSSValueNone' -> 'WebCore.CSSValueNone'
+    return 'WebCore.' + value_id.split('::')[-1]
+
+
+def swift_range_arguments(value_range):
+    if not value_range:
+        return []
+    match = re.fullmatch(r'CSS::Range\{(.*), (.*)\}', value_range)
+    if not match:
+        raise SwiftGenerationUnsupported(f"value range '{value_range}'")
+    convert = {'-CSS::Range::infinity': '-.infinity', 'CSS::Range::infinity': '.infinity'}
+    minimum, maximum = (convert.get(bound, bound) for bound in match.groups())
+    arguments = []
+    if minimum != '-.infinity':
+        arguments.append(f'min: {minimum}')
+    if maximum != '.infinity':
+        arguments.append(f'max: {maximum}')
+    return arguments
+
+
+class SwiftConsumerGenerator:
+    """One generated consumer, as `PropertyParser` methods: `name` for the root term and `name_<n>` for the terms under it."""
+
+    def __init__(self, name, root_term, keyword_fast_path_generator):
+        self.name = name
+        self.counter = 0
+        self.methods = []
+        self.keyword_fast_path_generator = keyword_fast_path_generator
+        self._value_method(root_term, name=name, keyword_fast_path_generator=keyword_fast_path_generator)
+
+    def generate(self, *, to):
+        for method in self.methods:
+            to.write_lines(method)
+            to.newline()
+
+    def _new_name(self):
+        self.counter += 1
+        return f'{self.name}_{self.counter}'
+
+    def _add(self, name, comment, returns, body, parameters=''):
+        method = [f'// {comment}', f'mutating func {name}({parameters}) -> {returns} {{']
+        method += ['    ' + line if line else '' for line in body]
+        method.append('}')
+        self.methods.append(method)
+        return name
+
+    # A method returning `WebCore.CSSValue?`, consuming exactly what the C++ term consumes.
+    def _value_method(self, term, *, name=None, keyword_fast_path_generator=None):
+        name = name or self._new_name()
+        if isinstance(term, MatchOneTerm):
+            return self._match_one(term, name, keyword_fast_path_generator)
+        if isinstance(term, OptionalTerm):
+            return self._value_method(term.subterm, name=name)
+        if isinstance(term, KeywordTerm):
+            return self._keywords([term], name, str(term))
+        if isinstance(term, ReferenceTerm):
+            return self._reference(term, name)
+        if isinstance(term, FunctionTerm):
+            return self._function(term, name)
+        if isinstance(term, (UnboundedRepetitionTerm, BoundedRepetitionTerm)):
+            return self._repetition(term, name, into_builder=False)
+        raise SwiftGenerationUnsupported(f"term '{term}' ({type(term).__name__})")
+
+    def _match_one(self, term, name, keyword_fast_path_generator):
+        if term.settings_flag:
+            raise SwiftGenerationUnsupported(f"settings flag on '{term}'")
+        # `TermGeneratorMatchOneTerm._build_term_generators`' order: fast-path keywords, the other keywords, references,
+        # functions, unbounded then bounded repetitions.
+        fast_keywords, keywords, references, functions, unbounded, bounded = [], [], [], [], [], []
+        for subterm in term.subterms:
+            if isinstance(subterm, KeywordTerm):
+                (fast_keywords if keyword_fast_path_generator and subterm.is_eligible_for_fast_path else keywords).append(subterm)
+            elif isinstance(subterm, ReferenceTerm):
+                references.append(subterm)
+            elif isinstance(subterm, FunctionTerm):
+                functions.append(subterm)
+            elif isinstance(subterm, UnboundedRepetitionTerm):
+                unbounded.append(subterm)
+            elif isinstance(subterm, BoundedRepetitionTerm):
+                bounded.append(subterm)
+            else:
+                raise SwiftGenerationUnsupported(f"term '{subterm}' ({type(subterm).__name__}) in '{term}'")
+        alternatives = []
+        if fast_keywords:
+            alternatives.append(self._keywords(fast_keywords, self._new_name(), ' | '.join(map(str, fast_keywords))))
+        if keywords:
+            alternatives.append(self._keywords(keywords, self._new_name(), ' | '.join(map(str, keywords))))
+        for subterm in references + functions + unbounded + bounded:
+            alternatives.append(self._value_method(subterm))
+        body = [f'if let value = {alternative}() {{ return value }}' for alternative in alternatives[:-1]]
+        body.append(f'return {alternatives[-1]}()')
+        return self._add(name, str(term), 'WebCore.CSSValue?', body)
+
+    def _keywords(self, keyword_terms, name, comment):
+        for keyword_term in keyword_terms:
+            if keyword_term.settings_flag or keyword_term.status == 'internal' or keyword_term.aliased_to:
+                raise SwiftGenerationUnsupported(f"keyword '{keyword_term}' with a settings flag, internal status or alias")
+        cases = ', '.join(f'UInt16({swift_value_id(keyword_term.value.id)}.rawValue)' for keyword_term in keyword_terms)
+        body = [
+            'let id = identId(cursor, index, end)',
+            'switch id {',
+            f'case {cases}:',
+            '    // `index` is below `end` (a `UInt32`): the token at it was read.',
+            '    index &+= 1',
+            '    consumeWhitespace()',
+            '    return cssKeywordValue(id)',
+            'default:',
+            '    return nil',
+            '}',
+        ]
+        return self._add(name, comment, 'WebCore.CSSValue?', body)
+
+    def _reference(self, term, name):
+        if term.settings_flag:
+            raise SwiftGenerationUnsupported(f"settings flag on '{term}'")
+        if term.override_function:
+            if term.override_function not in SWIFT_OVERRIDE_FUNCTIONS:
+                raise SwiftGenerationUnsupported(f"override function '{term.override_function}'")
+            return self._add(name, str(term), 'WebCore.CSSValue?', [f'{SWIFT_OVERRIDE_FUNCTIONS[term.override_function]}()'])
+        if not term.is_builtin:
+            raise SwiftGenerationUnsupported(f"reference '{term}'")
+        builtin = term.builtin
+        if isinstance(builtin, BuiltinNumberOrPercentageResolvedToNumberConsumer):
+            # `consumePercentageDividedBy100OrNumber` takes no range, so the grammar's is unused, as in C++.
+            arguments = ['.Number', 'percentageDividedBy100OrNumber: true']
+        elif isinstance(builtin, BuiltinNumberConsumer):
+            arguments = ['.Number'] + swift_range_arguments(builtin.value_range)
+        elif isinstance(builtin, BuiltinLengthConsumer):
+            arguments = ['.Length'] + swift_range_arguments(builtin.value_range)
+            if builtin.unitless_zero == 'UnitlessZeroQuirk::Forbid':
+                arguments.append('forbidUnitlessZeroLength: true')
+        elif isinstance(builtin, BuiltinLengthPercentageConsumer):
+            arguments = ['.LengthPercentage'] + swift_range_arguments(builtin.value_range)
+            if builtin.unitless_zero == 'UnitlessZeroQuirk::Forbid':
+                arguments.append('forbidUnitlessZeroLength: true')
+            if builtin.anchor == 'AnchorPolicy::Allow':
+                arguments.append('allowAnchor: true')
+            if builtin.anchor_size == 'AnchorSizePolicy::Allow':
+                arguments.append('allowAnchorSize: true')
+        elif isinstance(builtin, BuiltinAngleConsumer):
+            arguments = ['.Angle'] + swift_range_arguments(builtin.value_range)
+            if builtin.unitless_zero == 'UnitlessZeroQuirk::Allow':
+                arguments.append('allowUnitlessZeroAngle: true')
+        else:
+            raise SwiftGenerationUnsupported(f"builtin '{term}'")
+        return self._add(name, str(term), 'WebCore.CSSValue?', [f'primitive(PropertyPrimitive({", ".join(arguments)}))?.value'])
+
+    def _function(self, term, name):
+        if term.settings_flag:
+            raise SwiftGenerationUnsupported(f"settings flag on '{term}'")
+        parameters = term.parameter_group_term
+        arguments_name = f'{name}_arguments'
+        if isinstance(parameters, (UnboundedRepetitionTerm, BoundedRepetitionTerm)):
+            group = self._repetition(parameters, self._new_name(), into_builder=True)
+            body = [
+                f'guard var arguments = {group}() else {{ return nil }}',
+                'var value = WebCore.CSSFunctionValue.create(name, consume arguments)',
+                'return value.leakRef()',
+            ]
+        else:
+            optional = isinstance(parameters, OptionalTerm)
+            parameter = self._value_method(parameters)
+            # An absent optional parameter is a function of no arguments, as C++'s empty `CSSValueListBuilder`.
+            on_failure = '{ var value = WebCore.CSSFunctionValue.create(name); return value.leakRef() }' if optional else '{ return nil }'
+            body = [
+                f'guard let argument = {parameter}() else {on_failure}',
+                'var value = WebCore.CSSFunctionValue.create(name, consuming: RefCSSValue(argument))',
+                'return value.leakRef()',
+            ]
+        self._add(arguments_name, f'the arguments of {term}', 'WebCore.CSSValue?', body, parameters='_ name: WebCore.CSSValueID')
+        # `function` checks the name and `args.atEnd()`; C++ reads the arguments however few there are.
+        return self._add(name, str(term), 'WebCore.CSSValue?',
+            [f'function({swift_value_id(term.name.id)}, requireArguments: false) {{ $0.{arguments_name}($1) }}'])
+
+    def _repetition(self, term, name, *, into_builder):
+        if term.settings_flag:
+            raise SwiftGenerationUnsupported(f"settings flag on '{term}'")
+        bounded = isinstance(term, BoundedRepetitionTerm)
+        if not into_builder and bounded and term.type != 'CSSValueList':
+            # The C++ consumes each term into a local and creates `term.type` from them (`CSSValuePair`, ...).
+            raise SwiftGenerationUnsupported(f"bounded repetition of type {term.type} in '{term}'")
+        if term.separator == ',':
+            on_failure, separator = 'return nil', 'consumeComma()'
+        elif term.separator == ' ':
+            on_failure, separator = 'break', '!atEnd'
+        else:
+            raise SwiftGenerationUnsupported(f"separator '{term.separator}' in '{term}'")
+        item = self._value_method(term.repeated_term)
+        # `consumeListSeparatedBy`'s `ListOptimization::SingleValue`.
+        single_value = not into_builder and term.min <= 1 and term.single_value_optimization
+        body = ['var list = WebCore.CSSValueListBuilder()', 'var count: UInt32 = 0']
+        if single_value:
+            body.append('var first: WebCore.CSSValue? = nil')
+        body += ['repeat {', f'    guard let value = {item}() else {{ {on_failure} }}']
+        if single_value:
+            body.append('    if count == 0 { first = value }')
+        body += [
+            '    list.append(consuming: RefCSSValue(value))',
+            '    // At most the token count, a `UInt32`: each item consumed a token.',
+            '    count &+= 1',
+            f'}} while {separator}',
+        ]
+        conditions = []
+        if term.min > 0:
+            conditions.append(f'count >= {term.min}')
+        if bounded:
+            conditions.append(f'count <= {term.max}')
+        if conditions:
+            body.append(f'guard {", ".join(conditions)} else {{ return nil }}')
+        if into_builder:
+            body.append('return list')
+            return self._add(name, str(term), 'WebCore.CSSValueListBuilder?', body)
+        if single_value:
+            body.append('if count == 1, let first { return first }')
+        if term.type == 'CSSValueList':
+            create = {',': 'createCommaSeparated', ' ': 'createSpaceSeparated'}[term.separator]
+            body.append(f'var value = WebCore.CSSValueList.{create}(consume list)')
+        else:
+            body.append(f'var value = WebCore.{term.type}.create(consume list)')
+        body.append('return value.leakRef()')
+        return self._add(name, str(term), 'WebCore.CSSValue?', body)
+
+
 class SharedGrammarRuleConsumer(object):
     @staticmethod
     def make(shared_grammar_rule):
@@ -9964,6 +10268,8 @@ class SkipSharedGrammarRuleConsumer(SharedGrammarRuleConsumer):
 
 class GeneratedSharedGrammarRuleConsumer(SharedGrammarRuleConsumer):
     def __init__(self, shared_grammar_rule):
+        self.shared_grammar_rule = shared_grammar_rule
+        self.swift_consumer_id = None
         self.term_generator = TermGenerator.make(shared_grammar_rule.grammar.root_term)
         self.requires_state = self.term_generator.requires_state
         self.signature = GeneratedSharedGrammarRuleConsumer._build_signature(shared_grammar_rule, self.requires_state)
@@ -10000,9 +10306,23 @@ class GeneratedSharedGrammarRuleConsumer(SharedGrammarRuleConsumer):
         to.write(f"{self.signature.definition_string}")
         to.write(f"{{")
         with to.indent():
-            self.term_generator.generate_unconditional(to=to, range_string='range', state_string='state')
+            generate_body_forwarding_to_swift(self, to=to)
         to.write(f"}}")
         to.newline()
+
+
+# The body of a generated consumer: under USE(SWIFT_CSS), a call to its Swift consumer if it has one.
+def generate_body_forwarding_to_swift(consumer, *, to):
+    if consumer.swift_consumer_id is None:
+        consumer.term_generator.generate_unconditional(to=to, range_string='range', state_string='state')
+        return
+    if not consumer.requires_state:
+        raise Exception(f"{consumer} has a Swift consumer but no state parameter to pass it")
+    to.write(f"#if USE(SWIFT_CSS)")
+    to.write(f"return consumePropertyInSwift(range, state, {consumer.swift_consumer_id});")
+    to.write(f"#else")
+    consumer.term_generator.generate_unconditional(to=to, range_string='range', state_string='state')
+    to.write(f"#endif")
 
 
 # Each CSS property has a corresponding `PropertyConsumer` which defines how that property's
@@ -10258,6 +10578,7 @@ class DirectPropertyConsumer(PropertyConsumer):
 class GeneratedPropertyConsumer(PropertyConsumer):
     def __init__(self, property):
         self.property = property
+        self.swift_consumer_id = None
         self.keyword_fast_path_generator = GeneratedPropertyConsumer._build_keyword_fast_path_generator(property)
         self.term_generator = TermGenerator.make(property.codegen_properties.parser_grammar.root_term, self.keyword_fast_path_generator)
         self.requires_state = self.term_generator.requires_state
@@ -10317,7 +10638,7 @@ class GeneratedPropertyConsumer(PropertyConsumer):
             to.write(f"static {self.signature.definition_string}")
         to.write(f"{{")
         with to.indent():
-            self.term_generator.generate_unconditional(to=to, range_string='range', state_string='state')
+            generate_body_forwarding_to_swift(self, to=to)
         to.write(f"}}")
         to.newline()
 
