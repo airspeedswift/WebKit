@@ -139,7 +139,9 @@ enum class CSSPropertyParserSwiftPrimitive : uint8_t {
 class SWIFT_SAFE CSSPropertyParserSwiftCursor {
 public:
     uint32_t tokenCount() const { return m_range->size(); }
-    CSSParserTokenBits bits(uint32_t i) const { return m_range->peek(i).bits(); }
+    // Past the end, `peek`'s `eofToken()`: a function-local static, whose initialisation guard every inlined read
+    // would carry. Its bits are an `EOFToken`'s and nothing else, so they are formed here instead.
+    CSSParserTokenBits bits(uint32_t i) const { return i < m_range->size() ? m_range->span()[i].bits() : CSSParserTokenBits { .type = EOFToken }; }
     // `functionId()` for a `FunctionToken`, and `id()` otherwise.
     uint16_t keywordId(uint32_t i) const;
 
