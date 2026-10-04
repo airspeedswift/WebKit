@@ -3872,6 +3872,10 @@ private struct CalcParseState: ~Copyable {
     /// that sets `CalcNodeFlags.insideAnchorSide`.
     var hasAnchorSide = false
 
+    /// Whether the grammar set `anchorSideWasFunction` or `anchorFallbackWasFunction` on a node, the only
+    /// input `calcRestoreAnchorPrefixes` acts on. Without one that walk changes nothing, so it is skipped.
+    var restoresAnchorPrefix = false
+
     /// Whether `simplifyParsed` will run over the node being built, so its folds can be made at
     /// construction.
     ///
@@ -5441,6 +5445,7 @@ private func calcParseAnchor(
         flags |= CalcNodeFlags.anchorSideIsSubtree
         if parsedSide.wasFunction {
             flags |= CalcNodeFlags.anchorSideWasFunction
+            state.restoresAnchorPrefix = true
         }
         children.append(parsedSide.node)
     }
@@ -5451,6 +5456,7 @@ private func calcParseAnchor(
         }
         if fallback.wasFunction {
             flags |= CalcNodeFlags.anchorFallbackWasFunction
+            state.restoresAnchorPrefix = true
         }
         if fallback.type.anchorSlotCategory == .lengthPercentage {
             type.percentHint = CalcType.PercentHintValue(.Length)
@@ -5553,6 +5559,7 @@ private func calcParseAnchorSize(
     if let parsed = fallback.take() {
         if parsed.wasFunction {
             flags |= CalcNodeFlags.anchorFallbackWasFunction
+            state.restoresAnchorPrefix = true
         }
         if parsed.type.anchorSlotCategory == .lengthPercentage {
             type.percentHint = CalcType.PercentHintValue(.Length)
@@ -6024,7 +6031,7 @@ private func calcParseAttempt(
         }
     }
 
-    calcRestoreAnchorPrefixes(&parsed.node)
+    if state.restoresAnchorPrefix { calcRestoreAnchorPrefixes(&parsed.node) }
     attempt.type = parsed.type
     attempt.root = consume parsed.node
     return attempt
