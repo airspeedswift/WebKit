@@ -5937,6 +5937,11 @@ public func cssCalcParseSwift(
         outcome.outcome = UInt8(WebCore.CSSCalc.CSSCalcSwiftParseOutcome.Declined.rawValue)
         return .none
     }
+    // The only caller, `attemptSwiftParse` (CSSCalcTree+Parser.cpp), drops a tree whose type does not match
+    // `options.category`. Such a tree is answered without its `CSSCalcSwiftRoot`: a `<length-percentage>`
+    // try of `calc(1)` (stroke-dasharray's, before its `<number>` try) then allocates and frees nothing.
+    // The outcome and the type are unchanged, so the caller's own check still decides.
+    guard outcome.type.matches(options.category) else { return .none }
     return CSSCalcSwiftRoot(root)
 }
 
