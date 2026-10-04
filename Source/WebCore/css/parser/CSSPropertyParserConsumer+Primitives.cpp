@@ -106,24 +106,16 @@ uint16_t CSSPropertyParserSwiftCursor::keywordId(uint32_t i) const
     return token.type() == FunctionToken ? token.functionId() : token.id();
 }
 
-CSSPrimitiveValue* CSSPropertyParserSwiftCursor::primitiveAt(uint32_t i, uint32_t end, CSSPropertyParserSwiftPrimitive primitive) const
+CSSPrimitiveValue* CSSPropertyParserSwiftCursor::primitiveAt(uint32_t i, uint32_t end, uint8_t category, double min, double max, const CSSPropertyParserOptions& options) const
 {
-    using namespace CSSPropertyParserHelpers;
-    using enum CSSPropertyParserSwiftPrimitive;
+    // `FunctionConsumerForCalcValues` and `CSSPrimitiveValueResolverBase::resolve`, with the category and range
+    // as values rather than template arguments.
     auto range = CSSParserTokenRange { m_range->span().subspan(i, end - i) };
-    RefPtr<CSSPrimitiveValue> value;
-    switch (primitive) {
-    case LengthPercentageNonnegative: value = CSSPrimitiveValueResolver<CSS::LengthPercentage<CSS::Nonnegative>>::consumeAndResolve(range, *m_state); break;
-    case LengthPercentage: value = CSSPrimitiveValueResolver<CSS::LengthPercentage<>>::consumeAndResolve(range, *m_state); break;
-    case Length: value = CSSPrimitiveValueResolver<CSS::Length<>>::consumeAndResolve(range, *m_state); break;
-    case Number: value = CSSPrimitiveValueResolver<CSS::Number<>>::consumeAndResolve(range, *m_state); break;
-    case Angle: case AngleOrUnitlessZero: value = CSSPrimitiveValueResolver<CSS::Angle<>>::consumeAndResolve(range, *m_state, { .unitlessZeroAngle = primitive == Angle ? UnitlessZeroQuirk::Forbid : UnitlessZeroQuirk::Allow }); break;
-    case PercentageDividedBy100OrNumber: value = consumePercentageDividedBy100OrNumber(range, *m_state); break;
-    case StrokeDashLengthPercentage: value = CSSPrimitiveValueResolver<CSS::LengthPercentage<CSS::Nonnegative>>::consumeAndResolve(range, *m_state, { .overrideParserMode = HTMLStandardMode, .unitlessZeroLength = UnitlessZeroQuirk::Forbid }); break;
-    case NumberNonnegative: value = CSSPrimitiveValueResolver<CSS::Number<CSS::Nonnegative>>::consumeAndResolve(range, *m_state); break;
-    }
+    auto calc = CSS::UnevaluatedCalcBase::parseBase(range, *m_state, static_cast<CSS::Category>(category), CSS::Range { min, max }, { }, options);
+    if (!calc)
+        return nullptr;
     *m_nextIndex = range.begin() - m_range->begin();
-    return value.leakRef();
+    return &CSSPrimitiveValue::create(WTF::move(*calc)).leakRef();
 }
 
 RefPtr<CSSValue> CSSPropertyParserHelpers::consumePropertyInSwift(CSSParserTokenRange& range, CSS::PropertyParserState& state, uint8_t consumer, CSSPropertyParserOptions options)

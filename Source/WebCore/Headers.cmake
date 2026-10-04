@@ -1180,6 +1180,7 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS
     css/parser/CSSParserToken.h
     css/parser/CSSParserTokenBits.h
     css/parser/CSSParserTokenRange.h
+    css/parser/CSSPropertyParserOptions.h
     css/parser/CSSPropertyParser.h
     css/parser/CSSPropertyParserConsumer+Color.h
     css/parser/CSSSelectorParserContext.h

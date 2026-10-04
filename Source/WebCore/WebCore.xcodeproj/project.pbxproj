@@ -5872,6 +5872,7 @@
 		BCFE79AA2BE307C900114272 /* CSSParserContext.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7C5E4F2BE2A8FB00AE645C /* CSSParserContext.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BCFE79AB2BE307F800114272 /* CSSSelectorParserContext.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7C5E892BE2A8FB00AE645C /* CSSSelectorParserContext.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BCFE79AC2BE3081700114272 /* CSSParserMode.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7C5E572BE2A8FB00AE645C /* CSSParserMode.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		BC812BC12CA46BCB0048BBC5 /* CSSPropertyParserOptions.h in Headers */ = {isa = PBXBuildFile; fileRef = BC812BC02CA46BCB0048BBC5 /* CSSPropertyParserOptions.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BCFE79AE2BE3082F00114272 /* MutableCSSSelector.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7C5E952BE2A8FB00AE645C /* MutableCSSSelector.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BCFE79AF2BE308A200114272 /* CSSParserToken.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7C5E5C2BE2A8FB00AE645C /* CSSParserToken.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BCFE79B02BE308AD00114272 /* CSSParserIdioms.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7C5E542BE2A8FB00AE645C /* CSSParserIdioms.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -45652,6 +45653,7 @@
 				BC26505E2D9315E10027337D /* CSSPropertyParserConsumer+Color.h in Headers */,
 				62641BBD2F3C5E5D006EA1D3 /* CSSPropertyParserConsumer+Overflow.h in Headers */,
 				E462E5A52D1164690058FD21 /* CSSPropertyParserConsumer+PositionTry.h in Headers */,
+				BC812BC12CA46BCB0048BBC5 /* CSSPropertyParserOptions.h in Headers */,
 				BC3BEDB92DD5507E004E87D7 /* CSSPropertyParserResult.h in Headers */,
 				BC26505F2D93174E0027337D /* CSSPropertyParserState.h in Headers */,
 				E4E387FE294E147800C6EC1B /* CSSPropertyRule.h in Headers */,
