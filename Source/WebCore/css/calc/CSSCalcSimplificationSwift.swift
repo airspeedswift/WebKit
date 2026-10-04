@@ -4112,6 +4112,15 @@ private func calcToken(
     cursor.token(index)
 }
 
+/// Whether the token at `index` is the delimiter `a` or `b`: the test each operator loop below opens with.
+@inline(always)
+private func calcNextIsDelimiter(_ cursor: borrowing CalcTokens, _ state: inout CalcParseState, _ index: UInt32, _ end: UInt32, _ a: UInt16, _ b: UInt16) -> Bool {
+    guard index < end else { return false }
+    let token = calcToken(cursor, &state, index)
+    let op = token.type == WebCore.DelimiterToken ? token.delimiter : 0
+    return op == a || op == b
+}
+
 @inline(always)
 private func calcTokenIsWhitespace(_ type: WebCore.CSSParserTokenType) -> Bool {
     type == WebCore.NonNewlineWhitespaceToken || type == WebCore.NewlineToken
@@ -5682,6 +5691,10 @@ private func calcParseProduct(
     if depth > calcMaxExpressionDepth { return nil }
 
     guard let parsedFirst = calcParseValue(cursor, &index, end, depth, &state) else { return nil }
+    // One operand, the common case: answer it before any `Optional` or buffer exists. Without this the
+    // `CalcParsed?` below is destroyed through its value-witness table (a metadata lookup) and an empty
+    // `UniqueArray` is torn down on every call.
+    if !calcNextIsDelimiter(cursor, &state, index, end, 0x2A, 0x2F) { return parsedFirst }
     var productType = parsedFirst.type
 
     // A product of one operand is not a node, so the first operand is held until a second arrives.
@@ -5783,6 +5796,8 @@ private func calcParseSum(
     if depth > calcMaxExpressionDepth { return nil }
 
     guard let parsedFirst = calcParseProduct(cursor, &index, end, depth, &state) else { return nil }
+    // One operand, as in `calcParseProduct`.
+    if !calcNextIsDelimiter(cursor, &state, index, end, 0x2B, 0x2D) { return parsedFirst }
     var sumType = parsedFirst.type
 
     var first: CalcParsed? = parsedFirst
