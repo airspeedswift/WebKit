@@ -431,10 +431,8 @@ RefPtr<CSSValue> consumeScale(CSSParserTokenRange& range, CSS::PropertyParserSta
 }
 
 #else
-// `cssConsumePropertySwift`'s consumers 0 to 5.
-RefPtr<CSSValue> consumeRotate3dFunction(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumePropertyInSwift(range, state, 0); }
-RefPtr<CSSValue> consumeTranslateFunction(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumePropertyInSwift(range, state, 1); }
-RefPtr<CSSValue> consumeTranslate3dFunction(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumePropertyInSwift(range, state, 2); }
+// `cssConsumePropertySwift`'s consumers 3 to 5. The transform functions are reached from the generated Swift transform
+// consumers alone (CSSPropertyParsingSwift.swift).
 RefPtr<CSSValue> consumeTranslate(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumePropertyInSwift(range, state, 3); }
 RefPtr<CSSValue> consumeRotate(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumePropertyInSwift(range, state, 4); }
 RefPtr<CSSValue> consumeScale(CSSParserTokenRange& range, CSS::PropertyParserState& state) { return consumePropertyInSwift(range, state, 5); }

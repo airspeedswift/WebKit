@@ -217,7 +217,7 @@ EXCLUDED_SOURCE_FILE_NAMES[sdk=xr*] = $(inherited) *.tiff *Cursor.png npapi.h np
 // With WK_USE_SWIFT_CSS=NO the Swift CSS sources are not compiled. C++ that exists only to call, or
 // be called from, them is under USE(SWIFT_CSS).
 WK_SWIFT_CSS_EXCLUDED_SOURCE_FILE_NAMES = $(WK_SWIFT_CSS_EXCLUDED_SOURCE_FILE_NAMES_$(WK_USE_SWIFT_CSS));
-WK_SWIFT_CSS_EXCLUDED_SOURCE_FILE_NAMES_NO = CSSTokenizerSwift.swift CSSParserTokenBitsSwift.swift CSSUnitTrieSwift.swift CSSParserFastPathsSwift.swift CSSCalcSerializationSwift.swift CSSCalcSimplificationSwift.swift;
+WK_SWIFT_CSS_EXCLUDED_SOURCE_FILE_NAMES_NO = CSSTokenizerSwift.swift CSSParserTokenBitsSwift.swift CSSUnitTrieSwift.swift CSSParserFastPathsSwift.swift CSSCalcSerializationSwift.swift CSSCalcSimplificationSwift.swift CSSPropertyParsingSwift.swift;
 
 INCLUDED_SOURCE_FILE_NAMES = $(INCLUDED_SOURCE_FILE_NAMES_$(ENABLE_PDFJS));
 INCLUDED_SOURCE_FILE_NAMES_ENABLE_PDFJS = pdfjs*/*;
