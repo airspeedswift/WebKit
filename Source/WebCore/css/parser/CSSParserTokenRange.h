@@ -39,6 +39,7 @@ namespace WebCore {
 
 class CSSPrimitiveValue;
 class StyleSheetContents;
+struct CSSPropertyParserOptions;
 namespace CSS {
 struct PropertyParserState;
 }
@@ -120,19 +121,6 @@ private:
     std::span<const CSSParserToken> m_tokens;
 };
 
-// The primitive a cursor's `primitiveAt` consumes.
-enum class CSSPropertyParserSwiftPrimitive : uint8_t {
-    LengthPercentageNonnegative,
-    LengthPercentage,
-    Length,
-    Number,
-    Angle,
-    AngleOrUnitlessZero,
-    PercentageDividedBy100OrNumber,
-    StrokeDashLengthPercentage,
-    NumberNonnegative,
-};
-
 // A Swift property parser reads `range` by index through this. Swift sees the tokens one at a time
 // because `peek` returns a reference into the range, which it cannot import.
 // `SWIFT_SAFE` holds because a cursor lives on the C++ stack for the one Swift call that borrows it.
@@ -145,9 +133,9 @@ public:
     // `functionId()` for a `FunctionToken`, and `id()` otherwise.
     uint16_t keywordId(uint32_t i) const;
 
-    // A primitive other than a plain numeric token (calc(), anchor(), ...) starting at token `i`, in the
-    // tokens before `end`, through the `MetaResolver`. `nextIndex()` is the token after it.
-    CSSPrimitiveValue* primitiveAt(uint32_t i, uint32_t end, CSSPropertyParserSwiftPrimitive) const SWIFT_RETURNS_RETAINED;
+    // The math function (calc(), anchor(), ...) starting at token `i`, in the tokens before `end`, as a
+    // `CSS::Category` in `[min, max]`. `nextIndex()` is the token after it.
+    CSSPrimitiveValue* primitiveAt(uint32_t i, uint32_t end, uint8_t category, double min, double max, const CSSPropertyParserOptions&) const SWIFT_RETURNS_RETAINED;
     // The cursor is passed to Swift by value, so the index lives in the caller's frame.
     uint32_t nextIndex() const { return *m_nextIndex; }
     void setNextIndex(uint32_t i) const { *m_nextIndex = i; }

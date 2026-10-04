@@ -8177,7 +8177,7 @@ public func cssConsumeBackgroundSizeSwift(_ cursor: WebCore.CSSPropertyParserSwi
             coalescing = false
             return cssLengthPercentageValue(result.value, UInt8(truncatingIfNeeded: result.packed))
         }
-        guard let value = cursor.primitiveAt(index, count, .LengthPercentageNonnegative) else { return nil }
+        guard let value = cursor.primitiveAt(index, count, WebCore.CSS.Category.LengthPercentage.rawValue, 0, .infinity, WebCore.CSSPropertyParserOptions()) else { return nil }
         index = cursor.nextIndex()
         coalescing = false
         return value
@@ -8302,34 +8302,31 @@ private struct TransformParser {
         return value
     }
 
-    /// A `CSSPrimitiveValueResolver<kind>::consumeAndResolve` (or `consumePercentageDividedBy100OrNumber`).
-    mutating func primitive(_ kind: WebCore.CSSPropertyParserSwiftPrimitive) -> TransformPrimitive? {
+    /// A `CSSPrimitiveValueResolver<primitive>::consumeAndResolve` (or `consumePercentageDividedBy100OrNumber`).
+    mutating func primitive(_ primitive: PropertyPrimitive) -> TransformPrimitive? {
         let tokenType = type(index)
         if tokenType == WebCore.FunctionToken {
             // Only `FunctionConsumerForCalcValues` consumes a function token, so the value is calculated.
-            guard let value = cursor.primitiveAt(index, end, kind) else { return nil }
+            // `consumePercentageDividedBy100OrNumber` tries a `<number>` calc() first, then a `<percentage>` one.
+            guard let value = cursor.primitiveAt(index, end, primitive.category.rawValue, primitive.min, primitive.max, primitive.options)
+                ?? (primitive.percentageDividedBy100OrNumber
+                    ? cursor.primitiveAt(index, end, WebCore.CSS.Category.Percentage.rawValue, primitive.min, primitive.max, primitive.options) : nil)
+            else { return nil }
             assert(value.isCalculated())
             index = cursor.nextIndex()
             return TransformPrimitive(value: value, number: nil, isPercentage: false)
         }
         guard tokenType == WebCore.NumberToken || tokenType == WebCore.PercentageToken || tokenType == WebCore.DimensionToken else { return nil }
         let bits = cursor.bits(index)
-        let category: WebCore.CSS.Category
-        var flags = self.flags & ~UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue)
-        // `CSS::Nonnegative` is [0, inf], rejecting (not clamping) outside it at parse time.
-        var min = -Double.infinity
-        switch kind {
-        case .LengthPercentage: category = .LengthPercentage; flags = self.flags
-        // The caller's `options` already carry stroke-dasharray's `unitlessZeroLength = Forbid` and its mode.
-        case .LengthPercentageNonnegative, .StrokeDashLengthPercentage: category = .LengthPercentage; flags = self.flags; min = 0
-        case .NumberNonnegative: category = .Number; min = 0
-        case .Length: category = .Length; flags = self.flags
-        case .Angle: category = .Angle
-        case .AngleOrUnitlessZero: category = .Angle; flags |= UInt8(CSSNumericConsumerSwiftUnitlessZeroAngle.rawValue)
-        case .PercentageDividedBy100OrNumber: category = tokenType == WebCore.PercentageToken ? .Percentage : .Number
-        default: category = .Number
-        }
-        let range = NumericConsumerRange(min: min, max: .infinity, minBehavior: 0, maxBehavior: 0, flags: flags)
+        var category = primitive.category
+        // A `<length>` or `<length-percentage>` resolves to a float (`swiftNumericConsumerFlags(true, ...)`); the other
+        // categories to a double.
+        var flags = category == .LengthPercentage || category == .Length ? self.flags : self.flags & ~UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue)
+        if primitive.options.unitlessZeroAngle == .Allow { flags |= UInt8(CSSNumericConsumerSwiftUnitlessZeroAngle.rawValue) }
+        if primitive.percentageDividedBy100OrNumber && tokenType == WebCore.PercentageToken { category = .Percentage }
+        // `CSS::Nonnegative` is [0, inf], rejecting (not clamping) outside it at parse time. Stroke-dasharray's
+        // `unitlessZeroLength = Forbid` and mode are in the caller's `flags` and `parserMode` already.
+        let range = NumericConsumerRange(min: primitive.min, max: primitive.max, minBehavior: 0, maxBehavior: 0, flags: flags)
         let result = category == .Angle
             ? angleConsume(bits.numericValue, tokenType, UInt8(truncatingIfNeeded: bits.unit), parserMode, flags)
             : numericConsume(bits.numericValue, range, category.rawValue, tokenType.rawValue, UInt8(truncatingIfNeeded: bits.unit), parserMode, flags)
@@ -8523,6 +8520,40 @@ private func isTimelineRangeName(_ id: UInt16) -> Bool {
     default:
         return false
     }
+}
+
+/// A numeric reference of a property grammar (`<length-percentage [0,inf]>`, `<number>`, ...): what `primitive`
+/// consumes, as values rather than as `CSSPrimitiveValueResolver`'s template arguments. The generated consumers
+/// (step 2) write one per reference term.
+struct PropertyPrimitive {
+    let category: WebCore.CSS.Category
+    var min = -Double.infinity
+    var max = Double.infinity
+    /// What a calc() is parsed under. A numeric token reads `unitlessZeroAngle` here; the rest of its options are
+    /// already in the caller's `flags` and `parserMode`.
+    var options = WebCore.CSSPropertyParserOptions()
+    /// `consumePercentageDividedBy100OrNumber`: `category` is `.Number`, and a `<percentage>` is accepted as its value / 100.
+    var percentageDividedBy100OrNumber = false
+
+    static var LengthPercentage: Self { Self(category: .LengthPercentage) }
+    static var LengthPercentageNonnegative: Self { Self(category: .LengthPercentage, min: 0) }
+    /// Stroke-dasharray's `{ .overrideParserMode = HTMLStandardMode, .unitlessZeroLength = Forbid }`.
+    static var StrokeDashLengthPercentage: Self {
+        var primitive = Self(category: .LengthPercentage, min: 0)
+        primitive.options.overrideParserMode = .init(WebCore.HTMLStandardMode)
+        primitive.options.unitlessZeroLength = .Forbid
+        return primitive
+    }
+    static var Length: Self { Self(category: .Length) }
+    static var Number: Self { Self(category: .Number) }
+    static var NumberNonnegative: Self { Self(category: .Number, min: 0) }
+    static var Angle: Self { Self(category: .Angle) }
+    static var AngleOrUnitlessZero: Self {
+        var primitive = Self(category: .Angle)
+        primitive.options.unitlessZeroAngle = .Allow
+        return primitive
+    }
+    static var PercentageDividedBy100OrNumber: Self { Self(category: .Number, percentageDividedBy100OrNumber: true) }
 }
 
 /// A primitive the transform consumers parsed, with what they ask of it: `number` is the value of a
