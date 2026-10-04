@@ -8216,9 +8216,9 @@ public func cssConsumePropertySwift(_ cursor: WebCore.CSSPropertyParserSwiftCurs
     var parser = TransformParser(cursor: cursor, end: cursor.tokenCount(), index: 0, parserMode: parserMode, flags: flags)
     let value: WebCore.CSSValue?
     switch consumer {
-    case 0: value = parser.function(WebCore.CSSValueRotate3d) { $0.rotate3dArguments() }
-    case 1: value = parser.function(WebCore.CSSValueTranslate) { $0.translateArguments() }
-    case 2: value = parser.function(WebCore.CSSValueTranslate3d) { $0.translate3dArguments() }
+    case 0: value = parser.function(WebCore.CSSValueRotate3d) { $0.rotate3dArguments($1) }
+    case 1: value = parser.function(WebCore.CSSValueTranslate) { $0.translateArguments($1) }
+    case 2: value = parser.function(WebCore.CSSValueTranslate3d) { $0.translate3dArguments($1) }
     case 3: value = parser.translate()
     case 4: value = parser.rotate()
     case 5: value = parser.scale()
@@ -8270,7 +8270,7 @@ private struct TransformParser {
     }
 
     /// `name( arguments )`, as `range.peek().functionId() == name`, then `consumeFunction`, `arguments`, and `args.atEnd()`.
-    mutating func function(_ name: WebCore.CSSValueID, _ arguments: (inout TransformParser) -> WebCore.CSSValueListBuilder?) -> WebCore.CSSValue? {
+    mutating func function(_ name: WebCore.CSSValueID, _ arguments: (inout TransformParser, WebCore.CSSValueID) -> WebCore.CSSValue?) -> WebCore.CSSValue? {
         guard identId(cursor, index, end, WebCore.FunctionToken) == UInt16(name.rawValue) else { return nil }
         // `consumeBlock`: the tokens up to the matching `BlockEnd` (`CSSParserToken::BlockType` 2; `BlockStart` is
         // 1), or to the end if there is none. `i` and `depth` are bounded by `end` (a `UInt32`).
@@ -8288,11 +8288,13 @@ private struct TransformParser {
         }
         var args = TransformParser(cursor: cursor, end: argumentsEnd, index: index &+ 1, parserMode: parserMode, flags: flags)
         args.consumeWhitespace()
-        guard !args.atEnd, var list = arguments(&args), args.atEnd else { return nil }
+        // `arguments` creates the `CSSFunctionValue` from its operands through the `Ref` overloads, so no
+        // `CSSValueListBuilder` is built and moved across the boundary (four `Vector` moves and two
+        // destructions per function before).
+        guard !args.atEnd, let value = arguments(&args, name), args.atEnd else { return nil }
         index = i
         consumeWhitespace()
-        var value = WebCore.CSSFunctionValue.create(name, consume list)
-        return value.leakRef()
+        return value
     }
 
     /// A `CSSPrimitiveValueResolver<kind>::consumeAndResolve` (or `consumePercentageDividedBy100OrNumber`).
@@ -8349,28 +8351,36 @@ private struct TransformParser {
     }
 
     // rotate3d() = rotate3d( <number> , <number> , <number> , [ <angle> | <zero> ] )
-    mutating func rotate3dArguments() -> WebCore.CSSValueListBuilder? {
+    mutating func rotate3dArguments(_ name: WebCore.CSSValueID) -> WebCore.CSSValue? {
         guard let x = primitive(.Number), consumeComma(), let y = primitive(.Number), consumeComma(),
             let z = primitive(.Number), consumeComma(), let angle = primitive(.AngleOrUnitlessZero)
         else { return nil }
-        return cssValueListBuilder(x.value, y.value, z.value, angle.value)
+        var value = WebCore.CSSFunctionValue.create(name, consuming: RefCSSValue(x.value), consuming: RefCSSValue(y.value), consuming: RefCSSValue(z.value), consuming: RefCSSValue(angle.value))
+        return value.leakRef()
     }
 
     // translate() = translate( <length-percentage> , <length-percentage>? )
-    mutating func translateArguments() -> WebCore.CSSValueListBuilder? {
+    mutating func translateArguments(_ name: WebCore.CSSValueID) -> WebCore.CSSValue? {
         guard let x = primitive(.LengthPercentage) else { return nil }
-        guard consumeComma() else { return cssValueListBuilder(x.value) }
-        guard let y = primitive(.LengthPercentage) else { return nil }
         // A second value of `0` is the same as no second argument.
-        return y.isKnownZero ? cssValueListBuilder(x.value) : cssValueListBuilder(x.value, y.value)
+        if consumeComma() {
+            guard let y = primitive(.LengthPercentage) else { return nil }
+            if !y.isKnownZero {
+                var value = WebCore.CSSFunctionValue.create(name, consuming: RefCSSValue(x.value), consuming: RefCSSValue(y.value))
+                return value.leakRef()
+            }
+        }
+        var value = WebCore.CSSFunctionValue.create(name, consuming: RefCSSValue(x.value))
+        return value.leakRef()
     }
 
     // translate3d() = translate3d( <length-percentage> , <length-percentage> , <length> )
-    mutating func translate3dArguments() -> WebCore.CSSValueListBuilder? {
+    mutating func translate3dArguments(_ name: WebCore.CSSValueID) -> WebCore.CSSValue? {
         guard let x = primitive(.LengthPercentage), consumeComma(), let y = primitive(.LengthPercentage), consumeComma(),
             let z = primitive(.Length)
         else { return nil }
-        return cssValueListBuilder(x.value, y.value, z.value)
+        var value = WebCore.CSSFunctionValue.create(name, consuming: RefCSSValue(x.value), consuming: RefCSSValue(y.value), consuming: RefCSSValue(z.value))
+        return value.leakRef()
     }
 
     // none | <length-percentage> [ <length-percentage> <length>? ]?
