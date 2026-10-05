@@ -10054,7 +10054,12 @@ class SwiftConsumerGenerator:
         return f'{self.name}_{self.counter}'
 
     def _add(self, name, comment, returns, body, parameters=''):
-        method = [f'// {comment}', f'mutating func {name}({parameters}) -> {returns} {{']
+        method = [f'// {comment}']
+        # Every method but the root has exactly one caller, so it is inlined into it: the parser's state then stays in
+        # registers across the whole grammar, where a call per term passes it in memory (`inout PropertyParser`).
+        if name != self.name:
+            method.append('@inline(always)')
+        method.append(f'mutating func {name}({parameters}) -> {returns} {{')
         method += ['    ' + line if line else '' for line in body]
         method.append('}')
         self.methods.append(method)
@@ -10159,7 +10164,7 @@ class SwiftConsumerGenerator:
                 arguments.append('allowUnitlessZeroAngle: true')
         else:
             raise SwiftGenerationUnsupported(f"builtin '{term}'")
-        return self._add(name, str(term), 'WebCore.CSSValue?', [f'primitive(PropertyPrimitive({", ".join(arguments)}))?.value'])
+        return self._add(name, str(term), 'WebCore.CSSValue?', [f'primitiveValue(PropertyPrimitive({", ".join(arguments)}))'])
 
     def _function(self, term, name):
         if term.settings_flag:
@@ -10167,10 +10172,10 @@ class SwiftConsumerGenerator:
         parameters = term.parameter_group_term
         arguments_name = f'{name}_arguments'
         if isinstance(parameters, (UnboundedRepetitionTerm, BoundedRepetitionTerm)):
-            group = self._repetition(parameters, self._new_name(), into_builder=True)
-            body = [
-                f'guard var arguments = {group}() else {{ return nil }}',
-                'var value = WebCore.CSSFunctionValue.create(name, consume arguments)',
+            # The list is built in this method, not returned from another as a `CSSValueListBuilder?`, whose
+            # move and destruction are C++ calls.
+            body = self._repetition_body(parameters, into_builder=True) + [
+                'var value = WebCore.CSSFunctionValue.create(name, consume list)',
                 'return value.leakRef()',
             ]
         else:
@@ -10189,6 +10194,21 @@ class SwiftConsumerGenerator:
             [f'function({swift_value_id(term.name.id)}, requireArguments: false) {{ $0.{arguments_name}($1) }}'])
 
     def _repetition(self, term, name, *, into_builder):
+        assert not into_builder
+        body = self._repetition_body(term, into_builder=False)
+        single_value = term.min <= 1 and term.single_value_optimization
+        if single_value:
+            body.append('if count == 1, let first { return first }')
+        if term.type == 'CSSValueList':
+            create = {',': 'createCommaSeparated', ' ': 'createSpaceSeparated'}[term.separator]
+            body.append(f'var value = WebCore.CSSValueList.{create}(consume list)')
+        else:
+            body.append(f'var value = WebCore.{term.type}.create(consume list)')
+        body.append('return value.leakRef()')
+        return self._add(name, str(term), 'WebCore.CSSValue?', body)
+
+    # The statements that leave the items in `list` and their number in `count`, or return nil.
+    def _repetition_body(self, term, *, into_builder):
         if term.settings_flag:
             raise SwiftGenerationUnsupported(f"settings flag on '{term}'")
         bounded = isinstance(term, BoundedRepetitionTerm)
@@ -10223,18 +10243,7 @@ class SwiftConsumerGenerator:
             conditions.append(f'count <= {term.max}')
         if conditions:
             body.append(f'guard {", ".join(conditions)} else {{ return nil }}')
-        if into_builder:
-            body.append('return list')
-            return self._add(name, str(term), 'WebCore.CSSValueListBuilder?', body)
-        if single_value:
-            body.append('if count == 1, let first { return first }')
-        if term.type == 'CSSValueList':
-            create = {',': 'createCommaSeparated', ' ': 'createSpaceSeparated'}[term.separator]
-            body.append(f'var value = WebCore.CSSValueList.{create}(consume list)')
-        else:
-            body.append(f'var value = WebCore.{term.type}.create(consume list)')
-        body.append('return value.leakRef()')
-        return self._add(name, str(term), 'WebCore.CSSValue?', body)
+        return [f'// {term}'] + body
 
 
 class SharedGrammarRuleConsumer(object):
