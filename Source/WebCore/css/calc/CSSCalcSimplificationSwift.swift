@@ -8244,12 +8244,14 @@ struct PropertyParser {
         i < end ? WebCore.CSSParserTokenType(rawValue: UInt8(truncatingIfNeeded: cursor.bits(i).type)) : WebCore.EOFToken
     }
 
+    @inline(always)
     mutating func consumeWhitespace() {
         // `index` is below `end` (a `UInt32`) at each `&+= 1`.
         while type(index) == WebCore.NonNewlineWhitespaceToken || type(index) == WebCore.NewlineToken { index &+= 1 }
     }
 
     /// `consumeCommaIncludingWhitespace`.
+    @inline(always)
     mutating func consumeComma() -> Bool {
         guard type(index) == WebCore.CommaToken else { return false }
         index &+= 1
@@ -8268,6 +8270,7 @@ struct PropertyParser {
     /// `name( arguments )`, as `range.peek().functionId() == name`, then `consumeFunction`, `arguments`, and `args.atEnd()`.
     /// With `requireArguments`, `name()` is rejected before `arguments` runs, as the hand-written consumers do; the
     /// generated ones leave that to `arguments`, as the generated C++ does.
+    @inline(always)
     mutating func function(_ name: WebCore.CSSValueID, requireArguments: Bool = true, _ arguments: (inout PropertyParser, WebCore.CSSValueID) -> WebCore.CSSValue?) -> WebCore.CSSValue? {
         guard identId(cursor, index, end, WebCore.FunctionToken) == UInt16(name.rawValue) else { return nil }
         // `consumeBlock`: the tokens up to the matching `BlockEnd` (`CSSParserToken::BlockType` 2; `BlockStart` is
@@ -8295,19 +8298,38 @@ struct PropertyParser {
         return value
     }
 
-    /// A `CSSPrimitiveValueResolver<primitive>::consumeAndResolve` (or `consumePercentageDividedBy100OrNumber`).
+    /// A `CSSPrimitiveValueResolver<primitive>::consumeAndResolve` (or `consumePercentageDividedBy100OrNumber`), with what the
+    /// hand-written consumers ask of it.
     mutating func primitive(_ primitive: PropertyPrimitive) -> TransformPrimitive? {
+        var number: Double? = nil
+        var isPercentage = false
+        guard let value = primitiveValue(primitive, number: &number, isPercentage: &isPercentage) else { return nil }
+        return TransformPrimitive(value: value, number: number, isPercentage: isPercentage)
+    }
+
+    /// The value alone, for the generated consumers: no `TransformPrimitive` to build and destroy (an outlined
+    /// value-witness call per value under thin LTO).
+    mutating func primitiveValue(_ primitive: PropertyPrimitive) -> WebCore.CSSValue? {
+        var number: Double? = nil
+        var isPercentage = false
+        return primitiveValue(primitive, number: &number, isPercentage: &isPercentage)
+    }
+
+    /// `number` is the value of a non-calculated primitive (`raw()->value`), and nil for a calculated one.
+    @inline(always)
+    mutating func primitiveValue(_ primitive: PropertyPrimitive, number: inout Double?, isPercentage: inout Bool) -> WebCore.CSSValue? {
         let tokenType = type(index)
         if tokenType == WebCore.FunctionToken {
             // Only `FunctionConsumerForCalcValues` consumes a function token, so the value is calculated.
             // `consumePercentageDividedBy100OrNumber` tries a `<number>` calc() first, then a `<percentage>` one.
-            guard let value = cursor.primitiveAt(index, end, primitive.category.rawValue, primitive.min, primitive.max, primitive.options)
+            let options = primitive.cssPropertyParserOptions
+            guard let value = cursor.primitiveAt(index, end, primitive.category.rawValue, primitive.min, primitive.max, options)
                 ?? (primitive.percentageDividedBy100OrNumber
-                    ? cursor.primitiveAt(index, end, WebCore.CSS.Category.Percentage.rawValue, primitive.min, primitive.max, primitive.options) : nil)
+                    ? cursor.primitiveAt(index, end, WebCore.CSS.Category.Percentage.rawValue, primitive.min, primitive.max, options) : nil)
             else { return nil }
             assert(value.isCalculated())
             index = cursor.nextIndex()
-            return TransformPrimitive(value: value, number: nil, isPercentage: false)
+            return value
         }
         guard tokenType == WebCore.NumberToken || tokenType == WebCore.PercentageToken || tokenType == WebCore.DimensionToken else { return nil }
         let bits = cursor.bits(index)
@@ -8315,8 +8337,8 @@ struct PropertyParser {
         // A `<length>` or `<length-percentage>` resolves to a float (`swiftNumericConsumerFlags(true, ...)`); the other
         // categories to a double.
         var flags = category == .LengthPercentage || category == .Length ? self.flags : self.flags & ~UInt8(CSSNumericConsumerSwiftResolvesToFloat.rawValue)
-        if primitive.options.unitlessZeroAngle == .Allow { flags |= UInt8(CSSNumericConsumerSwiftUnitlessZeroAngle.rawValue) }
-        if primitive.options.unitlessZeroLength == .Forbid { flags &= ~UInt8(CSSNumericConsumerSwiftUnitlessZeroLength.rawValue) }
+        if primitive.options.contains(.allowUnitlessZeroAngle) { flags |= UInt8(CSSNumericConsumerSwiftUnitlessZeroAngle.rawValue) }
+        if primitive.options.contains(.forbidUnitlessZeroLength) { flags &= ~UInt8(CSSNumericConsumerSwiftUnitlessZeroLength.rawValue) }
         if primitive.percentageDividedBy100OrNumber && tokenType == WebCore.PercentageToken { category = .Percentage }
         // `CSS::Nonnegative` is [0, inf], rejecting (not clamping) outside it at parse time. Stroke-dasharray's
         // `unitlessZeroLength = Forbid` and mode are in the caller's `flags` and `parserMode` already.
@@ -8332,17 +8354,21 @@ struct PropertyParser {
         case .LengthPercentage, .Length:
             // `LengthUnit`'s cases are `LengthPercentageUnit`'s first cases, in order.
             guard let value = cssLengthPercentageValue(result.value, unit) else { return nil }
-            return TransformPrimitive(value: value, number: result.value, isPercentage: unit == UInt8(WebCore.CSS.LengthPercentageUnit.Percentage.rawValue))
+            number = result.value
+            isPercentage = unit == UInt8(WebCore.CSS.LengthPercentageUnit.Percentage.rawValue)
+            return value
         case .Angle:
             // Never nil: an imported C++ scoped enum's `init?(rawValue:)` does not validate.
             guard let angle = WebCore.CSS.AngleUnit(rawValue: unit) else { return nil }
             var value = WebCore.CSSPrimitiveValue.create(result.value, WebCore.CSS.toCSSUnitType(angle))
-            return TransformPrimitive(value: value.leakRef(), number: result.value, isPercentage: false)
+            number = result.value
+            return value.leakRef()
         default:
             // `consumePercentageDividedBy100OrNumber` makes a `<percentage>` a `<number>`.
-            let number = category == .Percentage ? result.value / 100 : result.value
-            var value = WebCore.CSSPrimitiveValue.create(number, .Number)
-            return TransformPrimitive(value: value.leakRef(), number: number, isPercentage: false)
+            let resolved = category == .Percentage ? result.value / 100 : result.value
+            var value = WebCore.CSSPrimitiveValue.create(resolved, .Number)
+            number = resolved
+            return value.leakRef()
         }
     }
 
@@ -8386,6 +8412,7 @@ struct PropertyParser {
     }
 
     // none | <length-percentage> [ <length-percentage> <length>? ]?
+    @inline(always)
     mutating func translate() -> WebCore.CSSValue? {
         if let none = consumeNone() { return none }
         guard let x = primitive(.LengthPercentage) else { return nil }
@@ -8404,6 +8431,7 @@ struct PropertyParser {
     }
 
     // none | <angle> | [ x | y | z | <number>{3} ] && <angle>
+    @inline(always)
     mutating func rotate() -> WebCore.CSSValue? {
         if let none = consumeNone() { return none }
         // Three locals, not a tuple of optionals: the tuple was destroyed through its value-witness table, a
@@ -8458,6 +8486,7 @@ struct PropertyParser {
     }
 
     // none | [ <number> | <percentage> ]{1,3}
+    @inline(always)
     mutating func scale() -> WebCore.CSSValue? {
         if let none = consumeNone() { return none }
         guard let x = primitive(.PercentageDividedBy100OrNumber) else { return nil }
@@ -8475,6 +8504,7 @@ struct PropertyParser {
 
     // <'stroke-dasharray'> = none | [ [ <length-percentage> | <number> ]+ ]#
     // https://svgwg.org/svg2-draft/painting.html#StrokeDashing
+    @inline(always)
     mutating func strokeDasharray() -> WebCore.CSSValue? {
         if let none = consumeNone() { return none }
         var dashes = WebCore.CSSValueListBuilder()
@@ -8493,6 +8523,7 @@ struct PropertyParser {
 
     // <'animation-range-{start|end}'> = normal | <length-percentage> | <timeline-range-name> <length-percentage>?
     // https://drafts.csswg.org/scroll-animations-1/#propdef-animation-range-start
+    @inline(always)
     mutating func singleAnimationRange(isStart: Bool) -> WebCore.CSSValue? {
         let id = identId(cursor, index, end)
         if id == UInt16(WebCore.CSSValueNormal.rawValue) || isTimelineRangeName(id) {
@@ -8526,34 +8557,47 @@ private func isTimelineRangeName(_ id: UInt16) -> Bool {
 /// consumes, as values rather than as `CSSPrimitiveValueResolver`'s template arguments. The generated consumers
 /// (step 2) write one per reference term.
 struct PropertyPrimitive {
+    /// The `CSSPropertyParserOptions` a calc() is parsed under, as bits: the C++ struct is built only on the calc()
+    /// path, since one carried here is spilled to the stack on every call (`primitiveAt` takes it by reference).
+    struct CalcOptions: OptionSet {
+        let rawValue: UInt8
+        static let standardMode = CalcOptions(rawValue: 1 << 0) // `.overrideParserMode = HTMLStandardMode`
+        static let forbidUnitlessZeroLength = CalcOptions(rawValue: 1 << 1)
+        static let allowUnitlessZeroAngle = CalcOptions(rawValue: 1 << 2)
+        static let allowAnchor = CalcOptions(rawValue: 1 << 3)
+        static let allowAnchorSize = CalcOptions(rawValue: 1 << 4)
+    }
+
     let category: WebCore.CSS.Category
     var min = -Double.infinity
     var max = Double.infinity
-    /// What a calc() is parsed under. A numeric token reads `unitlessZeroAngle` here; the rest of its options are
-    /// already in the caller's `flags` and `parserMode`.
-    var options = WebCore.CSSPropertyParserOptions()
+    /// What a calc() is parsed under. A numeric token reads `allowUnitlessZeroAngle` and `forbidUnitlessZeroLength`
+    /// here; the rest of its options are already in the caller's `flags` and `parserMode`.
+    var options: CalcOptions = []
     /// `consumePercentageDividedBy100OrNumber`: `category` is `.Number`, and a `<percentage>` is accepted as its value / 100.
     var percentageDividedBy100OrNumber = false
 
     static var LengthPercentage: Self { Self(category: .LengthPercentage) }
     static var LengthPercentageNonnegative: Self { Self(category: .LengthPercentage, min: 0) }
     /// Stroke-dasharray's `{ .overrideParserMode = HTMLStandardMode, .unitlessZeroLength = Forbid }`.
-    static var StrokeDashLengthPercentage: Self {
-        var primitive = Self(category: .LengthPercentage, min: 0)
-        primitive.options.overrideParserMode = .init(WebCore.HTMLStandardMode)
-        primitive.options.unitlessZeroLength = .Forbid
-        return primitive
-    }
+    static var StrokeDashLengthPercentage: Self { Self(category: .LengthPercentage, min: 0, options: [.standardMode, .forbidUnitlessZeroLength]) }
     static var Length: Self { Self(category: .Length) }
     static var Number: Self { Self(category: .Number) }
     static var NumberNonnegative: Self { Self(category: .Number, min: 0) }
     static var Angle: Self { Self(category: .Angle) }
-    static var AngleOrUnitlessZero: Self {
-        var primitive = Self(category: .Angle)
-        primitive.options.unitlessZeroAngle = .Allow
-        return primitive
-    }
+    static var AngleOrUnitlessZero: Self { Self(category: .Angle, options: .allowUnitlessZeroAngle) }
     static var PercentageDividedBy100OrNumber: Self { Self(category: .Number, percentageDividedBy100OrNumber: true) }
+
+    /// The C++ options for `primitiveAt`.
+    var cssPropertyParserOptions: WebCore.CSSPropertyParserOptions {
+        var result = WebCore.CSSPropertyParserOptions()
+        if options.contains(.standardMode) { result.overrideParserMode = .init(WebCore.HTMLStandardMode) }
+        if options.contains(.forbidUnitlessZeroLength) { result.unitlessZeroLength = .Forbid }
+        if options.contains(.allowUnitlessZeroAngle) { result.unitlessZeroAngle = .Allow }
+        if options.contains(.allowAnchor) { result.anchorPolicy = .Allow }
+        if options.contains(.allowAnchorSize) { result.anchorSizePolicy = .Allow }
+        return result
+    }
 }
 
 extension PropertyPrimitive {
@@ -8561,11 +8605,12 @@ extension PropertyPrimitive {
     /// process-css-properties.py writes them.
     init(_ category: WebCore.CSS.Category, min: Double = -.infinity, max: Double = .infinity, forbidUnitlessZeroLength: Bool = false,
         allowUnitlessZeroAngle: Bool = false, allowAnchor: Bool = false, allowAnchorSize: Bool = false, percentageDividedBy100OrNumber: Bool = false) {
-        self.init(category: category, min: min, max: max, percentageDividedBy100OrNumber: percentageDividedBy100OrNumber)
-        if forbidUnitlessZeroLength { options.unitlessZeroLength = .Forbid }
-        if allowUnitlessZeroAngle { options.unitlessZeroAngle = .Allow }
-        if allowAnchor { options.anchorPolicy = .Allow }
-        if allowAnchorSize { options.anchorSizePolicy = .Allow }
+        var options: CalcOptions = []
+        if forbidUnitlessZeroLength { options.insert(.forbidUnitlessZeroLength) }
+        if allowUnitlessZeroAngle { options.insert(.allowUnitlessZeroAngle) }
+        if allowAnchor { options.insert(.allowAnchor) }
+        if allowAnchorSize { options.insert(.allowAnchorSize) }
+        self.init(category: category, min: min, max: max, options: options, percentageDividedBy100OrNumber: percentageDividedBy100OrNumber)
     }
 }
 
