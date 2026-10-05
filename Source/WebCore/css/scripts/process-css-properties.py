@@ -10008,6 +10008,16 @@ SWIFT_OVERRIDE_FUNCTIONS = {
     'consumeTranslate3dFunction': 'translate3dFunction',
 }
 
+# The function name each override consumes, so a `MatchOne` of functions can dispatch on it.
+SWIFT_OVERRIDE_FUNCTION_NAMES = {
+    'consumeRotate3dFunction': 'WebCore.CSSValueRotate3d',
+    'consumeTranslateFunction': 'WebCore.CSSValueTranslate',
+    'consumeTranslate3dFunction': 'WebCore.CSSValueTranslate3d',
+}
+
+# The most arguments `CSSFunctionValue::create` takes as `Ref<CSSValue>&&` operands.
+SWIFT_FUNCTION_VALUE_REF_OVERLOADS = 4
+
 
 class SwiftGenerationUnsupported(Exception):
     pass
@@ -10101,6 +10111,9 @@ class SwiftConsumerGenerator:
                 bounded.append(subterm)
             else:
                 raise SwiftGenerationUnsupported(f"term '{subterm}' ({type(subterm).__name__}) in '{term}'")
+        dispatch = self._function_name_dispatch(term, name, references, functions) if not (fast_keywords or keywords or unbounded or bounded) else None
+        if dispatch:
+            return dispatch
         alternatives = []
         if fast_keywords:
             alternatives.append(self._keywords(fast_keywords, self._new_name(), ' | '.join(map(str, fast_keywords))))
@@ -10110,6 +10123,28 @@ class SwiftConsumerGenerator:
             alternatives.append(self._value_method(subterm))
         body = [f'if let value = {alternative}() {{ return value }}' for alternative in alternatives[:-1]]
         body.append(f'return {alternatives[-1]}()')
+        return self._add(name, str(term), 'WebCore.CSSValue?', body)
+
+    # A `MatchOne` whose every alternative is a function (or an override function) reads the function token's name
+    # once and switches on it, instead of trying each alternative in turn: a function token has one name, so at most
+    # one alternative can match it, and the names are checked to be distinct. C++ tries them in order, each a
+    # `functionId()` comparison, and the overrides an out-of-line call apiece.
+    def _function_name_dispatch(self, term, name, references, functions):
+        cases = []
+        for subterm in references:
+            if subterm.settings_flag or subterm.override_function not in SWIFT_OVERRIDE_FUNCTION_NAMES:
+                return None
+            cases.append((SWIFT_OVERRIDE_FUNCTION_NAMES[subterm.override_function], subterm))
+        for subterm in functions:
+            if subterm.settings_flag:
+                return None
+            cases.append((swift_value_id(subterm.name.id), subterm))
+        if len(cases) < 2 or len({value_id for value_id, _ in cases}) != len(cases):
+            return None
+        body = ['switch identId(cursor, index, end, WebCore.FunctionToken) {']
+        for value_id, subterm in cases:
+            body.append(f'case UInt16({value_id}.rawValue): return {self._value_method(subterm)}()')
+        body += ['default: return nil', '}']
         return self._add(name, str(term), 'WebCore.CSSValue?', body)
 
     def _keywords(self, keyword_terms, name, comment):
@@ -10171,7 +10206,9 @@ class SwiftConsumerGenerator:
             raise SwiftGenerationUnsupported(f"settings flag on '{term}'")
         parameters = term.parameter_group_term
         arguments_name = f'{name}_arguments'
-        if isinstance(parameters, (UnboundedRepetitionTerm, BoundedRepetitionTerm)):
+        if self._has_few_arguments(parameters):
+            body = self._few_arguments_body(parameters)
+        elif isinstance(parameters, (UnboundedRepetitionTerm, BoundedRepetitionTerm)):
             # The list is built in this method, not returned from another as a `CSSValueListBuilder?`, whose
             # move and destruction are C++ calls.
             body = self._repetition_body(parameters, into_builder=True) + [
@@ -10192,6 +10229,41 @@ class SwiftConsumerGenerator:
         # `function` checks the name and `args.atEnd()`; C++ reads the arguments however few there are.
         return self._add(name, str(term), 'WebCore.CSSValue?',
             [f'function({swift_value_id(term.name.id)}, requireArguments: false) {{ $0.{arguments_name}($1) }}'])
+
+    @staticmethod
+    def _has_few_arguments(parameters):
+        return (isinstance(parameters, BoundedRepetitionTerm) and not parameters.settings_flag and parameters.separator == ','
+            and 1 <= parameters.min <= parameters.max <= SWIFT_FUNCTION_VALUE_REF_OVERLOADS)
+
+    # A comma list of at most `SWIFT_FUNCTION_VALUE_REF_OVERLOADS` arguments, as locals passed to `CSSFunctionValue::create`'s
+    # `Ref` overloads. No `CSSValueListBuilder` is built, so there is no `Vector` to move into the by-value parameter
+    # and destroy twice: three C++ calls per function that thin LTO does not inline into the Swift caller. As the
+    # loop does, every comma-separated item is read before more than `max` is rejected, so a comma after the last
+    # allowed item fails the function.
+    def _few_arguments_body(self, term):
+        item = self._value_method(term.repeated_term)
+        body = [f'// {term}']
+        for i in range(term.min):
+            separator = 'consumeComma(), ' if i else ''
+            body.append(f'guard {separator}let a{i} = {item}() else {{ return nil }}')
+        for i in range(term.min, term.max):
+            body.append(f'var a{i}: WebCore.CSSValue? = nil')
+        indent = ''
+        for i in range(term.min, term.max):
+            body += [f'{indent}if consumeComma() {{', f'{indent}    guard let item = {item}() else {{ return nil }}', f'{indent}    a{i} = item']
+            indent += '    '
+        body.append(f'{indent}if consumeComma() {{ return nil }}')
+        for i in reversed(range(term.min, term.max)):
+            indent = indent[:-4]
+            body.append(f'{indent}}}')
+        def create(count):
+            operands = ', '.join(f'consuming: RefCSSValue(a{i})' for i in range(count))
+            return f'var value = WebCore.CSSFunctionValue.create(name, {operands}); return value.leakRef()'
+        for count in range(term.max, term.min, -1):
+            bindings = ', '.join(f'let a{i}' for i in range(term.min, count))
+            body.append(f'if {bindings} {{ {create(count)} }}')
+        body.append(create(term.min))
+        return body
 
     def _repetition(self, term, name, *, into_builder):
         assert not into_builder

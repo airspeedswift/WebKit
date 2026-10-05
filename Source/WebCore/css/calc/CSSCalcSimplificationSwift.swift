@@ -8366,7 +8366,8 @@ struct PropertyParser {
         default:
             // `consumePercentageDividedBy100OrNumber` makes a `<percentage>` a `<number>`.
             let resolved = category == .Percentage ? result.value / 100 : result.value
-            var value = WebCore.CSSPrimitiveValue.create(resolved, .Number)
+            // The `<number>` overload: the unit is known, so `create(double, CSSUnitType)`'s unit switch is skipped.
+            var value = WebCore.CSSPrimitiveValue.create(resolved)
             number = resolved
             return value.leakRef()
         }
