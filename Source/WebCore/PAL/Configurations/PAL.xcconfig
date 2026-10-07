@@ -30,7 +30,11 @@ GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) $(inherited) $(WK_USE_SWIFT_TEXT
 // since WebCore force-loads PAL and would otherwise carry the unused Swift decoder.
 WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES = $(WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES_$(WK_USE_SWIFT_TEXT_CODEC_UTF8));
 WK_USE_SWIFT_TEXT_CODEC_UTF8_DEFINES_YES = USE_SWIFT_TEXT_CODEC_UTF8=1;
-SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_USE_SWIFT_TEXT_CODEC_UTF8_CONDITIONS_$(WK_USE_SWIFT_TEXT_CODEC_UTF8));
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_USE_SWIFT_TEXT_CODEC_UTF8_CONDITIONS_$(WK_USE_SWIFT_TEXT_CODEC_UTF8)) $(WK_SWIFT_SIMD_CONDITIONS);
+// PROTOTYPE: the UTF-8 decoder's table lookup (TextCodecUTF8SIMD.swift) uses PSHUFB on x86_64 only when
+// told SSSE3 is available; every x86_64 Mac this builds for has it. BuiltinModule (OTHER_SWIFT_FLAGS)
+// is for the same file, until the standard library has these operations.
+WK_SWIFT_SIMD_CONDITIONS[arch=x86_64] = HAVE_SSSE3;
 WK_USE_SWIFT_TEXT_CODEC_UTF8_CONDITIONS_YES = USE_SWIFT_TEXT_CODEC_UTF8;
 
 FRAMEWORK_SEARCH_PATHS[sdk=iphone*] = $(FRAMEWORK_SEARCH_PATHS_ios_$(CONFIGURATION));
@@ -80,7 +84,7 @@ SWIFT_LIBRARY_LEVEL = spi;
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
 
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -enable-experimental-feature SafeInteropWrappers -enable-experimental-feature Lifetimes -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal;
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -enable-experimental-feature SafeInteropWrappers -enable-experimental-feature Lifetimes -enable-experimental-feature BuiltinModule -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal;
 
 _SWIFT_EXPLICIT_MODULES_ALLOW_CXX_INTEROP = YES;
 SWIFT_INSTALL_MODULE_FOR_DEPLOYMENT = YES;

@@ -310,6 +310,147 @@ private enum ChunkOutcome {
     case illFormed(consumed: Int, produced: Int)
 }
 
+// Splits 16 bytes into the 8 bytes at even offsets and the 8 at odd offsets. Written lane by lane
+// with literal indices, which every target lowers to one or two shuffles (uzp1/uzp2, pshufb or
+// pack); the vector-subscript spelling becomes a lane loop.
+@inline(always)
+private func deinterleave(_ v: SIMD16<UInt8>) -> (even: SIMD8<UInt8>, odd: SIMD8<UInt8>) {
+    (SIMD8(v[0], v[2], v[4], v[6], v[8], v[10], v[12], v[14]),
+     SIMD8(v[1], v[3], v[5], v[7], v[9], v[11], v[13], v[15]))
+}
+
+// Zero in every lane where `leads` is in `0xC2 ..< 0xC2 + leadCount` and `continuations` is a
+// continuation byte, and at least `leadCount` in any other: a bad continuation byte sets bit 6 or
+// 7, which no in-range lead offset has. So one maximum tests sixteen bytes.
+@inline(always)
+private func twoByteBlockIsWellFormed(_ leads: SIMD8<UInt8>, _ continuations: SIMD8<UInt8>, leadCount: UInt8) -> Bool {
+    ((leads &- 0xC2) | ((continuations & 0xC0) ^ 0x80)).max() < leadCount
+}
+
+// Decodes 16-byte blocks that are exactly eight two-byte sequences, from `index`, and returns how
+// many bytes it consumed (twice the characters it produced); it can return 0. `run` bounds both
+// views, as in `widenASCIIRun`, so the loop carries one bound. The callers try it only when the
+// next character is two-byte too, and keep it out of line so the per-character loops do not pay
+// for its registers.
+@inline(never)
+private func decodeTwoByteBlocksNarrow(
+    _ sourceBytes: RawSpan,
+    from index: Int,
+    count run: Int,
+    into output: inout MutableSpan<UInt8>,
+    at produced: Int
+) -> Int {
+    let sourceRun = sourceBytes.extracting(index..<(index &+ run))
+    var outputBytes = output.mutableBytes
+    var outputRun = outputBytes.extracting(produced..<(produced &+ (run &>> 1)))
+    var offset = 0
+    while offset &+ 16 <= run {
+        let (leads, continuations) = deinterleave(sourceRun.load(fromByteOffset: offset, as: SIMD16<UInt8>.self))
+        // Only C2 and C3 lead Latin-1 characters.
+        if !twoByteBlockIsWellFormed(leads, continuations, leadCount: 2) { break }
+        outputRun.storeBytes(of: (leads &<< 6) | (continuations & 0x3F), toByteOffset: offset &>> 1, as: SIMD8<UInt8>.self)
+        offset &+= 16
+    }
+    return offset
+}
+
+
+// MARK: - Uniform block runs (wide)
+//
+// Built only from operations that lower well on every target: loads, shifts, bitwise operations,
+// widening, lane-literal picks from loaded vectors and max reductions. SIMDMask comparisons are
+// avoided (they lower to a per-lane loop through the stack): a lane mask is the sign bit of a byte
+// spread by an arithmetic shift. Blocks of mixed lengths are left to the per-character loop: a
+// portable compaction (there is no portable dynamic shuffle) lowered to more instructions than
+// that loop spends on them.
+
+// 0xFF in each lane whose bit 7 is set, else 0.
+@inline(always)
+private func signMask(_ x: SIMD16<UInt8>) -> SIMD16<UInt8> {
+    SIMD16<UInt8>(truncatingIfNeeded: SIMD16<Int8>(truncatingIfNeeded: x) &>> 7)
+}
+
+// 0xFF in each lane that is zero, else 0.
+@inline(always)
+private func zeroMask(_ x: SIMD16<UInt8>) -> SIMD16<UInt8> { ~signMask(x | (0 &- x)) }
+
+@inline(always)
+private func continuationMask(_ x: SIMD16<UInt8>) -> SIMD16<UInt8> { signMask(x & ~(x &<< 1)) }
+// 11xxxxxx, 111xxxxx and 1111xxxx.
+@inline(always)
+private func leadMask(_ x: SIMD16<UInt8>) -> SIMD16<UInt8> { signMask(x & (x &<< 1)) }
+@inline(always)
+private func lead34Mask(_ x: SIMD16<UInt8>) -> SIMD16<UInt8> { signMask(x & (x &<< 1) & (x &<< 2)) }
+@inline(always)
+private func widen(_ x: SIMD8<UInt8>) -> SIMD8<UInt16> { SIMD8<UInt16>(truncatingIfNeeded: x) }
+
+// The continuation-byte lanes of a block of six three-byte or eight two-byte characters. Globals,
+// not literals, so the optimizer cannot see their lanes (see `decodeMixedBlocksWide`).
+private let threeByteContinuationPattern = SIMD16<UInt8>(0, 0xFF, 0xFF, 0, 0xFF, 0xFF, 0, 0xFF, 0xFF, 0, 0xFF, 0xFF, 0, 0xFF, 0xFF, 0)
+private let twoByteContinuationPattern = SIMD16<UInt8>(0, 0xFF, 0, 0xFF, 0, 0xFF, 0, 0xFF, 0, 0xFF, 0, 0xFF, 0, 0xFF, 0, 0xFF)
+
+// Decodes runs of 18-byte blocks that are six three-byte characters (dense CJK) and 16-byte
+// blocks that are eight two-byte characters, from `index`, and returns the bytes consumed and code
+// units produced. It stops at the first block that is neither, and near the end of `run`, leaving
+// the rest to the per-character loop. `run` bounds both views as in `widenASCIIRun`.
+@inline(never)
+private func decodeUniformBlocksWide(
+    _ sourceBytes: RawSpan,
+    from index: Int,
+    count run: Int,
+    into output: inout MutableSpan<UInt16>,
+    at produced: Int
+) -> (consumed: Int, produced: Int) {
+    let sourceRun = sourceBytes.extracting(index..<(index &+ run))
+    var outputBytes = output.mutableBytes
+    var outputRun = outputBytes.extracting((produced &* 2)..<((produced &+ run) &* 2))
+    // Read once per call from globals: as literals, LLVM specializes each lane of an operation
+    // with them (their lanes differ) and then computes the lanes in scalar code.
+    let threeByteContinuations = threeByteContinuationPattern
+    let twoByteContinuations = twoByteContinuationPattern
+    var offset = 0
+    var units = 0
+    while true {
+        let start = offset
+        // Six three-byte characters, leads at 0, 3, ..., 15: the continuation bytes are where those
+        // leads put them (0/0xFF lanes compared by subtraction), the leads are E0-EF and every lead
+        // has its continuation bytes (the last one's follow the block), and the second bytes after
+        // E0 and ED are in range. Each block reads 18 bytes, through the +2 load.
+        while offset &+ 18 <= run {
+            let v = sourceRun.load(fromByteOffset: offset, as: SIMD16<UInt8>.self)
+            let n1 = sourceRun.load(fromByteOffset: offset &+ 1, as: SIMD16<UInt8>.self)
+            let n2 = sourceRun.load(fromByteOffset: offset &+ 2, as: SIMD16<UInt8>.self)
+            let continuation = continuationMask(v)
+            let secondHigh = signMask(n1 &<< 2)
+            let three = (continuation &- threeByteContinuations) | (((v ^ 0xE0) & 0xF0) & ~continuation)
+                | (leadMask(v) & ~continuationMask(n1)) | (lead34Mask(v) & ~continuationMask(n2))
+                | (zeroMask(v ^ 0xE0) & ~secondHigh) | (zeroMask(v ^ 0xED) & secondHigh)
+            if three.max() != 0 { break }
+            // Lanes 6 and 7 are padding, stored past the units and overwritten: real lanes, since a
+            // literal lane makes LLVM compute the others in scalar code.
+            let l = widen(SIMD8(v[0], v[3], v[6], v[9], v[12], v[15], v[1], v[2]))
+            let c1 = widen(SIMD8(n1[0], n1[3], n1[6], n1[9], n1[12], n1[15], n1[1], n1[2]))
+            let c2 = widen(SIMD8(n2[0], n2[3], n2[6], n2[9], n2[12], n2[15], n2[1], n2[2]))
+            outputRun.storeBytes(of: ((l & 0x0F) &<< 12) | ((c1 & 0x3F) &<< 6) | (c2 & 0x3F), toByteOffset: units &* 2, as: SIMD8<UInt16>.self)
+            units &+= 6
+            offset &+= 18
+        }
+        // Eight two-byte characters: C2-DF at the even lanes, continuation bytes at the odd.
+        while offset &+ 16 <= run {
+            let v = sourceRun.load(fromByteOffset: offset, as: SIMD16<UInt8>.self)
+            let continuation = continuationMask(v)
+            let two = (continuation &- twoByteContinuations) | ((((v ^ 0xC0) & 0xE0) | zeroMask(v & 0x1E)) & ~continuation)
+            if two.max() != 0 { break }
+            let (leads, continuations) = deinterleave(v)
+            outputRun.storeBytes(of: (widen(leads & 0x1F) &<< 6) | widen(continuations & 0x3F), toByteOffset: units &* 2, as: SIMD8<UInt16>.self)
+            units &+= 8
+            offset &+= 16
+        }
+        if offset == start { break }
+    }
+    return (offset, units)
+}
+
 // Out of line so that its tests are not hoisted into `decodeChunk`'s per-character path, which costs
 // 12.5% on Latin-1 input. It runs at most once per call.
 @inline(never)
@@ -368,6 +509,16 @@ private func decodeChunk(
                 // and re-enters this block. The bytes stored past `offset` are overwritten, because
                 // output is written in order from `produced`.
                 var offset = 0
+                // 32 bytes per iteration while the run is ASCII; the word loop below finds the first
+                // non-ASCII byte of the block that ends this, and finishes the tail.
+                while offset &+ 32 <= run {
+                    let low = sourceRun.load(fromByteOffset: offset, as: SIMD16<UInt8>.self)
+                    let high = sourceRun.load(fromByteOffset: offset &+ 16, as: SIMD16<UInt8>.self)
+                    if (low | high).max() >= 0x80 { break }
+                    outputRun.storeBytes(of: low, toByteOffset: offset, as: SIMD16<UInt8>.self)
+                    outputRun.storeBytes(of: high, toByteOffset: offset &+ 16, as: SIMD16<UInt8>.self)
+                    offset &+= 32
+                }
                 while offset &+ 8 <= run {
                     let word = sourceRun.load(fromByteOffset: offset, as: UInt64.self)
                     outputRun.storeBytes(of: word, toByteOffset: offset, as: UInt64.self)
@@ -401,6 +552,17 @@ private func decodeChunk(
         output[produced] = UInt8(truncatingIfNeeded: twoByteScalar(firstByte, secondByte))
         produced += 1
         index += 2
+
+        // A second two-byte character in a row: decode eight per block while the input is exactly
+        // that. Tested after the first, so an isolated one pays only the test of the byte the loop
+        // reads next anyway.
+        if end &- index >= 16 && source[index] & 0xE0 == 0xC0 {
+            let blocks = decodeTwoByteBlocksNarrow(
+                sourceBytes, from: index, count: min(end &- index, (output.count &- produced) &* 2),
+                into: &output, at: produced)
+            index &+= blocks
+            produced &+= blocks &>> 1
+        }
     }
 
     return .complete(consumed: index, produced: produced)
@@ -429,6 +591,17 @@ private func widenASCIIRun(
     var outputBytes = output.mutableBytes
     var outputRun = outputBytes.extracting((produced &* 2)..<((produced &+ run) &* 2))
     var offset = 0
+    while offset &+ 32 <= run {
+        let low = sourceRun.load(fromByteOffset: offset, as: SIMD16<UInt8>.self)
+        let high = sourceRun.load(fromByteOffset: offset &+ 16, as: SIMD16<UInt8>.self)
+        if (low | high).max() >= 0x80 { break }
+        let base = offset &* 2
+        outputRun.storeBytes(of: SIMD8<UInt16>(truncatingIfNeeded: low.lowHalf), toByteOffset: base, as: SIMD8<UInt16>.self)
+        outputRun.storeBytes(of: SIMD8<UInt16>(truncatingIfNeeded: low.highHalf), toByteOffset: base &+ 16, as: SIMD8<UInt16>.self)
+        outputRun.storeBytes(of: SIMD8<UInt16>(truncatingIfNeeded: high.lowHalf), toByteOffset: base &+ 32, as: SIMD8<UInt16>.self)
+        outputRun.storeBytes(of: SIMD8<UInt16>(truncatingIfNeeded: high.highHalf), toByteOffset: base &+ 48, as: SIMD8<UInt16>.self)
+        offset &+= 32
+    }
     while offset &+ 8 <= run {
         // Lane `i` is byte `i` whatever the byte order, and the widened lanes are stored as native
         // UInt16, which is what `output` holds.
@@ -466,6 +639,11 @@ private func decodeWideChunk(
     var produced = startProduced
     let end = source.count
     let capacity = output.count
+    // `decodeUniformBlocksWide` is not tried again before `uniformRetry` after a call that decoded
+    // nothing, and the distance doubles with each such call, so text of mixed lengths (Cyrillic words
+    // between ASCII spaces) almost never pays for it. A call that decodes something resets it.
+    var uniformRetry = 0
+    var uniformBackoff = 64
 
     // One slot per character, not two: the destination has a slot per input byte and no character
     // produces more code units than it consumes bytes, so the surrogate pair always has room.
@@ -512,6 +690,28 @@ private func decodeWideChunk(
             output[produced] = UInt16(truncatingIfNeeded: twoByteScalar(firstByte, secondByte))
             produced += 1
             index &+= 2
+            // A second two-byte character in a row: decode eight per block while the input is exactly
+            // that. Tested after the first, so an isolated one pays only the test of the byte the loop
+            // reads next anyway.
+            if remaining >= 18 && index >= uniformRetry && source[index] >= 0xC2 {
+                var blocks = decodeUniformBlocksWide(
+                    sourceBytes, from: index, count: min(remaining &- 2, capacity &- produced),
+                    into: &output, at: produced)
+                // Not uniform from the start: lengths are mixed, so the table-driven transcoder.
+                if blocks.consumed == 0 && index >= 3 {
+                    blocks = transcodeUTF8BlocksToUTF16(
+                        sourceBytes, from: index, count: min(remaining &- 2, capacity &- produced),
+                        into: &output, at: produced)
+                }
+                index &+= blocks.consumed
+                produced &+= blocks.produced
+                if blocks.consumed == 0 {
+                    uniformRetry = index &+ uniformBackoff
+                    uniformBackoff = min(uniformBackoff &* 2, 4096)
+                } else {
+                    uniformBackoff = 64
+                }
+            }
             continue
         }
 
@@ -536,6 +736,24 @@ private func decodeWideChunk(
             output[produced] = UInt16(truncatingIfNeeded: threeByteScalar(firstByte, secondByte, thirdByte))
             produced += 1
             index &+= 3
+            if remaining >= 19 && index >= uniformRetry && source[index] >= 0xC2 {
+                var blocks = decodeUniformBlocksWide(
+                    sourceBytes, from: index, count: min(remaining &- 3, capacity &- produced),
+                    into: &output, at: produced)
+                if blocks.consumed == 0 {
+                    blocks = transcodeUTF8BlocksToUTF16(
+                        sourceBytes, from: index, count: min(remaining &- 3, capacity &- produced),
+                        into: &output, at: produced)
+                }
+                index &+= blocks.consumed
+                produced &+= blocks.produced
+                if blocks.consumed == 0 {
+                    uniformRetry = index &+ uniformBackoff
+                    uniformBackoff = min(uniformBackoff &* 2, 4096)
+                } else {
+                    uniformBackoff = 64
+                }
+            }
             continue
         }
 
@@ -568,6 +786,19 @@ private func decodeWideChunk(
             // mixed input.
             produced += appendSurrogatePair(fourByteScalar(firstByte, secondByte, thirdByte, fourthByte), to: &output, at: produced)
             index &+= 4
+            if remaining >= 20 && index >= uniformRetry && source[index] >= 0xC2 {
+                let blocks = transcodeUTF8BlocksToUTF16(
+                    sourceBytes, from: index, count: min(remaining &- 4, capacity &- produced),
+                    into: &output, at: produced)
+                index &+= blocks.consumed
+                produced &+= blocks.produced
+                if blocks.consumed == 0 {
+                    uniformRetry = index &+ uniformBackoff
+                    uniformBackoff = min(uniformBackoff &* 2, 4096)
+                } else {
+                    uniformBackoff = 64
+                }
+            }
             continue
         }
 
