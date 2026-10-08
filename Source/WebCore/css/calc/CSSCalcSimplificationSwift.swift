@@ -4010,7 +4010,7 @@ private struct CalcToken {
 /// `calc-mix()` weight, an `<anchor-element>`).
 ///
 /// Reading the C++ token vector in place would need a bounds-carrying view of C++ storage
-/// (rdar://186723514). A Swift-owned buffer that C++ fills through a `__counted_by` + `noescape`
+/// (rdar://186723514). A Swift-owned buffer that C++ fills through a `noescape` `std::span`
 /// parameter needs none.
 ///
 /// `~Escapable` because `tokens` is a `Span` over the caller's stack buffer.

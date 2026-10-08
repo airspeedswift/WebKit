@@ -509,19 +509,15 @@ static CSSSwiftDoubleScan swiftColorParseCSSNumber(std::span<const CharacterType
     return CSSSwiftDoubleScan { *number, 1 };
 }
 
-// Both annotations are repeated on each definition because `__counted_by` is part of the
-// function's type: a plain pointer parameter is a "conflicting types" error.
-//
-// unsafeMakeSpan rather than std::span's two-argument constructor, which
-// -Wunsafe-buffer-usage-in-container rejects without consulting `__counted_by`.
-CSSSwiftDoubleScan cssSwiftParseCSSNumber8(const Latin1Character *__counted_by(length) characters __attribute__((noescape)), size_t length)
+// `noescape` is repeated on each definition because clang makes it part of the function's type.
+CSSSwiftDoubleScan cssSwiftParseCSSNumber8(std::span<const Latin1Character> characters __attribute__((noescape)))
 {
-    return swiftColorParseCSSNumber(unsafeMakeSpan(characters, length));
+    return swiftColorParseCSSNumber(characters);
 }
 
-CSSSwiftDoubleScan cssSwiftParseCSSNumber16(const char16_t *__counted_by(length) characters __attribute__((noescape)), size_t length)
+CSSSwiftDoubleScan cssSwiftParseCSSNumber16(std::span<const char16_t> characters __attribute__((noescape)))
 {
-    return swiftColorParseCSSNumber(unsafeMakeSpan(characters, length));
+    return swiftColorParseCSSNumber(characters);
 }
 
 #if !CSS_CPP_COLOR_FAST_PATHS_COMPILED_IN
@@ -783,12 +779,11 @@ static RefPtr<CSSValue> parseColor(StringView string, const CSSParserContext& co
     return nullptr;
 }
 
-// The named-color lookup for the Swift scan. The `__counted_by` plus `noescape` parameter is what
-// the importer turns into a `Span`; see `cssSwiftParseCSSNumber8` for why both are repeated here.
+// The named-color lookup for the Swift scan.
 #if USE(SWIFT_CSS)
-CSSSwiftColor cssSwiftFindNamedColor(const Latin1Character *__counted_by(length) name __attribute__((noescape)), size_t length)
+CSSSwiftColor cssSwiftFindNamedColor(std::span<const Latin1Character> name __attribute__((noescape)))
 {
-    auto* namedColor = findColor(byteCast<char>(name), static_cast<unsigned>(length));
+    auto* namedColor = findColor(byteCast<char>(name.data()), static_cast<unsigned>(name.size()));
     if (!namedColor)
         return CSSSwiftColor { 0, static_cast<uint8_t>(CSSSwiftColorOutcomeNotAColor) };
     return CSSSwiftColor { namedColor->ARGBValue, static_cast<uint8_t>(CSSSwiftColorOutcomeParsed) };

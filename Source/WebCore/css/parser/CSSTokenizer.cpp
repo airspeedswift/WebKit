@@ -253,17 +253,9 @@ void CSSSwiftTokenSink::finish()
 // would have. Each token's kind was fixed by the Swift factory that built it, so nothing here
 // dispatches on it. charactersToDouble runs here so that rounding matches the C++ scanner.
 //
-// The annotations are repeated on the definition because an unannotated one is a different
-// function. unsafeMakeSpan rather than std::span's two-argument constructor, which
-// -Wunsafe-buffer-usage-in-container rejects without consulting __counted_by.
-bool CSSSwiftTokenSink::takeChunk(
-    const CSSParserTokenBits* __counted_by(tokenCount) tokens __attribute__((noescape)), size_t tokenCount,
-    const char16_t* __counted_by(unitCount) unescapedUnits __attribute__((noescape)), size_t unitCount,
-    const CSSSwiftObserverRecord* __counted_by(recordCount) records __attribute__((noescape)), size_t recordCount)
+// `noescape` is repeated on the definition because clang makes it part of the function's type.
+bool CSSSwiftTokenSink::takeChunk(std::span<const CSSParserTokenBits> tokenBits __attribute__((noescape)), std::span<const char16_t> unescaped __attribute__((noescape)), std::span<const CSSSwiftObserverRecord> observerRecords __attribute__((noescape)))
 {
-    auto tokenBits = unsafeMakeSpan(tokens, tokenCount);
-    auto unescaped = unsafeMakeSpan(unescapedUnits, unitCount);
-    auto observerRecords = unsafeMakeSpan(records, recordCount);
     auto& tokenizer = *m_tokenizer;
     auto& parserTokens = tokenizer.m_tokens;
     unsigned inputLength = tokenizer.m_input.length();
@@ -327,7 +319,7 @@ bool CSSSwiftTokenSink::takeChunk(
             if (!record.isComment)
                 ++recordedTokens;
         }
-        if (recordedTokens != tokenCount) [[unlikely]]
+        if (recordedTokens != tokenBits.size()) [[unlikely]]
             return false;
 
         unsigned tokenIndex = firstTokenIndex;
@@ -340,7 +332,7 @@ bool CSSSwiftTokenSink::takeChunk(
             }
             m_observerOffset = record.end;
         }
-    } else if (recordCount) [[unlikely]] {
+    } else if (!observerRecords.empty()) [[unlikely]] {
         // Records without a wrapper mean Swift ignored wantsObserverRecords().
         return false;
     }

@@ -1830,10 +1830,10 @@ CSSCalcSwiftSymbolResult CSSCalcSwiftParseCursor::lookupSymbol(uint16_t valueID)
     };
 }
 
-void CSSCalcSwiftParseCursor::fillTokenBits(CSSParserTokenBits *__counted_by(count) out __attribute__((noescape)), uint32_t count) const noexcept
+void CSSCalcSwiftParseCursor::fillTokenBits(std::span<CSSParserTokenBits> out __attribute__((noescape))) const noexcept
 {
-    // `subspan` checks `count` against the range under libc++ hardening.
-    std::ranges::transform(m_range.span().subspan(0, count), unsafeMakeSpan(out, count).begin(), &CSSParserToken::bits);
+    // `subspan` checks `out.size()` against the range under libc++ hardening.
+    std::ranges::transform(m_range.span().subspan(0, out.size()), out.begin(), &CSSParserToken::bits);
 }
 
 uint16_t CSSCalcSwiftParseCursor::keywordId(uint32_t index) const noexcept

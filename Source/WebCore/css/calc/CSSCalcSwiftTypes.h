@@ -36,6 +36,7 @@
 #include <WebCore/PlatformExportMacros.h>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <type_traits>
 #include <wtf/Ref.h>
 #include <wtf/RefCounted.h>
@@ -319,7 +320,7 @@ struct SWIFT_SAFE CSSCalcSwiftParseCursor {
     // Includes whitespace tokens, because the grammar looks behind one token.
     uint32_t tokenCount() const noexcept;
 
-    void fillTokenBits(CSSParserTokenBits *__counted_by(count) out __attribute__((noescape)), uint32_t count) const noexcept;
+    void fillTokenBits(std::span<CSSParserTokenBits> out __attribute__((noescape))) const noexcept;
 
     uint16_t keywordId(uint32_t index) const noexcept;
 
