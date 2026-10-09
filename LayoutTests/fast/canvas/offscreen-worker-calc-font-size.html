@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="../../resources/testharness.js"></script>
+<script src="../../resources/testharnessreport.js"></script>
+<script src="resources/offscreen-calc-font-cases.js"></script>
+</head>
+<body>
+<script>
+function checkResults(results)
+{
+    assert_equals(results.length, calcFontCases.length, "every case ran");
+    for (const r of results)
+        assert_equals(r.actual, r.expected, `${r.calcFont} measures as ${r.pxFont} (font now "${r.font}")`);
+}
+
+promise_test(async () => {
+    const worker = new Worker("resources/offscreen-calc-font-worker.js");
+    const results = await new Promise((resolve, reject) => {
+        worker.onmessage = e => resolve(e.data);
+        worker.onerror = e => reject(new Error(e.message || "worker error"));
+        worker.postMessage("RUN");
+    });
+    checkResults(results);
+}, "calc() font sizes on an OffscreenCanvas in a dedicated worker");
+
+test(() => {
+    checkResults(measureCalcFontCases(new OffscreenCanvas(100, 100).getContext("2d")));
+}, "calc() font sizes on an OffscreenCanvas on the main thread");
+
+test(() => {
+    checkResults(measureCalcFontCases(document.createElement("canvas").getContext("2d")));
+}, "calc() font sizes on a canvas element");
+</script>
+</body>
+</html>

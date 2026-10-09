@@ -1,0 +1,42 @@
+<body>
+<p>Ensure setting calc() fonts on worker OffscreenCanvases does not race main thread style resolution on shared style value tables.</p>
+<p>PASS if this test does not crash.</p>
+<div id="container"></div>
+<script>
+    window.testRunner?.waitUntilDone();
+    window.testRunner?.dumpAsText();
+
+    const workerCode = `
+        onmessage = () => {
+            const ctx = new OffscreenCanvas(10, 10).getContext("2d");
+            for (let n = 0; n < 200000; ++n)
+                ctx.font = "calc(" + (50 + (n & 63)) + "% + " + (1 + (n & 7)) + "px) serif";
+            postMessage("done");
+        };
+    `;
+
+    const container = document.getElementById("container");
+    for (let i = 0; i < 200; ++i)
+        container.appendChild(document.createElement("div"));
+
+    let pendingWorkers = 4;
+    for (let i = 0; i < 4; ++i) {
+        const worker = new Worker(URL.createObjectURL(new Blob([workerCode])));
+        worker.onmessage = () => { --pendingWorkers; };
+        worker.postMessage("RUN");
+    }
+
+    let round = 0;
+    function resolveStyle() {
+        for (const child of container.children) {
+            ++round;
+            child.style.width = `calc(${round % 97}% + ${round % 13}px)`;
+        }
+        container.offsetWidth;
+        if (pendingWorkers)
+            requestAnimationFrame(resolveStyle);
+        else
+            window.testRunner?.notifyDone();
+    }
+    requestAnimationFrame(resolveStyle);
+</script>

@@ -1,0 +1,4 @@
+
+PASS calc() font sizes on an OffscreenCanvas in a dedicated worker
+PASS calc() font sizes on an OffscreenCanvas on the main thread
+PASS calc() font sizes on a canvas element

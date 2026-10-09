@@ -1,0 +1,5 @@
+Ensure setting calc() fonts on worker OffscreenCanvases does not race main thread style resolution on shared style value tables.
+
+PASS if this test does not crash.
+
+

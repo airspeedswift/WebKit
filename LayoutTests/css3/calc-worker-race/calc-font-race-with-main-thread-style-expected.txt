@@ -1,3 +1,0 @@
-
-PASS calc() fonts on worker OffscreenCanvases while the main thread resolves calc() styles
-
