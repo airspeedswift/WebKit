@@ -46,9 +46,11 @@ private:
     String decode(std::span<const uint8_t>, bool flush, bool stopOnError, bool& sawError) final;
     Vector<uint8_t> encode(StringView, UnencodableHandling) const final;
 
+#if !USE_SWIFT_TEXT_CODEC_UTF8
     bool handlePartialSequence(std::span<Latin1Character>& destination, std::span<const uint8_t>& source, bool flush);
     void handlePartialSequence(std::span<char16_t>& destination, std::span<const uint8_t>& source, bool flush, bool stopOnError, bool& sawError);
     void LEGACY_NODELETE consumePartialSequenceByte();
+#endif
 
     int m_partialSequenceSize { 0 };
     std::array<uint8_t, U8_MAX_LENGTH> m_partialSequence;

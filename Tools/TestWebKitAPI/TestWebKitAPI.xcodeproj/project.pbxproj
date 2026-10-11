@@ -925,6 +925,7 @@
 				WebCore/TestPlatformStrategies.cpp,
 				WebCore/TextBoundaries.cpp,
 				WebCore/TextCodec.cpp,
+				WebCore/TextCodecUTF8Bench.cpp,
 				WebCore/TextIterator.cpp,
 				WebCore/TextMeasurementCache.cpp,
 				WebCore/TimeRanges.cpp,

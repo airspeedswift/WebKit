@@ -35,13 +35,23 @@
 #include <wtf/text/WTFString.h>
 #include <wtf/unicode/CharacterNames.h>
 
+#if !defined(USE_SWIFT_TEXT_CODEC_UTF8)
+#define USE_SWIFT_TEXT_CODEC_UTF8 0
+#endif
+
+#if USE_SWIFT_TEXT_CODEC_UTF8
+#include "PALSwiftBoundaryTypes.h"
+#endif
+
 namespace PAL {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(TextCodecUTF8);
 
+#if !USE_SWIFT_TEXT_CODEC_UTF8
 using namespace WTF::Unicode;
 
 const int nonCharacter = -1;
+#endif
 
 void TextCodecUTF8::registerEncodingNames(EncodingNameRegistrar registrar)
 {
@@ -71,6 +81,7 @@ void TextCodecUTF8::registerCodecs(TextCodecRegistrar registrar)
     });
 }
 
+#if !USE_SWIFT_TEXT_CODEC_UTF8
 static inline uint8_t LEGACY_NODELETE nonASCIISequenceLength(uint8_t firstByte)
 {
     static constexpr std::array<uint8_t, 256> lengths {
@@ -477,6 +488,53 @@ upConvertTo16Bit:
     }
     return String::adopt(WTF::move(buffer16));
 }
+#endif
+
+#if USE_SWIFT_TEXT_CODEC_UTF8
+String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool stopOnError, bool& sawError)
+{
+    // Each input byte might turn into a character.
+    // That includes all bytes in the partial-sequence buffer because
+    // each byte in an invalid sequence will turn into a replacement character.
+    size_t bufferSize = m_partialSequenceSize + bytes.size();
+    if (bufferSize > std::numeric_limits<unsigned>::max()) {
+        sawError = true;
+        return { };
+    }
+
+    auto adoptDecodedCharacters = [&]<typename CharacterType>(StringBuffer<CharacterType>& buffer, const TextCodecUTF8DecodeResult& result) -> String {
+        RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(result.charactersWritten <= buffer.length());
+        RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(result.state.partialSequenceSize <= m_partialSequence.size());
+        if (result.sawError)
+            sawError = true;
+        m_partialSequence = { result.state.partialSequence0, result.state.partialSequence1, result.state.partialSequence2, result.state.partialSequence3 };
+        m_partialSequenceSize = result.state.partialSequenceSize;
+        m_shouldStripByteOrderMark = result.state.shouldStripByteOrderMark;
+        buffer.shrink(result.charactersWritten);
+        if (buffer.length() > String::MaxLength) {
+            sawError = true;
+            return { };
+        }
+        return String::adopt(WTF::move(buffer));
+    };
+
+    static_assert(std::tuple_size_v<decltype(m_partialSequence)> == 4);
+    TextCodecUTF8DecoderState state { m_partialSequence[0], m_partialSequence[1], m_partialSequence[2], m_partialSequence[3], static_cast<uint8_t>(m_partialSequenceSize), m_shouldStripByteOrderMark };
+    StringBuffer<Latin1Character> buffer(bufferSize);
+    auto result = pal::decodeUTF8ToLatin1(state, bytes, buffer.span(), flush, stopOnError);
+    if (!result.needsUpconvert)
+        return adoptDecodedCharacters(buffer, result);
+
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(result.charactersWritten <= bufferSize);
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(result.bytesRead <= bytes.size());
+    if (result.sawError)
+        sawError = true;
+    StringBuffer<char16_t> buffer16(bufferSize);
+    StringImpl::copyCharacters(buffer16.span(), buffer.span().first(result.charactersWritten));
+    result = pal::decodeUTF8ToUTF16(result.state, bytes.subspan(result.bytesRead), buffer16.span(), result.charactersWritten, flush, stopOnError);
+    return adoptDecodedCharacters(buffer16, result);
+}
+#endif
 
 Vector<uint8_t> TextCodecUTF8::encodeUTF8(StringView string)
 {

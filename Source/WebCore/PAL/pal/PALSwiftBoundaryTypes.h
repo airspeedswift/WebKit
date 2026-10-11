@@ -35,6 +35,7 @@
 // Angle includes, because PAL builds with -fmodules and a quoted include of the same file is a second
 // identity for it, which fails with a redefinition error.
 #include <pal/crypto/CryptoTypes.h>
+#include <pal/text/TextCodecUTF8DecoderTypes.h>
 #include <wtf/Compiler.h>
 #include <wtf/EscapableByteSpan.h>
 

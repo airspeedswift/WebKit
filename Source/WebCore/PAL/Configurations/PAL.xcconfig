@@ -24,7 +24,19 @@
 #include "../../Configurations/FeatureDefines.xcconfig"
 #include "../../../../Configurations/Version.xcconfig"
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) $(inherited);
+// Selects the Swift implementation of TextCodecUTF8::decode (pal/text/TextCodecUTF8.swift) in place of the C++ one.
+// WebCore.xcconfig and this file must set WK_USE_SWIFT_TEXT_CODEC_UTF8 together, because WebCore includes
+// <pal/text/TextCodecUTF8.h>.
+WK_USE_SWIFT_TEXT_CODEC_UTF8 = NO;
+WK_SWIFT_TEXT_CODEC_UTF8_DEFINES_NO = USE_SWIFT_TEXT_CODEC_UTF8=0;
+WK_SWIFT_TEXT_CODEC_UTF8_DEFINES_YES = USE_SWIFT_TEXT_CODEC_UTF8=1;
+WK_SWIFT_TEXT_CODEC_UTF8_CONDITIONS_YES = USE_SWIFT_TEXT_CODEC_UTF8 $(WK_SWIFT_SIMD_CONDITIONS);
+WK_SWIFT_SIMD_CONDITIONS[arch=x86_64] = HAVE_SSSE3;
+// pal/text/SIMDTableLookup.swift uses the Builtin module for its table lookup.
+WK_SWIFT_TEXT_CODEC_UTF8_SWIFT_FLAGS_YES = -enable-experimental-feature BuiltinModule;
+
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) $(WK_SWIFT_TEXT_CODEC_UTF8_DEFINES_$(WK_USE_SWIFT_TEXT_CODEC_UTF8)) $(inherited);
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_SWIFT_TEXT_CODEC_UTF8_CONDITIONS_$(WK_USE_SWIFT_TEXT_CODEC_UTF8));
 
 FRAMEWORK_SEARCH_PATHS[sdk=iphone*] = $(FRAMEWORK_SEARCH_PATHS_ios_$(CONFIGURATION));
 FRAMEWORK_SEARCH_PATHS_ios_Debug = $(BUILT_PRODUCTS_DIR);
@@ -73,7 +85,7 @@ SWIFT_LIBRARY_LEVEL = spi;
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
 
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -enable-experimental-feature Lifetimes -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal;
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -enable-experimental-feature Lifetimes -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal $(WK_SWIFT_TEXT_CODEC_UTF8_SWIFT_FLAGS_$(WK_USE_SWIFT_TEXT_CODEC_UTF8));
 
 _SWIFT_EXPLICIT_MODULES_ALLOW_CXX_INTEROP = YES;
 SWIFT_INSTALL_MODULE_FOR_DEPLOYMENT = YES;
