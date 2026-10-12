@@ -356,7 +356,9 @@ if (LTO_MODE AND COMPILER_IS_CLANG AND NOT MSVC)
     # FIXME: consider passing LTO for Swift (it has never been toggled in Xcode
     # either).
     add_link_options("$<$<NOT:$<LINK_LANGUAGE:Swift>>:-flto=${LTO_MODE}>")
-elseif (LTO_MODE AND COMPILER_IS_CLANG AND MSVC AND NOT DEVELOPER_MODE)
+# WK_OPTIMIZE_IN_DEVELOPER_MODE lets a DEVELOPER_MODE build have LTO and whole-module Swift anyway
+# (see WebKitSwiftFlags.cmake), so it can be compared with a DEVELOPER_MODE build without them.
+elseif (LTO_MODE AND COMPILER_IS_CLANG AND MSVC AND (NOT DEVELOPER_MODE OR WK_OPTIMIZE_IN_DEVELOPER_MODE))
     set(CMAKE_C_FLAGS "-flto=${LTO_MODE} ${CMAKE_C_FLAGS}")
     set(CMAKE_CXX_FLAGS "-flto=${LTO_MODE} ${CMAKE_CXX_FLAGS}")
     set(CMAKE_EXE_LINKER_FLAGS "/opt:lldlto=2 ${CMAKE_EXE_LINKER_FLAGS}")
