@@ -3267,6 +3267,12 @@ list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/NodeName.cpp)
 GENERATE_DOM_NAME_ENUM(Namespace)
 list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/Namespace.cpp)
 
+# Set by WK_USE_SWIFT_HTML_FAST_PATH. HTMLDocumentParserFastPath.cpp then includes WebCore-Swift.h, so it
+# compiles in WebCore_SwiftInterop, after WebCore's Swift module.
+if (WK_USE_SWIFT_HTML_FAST_PATH)
+    list(APPEND WebCore_UNIFIED_SOURCE_EXCLUDES "(^|/)HTMLDocumentParserFastPath\\.cpp( |$)")
+endif ()
+
 WEBKIT_COMPUTE_SOURCES(WebCore)
 
 WEBKIT_DEFINE_SUBTARGET_WITH_PREFIX(WebCore WebCoreJSBindings
@@ -3354,6 +3360,80 @@ if (SWIFT_REQUIRED AND APPLE)
     WEBKIT_SETUP_SWIFT_AND_GENERATE_SWIFT_CPP_INTEROP_HEADER(WebCore WebCore
         "${WebCore_PRIVATE_HEADERS_DIR}"
         "WebCoreSwift-Generated.h")
+elseif (WK_USE_SWIFT_HTML_FAST_PATH)
+    target_sources(WebCore PRIVATE
+        ${WEBCORE_DIR}/SIMDHelpers.swift
+        ${WEBCORE_DIR}/SIMDHighBitMask.swift
+        ${WEBCORE_DIR}/SIMDSaturatingSubtract.swift
+        ${WEBCORE_DIR}/SIMDTableLookup.swift
+        ${WEBCORE_DIR}/html/parser/HTMLFastPathParser.swift
+    )
+
+    # C++ sources that include WebCoreSwift-Generated.h.
+    set(WebCore_SWIFT_INTEROP_SOURCES html/parser/HTMLDocumentParserFastPath.cpp)
+
+    # As in WebCore.xcconfig: the C++ and Swift conditions, and the Builtin module for the vendored
+    # SIMD operations in SIMD*.swift.
+    target_compile_definitions(WebCore PRIVATE
+        "$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:USE_SWIFT_HTML_FAST_PATH=1>")
+    webkit_target_add_swift_options(WebCore
+        "-enable-experimental-feature SafeInteropWrappers"
+        "-enable-experimental-feature BuiltinModule"
+        "-Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib"
+        "-D USE_SWIFT_HTML_FAST_PATH"
+        # Apple applies these to every Swift target; WebCore's Swift is written against them.
+        ${WEBKIT_SWIFT_EXPERIMENTAL_FEATURE_FLAGS}
+        ${WEBKIT_SWIFT_MEMORY_SAFETY_FLAGS}
+        "-Xcc -fmodule-map-file=${WTF_HEADERS_DIR}/module.modulemap"
+        ${WebCore_PLATFORM_SWIFT_CLANG_FLAG_PAIRS}
+    )
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        # HAVE_SSSE3 chooses PSHUFB in SIMDTableLookup.swift; the code generator must be allowed SSSE3
+        # too, or the (LTO) backend cannot select it. nehalem is x86-64-v2 (SSSE3, SSE4.2).
+        webkit_target_add_swift_options(WebCore "-D HAVE_SSSE3" "-target-cpu nehalem")
+    endif ()
+    if (LTO_MODE AND WEBKIT_SWIFT_WHOLE_MODULE)
+        # Bitcode with the ThinLTO summary, so the LTO link optimizes the Swift with its C++ caller.
+        # Not the driver's -lto=llvm-thin, which writes <name>.bc to the working directory because
+        # CMake's output file map has only an "object" entry.
+        webkit_target_add_swift_options(WebCore
+            "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -lto=llvm-${LTO_MODE}>"
+            "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -emit-bc>")
+    endif ()
+
+    # WebCore_Private.HTMLFastPathParserTypes, which HTMLFastPathParser.swift imports. Apple
+    # platforms get it from WebCore_Private.modulemap in the framework.
+    set(_webcore_swift_module_dir "${CMAKE_CURRENT_BINARY_DIR}/SwiftModuleMap")
+    file(WRITE "${_webcore_swift_module_dir}/module.modulemap.in"
+        "module WebCore_Private [system] {\n"
+        "    explicit module HTMLFastPathParserTypes {\n"
+        "        header \"${WEBCORE_DIR}/html/parser/HTMLFastPathParserTypes.h\"\n"
+        "        requires cplusplus\n"
+        "        export *\n"
+        "    }\n"
+        "}\n")
+    configure_file("${_webcore_swift_module_dir}/module.modulemap.in" "${_webcore_swift_module_dir}/module.modulemap" COPYONLY)
+
+    WEBKIT_SETUP_SWIFT_AND_GENERATE_SWIFT_CPP_INTEROP_HEADER(WebCore WebCore
+        "${_webcore_swift_module_dir}"
+        "WebCoreSwift-Generated.h")
+
+    if (WIN32)
+        # WebCore links its Swift objects with the C++ linker, which needs the import libraries of the
+        # Swift runtime those objects auto-link. They are in the SDK, not the toolchain that
+        # -print-target-info describes.
+        cmake_path(CONVERT "$ENV{SDKROOT}" TO_CMAKE_PATH_LIST _swift_sdkroot)
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+            set(_swift_sdk_arch aarch64)
+        else ()
+            set(_swift_sdk_arch x86_64)
+        endif ()
+        set(_swift_sdk_lib_dir "${_swift_sdkroot}/usr/lib/swift/windows/${_swift_sdk_arch}")
+        if (NOT EXISTS "${_swift_sdk_lib_dir}/swiftCore.lib")
+            message(FATAL_ERROR "No swiftCore.lib in ${_swift_sdk_lib_dir}; is SDKROOT set?")
+        endif ()
+        target_link_directories(WebCore PRIVATE "${_swift_sdk_lib_dir}")
+    endif ()
 endif ()
 
 WEBKIT_FRAMEWORK(WebCore)

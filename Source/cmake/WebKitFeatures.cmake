@@ -536,10 +536,12 @@ macro(WEBKIT_OPTION_END)
         endif ()
     endif ()
 
+    option(WK_USE_SWIFT_HTML_FAST_PATH "Scan HTML fragments for the fast-path parser with WebCore's HTMLFastPathParser.swift" OFF)
+
     # A Swift feature still on with a too-old toolchain was requested explicitly
     # (the default declines to auto-enable it), so fail loudly rather than drop it
     # silently. Apple is gated elsewhere; non-Clang is already rejected above.
-    if (NOT APPLE AND COMPILER_IS_CLANG AND ENABLE_BACK_FORWARD_LIST_SWIFT)
+    if (NOT APPLE AND COMPILER_IS_CLANG AND (ENABLE_BACK_FORWARD_LIST_SWIFT OR WK_USE_SWIFT_HTML_FAST_PATH))
         _WEBKIT_DETECT_SWIFT_CXX_INTEROP_SUPPORT(_swift_interop_ok)
         if (NOT _swift_interop_ok)
             message(FATAL_ERROR
@@ -553,7 +555,9 @@ macro(WEBKIT_OPTION_END)
         endif ()
     endif ()
 
-    if (ENABLE_BACK_FORWARD_LIST_SWIFT)
+    # WK_USE_SWIFT_HTML_FAST_PATH is the CMake counterpart of the WebCore.xcconfig setting of the same
+    # name: the HTML fragment fast path scans in WebCore's HTMLFastPathParser.swift.
+    if (ENABLE_BACK_FORWARD_LIST_SWIFT OR WK_USE_SWIFT_HTML_FAST_PATH)
         set(SWIFT_REQUIRED ON)
     else ()
         set(SWIFT_REQUIRED OFF)
