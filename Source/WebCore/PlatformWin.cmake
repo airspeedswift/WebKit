@@ -243,3 +243,35 @@ endif ()
 if (USE_SKIA)
     list(APPEND WebCore_PRIVATE_LIBRARIES ${SHARPYUV_LIBS})
 endif ()
+
+if (WK_USE_SWIFT_HTML_FAST_PATH)
+    # The same amended MSVC STL and WinSDK modulemaps Source/WebKit/PlatformWin.cmake mounts for
+    # WebKit's Swift, which is configured after WebCore. See that file.
+    cmake_path(CONVERT "$ENV{SDKROOT}" TO_CMAKE_PATH_LIST _swift_sdkroot)
+    cmake_path(CONVERT "$ENV{VCToolsInstallDir}" TO_CMAKE_PATH_LIST _vc_tools_dir)
+    set(_sdk_vcruntime_mm "${_swift_sdkroot}/usr/share/vcruntime.modulemap")
+    set(_sdk_winsdk_um_mm "${_swift_sdkroot}/usr/share/winsdk_um.modulemap")
+    if (_swift_sdkroot AND _vc_tools_dir AND EXISTS "${_sdk_vcruntime_mm}")
+        file(GLOB _msvc_internal_headers CONFIGURE_DEPENDS
+            RELATIVE "${_vc_tools_dir}/include"
+            "${_vc_tools_dir}/include/__msvc_*.hpp")
+        execute_process(
+            COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_SOURCE_DIR}/Source/WebKit/Scripts/generate-msvc-stl-modulemap.py"
+                --sdk-modulemap "${_sdk_vcruntime_mm}"
+                --winsdk-um-modulemap "${_sdk_winsdk_um_mm}"
+                --output-dir "${CMAKE_BINARY_DIR}/windows-modulemaps"
+                --headers ${_msvc_internal_headers}
+            OUTPUT_VARIABLE _webcore_win_vfs_overlay
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_VARIABLE _webcore_win_mm_error
+            RESULT_VARIABLE _webcore_win_mm_result)
+        if (NOT _webcore_win_mm_result EQUAL 0)
+            message(FATAL_ERROR "Could not generate the amended MSVC STL modulemap for WebCore's Swift:\n${_webcore_win_mm_error}")
+        endif ()
+        if (_webcore_win_vfs_overlay)
+            list(APPEND WebCore_PLATFORM_SWIFT_CLANG_FLAG_PAIRS "-vfsoverlay ${_webcore_win_vfs_overlay}")
+        endif ()
+    else ()
+        message(FATAL_ERROR "WebCore's Swift needs SDKROOT and VCToolsInstallDir (SDKROOT='$ENV{SDKROOT}', VCToolsInstallDir='$ENV{VCToolsInstallDir}')")
+    endif ()
+endif ()
