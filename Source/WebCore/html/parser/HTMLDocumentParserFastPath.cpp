@@ -65,6 +65,19 @@
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringParsingBuffer.h>
 
+#if !defined(USE_SWIFT_HTML_FAST_PATH)
+#define USE_SWIFT_HTML_FAST_PATH 0
+#endif
+
+#if USE_SWIFT_HTML_FAST_PATH
+#include "HTMLElementFactory.h"
+#include "HTMLFastPathParserTypes.h"
+#include "WebCore-Swift.h"
+#include <wtf/MallocSpan.h>
+#include <wtf/NeverDestroyed.h>
+#include <wtf/Scope.h>
+#endif
+
 class NewlineThenWhitespaceStringsTable {
 public:
     static constexpr unsigned maxSpaceCount = 32;
@@ -103,8 +116,13 @@ unsigned NODELETE maxCachedSetInnerHTMLStringSize()
     return s_maxCachedStringSize;
 }
 
+#if !USE_SWIFT_HTML_FAST_PATH
 template<typename CharacterType>
 class HTMLFastPathParser;
+#else
+template<typename CharacterType>
+static bool parseHTMLFragmentWithSwift(std::span<const CharacterType> source, Document&, ContainerNode& destinationParent, Element& contextElement);
+#endif
 
 
 enum class FragmentReuseResult : uint8_t {
@@ -187,12 +205,18 @@ static FragmentReuseResult cloneCachedPrefixAndParseSuffix(std::span<const Chara
     if (unparsedSuffix.empty())
         return FragmentReuseResult::Success;
 
+#if !USE_SWIFT_HTML_FAST_PATH
     HTMLFastPathParser<CharacterType> parser { unparsedSuffix, destinationParent.document(), destinationParent };
     if (!parser.parse(contextElement))
         return FragmentReuseResult::ParseFailure;
+#else
+    if (!parseHTMLFragmentWithSwift(unparsedSuffix, destinationParent.document(), destinationParent, contextElement))
+        return FragmentReuseResult::ParseFailure;
+#endif
     return FragmentReuseResult::Success;
 }
 
+#if !USE_SWIFT_HTML_FAST_PATH
 // Captures the potential outcomes for fast path html parser.
 enum class HTMLFastPathResult : uint8_t {
     Succeeded,
@@ -251,6 +275,7 @@ template<typename CharacterType> static inline bool NODELETE isCharAfterUnquoted
 {
     return character == ' ' || character == '>' || isASCIIWhitespace(character);
 }
+#endif
 
 #define FOR_EACH_SUPPORTED_TAG(APPLY) \
     APPLY(a, A)                       \
@@ -272,6 +297,7 @@ template<typename CharacterType> static inline bool NODELETE isCharAfterUnquoted
     APPLY(strong, Strong)             \
     APPLY(ul, Ul)
 
+#if !USE_SWIFT_HTML_FAST_PATH
 // This HTML parser is used as a fast-path for setting innerHTML.
 // It is faster than the general parser by only supporting a subset of valid
 // HTML. This way, it can be spec-compliant without following the algorithm
@@ -1117,6 +1143,135 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
         return WTF::move(element);
     }
 };
+#endif
+
+#if USE_SWIFT_HTML_FAST_PATH
+// Always inlined into the Swift scanner, where the empty span each caller passes for the other width drops that path.
+[[clang::always_inline]] uint64_t consumeHTMLEntityForFastPath(HTMLFastPathLatin1Span latin1Source NOESCAPE, HTMLFastPathUTF16Span utf16Source NOESCAPE, char16_t additionalAllowedCharacter, HTMLFastPathDecodedSpan decoded NOESCAPE)
+{
+    auto consume = [&]<typename CharacterType>(std::span<const CharacterType> source) {
+        StringParsingBuffer<CharacterType> buffer { source };
+        auto entity = consumeHTMLEntity(buffer, additionalAllowedCharacter);
+        auto characters = entity.span();
+        for (size_t i = 0; i < 3; ++i)
+            decoded[i] = i < characters.size() ? characters[i] : 0;
+        return static_cast<uint64_t>(source.size() - buffer.lengthRemaining()) << 2 | characters.size();
+    };
+    return latin1Source.empty() ? consume(utf16Source) : consume(latin1Source);
+}
+
+// Output buffers for scanHTMLFragmentForFastPath, kept per thread for reuse while the op buffer holds at most 2^18
+// words (inputs of up to about 128K code units).
+struct HTMLFastPathBuffers {
+    MallocSpan<uint32_t> ops;
+    MallocSpan<char16_t> decoded;
+    bool inUse { false };
+};
+
+static HTMLFastPathBuffers& retainedHTMLFastPathBuffers()
+{
+    static thread_local NeverDestroyed<HTMLFastPathBuffers> buffers;
+    return buffers;
+}
+
+// Indexed by HTMLFastPathTag, which lists FOR_EACH_SUPPORTED_TAG's tags in order.
+#define TAG_NAME(TagName, TagClassName) ElementNames::HTML::TagName,
+static constexpr std::array supportedElementNames { FOR_EACH_SUPPORTED_TAG(TAG_NAME) };
+#undef TAG_NAME
+#define TAG_INDEX(TagName, TagClassName) static_assert(supportedElementNames[std::to_underlying(HTMLFastPathTag::TagClassName)] == ElementNames::HTML::TagName);
+FOR_EACH_SUPPORTED_TAG(TAG_INDEX)
+#undef TAG_INDEX
+static_assert(supportedElementNames.size() == std::to_underlying(HTMLFastPathTag::Unsupported));
+
+// Swift validates the whole fragment and records it as ops (HTMLFastPathParserTypes.h). This builds the DOM from them
+// in HTMLFastPathParser's order: create, set attributes, append, beginParsingChildren, children, finishParsingChildren.
+template<typename CharacterType>
+static bool parseHTMLFragmentWithSwift(std::span<const CharacterType> source, Document& document, ContainerNode& destinationParent, Element& contextElement)
+{
+    // Building the DOM can start a nested parse, which gets its own buffers.
+    auto& retainedBuffers = retainedHTMLFastPathBuffers();
+    std::optional<HTMLFastPathBuffers> nestedBuffers;
+    auto& buffers = retainedBuffers.inUse ? nestedBuffers.emplace() : retainedBuffers;
+    buffers.inUse = true;
+    auto releaseBuffers = makeScopeExit([&] {
+        if (buffers.ops.span().size() > 1 << 18)
+            buffers = { };
+        buffers.inUse = false;
+    });
+#define TAG_CONTEXT(TagName, TagClassName) contextElement.elementName() == ElementNames::HTML::TagName ? HTMLFastPathTag::TagClassName :
+    auto context = FOR_EACH_SUPPORTED_TAG(TAG_CONTEXT) HTMLFastPathTag::Unsupported;
+#undef TAG_CONTEXT
+    auto scan = [&](size_t opCount, size_t decodedCount) {
+        if (buffers.ops.span().size() < opCount)
+            buffers.ops = MallocSpan<uint32_t>::malloc(opCount * sizeof(uint32_t));
+        if (buffers.decoded.span().size() < decodedCount)
+            buffers.decoded = MallocSpan<char16_t>::malloc(decodedCount * sizeof(char16_t));
+        return scanHTMLFragmentForFastPath(source, context, buffers.ops.mutableSpan(), buffers.decoded.mutableSpan());
+    };
+    // Enough room for any input of up to 2^21 code units (HTMLFastPathParserTypes.h). A longer input that needs more is
+    // scanned again with the sizes the first scan returned.
+    auto result = scan(std::min<size_t>(2 * source.size(), 1 << 22), std::min<size_t>(source.size(), 1 << 21));
+    if (result == std::numeric_limits<uint64_t>::max())
+        return false;
+    if (static_cast<uint32_t>(result) > buffers.ops.span().size() || (result >> 32) > buffers.decoded.span().size())
+        result = scan(static_cast<uint32_t>(result), result >> 32);
+
+    auto words = buffers.ops.span().first(static_cast<uint32_t>(result));
+    auto decodedCharacters = buffers.decoded.span().first(result >> 32);
+    Vector<Ref<HTMLElement>, 16> openElements;
+    Vector<Attribute, 10> attributes;
+    auto appendChild = [&](Node& child) {
+        ContainerNode& parent = openElements.isEmpty() ? destinationParent : openElements.last().get();
+        if (!parent.isConnected())
+            parent.parserAppendChildIntoIsolatedTree(child);
+        else
+            parent.parserAppendChild(child);
+    };
+    for (size_t index = 0; index < words.size();) {
+        uint32_t word = words[index++];
+        switch (static_cast<HTMLFastPathOp>(word & 1 ? word & 0xf : 0)) {
+        case HTMLFastPathOp::Text: {
+            uint32_t location = words[index++];
+            appendChild(Text::create(document, location >> 31 ? String(decodedCharacters.subspan(location & 0x7fffffff, word >> 1)) : String(source.subspan(location, word >> 1))));
+            break;
+        }
+        case HTMLFastPathOp::Whitespace:
+            appendChild(Text::create(document, NewlineThenWhitespaceStringsTable::getCachedWhitespace(word >> 4)));
+            break;
+        case HTMLFastPathOp::Element: {
+            Ref element = HTMLElementFactory::createKnownElement(tagNameForElementName(supportedElementNames[(word >> 4) & 0x1f]), document, /* createdByParser */ true).releaseNonNull();
+            attributes.shrink(0);
+            for (; words[index] != std::to_underlying(HTMLFastPathOpWord::EndOfAttributes); index += 4) {
+                // Name offset, name length, value offset, value length, each with a flag in its top bit. One bounds
+                // check for all four.
+                auto attributeWords = words.subspan(index, 4);
+                auto nameCharacters = source.subspan(attributeWords[0] & 0x7fffffff, attributeWords[1] & 0x7fffffff);
+                auto name = (attributeWords[1] >> 31) ? HTMLNameCache::makeAttributeQualifiedName(WTF::map<32>(nameCharacters, toASCIILower<CharacterType>).span()) : HTMLNameCache::makeAttributeQualifiedName(nameCharacters);
+                auto value = (attributeWords[3] >> 31) ? HTMLNameCache::makeAttributeValue(decodedCharacters.subspan(attributeWords[2], attributeWords[3] & 0x7fffffff)) : HTMLNameCache::makeAttributeValue(source.subspan(attributeWords[2], attributeWords[3] & 0x7fffffff));
+                if (attributeWords[0] >> 31) [[unlikely]]
+                    continue;
+                attributes.append(Attribute { WTF::move(name), WTF::move(value) });
+            }
+            ++index;
+            element->parserSetAttributes(attributes, Element::AttributeModificationReason::ParserFastPath);
+            if ((word >> 10) & 1) [[unlikely]]
+                element->setHasDuplicateAttribute(true);
+            appendChild(element);
+            element->beginParsingChildren();
+            if ((word >> 9) & 1)
+                element->finishParsingChildren();
+            else
+                openElements.append(WTF::move(element));
+            break;
+        }
+        case HTMLFastPathOp::End:
+            openElements.takeLast()->finishParsingChildren();
+            break;
+        }
+    }
+    return true;
+}
+#endif
 
 static bool canUseFastPath(Element& contextElement, OptionSet<ParserContentPolicy> policy)
 {
@@ -1142,8 +1297,12 @@ static bool tryFastParsingHTMLFragmentImpl(std::span<const CharacterType> source
     if (reuseResult == FragmentReuseResult::ParseFailure)
         return false;
 
+#if !USE_SWIFT_HTML_FAST_PATH
     HTMLFastPathParser parser { source, document, destinationParent };
     return parser.parse(contextElement);
+#else
+    return parseHTMLFragmentWithSwift(source, document, destinationParent, contextElement);
+#endif
 }
 
 bool tryFastParsingHTMLFragment(StringView source, Document& document, ContainerNode& destinationParent, Element& contextElement, OptionSet<ParserContentPolicy> policy)

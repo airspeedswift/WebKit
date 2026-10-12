@@ -41,4 +41,11 @@
 // If Swift function parameters or return types depend on C++ types, the
 // relevant headers must be included here.
 
+#if !defined(USE_SWIFT_HTML_FAST_PATH)
+#define USE_SWIFT_HTML_FAST_PATH 0
+#endif
+#if USE_SWIFT_HTML_FAST_PATH
+#include "HTMLFastPathParserTypes.h"
+#endif
+
 #include "WebCoreSwift-Generated.h"
