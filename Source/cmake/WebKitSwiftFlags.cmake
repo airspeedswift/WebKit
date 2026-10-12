@@ -132,6 +132,17 @@ set(WEBKIT_SWIFT_CXX_INTEROP_FLAGS
     -cxx-interoperability-mode=default
 )
 
+# Whole-module Swift for every build that is neither Debug nor DEVELOPER_MODE, as Xcode builds
+# WebCore. CMake's default is incremental, which never specializes a call to a generic function in
+# another file. DEVELOPER_MODE keeps incremental rebuilds, as it keeps clang-cl builds from LTO (see
+# WebKitCompilerFlags.cmake); WK_OPTIMIZE_IN_DEVELOPER_MODE overrides both.
+if (NOT DEVELOPER_MODE OR WK_OPTIMIZE_IN_DEVELOPER_MODE)
+    set(WEBKIT_SWIFT_WHOLE_MODULE ON)
+    set(CMAKE_Swift_COMPILATION_MODE "$<IF:$<CONFIG:Debug>,incremental,wholemodule>")
+else ()
+    set(WEBKIT_SWIFT_WHOLE_MODULE OFF)
+endif ()
+
 # Apply the global set
 
 webkit_add_swift_options(

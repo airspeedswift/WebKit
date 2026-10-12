@@ -63,8 +63,18 @@ def excluded_paths(request):
     return excludes
 
 
-def dependency_files(output_file_map):
+def dependency_files(output_file_map, module_name=None, whole_module=False):
     """The depfiles swiftc wrote for this compile, per its output-file-map."""
+    # A whole-module compile is one frontend job, and the driver writes its one depfile as
+    # <module>.d beside the output-file-map, whose per-file "dependencies" entries it ignores.
+    # Only that file counts: per-file depfiles left there by an earlier incremental build are
+    # stale, and a dependency they name that no longer exists would keep the module dirty.
+    if whole_module:
+        if not module_name:
+            return []
+        path = Path(output_file_map).parent / f"{module_name}.d"
+        return [str(path)] if path.exists() else []
+
     try:
         with open(output_file_map) as f:
             entries = json.load(f)
@@ -79,8 +89,8 @@ def dependency_files(output_file_map):
     return [path for path in paths if os.path.exists(path)]
 
 
-def write_ninja_depfile(request, output_file_map):
-    sources = dependency_files(output_file_map) if output_file_map else []
+def write_ninja_depfile(request, output_file_map, module_name=None, whole_module=False):
+    sources = dependency_files(output_file_map, module_name, whole_module) if output_file_map else []
     if not sources:
         sys.exit(
             f"{Path(__file__).name}: error: no dependency files named by "
@@ -208,7 +218,10 @@ def main(argv):
         if response_file:
             os.remove(response_file)
         if depfile_request and rc == 0:
-            write_ninja_depfile(depfile_request, args[args.index('-output-file-map') + 1])
+            module_name = args[args.index('-module-name') + 1] if '-module-name' in args else None
+            whole_module = any(arg in ('-wmo', '-whole-module-optimization') for arg in args)
+            write_ninja_depfile(depfile_request, args[args.index('-output-file-map') + 1],
+                                module_name, whole_module)
         if stamp_path and rc == 0 and not linking:
             Path(stamp_path).touch()
 
