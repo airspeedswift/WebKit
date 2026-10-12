@@ -358,6 +358,7 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/StyleGradient.cpp
         Tests/WebCore/TestPlatformStrategies.cpp
         Tests/WebCore/TextCodec.cpp
+        Tests/WebCore/TextCodecUTF8Bench.cpp
         Tests/WebCore/TextIterator.cpp
         Tests/WebCore/TimeRanges.cpp
         Tests/WebCore/TransformationMatrix.cpp
