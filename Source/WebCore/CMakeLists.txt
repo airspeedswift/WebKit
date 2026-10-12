@@ -3376,6 +3376,23 @@ endif ()
 
 WEBKIT_FRAMEWORK(WebCore)
 
+if (WK_USE_SWIFT_TEXT_CODEC_UTF8 AND WIN32)
+    # WebCore links PAL's Swift objects with the C++ linker, which needs the import libraries of
+    # the Swift runtime those objects auto-link. They are in the SDK, not the toolchain that
+    # -print-target-info describes.
+    cmake_path(CONVERT "$ENV{SDKROOT}" TO_CMAKE_PATH_LIST _swift_sdkroot)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+        set(_swift_sdk_arch aarch64)
+    else ()
+        set(_swift_sdk_arch x86_64)
+    endif ()
+    set(_swift_sdk_lib_dir "${_swift_sdkroot}/usr/lib/swift/windows/${_swift_sdk_arch}")
+    if (NOT EXISTS "${_swift_sdk_lib_dir}/swiftCore.lib")
+        message(FATAL_ERROR "No swiftCore.lib in ${_swift_sdk_lib_dir}; is SDKROOT set?")
+    endif ()
+    target_link_directories(WebCore PRIVATE "${_swift_sdk_lib_dir}")
+endif ()
+
 if (DEFINED WebCore_SWIFT_INTEROP_SOURCES)
     WEBKIT_DEFINE_SUBTARGET(WebCore_SwiftInterop WebCore ${WebCore_SWIFT_INTEROP_SOURCES})
     WEBKIT_REUSE_PREFIX_HEADER(WebCore_SwiftInterop WebCore WebCorePrefix.h PREFIX_LANGUAGES CXX OBJCXX)

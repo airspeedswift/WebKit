@@ -27,6 +27,7 @@ set(PAL_PUBLIC_HEADERS
     text/TextCodecSingleByte.h
     text/TextCodecUTF16.h
     text/TextCodecUTF8.h
+    text/TextCodecUTF8DecoderTypes.h
     text/TextCodecUserDefined.h
     text/TextEncoding.h
     text/TextEncodingDetector.h
@@ -80,11 +81,17 @@ if (SWIFT_REQUIRED AND APPLE)
 
         crypto/commoncrypto/CryptoDigestCommonCrypto.cpp
     )
-    foreach (_f IN LISTS PAL_SWIFT_INTEROP_SOURCES)
-        cmake_path(GET _f FILENAME _fn)
-        list(APPEND PAL_UNIFIED_SOURCE_EXCLUDES "(^|/)${_fn}( |$)")
-    endforeach ()
 endif ()
+# Set by WK_USE_SWIFT_TEXT_CODEC_UTF8, the counterpart of the PAL.xcconfig setting. TextCodecUTF8.cpp
+# then includes PALSwift-Generated.h, so it compiles after the Swift module like the other interop
+# sources.
+if (WK_USE_SWIFT_TEXT_CODEC_UTF8)
+    list(APPEND PAL_SWIFT_INTEROP_SOURCES text/TextCodecUTF8.cpp)
+endif ()
+foreach (_f IN LISTS PAL_SWIFT_INTEROP_SOURCES)
+    cmake_path(GET _f FILENAME _fn)
+    list(APPEND PAL_UNIFIED_SOURCE_EXCLUDES "(^|/)${_fn}( |$)")
+endforeach ()
 
 WEBKIT_COMPUTE_SOURCES(PAL)
 
@@ -98,13 +105,24 @@ WEBKIT_COPY_FILES(PAL_CopyHeaders
     FILES ${PAL_PUBLIC_HEADERS}
 )
 
+set(PAL_SWIFT_SOURCES "")
 if (SWIFT_REQUIRED AND APPLE)
-    target_sources(PAL PRIVATE
+    list(APPEND PAL_SWIFT_SOURCES
         ${PAL_DIR}/pal/pal.swift
         ${PAL_DIR}/pal/system/cocoa/RegexHelper.swift
         ${PAL_DIR}/pal/crypto/CryptoKitShim.swift
         ${PAL_DIR}/pal/crypto/WTFExtras.swift
+        ${PAL_DIR}/pal/text/SIMDTableLookup.swift
+        ${PAL_DIR}/pal/text/TextCodecUTF8.swift
     )
+elseif (WK_USE_SWIFT_TEXT_CODEC_UTF8)
+    list(APPEND PAL_SWIFT_SOURCES
+        ${PAL_DIR}/pal/text/SIMDTableLookup.swift
+        ${PAL_DIR}/pal/text/TextCodecUTF8.swift)
+endif ()
+
+if (PAL_SWIFT_SOURCES)
+    target_sources(PAL PRIVATE ${PAL_SWIFT_SOURCES})
 
     WEBKIT_SETUP_SWIFT_AND_GENERATE_SWIFT_CPP_INTEROP_HEADER(PAL pal
         "${PAL_HEADERS_DIR}"
@@ -123,6 +141,44 @@ if (SWIFT_REQUIRED AND APPLE)
         # On Apple platforms the interop macro already adds this; elsewhere PAL's
         # Swift still extends its underlying module and needs it explicitly.
         webkit_target_add_swift_options(PAL -import-underlying-module)
+        # Apple applies these to every Swift target; PAL's Swift is written against them.
+        webkit_target_add_swift_options(PAL
+            ${WEBKIT_SWIFT_EXPERIMENTAL_FEATURE_FLAGS}
+            ${WEBKIT_SWIFT_MEMORY_SAFETY_FLAGS}
+            "-Xcc -fmodule-map-file=${WTF_HEADERS_DIR}/module.modulemap"
+            ${PAL_PLATFORM_SWIFT_CLANG_FLAG_PAIRS}
+        )
+    endif ()
+    if (WK_USE_SWIFT_TEXT_CODEC_UTF8)
+        # Private to PAL, as in PAL.xcconfig. A Swift compilation condition too, so that without it
+        # TextCodecUTF8.swift compiles to nothing.
+        target_compile_definitions(PAL PRIVATE
+            "$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:USE_SWIFT_TEXT_CODEC_UTF8=1>")
+        webkit_target_add_swift_options(PAL "-D USE_SWIFT_TEXT_CODEC_UTF8")
+        # SIMDTableLookup.swift's table lookup (PSHUFB with SSSE3) needs the Builtin module, as in PAL.xcconfig.
+        webkit_target_add_swift_options(PAL "-enable-experimental-feature BuiltinModule")
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+            webkit_target_add_swift_options(PAL "-D HAVE_SSSE3")
+            # HAVE_SSSE3 only chooses PSHUFB; the code generator must be allowed SSSE3 too, or the (LTO)
+            # backend cannot select it. nehalem is x86-64-v2 (SSSE3, SSE4.2).
+            webkit_target_add_swift_options(PAL "-target-cpu nehalem")
+        endif ()
+    endif ()
+    if (LTO_MODE AND NOT APPLE)
+        # Otherwise an LTO build is C++-only: the Swift decoder would be machine code that the LTO
+        # link cannot inline into or optimize with its C++ caller. Xcode's counterpart is SWIFT_LTO.
+        # Not the driver's -lto=llvm-thin: that writes <name>.bc to the working directory, because
+        # CMake's output file map has only an "object" entry, so the object CMake links is never
+        # written. Asking the frontend for bitcode puts it in the object, with the ThinLTO summary.
+        # This needs whole-module mode: with a separate emit-module job, -emit-bc would override
+        # that job's -emit-module too.
+        if (WEBKIT_SWIFT_WHOLE_MODULE)
+            webkit_target_add_swift_options(PAL
+                "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -lto=llvm-${LTO_MODE}>"
+                "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -emit-bc>")
+        else ()
+            message(WARNING "LTO_MODE is set but Swift is not whole-module (DEVELOPER_MODE), so PAL's Swift is not LTO'd")
+        endif ()
     endif ()
 endif ()
 
