@@ -63,7 +63,12 @@ public func scanHTMLFragmentForFastPath16(
 }
 
 /// A code unit of the fast path's input: a Latin-1 character or a UTF-16 code unit.
-private protocol HTMLFastPathCodeUnit: FixedWidthInteger, UnsignedInteger {
+///
+/// FIXME: Make this, its witnesses and AttributeWindow private again once a private protocol links under LTO on
+/// Windows. With more than one object file per module (-num-threads), a private protocol's requirement descriptors are
+/// linkonce_odr aliases to offsets into the protocol descriptor, which LLVM's COFF bitcode symbol table rejects as an
+/// "Invalid weak external" (IRSymtab.cpp), so the link fails.
+protocol HTMLFastPathCodeUnit: FixedWidthInteger, UnsignedInteger {
     /// Consumes the character reference that starts `input`, just after its '&', as consumeHTMLEntity reads it, and
     /// writes the 0 to 3 characters it decodes to at the start of `decoded`, which has room for 3. Returns how many
     /// characters it read, shifted left by 2, or'ed with how many it wrote. `input` is not empty.
@@ -87,7 +92,7 @@ private protocol HTMLFastPathCodeUnit: FixedWidthInteger, UnsignedInteger {
 
 /// Four bits per code unit of sixteen, the first in the least significant, as matchNibbles(_:at:_:) gives them: 0xF
 /// where the code unit is in the class, and 0 elsewhere.
-private struct AttributeWindow {
+struct AttributeWindow {
     /// Attribute name characters (isAttributeNameCharacter).
     var nameCharacters: UInt64
     /// ASCII upper-case letters.
@@ -169,7 +174,7 @@ private func tableMatchNibbles(lowBytes: SIMD16<UInt8>, highBytes: SIMD16<UInt8>
 }
 
 extension UInt8: HTMLFastPathCodeUnit {
-    fileprivate static func consumeCharacterReference(
+    static func consumeCharacterReference(
         _ input: Span<UInt8>,
         _ additionalAllowedCharacter: UInt16,
         _ decoded: inout MutableSpan<UInt16>
@@ -185,23 +190,23 @@ extension UInt8: HTMLFastPathCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func matchNibbles(_ input: Span<UInt8>, at offset: Int, _ table: SIMD16<UInt8>) -> UInt64 {
+    static func matchNibbles(_ input: Span<UInt8>, at offset: Int, _ table: SIMD16<UInt8>) -> UInt64 {
         tableMatchNibbles(lowBytes: load16(input, at: offset), highBytes: SIMD16(), table)
     }
 
     @inline(always)
-    fileprivate static func eightCodeUnits(_ input: Span<UInt8>, at offset: Int) -> (lowBytes: UInt64, highBytes: UInt64) {
+    static func eightCodeUnits(_ input: Span<UInt8>, at offset: Int) -> (lowBytes: UInt64, highBytes: UInt64) {
         (UInt64(littleEndian: input.bytes.load(fromByteOffset: offset, as: UInt64.self)), 0)
     }
 
     @inline(always)
-    fileprivate static func attributeWindow(_ input: Span<UInt8>, at offset: Int) -> AttributeWindow {
+    static func attributeWindow(_ input: Span<UInt8>, at offset: Int) -> AttributeWindow {
         classifyAttributeWindow(lowBytes: load16(input, at: offset), highBytes: SIMD16())
     }
 }
 
 extension UInt16: HTMLFastPathCodeUnit {
-    fileprivate static func consumeCharacterReference(
+    static func consumeCharacterReference(
         _ input: Span<UInt16>,
         _ additionalAllowedCharacter: UInt16,
         _ decoded: inout MutableSpan<UInt16>
@@ -217,7 +222,7 @@ extension UInt16: HTMLFastPathCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func matchNibbles(_ input: Span<UInt16>, at offset: Int, _ table: SIMD16<UInt8>) -> UInt64 {
+    static func matchNibbles(_ input: Span<UInt16>, at offset: Int, _ table: SIMD16<UInt8>) -> UInt64 {
         let bytes = input.bytes
         let low = bytes.load(fromByteOffset: offset &* 2, as: SIMD8<UInt16>.self)
         let high = bytes.load(fromByteOffset: offset &* 2 &+ 16, as: SIMD8<UInt16>.self)
@@ -229,7 +234,7 @@ extension UInt16: HTMLFastPathCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func eightCodeUnits(_ input: Span<UInt16>, at offset: Int) -> (lowBytes: UInt64, highBytes: UInt64) {
+    static func eightCodeUnits(_ input: Span<UInt16>, at offset: Int) -> (lowBytes: UInt64, highBytes: UInt64) {
         let units = input.bytes.load(fromByteOffset: offset &* 2, as: SIMD8<UInt16>.self)
         return (
             UInt64(littleEndian: bitCast(SIMD8<UInt8>(truncatingIfNeeded: units), to: UInt64.self)),
@@ -238,7 +243,7 @@ extension UInt16: HTMLFastPathCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func attributeWindow(_ input: Span<UInt16>, at offset: Int) -> AttributeWindow {
+    static func attributeWindow(_ input: Span<UInt16>, at offset: Int) -> AttributeWindow {
         let bytes = input.bytes
         let low = bytes.load(fromByteOffset: offset &* 2, as: SIMD8<UInt16>.self)
         let high = bytes.load(fromByteOffset: offset &* 2 &+ 16, as: SIMD8<UInt16>.self)
