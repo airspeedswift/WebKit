@@ -28,17 +28,28 @@ import os
 import re
 import sys
 
-# Generates an amended copy of the Swift Windows SDK's vcruntime.modulemap, plus a
-# clang VFS overlay that mounts it over the MSVC include directory as
-# module.modulemap.
+# Generates amended copies of the Swift Windows SDK's vcruntime.modulemap and
+# winsdk_um.modulemap, plus a VFS overlay that mounts them over the SDK's own copies.
 #
-# The additions have to go inside `std._Private` rather than into a separate module
+# The overlay is for swiftc's -vfsoverlay, not clang's -ivfsoverlay: the Swift clang
+# importer reads SDKROOT/usr/share/*.modulemap through Swift's file system and injects
+# them as module.modulemap files in the MSVC and Windows SDK include directories on top
+# of any clang overlays, so a clang overlay of those module.modulemap files is silently
+# shadowed.
+#
+# Both amendments fix the same problem: a header that no module declares is owned by
+# whichever submodule happens to include it first, so its declarations are invisible to
+# code that includes it through some other submodule. With C++23, <queue> and <stack>
+# include __msvc_ranges_to.hpp, so std.queue owns std::views::transform and <ranges>
+# alone does not provide it. Likewise <windows.h> does not provide HWND, because
+# windef.h is owned by whichever WinSDK submodule includes it first.
+#
+# The STL additions have to go inside `std._Private` rather than into a separate module
 # of our own: these headers include other STL headers, and STL headers include them,
 # so a separate top-level module would form a cyclic dependency with `std`.
 #
-# Writes <output-dir>/vcruntime.modulemap and <output-dir>/vfs-overlay.yaml, and
-# prints the path of the overlay to stdout for cmake to put on the importer's
-# command line.
+# Writes the amended modulemaps and <output-dir>/vfs-overlay.yaml, and prints the path
+# of the overlay to stdout for cmake to put on the swiftc command line.
 
 # An aggregate that pulls in the whole STL; giving it a module of its own is not useful.
 EXCLUDED_HEADERS = frozenset(['__msvc_all_public_headers.hpp'])
@@ -50,6 +61,12 @@ EXCLUDED_HEADERS = frozenset(['__msvc_all_public_headers.hpp'])
 PRIVATE_MODULE_RE = re.compile(
     r'^(?P<indent>[ \t]*)module _Private\b[^\n]*\{[ \t]*\n'
     r'(?:[ \t]*(?:requires[^\n]*)?\n)*', re.MULTILINE)
+
+# The opening line of the top-level `module WinSDK [system] {` in winsdk_um.modulemap.
+WINSDK_MODULE_RE = re.compile(r'^module WinSDK\b[^\n]*\{[ \t]*\n', re.MULTILINE)
+
+# winsdk_um.modulemap lives in um/; windef.h is in the sibling shared/ directory.
+WINDEF_HEADER = '../shared/windef.h'
 
 
 def declared_headers(modulemap_text):
@@ -79,6 +96,19 @@ def amend_modulemap(modulemap_text, headers):
     return modulemap_text[:insertion_point] + additions + modulemap_text[insertion_point:], missing
 
 
+def amend_winsdk_um_modulemap(modulemap_text):
+    if WINDEF_HEADER in declared_headers(modulemap_text):
+        return modulemap_text, []
+
+    match = WINSDK_MODULE_RE.search(modulemap_text)
+    if not match:
+        raise ValueError("could not find the `module WinSDK` block to extend")
+
+    addition = '  module WinDef {\n    header "%s"\n    export *\n  }\n\n' % WINDEF_HEADER
+    insertion_point = match.end()
+    return modulemap_text[:insertion_point] + addition + modulemap_text[insertion_point:], [WINDEF_HEADER]
+
+
 def write_if_changed(path, contents):
     try:
         with open(path, 'r') as f:
@@ -91,23 +121,19 @@ def write_if_changed(path, contents):
     return True
 
 
-def vfs_overlay(msvc_include_dir, modulemap_path):
+def vfs_overlay(mounts):
+    roots = {}
+    for sdk_modulemap, modulemap_path in mounts:
+        directory = os.path.dirname(sdk_modulemap).replace('\\', '/')
+        roots.setdefault(directory, []).append({
+            'name': os.path.basename(sdk_modulemap),
+            'type': 'file',
+            'external-contents': modulemap_path.replace('\\', '/'),
+        })
     return {
         'version': 0,
         'case-sensitive': 'false',
-        'roots': [
-            {
-                'name': msvc_include_dir.replace('\\', '/'),
-                'type': 'directory',
-                'contents': [
-                    {
-                        'name': 'module.modulemap',
-                        'type': 'file',
-                        'external-contents': modulemap_path.replace('\\', '/'),
-                    },
-                ],
-            },
-        ],
+        'roots': [{'name': d, 'type': 'directory', 'contents': c} for d, c in roots.items()],
     }
 
 
@@ -115,34 +141,44 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sdk-modulemap', required=True,
                         help='the Swift SDK\'s usr/share/vcruntime.modulemap')
-    parser.add_argument('--msvc-include-dir', required=True,
-                        help='the MSVC include directory to mount the amended map over')
+    parser.add_argument('--winsdk-um-modulemap',
+                        help='the Swift SDK\'s usr/share/winsdk_um.modulemap')
     parser.add_argument('--output-dir', required=True,
-                        help='where to write vcruntime.modulemap and vfs-overlay.yaml')
+                        help='where to write the amended modulemaps and vfs-overlay.yaml')
     parser.add_argument('--headers', nargs='*', default=[], metavar='HEADER',
-                        help='__msvc_*.hpp header names, relative to --msvc-include-dir')
+                        help='__msvc_*.hpp header names, relative to the MSVC include directory')
     args = parser.parse_args(argv[1:])
 
-    with open(args.sdk_modulemap, 'r') as f:
-        sdk_modulemap = f.read()
-
     if not args.headers:
-        raise ValueError('no __msvc_*.hpp headers found in %s' % args.msvc_include_dir)
+        raise ValueError('no __msvc_*.hpp headers given')
 
-    amended, added = amend_modulemap(sdk_modulemap, args.headers)
-    if not added:
-        print('%s already declares every internal STL header' % args.sdk_modulemap, file=sys.stderr)
+    amendments = []
+    with open(args.sdk_modulemap, 'r') as f:
+        amendments.append((args.sdk_modulemap, *amend_modulemap(f.read(), args.headers)))
+    if args.winsdk_um_modulemap:
+        with open(args.winsdk_um_modulemap, 'r') as f:
+            amendments.append((args.winsdk_um_modulemap, *amend_winsdk_um_modulemap(f.read())))
+
+    amendments = [a for a in amendments if a[2]]
+    if not amendments:
+        print('the SDK modulemaps already declare every header this script adds', file=sys.stderr)
         return 0
 
     os.makedirs(args.output_dir, exist_ok=True)
-    modulemap_path = os.path.join(args.output_dir, 'vcruntime.modulemap')
     overlay_path = os.path.join(args.output_dir, 'vfs-overlay.yaml')
 
-    overlay = json.dumps(vfs_overlay(args.msvc_include_dir, modulemap_path), indent=2) + '\n'
-    wrote = write_if_changed(modulemap_path, amended) | write_if_changed(overlay_path, overlay)
+    wrote = False
+    mounts = []
+    for sdk_modulemap, amended, _ in amendments:
+        modulemap_path = os.path.join(args.output_dir, os.path.basename(sdk_modulemap))
+        wrote |= write_if_changed(modulemap_path, amended)
+        mounts.append((os.path.abspath(sdk_modulemap), modulemap_path))
+    overlay = json.dumps(vfs_overlay(mounts), indent=2) + '\n'
+    wrote |= write_if_changed(overlay_path, overlay)
 
     if wrote:
-        print('declared %d internal STL header(s): %s' % (len(added), ' '.join(added)), file=sys.stderr)
+        for sdk_modulemap, _, added in amendments:
+            print('%s: declared %d header(s): %s' % (os.path.basename(sdk_modulemap), len(added), ' '.join(added)), file=sys.stderr)
     print(overlay_path.replace('\\', '/'))
     return 0
 
