@@ -65,6 +65,14 @@
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringParsingBuffer.h>
 
+#if !defined(USE_SWIFT_HTML_FAST_PATH)
+#define USE_SWIFT_HTML_FAST_PATH 0
+#endif
+
+#if USE_SWIFT_HTML_FAST_PATH
+#include "WebCore-Swift.h"
+#endif
+
 class NewlineThenWhitespaceStringsTable {
 public:
     static constexpr unsigned maxSpaceCount = 32;
@@ -103,8 +111,34 @@ unsigned LEGACY_NODELETE maxCachedSetInnerHTMLStringSize()
     return s_maxCachedStringSize;
 }
 
+#if USE_SWIFT_HTML_FAST_PATH
+// HTMLFastPathParser.swift uses these values as literals.
+static_assert(Settings::defaultMaximumHTMLParserDOMTreeDepth == 512);
+static_assert(NewlineThenWhitespaceStringsTable::maxSpaceCount == 32);
+
+[[clang::always_inline]] String newlineThenWhitespaceStringForFastPath(unsigned spaceCount)
+{
+    return NewlineThenWhitespaceStringsTable::getCachedWhitespace(spaceCount);
+}
+
+// Each Swift caller passes an empty span for the width it does not use.
+[[clang::always_inline]] uint64_t consumeHTMLEntityForFastPath(HTMLFastPathLatin1Span latin1Source NOESCAPE, HTMLFastPathUTF16Span utf16Source NOESCAPE, char16_t additionalAllowedCharacter, std::span<char16_t> decoded NOESCAPE, size_t decodedOffset)
+{
+    auto consume = [&]<typename CharacterType>(std::span<const CharacterType> source) {
+        StringParsingBuffer<CharacterType> buffer { source };
+        auto entity = consumeHTMLEntity(buffer, additionalAllowedCharacter);
+        auto characters = entity.span();
+        std::ranges::copy(characters, decoded.subspan(decodedOffset, characters.size()).begin());
+        return static_cast<uint64_t>(source.size() - buffer.lengthRemaining()) << 2 | characters.size();
+    };
+    return latin1Source.empty() ? consume(utf16Source) : consume(latin1Source);
+}
+#endif
+
+#if !USE_SWIFT_HTML_FAST_PATH
 template<typename CharacterType>
 class HTMLFastPathParser;
+#endif
 
 
 enum class FragmentReuseResult : uint8_t {
@@ -187,12 +221,18 @@ static FragmentReuseResult cloneCachedPrefixAndParseSuffix(std::span<const Chara
     if (unparsedSuffix.empty())
         return FragmentReuseResult::Success;
 
+#if !USE_SWIFT_HTML_FAST_PATH
     HTMLFastPathParser<CharacterType> parser { unparsedSuffix, destinationParent.document(), destinationParent };
     if (!parser.parse(contextElement))
         return FragmentReuseResult::ParseFailure;
+#else
+    if (!parseHTMLFragmentForFastPath(unparsedSuffix, protect(destinationParent.document()).ptr(), &destinationParent, &contextElement))
+        return FragmentReuseResult::ParseFailure;
+#endif
     return FragmentReuseResult::Success;
 }
 
+#if !USE_SWIFT_HTML_FAST_PATH
 // Captures the potential outcomes for fast path html parser.
 enum class HTMLFastPathResult : uint8_t {
     Succeeded,
@@ -1117,6 +1157,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
         return WTF::move(element);
     }
 };
+#endif
 
 static bool canUseFastPath(Element& contextElement, OptionSet<ParserContentPolicy> policy)
 {
@@ -1142,8 +1183,12 @@ static bool tryFastParsingHTMLFragmentImpl(std::span<const CharacterType> source
     if (reuseResult == FragmentReuseResult::ParseFailure)
         return false;
 
+#if !USE_SWIFT_HTML_FAST_PATH
     HTMLFastPathParser parser { source, document, destinationParent };
     return parser.parse(contextElement);
+#else
+    return parseHTMLFragmentForFastPath(source, &document, &destinationParent, &contextElement);
+#endif
 }
 
 bool tryFastParsingHTMLFragment(StringView source, Document& document, ContainerNode& destinationParent, Element& contextElement, OptionSet<ParserContentPolicy> policy)

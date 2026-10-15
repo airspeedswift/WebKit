@@ -1819,6 +1819,8 @@
 		46CF504A27AB1EA40070DBC8 /* SharedWorkerContextManager.h in Headers */ = {isa = PBXBuildFile; fileRef = 46CF504827AB1EA10070DBC8 /* SharedWorkerContextManager.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		46D0004026A0FEB300D1BF1E /* SubmitEvent.h in Headers */ = {isa = PBXBuildFile; fileRef = 46D0003E26A0FE6F00D1BF1E /* SubmitEvent.h */; };
 		46D21F192993268400835FBA /* HTMLDocumentParserFastPath.h in Headers */ = {isa = PBXBuildFile; fileRef = 46D21F182993268000835FBA /* HTMLDocumentParserFastPath.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		5A1F00000000000000000002 /* HTMLFastPathParserTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 5A1F00000000000000000001 /* HTMLFastPathParserTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		5A1F00000000000000000004 /* HTMLFastPathParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1F00000000000000000003 /* HTMLFastPathParser.swift */; };
 		46DA4A0227AB039300E375A8 /* TransferredMessagePort.h in Headers */ = {isa = PBXBuildFile; fileRef = 46DA4A0027AB038D00E375A8 /* TransferredMessagePort.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		46DBB6501AB8C96F00D9A813 /* PowerObserverMac.h in Headers */ = {isa = PBXBuildFile; fileRef = 46DBB64E1AB8C96F00D9A813 /* PowerObserverMac.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		46DC53BF28EB3D65005376B0 /* ScreenOrientationManager.h in Headers */ = {isa = PBXBuildFile; fileRef = 46DC53BE28EB3D64005376B0 /* ScreenOrientationManager.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -12050,6 +12052,8 @@
 		46D0003F26A0FE7000D1BF1E /* SubmitEvent.idl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = SubmitEvent.idl; sourceTree = "<group>"; };
 		46D21F172993268000835FBA /* HTMLDocumentParserFastPath.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = HTMLDocumentParserFastPath.cpp; sourceTree = "<group>"; };
 		46D21F182993268000835FBA /* HTMLDocumentParserFastPath.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = HTMLDocumentParserFastPath.h; sourceTree = "<group>"; };
+		5A1F00000000000000000001 /* HTMLFastPathParserTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = HTMLFastPathParserTypes.h; sourceTree = "<group>"; };
+		5A1F00000000000000000003 /* HTMLFastPathParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLFastPathParser.swift; sourceTree = "<group>"; };
 		46D95AF9CD2A75B2267ECDF9 /* CanvasImageSource+Usability.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "CanvasImageSource+Usability.h"; sourceTree = "<group>"; };
 		46DA4A0027AB038D00E375A8 /* TransferredMessagePort.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TransferredMessagePort.h; sourceTree = "<group>"; };
 		46DBB64E1AB8C96F00D9A813 /* PowerObserverMac.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PowerObserverMac.h; sourceTree = "<group>"; };
@@ -34251,6 +34255,8 @@
 				977B3852122883E900B81FF8 /* HTMLEntitySearch.cpp */,
 				977B3853122883E900B81FF8 /* HTMLEntitySearch.h */,
 				977B3854122883E900B81FF8 /* HTMLEntityTable.h */,
+				5A1F00000000000000000003 /* HTMLFastPathParser.swift */,
+				5A1F00000000000000000001 /* HTMLFastPathParserTypes.h */,
 				977B3855122883E900B81FF8 /* HTMLFormattingElementList.cpp */,
 				977B3856122883E900B81FF8 /* HTMLFormattingElementList.h */,
 				97BC849A12370A4B000C6161 /* HTMLInputStream.h */,
@@ -46094,6 +46100,7 @@
 				977B386A122883E900B81FF8 /* HTMLEntityParser.h in Headers */,
 				977B386C122883E900B81FF8 /* HTMLEntitySearch.h in Headers */,
 				977B386D122883E900B81FF8 /* HTMLEntityTable.h in Headers */,
+				5A1F00000000000000000002 /* HTMLFastPathParserTypes.h in Headers */,
 				A81369D4097374F600D74463 /* HTMLFieldSetElement.h in Headers */,
 				A8CFF7A60A156978000A4234 /* HTMLFontElement.h in Headers */,
 				977B386F122883E900B81FF8 /* HTMLFormattingElementList.h in Headers */,
@@ -51135,6 +51142,7 @@
 				7BE37F7A27BB86AB007A6CD3 /* GraphicsContextGLCocoa.mm in Sources */,
 				4195B986296442AA0071566E /* GraphicsContextGLCVCocoa.mm in Sources */,
 				7C3E510B18DF8F3500C112F7 /* HTMLConverter.mm in Sources */,
+				5A1F00000000000000000004 /* HTMLFastPathParser.swift in Sources */,
 				A8D06B3A0A265DCD005E7203 /* HTMLNames.cpp in Sources */,
 				1AC900C31943C0FC008625B5 /* HTTPHeaderNames.cpp in Sources */,
 				CD27AE5122A9868700947FF9 /* ImageRotationSessionVT.mm in Sources */,
