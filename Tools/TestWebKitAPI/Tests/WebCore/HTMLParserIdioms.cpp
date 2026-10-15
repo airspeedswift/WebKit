@@ -28,6 +28,7 @@
 #include "Helpers/Test.h"
 #include <WebCore/DocumentFragment.h>
 #include <WebCore/Element.h>
+#include <WebCore/ElementInlines.h>
 #include <WebCore/ExceptionOr.h>
 #include <WebCore/HTMLBodyElement.h>
 #include <WebCore/HTMLDivElement.h>
@@ -43,6 +44,7 @@
 #include <WebCore/ScriptWrappableInlines.h>
 #include <WebCore/Settings.h>
 #include <WebCore/Text.h>
+#include <wtf/text/StringBuilder.h>
 #include <wtf/text/WTFString.h>
 
 using namespace WebCore;
@@ -536,6 +538,416 @@ TEST(WebCoreHTMLParser, FastPathEntityWithoutSemicolonInAttributeValue)
 
     // Named entity with semicolon (e.g. &AElig; followed by text).
     EXPECT_EQ(UTF8CString { u8"\xC3\x86X"_span }, testFastParserAttribute("<span title=\"&AElig;X\"></span>"_s).utf8());
+}
+
+TEST(WebCoreHTMLParser, FastPathMixedCaseAttributeNames)
+{
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+    auto documentElement = HTMLHtmlElement::create(document);
+    document->appendChild(documentElement);
+    auto body = HTMLBodyElement::create(document);
+    documentElement->appendChild(body);
+
+    auto div = HTMLDivElement::create(document);
+    document->body()->appendChild(div);
+
+    // Names of 15, 16 and 17 characters, in 8-bit and 16-bit input. The 16-bit input ends with U+0141, whose low
+    // byte is 'A'.
+    for (bool is8Bit : { true, false }) {
+        auto attributeNames = [&](ASCIILiteral markup) -> String {
+            StringBuilder builder;
+            builder.append(markup);
+            if (!is8Bit)
+                builder.append(static_cast<char16_t>(0x0141));
+            auto input = builder.toString();
+            EXPECT_EQ(is8Bit, input.is8Bit());
+            auto fragment = DocumentFragment::create(document);
+            bool result = tryFastParsingHTMLFragment(input, document, fragment, div, { ParserContentPolicy::AllowScriptingContent });
+            EXPECT_TRUE(result);
+            auto* element = result ? dynamicDowncast<Element>(fragment->firstChild()) : nullptr;
+            EXPECT_TRUE(element);
+            if (!element || !element->hasAttributes())
+                return String();
+            StringBuilder names;
+            for (unsigned i = 0; i < element->attributeCount(); ++i) {
+                if (i)
+                    names.append(' ');
+                names.append(element->attributeAt(i).localName());
+            }
+            return names.toString();
+        };
+
+        EXPECT_EQ("abcdefghijklmno"_s, attributeNames("<div ABCDEFGHIJKLMNo=1></div>"_s));
+        EXPECT_EQ("abcdefghijklmnop"_s, attributeNames("<div aBcDeFgHiJkLmNoP=1></div>"_s));
+        EXPECT_EQ("abcdefghijklmnopq"_s, attributeNames("<div ABCDEFGHIJKLMNOPQ=1></div>"_s));
+        EXPECT_EQ("abcdefghijklmnopq abcdefghijklmnopr"_s, attributeNames("<div ABCDEFGHIJKLMNOPQ=1 abcdefghijklmnopR=2></div>"_s));
+        EXPECT_EQ("abcdefghijklmnop abcdefghijklmnopq"_s, attributeNames("<div ABCDEFGHIJKLMNOP=1 ABCDEFGHIJKLMNOPQ=2></div>"_s));
+        EXPECT_EQ("abcdefghijklmnop"_s, attributeNames("<div abcdefghijklmnop=1 ABCDEFGHIJKLMNOP=2></div>"_s));
+        EXPECT_EQ("abcdefghijklmno-z"_s, attributeNames("<div Abcdefghijklmno-Z=1></div>"_s));
+    }
+}
+
+TEST(WebCoreHTMLParser, FastPathNewlineThenSpaces)
+{
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+    auto documentElement = HTMLHtmlElement::create(document);
+    document->appendChild(documentElement);
+    auto body = HTMLBodyElement::create(document);
+    documentElement->appendChild(body);
+
+    auto div = HTMLDivElement::create(document);
+    document->body()->appendChild(div);
+
+    auto firstText = [&](const String& input) -> String {
+        auto fragment = DocumentFragment::create(document);
+        bool result = tryFastParsingHTMLFragment(input, document, fragment, div, { ParserContentPolicy::AllowScriptingContent });
+        EXPECT_TRUE(result);
+        auto* text = result ? dynamicDowncast<Text>(fragment->firstChild()) : nullptr;
+        EXPECT_TRUE(text);
+        return text ? text->data() : String();
+    };
+
+    // Indents of 32, 33 and 40 spaces, in 8-bit and 16-bit input. The 16-bit input has U+0141 after it.
+    for (unsigned spaces : { 32u, 33u, 40u }) {
+        StringBuilder indent;
+        indent.append('\n');
+        for (unsigned i = 0; i < spaces; ++i)
+            indent.append(' ');
+        auto indentString = indent.toString();
+        for (bool is8Bit : { true, false }) {
+            StringBuilder builder;
+            builder.append(indentString, "<b>"_s);
+            if (!is8Bit)
+                builder.append(static_cast<char16_t>(0x0141));
+            builder.append("</b>"_s);
+            auto input = builder.toString();
+            EXPECT_EQ(is8Bit, input.is8Bit());
+            EXPECT_EQ(indentString, firstText(input));
+        }
+    }
+
+    // U+0120, whose low byte is a space, after 1, 16 and 20 spaces.
+    for (unsigned spaces : { 1u, 16u, 20u }) {
+        StringBuilder text;
+        text.append('\n');
+        for (unsigned i = 0; i < spaces; ++i)
+            text.append(' ');
+        text.append(static_cast<char16_t>(0x0120));
+        for (unsigned i = 0; i < 19; ++i)
+            text.append(' ');
+        auto textString = text.toString();
+        EXPECT_FALSE(textString.is8Bit());
+        EXPECT_EQ(textString, firstText(makeString(textString, "<b></b>"_s)));
+    }
+}
+
+TEST(WebCoreHTMLParser, FastPathDeeplyNestedElements)
+{
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+    auto documentElement = HTMLHtmlElement::create(document);
+    document->appendChild(documentElement);
+    auto body = HTMLBodyElement::create(document);
+    documentElement->appendChild(body);
+
+    auto div = HTMLDivElement::create(document);
+    document->body()->appendChild(div);
+
+    // 40 nested <span>s, each followed by a <b> after its end tag, in 8-bit and 16-bit input. The 16-bit input has
+    // U+0141 in the innermost text.
+    for (bool is8Bit : { true, false }) {
+        StringBuilder builder;
+        for (unsigned i = 0; i < 40; ++i)
+            builder.append("<span>"_s);
+        builder.append('x');
+        if (!is8Bit)
+            builder.append(static_cast<char16_t>(0x0141));
+        for (unsigned i = 0; i < 40; ++i)
+            builder.append("</span><b></b>"_s);
+        auto input = builder.toString();
+        EXPECT_EQ(is8Bit, input.is8Bit());
+
+        auto fragment = DocumentFragment::create(document);
+        bool result = tryFastParsingHTMLFragment(input, document, fragment, div, { ParserContentPolicy::AllowScriptingContent });
+        EXPECT_TRUE(result);
+        if (!result)
+            continue;
+        Node* node = fragment.ptr();
+        for (unsigned depth = 0; depth < 40; ++depth) {
+            node = node->firstChild();
+            ASSERT_TRUE(node);
+            EXPECT_EQ("SPAN"_s, node->nodeName());
+            auto* next = node->nextSibling();
+            ASSERT_TRUE(next);
+            EXPECT_EQ("B"_s, next->nodeName());
+            EXPECT_FALSE(next->nextSibling());
+        }
+        auto* text = dynamicDowncast<Text>(node->firstChild());
+        ASSERT_TRUE(text);
+        EXPECT_EQ(is8Bit ? 1u : 2u, text->length());
+        EXPECT_FALSE(text->nextSibling());
+    }
+}
+
+static String sixteenBitString(const String& string)
+{
+    Vector<char16_t> characters;
+    for (unsigned i = 0; i < string.length(); ++i)
+        characters.append(string[i]);
+    return String(characters.span());
+}
+
+static String repeatedCharacter(char character, unsigned count)
+{
+    StringBuilder builder;
+    for (unsigned i = 0; i < count; ++i)
+        builder.append(character);
+    return builder.toString();
+}
+
+TEST(WebCoreHTMLParser, FastPathLongEscapedText)
+{
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+    auto documentElement = HTMLHtmlElement::create(document);
+    document->appendChild(documentElement);
+    auto body = HTMLBodyElement::create(document);
+    documentElement->appendChild(body);
+
+    auto div = HTMLDivElement::create(document);
+    document->body()->appendChild(div);
+
+    auto parse = [&](const String& input) -> RefPtr<DocumentFragment> {
+        auto fragment = DocumentFragment::create(document);
+        bool result = tryFastParsingHTMLFragment(input, document, fragment, div, { ParserContentPolicy::AllowScriptingContent });
+        EXPECT_TRUE(result);
+        return result ? RefPtr { fragment.ptr() } : nullptr;
+    };
+
+    // Text and attribute values that decode to 255, 256, 257 and 513 characters, with the character reference first
+    // or last, in 8-bit and 16-bit input.
+    for (unsigned length : { 255u, 256u, 257u, 513u }) {
+        auto letters = repeatedCharacter('a', length - 1);
+        for (bool referenceFirst : { true, false }) {
+            auto escaped = referenceFirst ? makeString("&amp;"_s, letters) : makeString(letters, "&amp;"_s);
+            auto decoded = referenceFirst ? makeString('&', letters) : makeString(letters, '&');
+            for (bool is8Bit : { true, false }) {
+                auto text = makeString(escaped, "<b></b>"_s);
+                auto fragment = parse(is8Bit ? text : sixteenBitString(text));
+                auto* textNode = fragment ? dynamicDowncast<Text>(fragment->firstChild()) : nullptr;
+                EXPECT_TRUE(textNode);
+                if (textNode)
+                    EXPECT_EQ(decoded, textNode->data());
+
+                auto attribute = makeString("<span title=\""_s, escaped, "\"></span>"_s);
+                fragment = parse(is8Bit ? attribute : sixteenBitString(attribute));
+                auto* element = fragment ? dynamicDowncast<Element>(fragment->firstChild()) : nullptr;
+                EXPECT_TRUE(element);
+                if (element)
+                    EXPECT_EQ(decoded, element->getAttribute(HTMLNames::titleAttr));
+            }
+        }
+    }
+}
+
+TEST(WebCoreHTMLParser, FastPathManyAttributes)
+{
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+    auto documentElement = HTMLHtmlElement::create(document);
+    document->appendChild(documentElement);
+    auto body = HTMLBodyElement::create(document);
+    documentElement->appendChild(body);
+
+    auto div = HTMLDivElement::create(document);
+    document->body()->appendChild(div);
+
+    auto attributes = [](const Node* node) -> String {
+        auto* element = dynamicDowncast<Element>(node);
+        EXPECT_TRUE(element);
+        if (!element || !element->hasAttributes())
+            return String();
+        StringBuilder builder;
+        for (unsigned i = 0; i < element->attributeCount(); ++i) {
+            if (i)
+                builder.append(' ');
+            builder.append(element->attributeAt(i).localName(), '=', element->attributeAt(i).value());
+        }
+        return builder.toString();
+    };
+
+    // An element with 11 attributes, then one with 2, then one with a name that the first element has, in 8-bit and
+    // 16-bit input.
+    for (bool is8Bit : { true, false }) {
+        auto markup = "<div a0=0 a1=1 a2=2 a3=3 a4=4 a5=5 a6=6 a7=7 a8=8 a9=9 a10=10></div><span x=1 y=2></span><b x=3 a5=4 y=5></b>"_s;
+        auto input = is8Bit ? String(markup) : sixteenBitString(markup);
+        auto fragment = DocumentFragment::create(document);
+        bool result = tryFastParsingHTMLFragment(input, document, fragment, div, { ParserContentPolicy::AllowScriptingContent });
+        EXPECT_TRUE(result);
+        if (!result)
+            continue;
+        auto* first = fragment->firstChild();
+        EXPECT_EQ("a0=0 a1=1 a2=2 a3=3 a4=4 a5=5 a6=6 a7=7 a8=8 a9=9 a10=10"_s, attributes(first));
+        auto* second = first ? first->nextSibling() : nullptr;
+        EXPECT_EQ("x=1 y=2"_s, attributes(second));
+        auto* third = second ? second->nextSibling() : nullptr;
+        EXPECT_EQ("x=3 a5=4 y=5"_s, attributes(third));
+    }
+}
+
+TEST(WebCoreHTMLParser, FastPathAttributeValueAtWindowEnd)
+{
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+    auto documentElement = HTMLHtmlElement::create(document);
+    document->appendChild(documentElement);
+    auto body = HTMLBodyElement::create(document);
+    documentElement->appendChild(body);
+
+    auto div = HTMLDivElement::create(document);
+    document->body()->appendChild(div);
+
+    auto attributeValue = [&](const String& input) -> String {
+        auto fragment = DocumentFragment::create(document);
+        bool result = tryFastParsingHTMLFragment(input, document, fragment, div, { ParserContentPolicy::AllowScriptingContent });
+        EXPECT_TRUE(result);
+        auto* element = result ? dynamicDowncast<Element>(fragment->firstChild()) : nullptr;
+        EXPECT_TRUE(element);
+        if (!element || !element->hasAttributes())
+            return String();
+        return element->attributeAt(0).value();
+    };
+
+    // Values that start 15, 16 and 17 characters after the attribute name does, quoted with either quote and
+    // containing the other, in 8-bit and 16-bit input. In 16-bit input, also values containing U+0122 and U+0127,
+    // whose low bytes are the quotes.
+    auto wideValue = makeString('a', static_cast<char16_t>(0x0122), static_cast<char16_t>(0x0127), 'b');
+    for (auto name : { "abcdefghijklm"_s, "abcdefghijklmn"_s, "abcdefghijklmno"_s }) {
+        for (bool is8Bit : { true, false }) {
+            auto input = [&](char quote, const String& value) {
+                auto markup = makeString("<span "_s, name, '=', quote, value, quote, "></span>"_s);
+                return is8Bit ? markup : sixteenBitString(markup);
+            };
+            EXPECT_EQ("it's"_s, attributeValue(input('"', "it's"_s)));
+            EXPECT_EQ("say \"hi\" to everyone"_s, attributeValue(input('\'', "say \"hi\" to everyone"_s)));
+            EXPECT_EQ(emptyString(), attributeValue(input('"', emptyString())));
+            EXPECT_EQ(emptyString(), attributeValue(input('\'', emptyString())));
+            if (!is8Bit) {
+                EXPECT_EQ(wideValue, attributeValue(input('"', wideValue)));
+                EXPECT_EQ(wideValue, attributeValue(input('\'', wideValue)));
+            }
+        }
+    }
+}
+
+TEST(WebCoreHTMLParser, FastPathTagNameLengths)
+{
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+    auto documentElement = HTMLHtmlElement::create(document);
+    document->appendChild(documentElement);
+    auto body = HTMLBodyElement::create(document);
+    documentElement->appendChild(body);
+
+    auto div = HTMLDivElement::create(document);
+    document->body()->appendChild(div);
+
+    // The names of the fragment's top-level nodes, or "fail" if the fast path does not parse it.
+    auto topLevelNames = [&](const String& input) -> String {
+        auto fragment = DocumentFragment::create(document);
+        if (!tryFastParsingHTMLFragment(input, document, fragment, div, { ParserContentPolicy::AllowScriptingContent }))
+            return "fail"_s;
+        StringBuilder builder;
+        for (auto* child = fragment->firstChild(); child; child = child->nextSibling()) {
+            if (child != fragment->firstChild())
+                builder.append(' ');
+            builder.append(child->nodeName());
+        }
+        return builder.toString();
+    };
+
+    // Start tags of 6 to 9 letters, and end tags with fewer than 8 characters after them, in 8-bit and 16-bit input.
+    for (bool is8Bit : { true, false }) {
+        auto names = [&](ASCIILiteral markup) {
+            return topLevelNames(is8Bit ? String(markup) : sixteenBitString(markup));
+        };
+        EXPECT_EQ("BUTTON"_s, names("<button>x</button>"_s));
+        EXPECT_EQ("BUTTON"_s, names("<BUTTON>x</BUTTON>"_s));
+        EXPECT_EQ("BUTTON"_s, names("<button >x</button >"_s));
+        EXPECT_EQ("STRONG #text"_s, names("<strong>x</strong>y"_s));
+        EXPECT_EQ("fail"_s, names("<abcdefg>x</abcdefg>"_s));
+        EXPECT_EQ("fail"_s, names("<abcdefgh>x</abcdefgh>"_s));
+        EXPECT_EQ("fail"_s, names("<abcdefghi>x</abcdefghi>"_s));
+        EXPECT_EQ("SPAN BR"_s, names("<span>x</span><br>"_s));
+        EXPECT_EQ("B"_s, names("<b>x</b>"_s));
+        EXPECT_EQ("B"_s, names("<b>x</B>"_s));
+        EXPECT_EQ("fail"_s, names("<span>x</spa>"_s));
+        EXPECT_EQ("fail"_s, names("<span>x</span"_s));
+        EXPECT_EQ("fail"_s, names("<button>x</butto"_s));
+    }
+
+    // U+0162 and U+0142, whose low bytes are 'b' and 'B', in tag names.
+    auto wide = [&](char16_t character, ASCIILiteral before, ASCIILiteral after) {
+        return topLevelNames(makeString(before, character, after));
+    };
+    EXPECT_EQ("fail"_s, wide(0x0162, "<"_s, ">x</b>"_s));
+    EXPECT_EQ("fail"_s, wide(0x0142, "<b>x</"_s, ">"_s));
+    EXPECT_EQ("fail"_s, wide(0x0162, "<b>x</"_s, ">0123456789"_s));
+}
+
+TEST(WebCoreHTMLParser, FastPathTextRunLengths)
+{
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+    auto documentElement = HTMLHtmlElement::create(document);
+    document->appendChild(documentElement);
+    auto body = HTMLBodyElement::create(document);
+    documentElement->appendChild(body);
+
+    auto div = HTMLDivElement::create(document);
+    document->body()->appendChild(div);
+
+    auto firstText = [&](const String& input) -> String {
+        auto fragment = DocumentFragment::create(document);
+        bool result = tryFastParsingHTMLFragment(input, document, fragment, div, { ParserContentPolicy::AllowScriptingContent });
+        EXPECT_TRUE(result);
+        auto* text = result ? dynamicDowncast<Text>(fragment->firstChild()) : nullptr;
+        EXPECT_TRUE(text);
+        EXPECT_TRUE(text && text->nextSibling());
+        return text ? text->data() : String();
+    };
+
+    // Runs of 15, 16, 17, 31, 32 and 33 characters before a tag, in 8-bit and 16-bit input. In 16-bit input, also runs
+    // containing U+0126 and U+013C, whose low bytes are '&' and '<'.
+    for (unsigned length : { 15u, 16u, 17u, 31u, 32u, 33u }) {
+        auto run = repeatedCharacter('t', length);
+        EXPECT_EQ(run, firstText(makeString(run, "<b></b>"_s)));
+        EXPECT_EQ(run, firstText(sixteenBitString(makeString(run, "<b></b>"_s))));
+
+        StringBuilder wideRun;
+        for (unsigned i = 0; i < length; ++i)
+            wideRun.append(i == length / 2 ? u'\u0126' : i == length - 1 ? u'\u013C' : u't');
+        auto wideRunString = wideRun.toString();
+        EXPECT_EQ(wideRunString, firstText(makeString(wideRunString, "<b></b>"_s)));
+    }
 }
 
 } // namespace TestWebKitAPI
