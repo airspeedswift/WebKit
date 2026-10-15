@@ -52,6 +52,12 @@ framework module WebCore_Private [system] {
         export *
     }
 
+    explicit module HTMLFastPathParserTypes {
+        header "HTMLFastPathParserTypes.h"
+        requires cplusplus
+        export *
+    }
+
     module Core {
         // Stated ahead of the umbrella so that the complete `enum CSSValueID : uint16_t` is parsed
         // before any of the WebCore headers that forward-declare it. If an incomplete declaration
@@ -94,6 +100,9 @@ framework module WebCore_Private [system] {
 
         // Stated as a header of Core above so that it is parsed first.
         exclude header "CSSValueKeywords.h"
+
+        // In the explicit module HTMLFastPathParserTypes above, for WebCore's Swift.
+        exclude header "HTMLFastPathParserTypes.h"
 
         module * {
             export *
