@@ -277,7 +277,12 @@ MODULE_VERIFIER_KIND = builtin;
 // -fno-exceptions matches GCC_ENABLE_CPP_EXCEPTIONS = NO, so C++ inline functions that Swift calls can be inlined into it.
 // -fignore-exceptions keeps the cleanups Objective-C exceptions (GCC_ENABLE_OBJC_EXCEPTIONS) would need out of the C++
 // inline functions Swift calls, so they can be inlined too.
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+// -O2 compiles those inline C++ functions as WebCore's C++ is, not at the importer's default -Os, so their loops
+// vectorize. -enable-dfa-jump-thread lets LLVM branch from each transition of a state machine written as a switch
+// in a loop straight to the next state.
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -O2 -Xllvm -enable-dfa-jump-thread -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+// The compile cache drops -Xcc options, so it is off for WebCore's Swift.
+SWIFT_ENABLE_COMPILE_CACHE = NO;
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
