@@ -40,13 +40,13 @@
 namespace WTF {
 
 // Construct a string with UTF-16 data.
-String::String(std::span<const char16_t> characters)
+String::String(std::span<const char16_t> characters NOESCAPE)
     : m_impl(characters.data() ? RefPtr { StringImpl::create(characters) } : nullptr)
 {
 }
 
 // Construct a string with latin1 data.
-String::String(std::span<const Latin1Character> characters)
+String::String(std::span<const Latin1Character> characters NOESCAPE)
     : m_impl(characters.data() ? RefPtr { StringImpl::create(characters) } : nullptr)
 {
 }

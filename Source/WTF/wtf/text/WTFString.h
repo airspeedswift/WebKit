@@ -64,15 +64,15 @@ public:
     String() = default;
 
     // Construct a string with UTF-16 data.
-    WTF_EXPORT_PRIVATE String(std::span<const char16_t> characters);
+    WTF_EXPORT_PRIVATE String(std::span<const char16_t> characters NOESCAPE);
 
     // Construct a string with Latin-1 data.
-    WTF_EXPORT_PRIVATE String(std::span<const Latin1Character> characters);
+    WTF_EXPORT_PRIVATE String(std::span<const Latin1Character> characters NOESCAPE);
     ALWAYS_INLINE static String fromLatin1(const char* characters) { return String { characters }; }
     ALWAYS_INLINE static String fromLatin1(std::span<const char> characters) { return String { characters }; }
 
     // Construct a string with UTF-8 data, null string if it contains invalid UTF-8 sequences.
-    WTF_EXPORT_PRIVATE String(std::span<const char8_t>);
+    WTF_EXPORT_PRIVATE String(std::span<const char8_t>) SWIFT_NAME(init(utf8:));
     String(const char8_t* characters) : String(unsafeSpan(characters)) { }
 
     // Construct a string from a CString that knows its encoding, decoding it as that encoding.
