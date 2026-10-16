@@ -30,7 +30,7 @@ namespace WebCore {
 // Swift uses a SegmentedString only through its member functions. Its spans point into the Strings it
 // holds, except in one made from a StringView, whose characters the caller keeps alive, as for any
 // other user.
-class SWIFT_SAFE SegmentedString {
+class WEBCORE_EXPORT SWIFT_SAFE SegmentedString {
 public:
     SegmentedString() = default;
     SegmentedString(String&&);

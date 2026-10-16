@@ -29,7 +29,7 @@ namespace WebCore {
 
 class Document;
 
-class HTMLParserOptions {
+class WEBCORE_EXPORT HTMLParserOptions {
 public:
     explicit HTMLParserOptions();
     explicit HTMLParserOptions(Document&);

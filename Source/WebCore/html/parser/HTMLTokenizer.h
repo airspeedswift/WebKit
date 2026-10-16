@@ -34,7 +34,7 @@ namespace WebCore {
 
 class SegmentedString;
 
-class HTMLTokenizer {
+class WEBCORE_EXPORT HTMLTokenizer {
 public:
     explicit HTMLTokenizer(const HTMLParserOptions& = HTMLParserOptions());
 
