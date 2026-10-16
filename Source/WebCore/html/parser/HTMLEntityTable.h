@@ -26,13 +26,15 @@
 
 #pragma once
 
+#include <span>
 #include <unicode/umachine.h>
+#include <wtf/Compiler.h>
 
 namespace WebCore {
 
 // Optimize packing since there are over 2000 of these.
 struct HTMLEntityTableEntry {
-    std::span<const char> nameCharacters() const;
+    std::span<const char> nameCharacters() const LIFETIME_BOUND;
     unsigned nameLength() const { return nameLengthExcludingSemicolon + nameIncludesTrailingSemicolon; }
 
     unsigned firstCharacter : 21; // All Unicode characters fit in 21 bits.
