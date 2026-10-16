@@ -2585,7 +2585,12 @@ private:
 
     CompletionHandler<void()> m_whenWindowLoadEventOrDestroyed;
 
+#if !defined(__swift__)
     WeakHashMap<Node, std::unique_ptr<QuerySelectorResults>, WeakPtrImplWithEventTargetData> m_querySelectorResults;
+#else
+    // Hidden from Swift, as RadioButtonGroups' map is: the importer would need QuerySelectorResults' definition.
+    alignas(WeakHashMap<Node, std::unique_ptr<QuerySelectorResults>, WeakPtrImplWithEventTargetData>) unsigned char m_querySelectorResults[sizeof(WeakHashMap<Node, std::unique_ptr<QuerySelectorResults>, WeakPtrImplWithEventTargetData>)];
+#endif
 
     ViewportArguments m_viewportArguments;
     SafeAreaInsetOptIn m_safeAreaInsetOptIn { SafeAreaInsetOptIn::Undetermined };

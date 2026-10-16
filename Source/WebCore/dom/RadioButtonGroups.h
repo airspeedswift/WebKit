@@ -33,6 +33,7 @@ class RadioButtonGroup;
 
 class RadioButtonGroups {
     WTF_MAKE_TZONE_ALLOCATED(RadioButtonGroups);
+    WTF_MAKE_NONCOPYABLE(RadioButtonGroups);
 public:
     RadioButtonGroups();
     ~RadioButtonGroups();
@@ -47,8 +48,14 @@ public:
     Vector<Ref<HTMLInputElement>> groupMembers(const HTMLInputElement&) const;
 
 private:
+#if !defined(__swift__)
     typedef HashMap<AtomString, std::unique_ptr<RadioButtonGroup>> NameToGroupMap;
     NameToGroupMap m_nameToGroupMap;
+#else
+    // Hidden from Swift, whose Clang importer instantiates the map's std::optional<std::unique_ptr<RadioButtonGroup>>
+    // results and so needs RadioButtonGroup's definition. Swift sees storage of the same size in its place.
+    alignas(HashMap<AtomString, std::unique_ptr<RadioButtonGroup>>) unsigned char m_nameToGroupMap[sizeof(HashMap<AtomString, std::unique_ptr<RadioButtonGroup>>)];
+#endif
 };
 
 } // namespace WebCore
