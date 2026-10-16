@@ -43,31 +43,6 @@ static constexpr std::array<char16_t, 32> windowsLatin1ExtensionArray {
     0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178, // 98-9F
 };
 
-constexpr DecodedHTMLEntity::DecodedHTMLEntity() = default;
-
-constexpr DecodedHTMLEntity::DecodedHTMLEntity(char16_t first)
-    : m_length { 1 }
-    , m_characters { first }
-{
-}
-
-constexpr DecodedHTMLEntity::DecodedHTMLEntity(char16_t first, char16_t second)
-    : m_length { 2 }
-    , m_characters { first, second }
-{
-}
-
-constexpr DecodedHTMLEntity::DecodedHTMLEntity(char16_t first, char16_t second, char16_t third)
-    : m_length { 3 }
-    , m_characters { first, second, third }
-{
-}
-
-constexpr DecodedHTMLEntity::DecodedHTMLEntity(ConstructNotEnoughCharactersType)
-    : m_notEnoughCharacters { true }
-{
-}
-
 static constexpr DecodedHTMLEntity LEGACY_NODELETE makeEntity(char32_t character)
 {
     if (!character || character > UCHAR_MAX_VALUE || U_IS_SURROGATE(character))
