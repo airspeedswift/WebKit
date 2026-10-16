@@ -296,13 +296,15 @@ MODULE_VERIFIER_KIND = builtin;
 // -fno-exceptions matches the C++ (GCC_ENABLE_CPP_EXCEPTIONS = NO). Without it the importer's clang emits
 // C++ inline functions with the C++ personality, and LLVM will not inline those into Swift functions
 // ("incompatible personality"), so e.g. every `Ref<T>` destructor Swift runs stays an out-of-line call.
+// -fignore-exceptions keeps the cleanups Objective-C exceptions (GCC_ENABLE_OBJC_EXCEPTIONS) would need out of the C++
+// inline functions Swift calls, so they can be inlined too.
 // ENABLE_SWIFT_BASE_CLASS_ANNOTATIONS=0 keeps WebCore's Swift importer off the base-class Swift annotations
 // (SwiftBridging.h, 5f4afbfb124b). With them, every type deriving from RefCounted or ThreadSafeRefCounted
 // imports as a foreign reference type, and the importer then needs the definition of each one it walks,
 // including JavaScriptCore's Wasm and DOMJIT classes that WebCore_Private reaches but whose definitions are
 // in submodules nothing imports ("foreign reference type 'Callee' has unreachable definition"). The C++ is
 // unaffected: the annotations are attributes Swift reads, and CSSValue carries its own.
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -DENABLE_SWIFT_BASE_CLASS_ANNOTATIONS=0 -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -DENABLE_SWIFT_BASE_CLASS_ANNOTATIONS=0 -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
