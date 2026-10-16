@@ -110,6 +110,8 @@ public:
     void appendToAttributeValue(char16_t);
     void appendToAttributeValue(unsigned index, StringView value);
     template<typename CharacterType> void appendToAttributeValue(std::span<const CharacterType>);
+    void appendToAttributeValue(std::span<const Latin1Character> characters NOESCAPE) { appendToAttributeValue<Latin1Character>(characters); }
+    void appendToAttributeValue(std::span<const char16_t> characters NOESCAPE) { appendToAttributeValue<char16_t>(characters); }
     void endAttribute();
 
     void setSelfClosing();
@@ -128,6 +130,8 @@ public:
     void appendToCharacter(char16_t);
     void appendToCharacter(const Vector<Latin1Character, 32>&);
     template<typename CharacterType> void appendToCharacter(std::span<const CharacterType>);
+    void appendToCharacter(std::span<const Latin1Character> characters NOESCAPE) { appendToCharacter<Latin1Character>(characters); }
+    void appendToCharacter(std::span<const char16_t> characters NOESCAPE) { appendToCharacter<char16_t>(characters); }
 
     void makeReplacedNullCharacter();
 
