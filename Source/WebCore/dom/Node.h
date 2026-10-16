@@ -25,6 +25,7 @@
 #pragma once
 
 #include <WebCore/EventTarget.h>
+#include <wtf/SwiftBridging.h>
 #include <WebCore/NodeIdentifier.h>
 #include <WebCore/NodeType.h>
 #include <WebCore/StyleValidity.h>
@@ -110,7 +111,7 @@ using NodeOrString = Variant<Ref<Node>, String>;
 const int initialNodeVectorSize = 11; // Covers 99.5%. See webkit.org/b/80706
 typedef Vector<Ref<Node>, initialNodeVectorSize> NodeVector;
 
-class Node : public EventTarget, public CanMakeCheckedPtr<Node> {
+class SWIFT_SHARED_REFERENCE(.ref, .deref) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT Node : public EventTarget, public CanMakeCheckedPtr<Node> {
     WTF_MAKE_PREFERABLY_COMPACT_TZONE_ALLOCATED(Node);
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(Node);
 

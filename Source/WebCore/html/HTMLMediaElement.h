@@ -56,6 +56,7 @@
 #include <wtf/Identified.h>
 #include <wtf/LoggerHelper.h>
 #include <wtf/Observer.h>
+#include <wtf/Stopwatch.h>
 #include <wtf/WallTime.h>
 #include <wtf/WeakPtr.h>
 
