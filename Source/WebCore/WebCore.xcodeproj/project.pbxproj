@@ -4377,7 +4377,7 @@
 		A1763F3F1E205234001D58DE /* WebArchiveDumpSupport.h in Headers */ = {isa = PBXBuildFile; fileRef = A1763F3D1E205234001D58DE /* WebArchiveDumpSupport.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A1763F411E20586E001D58DE /* CFNetwork.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1763F401E20586E001D58DE /* CFNetwork.framework */; };
 		A178A0072B7FFC4900C26789 /* WebSampleBufferVideoRendering.h in Headers */ = {isa = PBXBuildFile; fileRef = A178A0062B7FFC4900C26789 /* WebSampleBufferVideoRendering.h */; };
-		A17C81230F2A5CF7005DAAEB /* HTMLElementFactory.h in Headers */ = {isa = PBXBuildFile; fileRef = A17C81210F2A5CF7005DAAEB /* HTMLElementFactory.h */; };
+		A17C81230F2A5CF7005DAAEB /* HTMLElementFactory.h in Headers */ = {isa = PBXBuildFile; fileRef = A17C81210F2A5CF7005DAAEB /* HTMLElementFactory.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A17D275E1EAC579800BF01E7 /* MediaSelectionOption.h in Headers */ = {isa = PBXBuildFile; fileRef = A17D275D1EAC579800BF01E7 /* MediaSelectionOption.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A17FEE641F8893220021E811 /* PaymentSessionBase.h in Headers */ = {isa = PBXBuildFile; fileRef = A17FEE631F8893220021E811 /* PaymentSessionBase.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A180AD5B219F81B000DC039A /* WebCoreAdditions.mm in Sources */ = {isa = PBXBuildFile; fileRef = A17E4F26219BC01600E1C7EE /* WebCoreAdditions.mm */; };
@@ -7360,7 +7360,7 @@
 		F498C6BF299EE7B200CBA427 /* NoiseInjectionPolicy.h in Headers */ = {isa = PBXBuildFile; fileRef = F498C6BE299EE7A400CBA427 /* NoiseInjectionPolicy.h */; };
 		F4A064C8277E48C900B06A17 /* FontCocoa.h in Headers */ = {isa = PBXBuildFile; fileRef = F4A064C6277E48C600B06A17 /* FontCocoa.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		F4A1C12A2AD05FA400862999 /* WebEventPrivate.h in Headers */ = {isa = PBXBuildFile; fileRef = F4A1C1292AD05F8A00862999 /* WebEventPrivate.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		F4B0018926E7F21F006EAABE /* HTMLNameCache.h in Headers */ = {isa = PBXBuildFile; fileRef = F4B0018726E7F21F006EAABE /* HTMLNameCache.h */; };
+		F4B0018926E7F21F006EAABE /* HTMLNameCache.h in Headers */ = {isa = PBXBuildFile; fileRef = F4B0018726E7F21F006EAABE /* HTMLNameCache.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		F4B2A909265030BA009E7286 /* DataDetectorHighlight.h in Headers */ = {isa = PBXBuildFile; fileRef = F4B2A90626502BA0009E7286 /* DataDetectorHighlight.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		F4B422C4220C0568009E1E7D /* DOMPasteAccess.h in Headers */ = {isa = PBXBuildFile; fileRef = F4B422C2220C0000009E1E7D /* DOMPasteAccess.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		F4BFB9851E1DDF9B00862C24 /* DumpEditingHistory.js in Copy Scripts */ = {isa = PBXBuildFile; fileRef = F48389831E1DDF2B0076B7EA /* DumpEditingHistory.js */; };
