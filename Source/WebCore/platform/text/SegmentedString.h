@@ -67,6 +67,8 @@ public:
 
     std::span<const Latin1Character> currentSubstringSpan8() const LIFETIME_BOUND;
     void advancePastMultiple8(unsigned count);
+    std::span<const char16_t> currentSubstringSpan16() const LIFETIME_BOUND;
+    void advancePastMultiple16(unsigned count);
 
     enum AdvancePastResult { DidNotMatch, DidMatch, NotEnoughCharacters };
     AdvancePastResult advancePast(ASCIILiteral literal) { return advancePast<false>(literal); }
@@ -335,6 +337,36 @@ inline void SegmentedString::advancePastMultiple8(unsigned count)
 
     m_currentCharacter = m_currentSubstring.s.currentCharacter8[0];
     if (m_currentSubstring.s.currentCharacter8.size() == 1) [[unlikely]]
+        updateAdvanceFunctionPointersForSingleCharacterSubstring();
+}
+
+// Returns a span over the remaining characters in the current 16-bit substring,
+// starting from the current character. Returns an empty span if not 16-bit, or if
+// only one character remains, as currentSubstringSpan8() does for 8-bit substrings.
+inline std::span<const char16_t> SegmentedString::currentSubstringSpan16() const LIFETIME_BOUND
+{
+    if (!m_currentSubstring.is8Bit && m_currentSubstring.length() > 1)
+        return m_currentSubstring.s.currentCharacter16;
+    return { };
+}
+
+// Advances past `count` characters in the current 16-bit substring.
+// The caller must ensure at least one character remains after advancing
+// (i.e. count < currentSubstringSpan16().size()), as the function sets
+// the next remaining character as m_currentCharacter.
+inline void SegmentedString::advancePastMultiple16(unsigned count)
+{
+    ASSERT(!m_currentSubstring.is8Bit);
+    ASSERT(count < m_currentSubstring.s.currentCharacter16.size());
+
+    // Calls startNewLine() before skipping past the newline, unlike advancePastMultiple8(),
+    // so that the line numbers match advanceAndUpdateLineNumber16().
+    if (m_currentCharacter == '\n' && m_currentSubstring.doNotExcludeLineNumbers)
+        startNewLine();
+    skip(m_currentSubstring.s.currentCharacter16, count);
+
+    m_currentCharacter = m_currentSubstring.s.currentCharacter16[0];
+    if (m_currentSubstring.s.currentCharacter16.size() == 1) [[unlikely]]
         updateAdvanceFunctionPointersForSingleCharacterSubstring();
 }
 
