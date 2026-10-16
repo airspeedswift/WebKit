@@ -20,20 +20,24 @@
 #pragma once
 
 #include <wtf/Deque.h>
+#include <wtf/SwiftBridging.h>
 #include <wtf/text/ParsingUtilities.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
 namespace WebCore {
 
-class SegmentedString {
+// Swift uses a SegmentedString only through its member functions. Its spans point into the Strings it
+// holds, except in one made from a StringView, whose characters the caller keeps alive, as for any
+// other user.
+class SWIFT_SAFE SegmentedString {
 public:
     SegmentedString() = default;
     SegmentedString(String&&);
     SegmentedString(const String&);
     explicit SegmentedString(StringView);
 
-    SegmentedString(SegmentedString&&) = delete;
+    SegmentedString(SegmentedString&&);
     SegmentedString(const SegmentedString&) = delete;
 
     SegmentedString& operator=(SegmentedString&&);
@@ -61,7 +65,7 @@ public:
     void advancePastNonNewline(); // Faster than calling advance when we know the current character is not a newline.
     void advancePastNewline(); // Faster than calling advance when we know the current character is a newline.
 
-    std::span<const Latin1Character> currentSubstringSpan8() const;
+    std::span<const Latin1Character> currentSubstringSpan8() const LIFETIME_BOUND;
     void advancePastMultiple8(unsigned count);
 
     enum AdvancePastResult { DidNotMatch, DidMatch, NotEnoughCharacters };
@@ -218,6 +222,11 @@ inline SegmentedString::SegmentedString(String&& string)
     }
 }
 
+inline SegmentedString::SegmentedString(SegmentedString&& other)
+{
+    *this = WTF::move(other);
+}
+
 inline SegmentedString::SegmentedString(const String& string)
     : SegmentedString(String { string })
 {
@@ -297,7 +306,7 @@ inline void SegmentedString::advancePastNewline()
 
 // Returns a span over the remaining characters in the current 8-bit substring,
 // starting from the current character. Returns an empty span if not 8-bit.
-inline std::span<const Latin1Character> SegmentedString::currentSubstringSpan8() const
+inline std::span<const Latin1Character> SegmentedString::currentSubstringSpan8() const LIFETIME_BOUND
 {
     if (m_fastPathFlags & Use8BitAdvance)
         return m_currentSubstring.s.currentCharacter8;
