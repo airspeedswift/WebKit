@@ -34,22 +34,22 @@ namespace WebCore {
 
 class HTMLNameCache {
 public:
-    ALWAYS_INLINE static QualifiedName makeAttributeQualifiedName(std::span<const char16_t> string)
+    ALWAYS_INLINE static QualifiedName makeAttributeQualifiedName(std::span<const char16_t> string NOESCAPE)
     {
         return makeQualifiedName(string);
     }
 
-    ALWAYS_INLINE static QualifiedName makeAttributeQualifiedName(std::span<const Latin1Character> string)
+    ALWAYS_INLINE static QualifiedName makeAttributeQualifiedName(std::span<const Latin1Character> string NOESCAPE)
     {
         return makeQualifiedName(string);
     }
 
-    ALWAYS_INLINE static AtomString makeAttributeValue(std::span<const char16_t> string)
+    ALWAYS_INLINE static AtomString makeAttributeValue(std::span<const char16_t> string NOESCAPE)
     {
         return makeAtomString(string);
     }
 
-    ALWAYS_INLINE static AtomString makeAttributeValue(std::span<const Latin1Character> string)
+    ALWAYS_INLINE static AtomString makeAttributeValue(std::span<const Latin1Character> string NOESCAPE)
     {
         return makeAtomString(string);
     }

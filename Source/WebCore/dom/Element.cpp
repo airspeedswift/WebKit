@@ -2984,7 +2984,7 @@ void Element::stripScriptingAttributes(Vector<Attribute>& attributeVector) const
     });
 }
 
-void Element::parserSetAttributes(std::span<const Attribute> attributes, AttributeModificationReason reason)
+void Element::parserSetAttributes(std::span<const Attribute> attributes NOESCAPE, AttributeModificationReason reason)
 {
     ASSERT(!isConnected());
     ASSERT(!parentNode());
