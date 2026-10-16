@@ -146,7 +146,9 @@ private:
     // For StartTag and EndTag
     bool m_selfClosing;
     AttributeList m_attributes;
-    Attribute* m_currentAttribute;
+#if ASSERT_ENABLED
+    bool m_hasCurrentAttribute { false };
+#endif
 
     // For DOCTYPE
     std::unique_ptr<DoctypeData> m_doctypeData;
@@ -267,7 +269,7 @@ inline void HTMLToken::beginStartTag(Latin1Character character)
     m_attributes.clear();
 
 #if ASSERT_ENABLED
-    m_currentAttribute = nullptr;
+    m_hasCurrentAttribute = false;
 #endif
 
     m_data.append(character);
@@ -281,7 +283,7 @@ inline void HTMLToken::beginEndTag(Latin1Character character)
     m_attributes.clear();
 
 #if ASSERT_ENABLED
-    m_currentAttribute = nullptr;
+    m_hasCurrentAttribute = false;
 #endif
 
     m_data.append(character);
@@ -295,7 +297,7 @@ inline void HTMLToken::beginEndTag(const Vector<Latin1Character, 32>& characters
     m_attributes.clear();
 
 #if ASSERT_ENABLED
-    m_currentAttribute = nullptr;
+    m_hasCurrentAttribute = false;
 #endif
 
     m_data.appendVector(characters);
@@ -305,14 +307,16 @@ inline void HTMLToken::beginAttribute()
 {
     ASSERT(m_type == Type::StartTag || m_type == Type::EndTag);
     m_attributes.grow(m_attributes.size() + 1);
-    m_currentAttribute = &m_attributes.last();
+#if ASSERT_ENABLED
+    m_hasCurrentAttribute = true;
+#endif
 }
 
 inline void HTMLToken::endAttribute()
 {
-    ASSERT(m_currentAttribute);
+    ASSERT(m_hasCurrentAttribute);
 #if ASSERT_ENABLED
-    m_currentAttribute = nullptr;
+    m_hasCurrentAttribute = false;
 #endif
 }
 
@@ -320,24 +324,24 @@ inline void HTMLToken::appendToAttributeName(char16_t character)
 {
     ASSERT(character);
     ASSERT(m_type == Type::StartTag || m_type == Type::EndTag);
-    ASSERT(m_currentAttribute);
-    m_currentAttribute->name.append(character);
+    ASSERT(m_hasCurrentAttribute);
+    m_attributes.last().name.append(character);
 }
 
 inline void HTMLToken::appendToAttributeValue(char16_t character)
 {
     ASSERT(character);
     ASSERT(m_type == Type::StartTag || m_type == Type::EndTag);
-    ASSERT(m_currentAttribute);
-    m_currentAttribute->value.append(character);
+    ASSERT(m_hasCurrentAttribute);
+    m_attributes.last().value.append(character);
 }
 
 template<typename CharacterType>
 inline void HTMLToken::appendToAttributeValue(std::span<const CharacterType> characters)
 {
     ASSERT(m_type == Type::StartTag || m_type == Type::EndTag);
-    ASSERT(m_currentAttribute);
-    m_currentAttribute->value.append(characters);
+    ASSERT(m_hasCurrentAttribute);
+    m_attributes.last().value.append(characters);
 }
 
 inline void HTMLToken::appendToAttributeValue(unsigned i, StringView value)
