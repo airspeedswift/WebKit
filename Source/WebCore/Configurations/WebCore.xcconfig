@@ -304,7 +304,8 @@ MODULE_VERIFIER_KIND = builtin;
 // including JavaScriptCore's Wasm and DOMJIT classes that WebCore_Private reaches but whose definitions are
 // in submodules nothing imports ("foreign reference type 'Callee' has unreachable definition"). The C++ is
 // unaffected: the annotations are attributes Swift reads, and CSSValue carries its own.
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -DENABLE_SWIFT_BASE_CLASS_ANNOTATIONS=0 -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+// BuiltinModule is for the vendored SIMD operations in SIMD*.swift, until the standard library has them.
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -DENABLE_SWIFT_BASE_CLASS_ANNOTATIONS=0 -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers -enable-experimental-feature BuiltinModule $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
@@ -315,3 +316,8 @@ OTHER_MODULE_VERIFIER_FLAGS_ = -iframework "$(WK_PRIVATE_SDK_DIR)$(WK_OVERRIDE_F
 
 HEADERMAP_INCLUDES_FRAMEWORK_ENTRIES_FOR_TARGETS_NOT_BEING_BUILT = NO;
 HEADERMAP_USES_VFS = YES;
+
+// PSHUFB in SIMDTableLookup.swift needs SSSE3, which every x86_64 Mac target has. Other
+// conditions are added to this line; assigning the setting again would replace it.
+WK_SWIFT_SIMD_CONDITIONS[arch=x86_64] = HAVE_SSSE3;
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_SWIFT_SIMD_CONDITIONS);
