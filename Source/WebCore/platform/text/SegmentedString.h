@@ -73,6 +73,13 @@ public:
     void advancePastMultiple8(unsigned count);
     std::span<const char16_t> currentSubstringSpan16() const LIFETIME_BOUND;
     void advancePastMultiple16(unsigned count);
+#if defined(_WIN32)
+    // For SegmentedStringWindows.swift. With the MSVC standard library, Swift does not import a std::span
+    // returned from a LIFETIME_BOUND member function ("may return an interior pointer"), so these return it
+    // as an independent value and the Swift extension restores the lifetime dependence on the string.
+    std::span<const Latin1Character> currentSubstringSpan8ForSwift() const SWIFT_RETURNS_INDEPENDENT_VALUE { return currentSubstringSpan8(); }
+    std::span<const char16_t> currentSubstringSpan16ForSwift() const SWIFT_RETURNS_INDEPENDENT_VALUE { return currentSubstringSpan16(); }
+#endif
 
 #if !USE_SWIFT_HTML_TOKENIZER
     enum AdvancePastResult { DidNotMatch, DidMatch, NotEnoughCharacters };

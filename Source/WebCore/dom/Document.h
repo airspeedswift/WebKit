@@ -2551,7 +2551,17 @@ private:
 
     CompletionHandler<void()> m_whenWindowLoadEventOrDestroyed;
 
+    // Hidden from WebCore's Swift on Windows, where the Clang importer instantiates the map's
+    // std::optional<std::unique_ptr<QuerySelectorAllResults>> and so MSVC's default_delete, which needs the
+    // complete type (it is defined in Document.cpp). Swift sees storage of the same size and alignment: the
+    // map's layout does not depend on its value type.
+#if defined(__swift__) && defined(_WIN32)
+    alignas(WeakHashMap<Node, std::unique_ptr<int>, WeakPtrImplWithEventTargetData>) unsigned char m_querySelectorAllResults[sizeof(WeakHashMap<Node, std::unique_ptr<int>, WeakPtrImplWithEventTargetData>)];
+#else
     WeakHashMap<Node, std::unique_ptr<QuerySelectorAllResults>, WeakPtrImplWithEventTargetData> m_querySelectorAllResults;
+    static_assert(sizeof(WeakHashMap<Node, std::unique_ptr<QuerySelectorAllResults>, WeakPtrImplWithEventTargetData>) == sizeof(WeakHashMap<Node, std::unique_ptr<int>, WeakPtrImplWithEventTargetData>));
+    static_assert(alignof(WeakHashMap<Node, std::unique_ptr<QuerySelectorAllResults>, WeakPtrImplWithEventTargetData>) == alignof(WeakHashMap<Node, std::unique_ptr<int>, WeakPtrImplWithEventTargetData>));
+#endif
 
     ViewportArguments m_viewportArguments;
     SafeAreaInsetOptIn m_safeAreaInsetOptIn { SafeAreaInsetOptIn::Undetermined };
@@ -2604,7 +2614,14 @@ private:
     std::unique_ptr<DocumentSharedObjectPool> m_sharedObjectPool;
 
     using LocaleIdentifierToLocaleMap = HashMap<AtomString, std::unique_ptr<Locale>>;
+    // Hidden from WebCore's Swift on Windows for the reason m_querySelectorAllResults is.
+#if defined(__swift__) && defined(_WIN32)
+    alignas(HashMap<AtomString, std::unique_ptr<int>>) unsigned char m_localeCache[sizeof(HashMap<AtomString, std::unique_ptr<int>>)];
+#else
     LocaleIdentifierToLocaleMap m_localeCache;
+    static_assert(sizeof(LocaleIdentifierToLocaleMap) == sizeof(HashMap<AtomString, std::unique_ptr<int>>));
+    static_assert(alignof(LocaleIdentifierToLocaleMap) == alignof(HashMap<AtomString, std::unique_ptr<int>>));
+#endif
 
     const RefPtr<Document> m_templateDocument;
     WeakPtr<Document, WeakPtrImplWithEventTargetData> m_templateDocumentHost; // Manually managed weakref (backpointer from m_templateDocument).

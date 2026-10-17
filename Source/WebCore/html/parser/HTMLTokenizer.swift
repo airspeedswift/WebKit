@@ -1077,7 +1077,8 @@ extension WebCore.HTMLTokenizer {
         }
         var state = states[Int(m_state.rawValue)]
         defer {
-            m_state = State(rawValue: state.rawValue)
+            // State's raw type is the C++ enum's underlying type, unsigned on Apple platforms and int under MSVC.
+            m_state = State(rawValue: State.RawValue(state.rawValue))
         }
 
         if !m_bufferedEndTagName.isEmpty() && !state.isEndTagBuffering {

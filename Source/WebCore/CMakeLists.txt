@@ -3453,6 +3453,9 @@ elseif (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
             ${WEBCORE_DIR}/html/parser/HTMLEntityParser.swift
             ${WEBCORE_DIR}/html/parser/HTMLTokenizer.swift
         )
+        if (WIN32)
+            target_sources(WebCore PRIVATE ${WEBCORE_DIR}/platform/text/SegmentedStringWindows.swift)
+        endif ()
         list(APPEND WebCore_SWIFT_INTEROP_SOURCES
             html/parser/HTMLTokenizer.cpp
             html/track/WebVTTTokenizer.cpp
