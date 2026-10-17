@@ -364,6 +364,14 @@ elseif (LTO_MODE AND COMPILER_IS_CLANG AND MSVC AND (NOT DEVELOPER_MODE OR WK_OP
     set(CMAKE_EXE_LINKER_FLAGS "/opt:lldlto=2 ${CMAKE_EXE_LINKER_FLAGS}")
     set(CMAKE_SHARED_LINKER_FLAGS "/opt:lldlto=2 ${CMAKE_SHARED_LINKER_FLAGS}")
     set(CMAKE_MODULE_LINKER_FLAGS "/opt:lldlto=2 ${CMAKE_MODULE_LINKER_FLAGS}")
+    # A target that links as Swift (WebKit, with a Swift feature on) goes through swiftc, whose default
+    # on Windows is link.exe, which reads neither the LTO bitcode nor /opt:lldlto. Plain -use-ld=lld
+    # is not enough: that is the Swift toolchain's lld, which cannot read bitcode from a newer
+    # clang-cl. -tools-directory makes swiftc use the lld-link the C++ targets link with (it takes
+    # neither a path in -use-ld nor -ld-path).
+    cmake_path(GET CMAKE_LINKER PARENT_PATH _webkit_linker_dir)
+    add_link_options("$<$<LINK_LANGUAGE:Swift>:-use-ld=lld>"
+        "$<$<LINK_LANGUAGE:Swift>:SHELL:-tools-directory ${_webkit_linker_dir}>")
 endif ()
 
 # PRESERVE_MOST is only profitable under LTO: without it, hot/cold splitting gives the extracted

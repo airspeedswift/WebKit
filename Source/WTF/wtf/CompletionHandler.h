@@ -44,6 +44,44 @@ namespace WTF {
 using SwiftClosureInvoke = void (* WTF_NONNULL)(void* WTF_NONNULL context, void* WTF_NULLABLE argument);
 using SwiftClosureDestroy = void (* WTF_NONNULL)(void* WTF_NONNULL context);
 
+#ifdef __swift__
+// Owns a Swift closure's context, destroying it once the last owner goes away.
+// FIXME: This could be std::unique_ptr<void, SwiftClosureDestroy>, but on Windows the Swift
+// compiler then references std::exchange<void*, std::nullptr_t> (from MSVC's unique_ptr::release)
+// without emitting it, and the link fails.
+class SwiftClosureOwner {
+public:
+    SwiftClosureOwner(void* WTF_NONNULL context, SwiftClosureDestroy destroy)
+        : m_context(context)
+        , m_destroy(destroy)
+    {
+    }
+
+    SwiftClosureOwner(SwiftClosureOwner&& other)
+        : m_context(other.m_context)
+        , m_destroy(other.m_destroy)
+    {
+        other.m_context = nullptr;
+    }
+
+    SwiftClosureOwner(const SwiftClosureOwner&) = delete;
+    SwiftClosureOwner& operator=(const SwiftClosureOwner&) = delete;
+    SwiftClosureOwner& operator=(SwiftClosureOwner&&) = delete;
+
+    ~SwiftClosureOwner()
+    {
+        if (m_context)
+            m_destroy(m_context);
+    }
+
+    void* WTF_NULLABLE get() const { return m_context; }
+
+private:
+    void* WTF_NULLABLE m_context;
+    SwiftClosureDestroy m_destroy;
+};
+#endif
+
 template<typename> class CompletionHandler;
 class CompletionHandlerCallThread {
 public:
@@ -90,7 +128,7 @@ public:
 #ifdef __swift__
     // This should only be called within the initializers of the `CxxCompletionHandler` protocols.
     CompletionHandler(SwiftClosureInvoke invoke, SwiftClosureDestroy destroy, void* WTF_NONNULL context) SWIFT_NAME(init(invoke:destroy:context:))
-        : CompletionHandler([invoke, owner = std::unique_ptr<void, SwiftClosureDestroy> { context, destroy }](In... arguments) -> Out {
+        : CompletionHandler([invoke, owner = SwiftClosureOwner { context, destroy }](In... arguments) -> Out {
             passArgumentToSwift(invoke, owner.get(), std::forward<In>(arguments)...);
         })
     {
