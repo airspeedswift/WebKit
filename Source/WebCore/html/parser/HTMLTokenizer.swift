@@ -70,7 +70,7 @@ private func processToken(
 }
 
 /// HTMLTokenizer::State, in the same order, which HTMLTokenizer::processToken checks with a static_assert.
-private enum TokenizerState: UInt32, CaseIterable {
+enum TokenizerState: UInt32, CaseIterable {
     case data
     case characterReferenceInData
     case rcdata
@@ -361,7 +361,7 @@ private var rightSquareBracketCharacter: SIMD16<UInt8> {
 /// The second table that a run also ends at, for characters whose low four bits are those of a special character.
 ///
 /// None, '-', ' ', ']', or the ' ', '<' and '=' of an attribute name.
-private enum AdditionalSpecialCharacters {
+enum AdditionalSpecialCharacters {
     case none
     case hyphenMinus
     case space
@@ -381,7 +381,7 @@ private enum AdditionalSpecialCharacters {
 }
 
 /// A code unit of a SegmentedString substring, as plainTextLength reads it.
-private protocol PlainTextCodeUnit: FixedWidthInteger, UnsignedInteger {
+protocol PlainTextCodeUnit: FixedWidthInteger, UnsignedInteger {
     /// tableMatchNibbles of code units `offset` to `offset + 15` of `characters` against `specialCharacters`, and
     /// against `additionalSpecialCharacters`. A code unit above 0xFF matches neither.
     static func specialCharacterMatches(
@@ -394,7 +394,7 @@ private protocol PlainTextCodeUnit: FixedWidthInteger, UnsignedInteger {
 
 extension UInt8: PlainTextCodeUnit {
     @inline(always)
-    fileprivate static func specialCharacterMatches(
+    static func specialCharacterMatches(
         _ characters: Span<UInt8>,
         at offset: Int,
         _ specialCharacters: SIMD16<UInt8>,
@@ -411,7 +411,7 @@ extension UInt8: PlainTextCodeUnit {
 
 extension UInt16: PlainTextCodeUnit {
     @inline(always)
-    fileprivate static func specialCharacterMatches(
+    static func specialCharacterMatches(
         _ characters: Span<UInt16>,
         at offset: Int,
         _ specialCharacters: SIMD16<UInt8>,

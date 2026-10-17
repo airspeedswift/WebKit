@@ -453,7 +453,7 @@ private struct HTMLEntitySearch {
 
 /// The characters a character reference is read from. `Consumed` is what the decoder has consumed of them, kept so
 /// that it can push them back.
-private protocol HTMLEntitySource: ~Copyable, ~Escapable {
+protocol HTMLEntitySource: ~Copyable, ~Escapable {
     associatedtype Consumed
 
     func isEmpty(_ consumed: borrowing Consumed) -> Bool
@@ -464,7 +464,7 @@ private protocol HTMLEntitySource: ~Copyable, ~Escapable {
 }
 
 /// The characters consumed from a SegmentedString.
-private struct ConsumedCharacters {
+struct ConsumedCharacters {
     fileprivate static let inlineCapacity = 64
 
     fileprivate var inlineCharacters = InlineArray<64, UInt16>(repeating: 0)
@@ -508,24 +508,24 @@ private struct ConsumedCharacters {
 
 // The source the tokenizer reads from. A source that is complete ends with a 0 character.
 extension WebCore.SegmentedString: HTMLEntitySource {
-    fileprivate func isEmpty(_ consumed: borrowing ConsumedCharacters) -> Bool {
+    func isEmpty(_ consumed: borrowing ConsumedCharacters) -> Bool {
         isEmpty()
     }
 
-    fileprivate func currentCharacter(_ consumed: borrowing ConsumedCharacters) -> UInt16 {
+    func currentCharacter(_ consumed: borrowing ConsumedCharacters) -> UInt16 {
         currentCharacter()
     }
 
-    fileprivate mutating func advance(_ consumed: inout ConsumedCharacters) {
+    mutating func advance(_ consumed: inout ConsumedCharacters) {
         consumed.append(currentCharacter())
         advancePastNonNewline()
     }
 
-    fileprivate mutating func pushEverythingBack(_ consumed: inout ConsumedCharacters) {
+    mutating func pushEverythingBack(_ consumed: inout ConsumedCharacters) {
         pushBack(consuming: consumed.removeCharacters(from: 0))
     }
 
-    fileprivate mutating func pushBackButKeep(_ keepCount: Int, _ consumed: inout ConsumedCharacters) {
+    mutating func pushBackButKeep(_ keepCount: Int, _ consumed: inout ConsumedCharacters) {
         pushBack(consuming: consumed.removeCharacters(from: keepCount))
     }
 }
@@ -533,23 +533,23 @@ extension WebCore.SegmentedString: HTMLEntitySource {
 // Characters that are complete: the character after the last one reads as 0, and the source is never empty.
 // `Consumed` is the number of characters consumed.
 extension Span: HTMLEntitySource where Element: FixedWidthInteger & UnsignedInteger {
-    fileprivate func isEmpty(_ consumed: borrowing Int) -> Bool {
+    func isEmpty(_ consumed: borrowing Int) -> Bool {
         false
     }
 
-    fileprivate func currentCharacter(_ consumed: borrowing Int) -> UInt16 {
+    func currentCharacter(_ consumed: borrowing Int) -> UInt16 {
         consumed < count ? UInt16(truncatingIfNeeded: self[consumed]) : 0
     }
 
-    fileprivate func advance(_ consumed: inout Int) {
+    func advance(_ consumed: inout Int) {
         consumed += 1
     }
 
-    fileprivate func pushEverythingBack(_ consumed: inout Int) {
+    func pushEverythingBack(_ consumed: inout Int) {
         consumed = 0
     }
 
-    fileprivate func pushBackButKeep(_ keepCount: Int, _ consumed: inout Int) {
+    func pushBackButKeep(_ keepCount: Int, _ consumed: inout Int) {
         consumed = keepCount
     }
 }
