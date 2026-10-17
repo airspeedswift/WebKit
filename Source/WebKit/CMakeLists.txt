@@ -1,5 +1,14 @@
 set_property(DIRECTORY . PROPERTY FOLDER "WebKit")
 
+# SWIFT_REQUIRED is on for the whole build when any port's Swift feature is on, including the ones
+# that put Swift only in PAL or WebCore (WK_USE_SWIFT_TEXT_CODEC_UTF8, WK_USE_SWIFT_CSS,
+# WK_USE_SWIFT_HTML_FAST_PATH). Outside Apple, WebKit's own Swift belongs to
+# ENABLE_BACK_FORWARD_LIST_SWIFT alone, so it stays out of the build unless that is on. This
+# directory's copy of the variable is the one WebKit's Swift setup reads.
+if (NOT APPLE AND NOT ENABLE_BACK_FORWARD_LIST_SWIFT)
+    set(SWIFT_REQUIRED OFF)
+endif ()
+
 set(WebKit_PRIVATE_INCLUDE_DIRECTORIES
     "${CMAKE_BINARY_DIR}"
     "${PAL_FRAMEWORK_HEADERS_DIR}"
