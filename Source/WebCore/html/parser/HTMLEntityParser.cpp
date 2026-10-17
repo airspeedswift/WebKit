@@ -36,6 +36,7 @@
 
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TOKENIZER
 static constexpr std::array<char16_t, 32> windowsLatin1ExtensionArray {
     0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, // 80-87
     0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F, // 88-8F
@@ -279,5 +280,6 @@ DecodedHTMLEntity decodeNamedHTMLEntityForXMLParser(const char* name)
         return { };
     return makeEntity(*search.match());
 }
+#endif
 
 } // namespace WebCore

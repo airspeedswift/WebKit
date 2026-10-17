@@ -32,6 +32,7 @@
 
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TOKENIZER
 HTMLEntitySearch::HTMLEntitySearch()
     : m_entries(HTMLEntityTable::entries())
 {
@@ -120,5 +121,6 @@ void HTMLEntitySearch::advance(char16_t nextCharacter)
         return;
     m_mostRecentMatch = &m_entries.front();
 }
+#endif
 
 }

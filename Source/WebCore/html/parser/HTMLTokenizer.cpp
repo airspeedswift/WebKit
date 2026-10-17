@@ -35,10 +35,15 @@
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringBuilder.h>
 
+#if USE_SWIFT_HTML_TOKENIZER
+#include "WebCore-Swift.h"
+#endif
+
 namespace WebCore {
 
 using namespace HTMLNames;
 
+#if !USE_SWIFT_HTML_TOKENIZER
 // https://html.spec.whatwg.org/multipage/parsing.html#data-state
 // In the Data state, '<' switches to TagOpenState, '&' switches to a character
 // reference, and '\0' is a parse error. '\r' and '\n' require special handling
@@ -98,12 +103,14 @@ inline bool HTMLTokenizer::inEndTagBufferingState() const
         return false;
     }
 }
+#endif
 
 HTMLTokenizer::HTMLTokenizer(const HTMLParserOptions& options)
     : m_options(options)
 {
 }
 
+#if !USE_SWIFT_HTML_TOKENIZER
 inline void HTMLTokenizer::bufferASCIICharacter(char16_t character)
 {
     ASSERT(character != kEndOfFileMarker);
@@ -254,9 +261,15 @@ bool HTMLTokenizer::commitToCompleteEndTag(SegmentedString& source)
     flushBufferedEndTag();
     return true;
 }
+#endif
 
 bool HTMLTokenizer::processToken(SegmentedString& source)
 {
+#if USE_SWIFT_HTML_TOKENIZER
+    // HTMLTokenizer.swift's TokenizerState lists these states in this order.
+    static_assert(CDATASectionDoubleRightSquareBracketState == 75);
+    return processHTMLTokenizerToken(*this, source, m_additionalAllowedCharacter);
+#else
     if (!m_bufferedEndTagName.isEmpty() && !inEndTagBufferingState()) {
         // We are back here after emitting a character token that came just before an end tag.
         // To continue parsing the end tag we need to move the buffered tag name into the token.
@@ -1592,6 +1605,7 @@ bool HTMLTokenizer::processToken(SegmentedString& source)
 
     ASSERT_NOT_REACHED();
     return false;
+#endif
 }
 
 String HTMLTokenizer::bufferedCharacters() const
@@ -1617,6 +1631,7 @@ void HTMLTokenizer::updateStateFor(const AtomString& tagName)
         m_state = RAWTEXTState;
 }
 
+#if !USE_SWIFT_HTML_TOKENIZER
 inline void HTMLTokenizer::appendToTemporaryBuffer(char16_t character)
 {
     ASSERT(isASCII(character));
@@ -1646,5 +1661,6 @@ inline bool HTMLTokenizer::isAppropriateEndTag() const
 inline void HTMLTokenizer::parseError()
 {
 }
+#endif
 
 }

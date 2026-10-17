@@ -111,6 +111,11 @@ unsigned LEGACY_NODELETE maxCachedSetInnerHTMLStringSize()
     return s_maxCachedStringSize;
 }
 
+#if USE_SWIFT_HTML_TOKENIZER
+// USE_SWIFT_HTML_TOKENIZER compiles out the C++ consumeHTMLEntity, which the C++ fast path calls.
+static_assert(USE_SWIFT_HTML_FAST_PATH);
+#endif
+
 #if USE_SWIFT_HTML_FAST_PATH
 // HTMLFastPathParser.swift uses these values as literals.
 static_assert(Settings::defaultMaximumHTMLParserDOMTreeDepth == 512);
@@ -121,6 +126,7 @@ static_assert(NewlineThenWhitespaceStringsTable::maxSpaceCount == 32);
     return NewlineThenWhitespaceStringsTable::getCachedWhitespace(spaceCount);
 }
 
+#if !USE_SWIFT_HTML_TOKENIZER
 // Each Swift caller passes an empty span for the width it does not use.
 [[clang::always_inline]] uint64_t consumeHTMLEntityForFastPath(HTMLFastPathLatin1Span latin1Source NOESCAPE, HTMLFastPathUTF16Span utf16Source NOESCAPE, char16_t additionalAllowedCharacter, std::span<char16_t> decoded NOESCAPE, size_t decodedOffset)
 {
@@ -133,6 +139,7 @@ static_assert(NewlineThenWhitespaceStringsTable::maxSpaceCount == 32);
     };
     return latin1Source.empty() ? consume(utf16Source) : consume(latin1Source);
 }
+#endif
 #endif
 
 #if !USE_SWIFT_HTML_FAST_PATH

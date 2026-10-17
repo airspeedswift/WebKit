@@ -50,7 +50,8 @@ internal import WebCore_Private.Core.Text
 /// Returns false if the fragment is outside the subset of HTML the fast path supports (HTMLDocumentParserFastPath.cpp).
 /// The nodes already appended then stay, for the caller to discard.
 ///
-/// The C++ caller owns the characters of `source`, which stay alive and unchanged for the call.
+/// The C++ caller owns the characters of `source`, which stay alive and unchanged for the call, and any byte is a
+/// valid Latin1Character.
 ///
 /// FIXME: Take a Span once a std::span can cross safely (rdar://186723514).
 @_expose(Cxx)
@@ -66,7 +67,8 @@ func parseHTMLFragmentForFastPath(
 
 /// The 16-bit form of parseHTMLFragmentForFastPath(_:_:_:_:).
 ///
-/// The C++ caller owns the characters of `source`, which stay alive and unchanged for the call.
+/// The C++ caller owns the characters of `source`, which stay alive and unchanged for the call, and any 16-bit value
+/// is a valid char16_t.
 ///
 /// FIXME: Take a Span once a std::span can cross safely (rdar://186723514).
 @_expose(Cxx, "parseHTMLFragmentForFastPath")
@@ -206,9 +208,11 @@ private func classifyAttributeWindow(lowBytes: SIMD16<UInt8>, highBytes: SIMD16<
     )
 }
 
-/// matchNibbles(_:at:_:) for sixteen code units given as their low bytes and their high bytes.
+/// Four bits per code unit of sixteen given as their low bytes and their high bytes, the first in the least
+/// significant: 0xF where the code unit is below 0x100 and equals the lane of `table` its low four bits select, and 0
+/// elsewhere.
 @inline(always)
-private func tableMatchNibbles(lowBytes: SIMD16<UInt8>, highBytes: SIMD16<UInt8>, _ table: SIMD16<UInt8>) -> UInt64 {
+func tableMatchNibbles(lowBytes: SIMD16<UInt8>, highBytes: SIMD16<UInt8>, _ table: SIMD16<UInt8>) -> UInt64 {
     // Zero in the lanes that match, and only in those.
     let difference = (neon_tbl(table, lowBytes & SIMD16(repeating: 0x0F)) &- lowBytes) | highBytes
     let mismatches = signLanes(difference | (SIMD16() &- difference))
@@ -222,6 +226,9 @@ extension UInt8: HTMLFastPathCodeUnit {
         _ decoded: inout MutableSpan<UInt16>,
         at offset: Int
     ) -> UInt64 {
+        #if USE_SWIFT_HTML_TOKENIZER
+        consumeHTMLEntity(input, additionalAllowedCharacter, &decoded, at: offset)
+        #else
         // An empty UTF-16 source. A Span converted to a std::span must have an address, even when empty.
         let noCharacters = InlineArray<1, UInt16>(repeating: 0)
         return WebCore.consumeHTMLEntityForFastPath(
@@ -231,6 +238,7 @@ extension UInt8: HTMLFastPathCodeUnit {
             &decoded,
             offset
         )
+        #endif
     }
 
     @inline(always)
@@ -271,6 +279,9 @@ extension UInt16: HTMLFastPathCodeUnit {
         _ decoded: inout MutableSpan<UInt16>,
         at offset: Int
     ) -> UInt64 {
+        #if USE_SWIFT_HTML_TOKENIZER
+        consumeHTMLEntity(input, additionalAllowedCharacter, &decoded, at: offset)
+        #else
         // An empty Latin-1 source. A Span converted to a std::span must have an address, even when empty.
         let noCharacters = InlineArray<1, UInt8>(repeating: 0)
         return WebCore.consumeHTMLEntityForFastPath(
@@ -280,6 +291,7 @@ extension UInt16: HTMLFastPathCodeUnit {
             &decoded,
             offset
         )
+        #endif
     }
 
     @inline(always)
@@ -301,7 +313,7 @@ extension UInt16: HTMLFastPathCodeUnit {
     // the byte offsets below cannot overflow.
 
     @inline(always)
-    fileprivate static func matchNibbles(_ input: Span<UInt16>, at offset: Int, _ table: SIMD16<UInt8>) -> UInt64 {
+    static func matchNibbles(_ input: Span<UInt16>, at offset: Int, _ table: SIMD16<UInt8>) -> UInt64 {
         let bytes = input.bytes
         let low = bytes.load(fromByteOffset: offset &* 2, as: SIMD8<UInt16>.self)
         let high = bytes.load(fromByteOffset: offset &* 2 &+ 16, as: SIMD8<UInt16>.self)

@@ -38,6 +38,10 @@
 #include "MarkupTokenizerInlines.h"
 #include <wtf/text/StringBuilder.h>
 
+#if USE_SWIFT_HTML_TOKENIZER
+#include "WebCore-Swift.h"
+#endif
+
 namespace WebCore {
 
 #define WEBVTT_ADVANCE_TO(stateName)                        \
@@ -71,7 +75,12 @@ static bool emitToken(WebVTTToken& resultToken, WebVTTToken&& token)
 template<typename CharacterType>
 static void processEntity(StringParsingBuffer<CharacterType>& source, StringBuilder& result, char16_t additionalAllowedCharacter = 0)
 {
+#if USE_SWIFT_HTML_TOKENIZER
+    DecodedHTMLEntity decoded;
+    source.advanceBy(consumeHTMLEntity(source.span(), additionalAllowedCharacter, decoded));
+#else
     auto decoded = consumeHTMLEntity(source, additionalAllowedCharacter);
+#endif
     if (decoded.failed())
         result.append('&');
     else {

@@ -38,12 +38,16 @@
 #include <WebCore/HTMLInputElement.h>
 #include <WebCore/HTMLNames.h>
 #include <WebCore/HTMLParserIdioms.h>
+#include <WebCore/HTMLToken.h>
+#include <WebCore/HTMLTokenizer.h>
 #include <WebCore/NodeInlines.h>
 #include <WebCore/ParserContentPolicy.h>
 #include <WebCore/ProcessWarming.h>
 #include <WebCore/ScriptWrappableInlines.h>
+#include <WebCore/SegmentedString.h>
 #include <WebCore/Settings.h>
 #include <WebCore/Text.h>
+#include <wtf/text/OrdinalNumber.h>
 #include <wtf/text/StringBuilder.h>
 #include <wtf/text/WTFString.h>
 
@@ -947,6 +951,301 @@ TEST(WebCoreHTMLParser, FastPathTextRunLengths)
             wideRun.append(i == length / 2 ? u'\u0126' : i == length - 1 ? u'\u013C' : u't');
         auto wideRunString = wideRun.toString();
         EXPECT_EQ(wideRunString, firstText(makeString(wideRunString, "<b></b>"_s)));
+    }
+}
+
+TEST(WebCoreHTMLParser, TokenizerLongNumericCharacterReference)
+{
+    // Returns the characters and attribute values of the tokens, appending the input whole or one character at a time.
+    auto tokenize = [](const String& input, bool oneCharacterAtATime) {
+        HTMLTokenizer tokenizer;
+        SegmentedString source;
+        StringBuilder result;
+        auto takeTokens = [&] {
+            while (auto token = tokenizer.nextToken(source)) {
+                if (token->type() == HTMLToken::Type::Character)
+                    result.append(token->characters().span());
+                else if (token->type() == HTMLToken::Type::StartTag) {
+                    for (auto& attribute : token->attributes())
+                        result.append(attribute.value.span());
+                }
+            }
+        };
+        if (oneCharacterAtATime) {
+            for (unsigned i = 0; i < input.length(); ++i) {
+                source.append(input.substring(i, 1));
+                takeTokens();
+            }
+        } else {
+            source.append(input);
+            takeTokens();
+        }
+        return result.toString();
+    };
+
+    // References of 63 to 68 characters after the '&', in text and in an attribute value.
+    for (unsigned length = 63; length <= 68; ++length) {
+        auto reference = makeString("&#"_s, repeatedCharacter('0', length - 4), "65;"_s);
+        auto input = makeString('x', reference, "y<b title=\""_s, reference, "\">"_s);
+        EXPECT_EQ(String("xAyA"_s), tokenize(input, false));
+        EXPECT_EQ(String("xAyA"_s), tokenize(input, true));
+    }
+}
+
+TEST(WebCoreHTMLParser, TokenizerPlainTextRuns)
+{
+    // Returns the characters and attribute values of the tokens, each comment as "<!--comment-->" followed by '8' if it
+    // is all 8-bit data, and each DOCTYPE's identifiers as "[public|system]", appending the input in chunks of
+    // `chunkLength` characters. With `withAttributeNames`, each attribute as "name=value;". The start tags of title,
+    // style, script and svg switch to the states the tree builder would.
+    // For an input with no '\r' and no character reference, also checks the source's line and column after each token:
+    // the line is the number of '\n's consumed, and the column the number of characters consumed after the last of
+    // them, plus one when that '\n' was read from a 16-bit string or was the last character of a chunk, where
+    // SegmentedString starts the new line before it advances past the '\n'.
+    auto tokenize = [](const String& input, unsigned chunkLength, bool checkLinesAndColumns, bool withAttributeNames) {
+        HTMLTokenizer tokenizer;
+        SegmentedString source;
+        StringBuilder result;
+        auto expectLineAndColumn = [&] {
+            unsigned consumed = source.numberOfCharactersConsumed();
+            int line = 0;
+            std::optional<unsigned> lastNewline;
+            for (unsigned i = 0; i < consumed; ++i) {
+                if (input[i] == '\n') {
+                    ++line;
+                    lastNewline = i;
+                }
+            }
+            int column = consumed;
+            if (lastNewline) {
+                bool lastInChunk = !((*lastNewline + 1) % chunkLength) || *lastNewline + 1 == input.length();
+                column = consumed - *lastNewline - 1 + (!input.is8Bit() || lastInChunk ? 1 : 0);
+            }
+            EXPECT_EQ(line, source.currentLine().zeroBasedInt());
+            EXPECT_EQ(column, source.currentColumn().zeroBasedInt());
+        };
+        auto takeTokens = [&] {
+            while (auto token = tokenizer.nextToken(source)) {
+                if (checkLinesAndColumns)
+                    expectLineAndColumn();
+                if (token->type() == HTMLToken::Type::Character)
+                    result.append(token->characters().span());
+                else if (token->type() == HTMLToken::Type::Comment) {
+                    result.append("<!--"_s, token->comment().span(), "-->"_s);
+                    if (token->commentIsAll8BitData())
+                        result.append('8');
+                } else if (token->type() == HTMLToken::Type::DOCTYPE) {
+                    auto doctypeData = token->releaseDoctypeData();
+                    result.append('[', doctypeData->publicIdentifier.span(), '|', doctypeData->systemIdentifier.span(), ']');
+                } else if (token->type() == HTMLToken::Type::StartTag) {
+                    for (auto& attribute : token->attributes()) {
+                        if (withAttributeNames)
+                            result.append(attribute.name.span(), '=', attribute.value.span(), ';');
+                        else
+                            result.append(attribute.value.span());
+                    }
+                    String name { token->name().span() };
+                    if (name == "title"_s)
+                        tokenizer.setRCDATAState();
+                    else if (name == "style"_s)
+                        tokenizer.setRAWTEXTState();
+                    else if (name == "script"_s)
+                        tokenizer.setScriptDataState();
+                    else if (name == "svg"_s)
+                        tokenizer.setShouldAllowCDATA(true);
+                }
+            }
+        };
+        for (unsigned i = 0; i < input.length(); i += chunkLength) {
+            source.append(input.substring(i, chunkLength));
+            takeTokens();
+            if (checkLinesAndColumns)
+                expectLineAndColumn();
+        }
+        return result.toString();
+    };
+    // Whole, in chunks of one to three characters, and in chunks of 16 to 18 and 32 to 34 characters; as an 8-bit and
+    // as a 16-bit string.
+    auto expectTokens = [&](const String& expected, const String& input, bool checkLinesAndColumns = false, bool withAttributeNames = false) {
+        Vector<char16_t> wideCharacters;
+        for (unsigned i = 0; i < input.length(); ++i)
+            wideCharacters.append(input[i]);
+        String wideInput { wideCharacters.span() };
+        EXPECT_FALSE(wideInput.is8Bit());
+        for (unsigned chunkLength : { std::numeric_limits<unsigned>::max(), 1u, 2u, 3u, 16u, 17u, 18u, 32u, 33u, 34u }) {
+            EXPECT_EQ(expected, tokenize(input, chunkLength, checkLinesAndColumns, withAttributeNames));
+            EXPECT_EQ(expected, tokenize(wideInput, chunkLength, checkLinesAndColumns, withAttributeNames));
+        }
+    };
+
+    // Runs of 1 to 50 characters ended by each character that ends a run, in text, in all three attribute value
+    // quotings, in RCDATA, in RAWTEXT, in script data, escaped and double escaped, in comments, bogus comments, both
+    // quotings of DOCTYPE identifiers, CDATA sections and attribute names. The Latin-1 runs include characters whose low
+    // four bits are those of NUL, ' ', '\t', '"', '&', '\'', '-', '/', '\n', '\f', '<', '=', '>', ']' and '\r', and upper
+    // case letters, ASCII and not; the 16-bit runs include characters whose low byte is one of those, and U+3C00, whose
+    // high byte is '<'.
+    constexpr std::array<Latin1Character, 17> runCharacters { 'a', 0x80, 0xA2, 0xA6, 0xA7, 0xAA, 0xBC, 0xAD, 0xFF, 0xA0, 0xA9, 0xAC,
+        0xBE, 'Q', 0xC9, 0xDE, 0xAF };
+    constexpr std::array<char16_t, 20> wideRunCharacters { 'a', 0x0100, 0x0122, 0x0126, 0x0127, 0x012D, 0x010A, 0x013C, 0x010D,
+        0x3C00, 0x4E2D, 0x0120, 0x0109, 0x010C, 0x013E, 0x015D, 0x013D, 0x012F, 0x0141, 'Z' };
+    auto expectRunTokens = [&](const String& run) {
+        auto input = makeString('x', run, "&amp;"_s, run, "\r\n"_s, run, '\n', run, "<b title=\""_s, run, "&amp;"_s, run, '\'', run,
+            "\" alt='"_s, run, '"', run, "'>"_s);
+        auto expected = makeString('x', run, '&', run, '\n', run, '\n', run, run, '&', run, '\'', run, run, '"', run);
+        expectTokens(expected, input);
+
+        auto unquotedInput = makeString("<b title="_s, run, "&amp;"_s, run, " alt="_s, run, "\r\nc="_s, run, "\td="_s, run, "\fe="_s, run,
+            "\"'<=`"_s, run, "\nf="_s, run, '>', run);
+        auto unquotedExpected = makeString(run, '&', run, run, run, run, run, "\"'<=`"_s, run, run, run);
+        expectTokens(unquotedExpected, unquotedInput);
+
+        auto rcdata = [&](ASCIILiteral newline, ASCIILiteral ampersand) {
+            return makeString(run, ampersand, run, newline, run, "<b>"_s, run);
+        };
+        auto rcdataInput = makeString("<title>"_s, rcdata("\r\n"_s, "&amp;"_s), "</title>"_s);
+        expectTokens(rcdata("\n"_s, "&"_s), rcdataInput);
+
+        auto rawText = [&](ASCIILiteral newline) {
+            return makeString(run, "&amp;"_s, run, newline, run, "<b>"_s, run);
+        };
+        auto rawTextInput = makeString("<style>"_s, rawText("\r\n"_s), "</style>"_s);
+        expectTokens(rawText("\n"_s), rawTextInput);
+
+        auto scriptData = [&](ASCIILiteral newline) {
+            return makeString(rawText(newline), "<!--"_s, run, '-', run, "<b>"_s, run, newline, run, "<script>"_s, run, '-', run,
+                "<b>"_s, run, newline, run, "</script>"_s, run, "-->"_s, run);
+        };
+        auto scriptDataInput = makeString("<script>"_s, scriptData("\r\n"_s), "</script>"_s);
+        expectTokens(scriptData("\n"_s), scriptDataInput);
+
+        bool is8Bit = run.containsOnlyLatin1();
+        auto comment = [&](ASCIILiteral before, const String& text) {
+            return makeString("<!--"_s, before, text, "-->"_s, is8Bit ? "8"_s : ""_s);
+        };
+        auto markupInput = makeString("<!--"_s, run, '-', run, "\r\n"_s, run, ">"_s, run, "--><?"_s, run, '\n', run, "]-><!DOCTYPE html PUBLIC \""_s,
+            run, "'"_s, run, "\r\n"_s, run, "\" '"_s, run, '"', run, "'><!DOCTYPE html SYSTEM \""_s, run, '\n', run, "\"><svg><![CDATA["_s,
+            run, ']', run, "\r\n"_s, run, "]]"_s, run, "-->]]>"_s, run, "</svg>"_s);
+        auto markupExpected = makeString(comment(""_s, makeString(run, '-', run, '\n', run, '>', run)), comment("?"_s, makeString(run, '\n', run, "]-"_s)),
+            '[', run, '\'', run, '\n', run, '|', run, '"', run, ']', '[', '|', run, '\n', run, ']', run, ']', run, '\n', run, "]]"_s, run, "-->"_s, run);
+        expectTokens(markupExpected, markupInput);
+
+        // Lines of runs, '\n' after '\n' and a '\n' at the start, the end and the second-to-last character of a chunk,
+        // in each state that keeps a '\n' as text.
+        auto lines = makeString(run, '\n', run, "\n\n"_s, run, '\n', '\n', run, '\n');
+        auto linesInput = makeString('x', lines, "<b title=\""_s, lines, "\" alt='"_s, lines, "'>"_s, lines, "<title>"_s, lines,
+            "</title><style>"_s, lines, "</style><script>"_s, lines, "<!--"_s, lines, "<script>"_s, lines, "</script>"_s, lines,
+            "--></script><!--"_s, lines, "--><?"_s, lines, "><!DOCTYPE html PUBLIC \""_s, lines, "\" '"_s, lines,
+            "'><svg><![CDATA["_s, lines, "]]></svg>"_s, lines);
+        auto linesExpected = makeString('x', lines, lines, lines, lines, lines, lines, lines, "<!--"_s, lines, "<script>"_s,
+            lines, "</script>"_s, lines, "-->"_s, comment(""_s, lines), comment("?"_s, lines), '[', lines, '|', lines, ']',
+            lines, lines);
+        expectTokens(linesExpected, linesInput, true);
+
+        // Attribute names ended by each character that ends one, with '\v', which does not, and with the parse errors
+        // '"', '\'' and '<' and a NUL inside, after the first attribute and after a value.
+        auto name = run.convertToASCIILowercase();
+        Vector<char16_t> nullCharacter { 0 };
+        auto namesInput = makeString("<b "_s, run, "=v "_s, run, '\t', run, '\n', run, '\f', run, '\v', run, "\r\n"_s, run, '/', run, "\"'<"_s, run,
+            String { nullCharacter.span() }, run, " =w "_s, run, "\t/"_s, run, "='x'"_s, run, '>', run);
+        auto namesExpected = makeString(name, "=v;"_s, name, "=;"_s, name, "=;"_s, name, "=;"_s, name, '\v', name, "=;"_s, name, "=;"_s, name, "\"'<"_s,
+            name, static_cast<char16_t>(0xFFFD), name, "=w;"_s, name, "=;"_s, name, "=x;"_s, name, "=;"_s, run);
+        expectTokens(namesExpected, namesInput, false, true);
+    };
+    for (unsigned length = 1; length <= 50; ++length) {
+        Vector<Latin1Character> runBuffer;
+        Vector<char16_t> wideRunBuffer;
+        for (unsigned i = 0; i < length; ++i) {
+            runBuffer.append(runCharacters[i % runCharacters.size()]);
+            wideRunBuffer.append(wideRunCharacters[(i + length) % wideRunCharacters.size()]);
+        }
+        String run { runBuffer.span() };
+        EXPECT_TRUE(run.is8Bit());
+        expectRunTokens(run);
+        String wideRun { wideRunBuffer.span() };
+        EXPECT_FALSE(wideRun.is8Bit());
+        expectRunTokens(wideRun);
+    }
+}
+
+TEST(WebCoreHTMLParser, TokenizerEndTagsInText)
+{
+    // Returns the characters of the tokens, with each end tag as "[/name]", appending the input in chunks of
+    // `chunkLength` characters. The start tags of title, style and script switch to the states the tree builder would.
+    auto tokenize = [](const String& input, unsigned chunkLength) {
+        HTMLTokenizer tokenizer;
+        SegmentedString source;
+        StringBuilder result;
+        auto takeTokens = [&] {
+            while (auto token = tokenizer.nextToken(source)) {
+                if (token->type() == HTMLToken::Type::Character)
+                    result.append(token->characters().span());
+                else if (token->type() == HTMLToken::Type::EndTag)
+                    result.append("[/"_s, String { token->name().span() }, ']');
+                else if (token->type() == HTMLToken::Type::StartTag) {
+                    String name { token->name().span() };
+                    if (name == "title"_s)
+                        tokenizer.setRCDATAState();
+                    else if (name == "style"_s)
+                        tokenizer.setRAWTEXTState();
+                    else if (name == "script"_s)
+                        tokenizer.setScriptDataState();
+                }
+            }
+        };
+        for (unsigned i = 0; i < input.length(); i += chunkLength) {
+            source.append(input.substring(i, chunkLength));
+            takeTokens();
+        }
+        return result.toString();
+    };
+    // Whole, one character at a time, and in chunks that end inside and just after the end tag's name; as an 8-bit
+    // and as a 16-bit string.
+    auto expectTokens = [&](const String& expected, const String& input) {
+        Vector<char16_t> wideCharacters;
+        for (unsigned i = 0; i < input.length(); ++i)
+            wideCharacters.append(input[i]);
+        String wideInput { wideCharacters.span() };
+        EXPECT_FALSE(wideInput.is8Bit());
+        for (unsigned chunkLength : { std::numeric_limits<unsigned>::max(), 1u, 2u, 3u, 16u, 17u, 18u, 32u, 33u }) {
+            EXPECT_EQ(expected, tokenize(input, chunkLength));
+            EXPECT_EQ(expected, tokenize(wideInput, chunkLength));
+        }
+    };
+
+    // Names that are, and are not, the appropriate end tag, after text of lengths that place them on both sides of
+    // the end of a chunk, in RCDATA, RAWTEXT, script data and escaped script data.
+    struct Context {
+        ASCIILiteral start;
+        ASCIILiteral text;
+        ASCIILiteral name;
+        ASCIILiteral uppercaseName;
+    };
+    const std::array contexts { Context { "<title>"_s, ""_s, "title"_s, "TiTlE"_s }, Context { "<style>"_s, ""_s, "style"_s, "STYLE"_s },
+        Context { "<script>"_s, ""_s, "script"_s, "sCrIpT"_s }, Context { "<script>"_s, "<!--"_s, "script"_s, "SCRIPT"_s } };
+    for (auto& context : contexts) {
+        String name { context.name };
+        for (unsigned length : { 0u, 1u, 9u, 13u, 14u, 15u, 16u, 31u }) {
+            auto text = makeString(context.text, repeatedCharacter('a', length));
+            for (auto& endTagName : { name, String { context.uppercaseName } }) {
+                auto input = makeString(context.start, text, "</"_s, endTagName, ">z</"_s, name, ">q"_s);
+                expectTokens(makeString(text, "[/"_s, name, "]z[/"_s, name, "]q"_s), input);
+                // The rest of the end tag is attributes, which end tags drop.
+                for (auto follower : { " "_s, "/"_s }) {
+                    auto input = makeString(context.start, text, "</"_s, endTagName, follower, "z</"_s, name, ">q"_s);
+                    expectTokens(makeString(text, "[/"_s, name, "]q"_s), input);
+                }
+            }
+            auto uppercaseInput = makeString(context.start, text, "</"_s, context.uppercaseName, "1z</"_s, name, ">q"_s);
+            expectTokens(makeString(text, "</"_s, context.uppercaseName, "1z[/"_s, name, "]q"_s), uppercaseInput);
+            for (auto& falseName : { name.left(name.length() - 1), makeString(name, 'x'), String { "b"_s }, repeatedCharacter('Q', 33) }) {
+                for (auto follower : { ">"_s, " "_s, "/"_s, "\t"_s, "\n"_s, "1"_s, "-"_s }) {
+                    auto input = makeString(context.start, text, "</"_s, falseName, follower, "z</"_s, name, ">q"_s);
+                    expectTokens(makeString(text, "</"_s, falseName, follower, "z[/"_s, name, "]q"_s), input);
+                }
+                auto input = makeString(context.start, text, "</"_s, falseName, "\r\nz</"_s, name, ">q"_s);
+                expectTokens(makeString(text, "</"_s, falseName, "\nz[/"_s, name, "]q"_s), input);
+            }
+        }
     }
 }
 
