@@ -46,6 +46,7 @@
 #include "StyleBuilderState.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleLengthResolution.h"
+#include "StylePrimitiveNumericTypes+Conversions.h"
 // WebCoreSwift-Generated.h is module-scoped, so a translation unit that includes it must declare
 // every Swift boundary type.
 #if USE(SWIFT_CSS)

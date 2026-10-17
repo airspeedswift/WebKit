@@ -538,11 +538,12 @@ macro(WEBKIT_OPTION_END)
 
     option(WK_USE_SWIFT_TEXT_CODEC_UTF8 "Replace the C++ UTF-8 decoder with PAL's TextCodecUTF8.swift" OFF)
     option(WK_USE_SWIFT_HTML_FAST_PATH "Scan HTML fragments for the fast-path parser with WebCore's HTMLFastPathParser.swift" OFF)
+    option(WK_USE_SWIFT_CSS "Replace the C++ CSS tokenizer, property fast paths and calc() with WebCore's Swift" OFF)
 
     # A Swift feature still on with a too-old toolchain was requested explicitly
     # (the default declines to auto-enable it), so fail loudly rather than drop it
     # silently. Apple is gated elsewhere; non-Clang is already rejected above.
-    if (NOT APPLE AND COMPILER_IS_CLANG AND (ENABLE_BACK_FORWARD_LIST_SWIFT OR WK_USE_SWIFT_TEXT_CODEC_UTF8 OR WK_USE_SWIFT_HTML_FAST_PATH))
+    if (NOT APPLE AND COMPILER_IS_CLANG AND (ENABLE_BACK_FORWARD_LIST_SWIFT OR WK_USE_SWIFT_TEXT_CODEC_UTF8 OR WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS))
         _WEBKIT_DETECT_SWIFT_CXX_INTEROP_SUPPORT(_swift_interop_ok)
         if (NOT _swift_interop_ok)
             message(FATAL_ERROR
@@ -559,11 +560,20 @@ macro(WEBKIT_OPTION_END)
     # WK_USE_SWIFT_TEXT_CODEC_UTF8 is the CMake counterpart of the PAL.xcconfig setting of the same
     # name: it replaces the C++ UTF-8 decoder with PAL's TextCodecUTF8.swift.
     # WK_USE_SWIFT_HTML_FAST_PATH is the CMake counterpart of the WebCore.xcconfig setting of the same
-    # name: the HTML fragment fast path scans in WebCore's HTMLFastPathParser.swift.
-    if (ENABLE_BACK_FORWARD_LIST_SWIFT OR WK_USE_SWIFT_TEXT_CODEC_UTF8 OR WK_USE_SWIFT_HTML_FAST_PATH)
+    # name: the HTML fragment fast path scans in WebCore's HTMLFastPathParser.swift. WK_USE_SWIFT_CSS is
+    # the counterpart of WebCore.xcconfig's.
+    if (ENABLE_BACK_FORWARD_LIST_SWIFT OR WK_USE_SWIFT_TEXT_CODEC_UTF8 OR WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
         set(SWIFT_REQUIRED ON)
     else ()
         set(SWIFT_REQUIRED OFF)
+    endif ()
+
+    # USE(SWIFT_CSS) changes the layout of CSSCalc::Tree and Style::Calculation::Tree, so every C++
+    # target that includes WebCore's headers needs it, as TestWebKitAPI's Base.xcconfig passes it.
+    # Swift's -D takes no value, so Swift gets none; every Swift target's clang importer gets it through
+    # _webkit_cxx_preprocessor_definitions, which reads this directory's definitions.
+    if (WK_USE_SWIFT_CSS)
+        add_compile_definitions("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:USE_SWIFT_CSS=1>")
     endif ()
 endmacro()
 

@@ -127,7 +127,14 @@ private:
 
 // The CSS parser stores one token per token of every stylesheet, so the size is a
 // cache-residency property.
+#if defined(_MSC_VER)
+// The Microsoft ABI starts a new allocation unit wherever a bitfield's declared type changes, and
+// CSSParserTokenBits has two bool bitfields among unsigned ones. Upstream's token is 32 bytes there
+// too.
+static_assert(sizeof(CSSParserToken) == 32);
+#else
 static_assert(sizeof(CSSParserToken) == 24);
+#endif
 static_assert(alignof(CSSParserToken) == 8);
 static_assert(sizeof(CSSParserTokenBits) == sizeof(CSSParserToken));
 

@@ -157,17 +157,13 @@ private func sortPriority(_ unit: WebCore.CSSUnitType) -> UInt32 {
 /// integer order is the stable sort steps 6 and 7 ask for.
 @inline(always)
 private func sortKey(_ node: borrowing CalcNode, _ index: Int) -> UInt64 {
-    let info = node[index].info
     var priority = otherSortPriority
-    switch info.kind {
-    case .number, .percentage, .canonicalDimension, .nonCanonicalDimension:
-        if let unit = WebCore.CSSUnitType(rawValue: info.unitType) {
+    if let unitType = node[index].numericUnitType {
+        if let unit = WebCore.CSSUnitType(rawValue: unitType) {
             priority = sortPriority(unit)
         } else {
             priority = errorSortPriority
         }
-    default:
-        break
     }
     return (UInt64(priority) << 32) | UInt64(UInt32(index))
 }
@@ -254,21 +250,45 @@ private func isSerializableRoot(
     isSerializableNode(kind, childCount)
 }
 
-/// Whether every node of the tree can be serialized here, established before anything is appended,
-/// since a partial emit into C++'s `StringBuilder` cannot be undone.
-private func walk(_ node: borrowing CalcNode) -> Bool {
-    let info = node.info
-    guard isSerializableNode(info.kind, info.childCount) else {
-        return false
-    }
-    var index: UInt32 = 0
-    while index < info.childCount {
-        guard walk(node[Int(index)]) else {
-            return false
+/// Traps on a node `isSerializableNode` refuses, at the node, as it is written.
+///
+/// A refusal ends the process wherever it is made: the C++ entry points have no failure channel and
+/// `RELEASE_ASSERT_NOT_REACHED` on `false` (CSSCalcTree+Serialization.cpp). Refusing before anything
+/// is appended would take a whole-tree pass ahead of the emit, measured at 4.6% of a serialization on
+/// the calc corpus, and would change nothing but where the trap is. The shapes refused have no
+/// producer: a childless `Sum` or `Product`, a `Negate`, `Invert` or `clamp` of the wrong arity, or
+/// an alternative `CalcNode.info` has no kind for.
+@inline(always)
+private func requireSerializable(_ info: CalcNodeInfo) {
+    precondition(isSerializableNode(info.kind, info.childCount), "the Swift calc() serializer met a tree no producer makes")
+}
+
+extension CalcNode {
+    /// `info.unitType` when `info.kind` is one of the four numeric kinds, and nil otherwise, without
+    /// building the whole `CalcNodeInfo`, whose 40-way switch was the serializer's hottest function
+    /// when every sort key, term and node built one.
+    @inline(always)
+    fileprivate var numericUnitType: UInt8? {
+        switch alternative {
+        case .Number, .Percentage, .CanonicalDimension, .NonCanonicalDimension:
+            // `info` gives a non-leaf `Unknown`; no producer makes one.
+            return children.isEmpty ? unitType : UInt8(WebCore.CSSUnitType.Unknown.rawValue)
+        default:
+            return nil
         }
-        index += 1
     }
-    return true
+
+    /// `info.numericValue` of a numeric kind, as `numericUnitType` reads `info.unitType`.
+    @inline(always)
+    fileprivate var numericValueIfLeaf: Double {
+        children.isEmpty ? value : 0
+    }
+
+    /// The only child of a `Negate` or `Invert`, which `isSerializableNode` requires there be exactly one of.
+    @inline(always)
+    fileprivate func requireOnlyChild() {
+        precondition(children.count == 1, "the Swift calc() serializer met a tree no producer makes")
+    }
 }
 
 /// The part of `SerializationState` that does not vary with depth. `groupingParenthesis` is a
@@ -304,6 +324,7 @@ private struct CalcSerialization {
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
         let info = node.info
+        requireSerializable(info)
         switch info.kind {
         case .number, .percentage, .canonicalDimension, .nonCanonicalDimension:
             // 2. If root is a numeric value, serialize root per the normal rules for it.
@@ -356,8 +377,8 @@ private struct CalcSerialization {
             }
 
         case .operation:
-            // Unreachable: `walk` refuses it before anything is appended.
-            preconditionFailure("the walk admitted a node kind the serializer cannot emit")
+            // Unreachable: `requireSerializable` refuses it.
+            preconditionFailure("the Swift calc() serializer met a tree no producer makes")
         }
     }
 
@@ -583,25 +604,23 @@ private struct CalcSerialization {
         _ child: borrowing CalcNode,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        let childInfo = child.info
-        switch childInfo.kind {
-        case .negate:
+        if child.alternative == .Negate {
             // 6.1. If child is a Negate node, append " - " and serialize the Negate's child.
+            child.requireOnlyChild()
             sink.append(" - ")
             serializeCalculationTree(child[0], includingGroupingParenthesis: true, &sink)
-
-        case .number, .percentage, .canonicalDimension, .nonCanonicalDimension:
+        } else if let unitType = child.numericUnitType {
             // 6.2. If child is a negative numeric value, append " - " and serialize its negation.
             // `-0.0` and NaN are not `< 0`, so both take the " + " branch, as in the C++.
-            if childInfo.numericValue < 0 {
+            let value = child.numericValueIfLeaf
+            if value < 0 {
                 sink.append(" - ")
-                sink.appendNumber(-childInfo.numericValue, childInfo.unitType)
+                sink.appendNumber(-value, unitType)
             } else {
                 sink.append(" + ")
-                sink.appendNumber(childInfo.numericValue, childInfo.unitType)
+                sink.appendNumber(value, unitType)
             }
-
-        default:
+        } else {
             // 6.3. Otherwise, append " + " and serialize child.
             sink.append(" + ")
             serializeCalculationTree(child, includingGroupingParenthesis: true, &sink)
@@ -643,8 +662,9 @@ private struct CalcSerialization {
         _ child: borrowing CalcNode,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
-        if child.info.kind == .invert {
+        if child.alternative == .Invert {
             // 7.1. If child is an Invert node, append " / " and serialize the Invert's child.
+            child.requireOnlyChild()
             sink.append(" / ")
             serializeCalculationTree(child[0], includingGroupingParenthesis: true, &sink)
         } else {
@@ -665,6 +685,7 @@ private struct CalcSerialization {
         _ info: CalcNodeInfo,
         _ sink: inout WebCore.CSSCalc.CSSCalcSwiftSink
     ) {
+        requireSerializable(info)
         switch info.kind {
         case .number, .percentage, .canonicalDimension, .nonCanonicalDimension:
             // 1. If the root is a numeric value and the serialization is of a computed value or
@@ -719,13 +740,14 @@ private struct CalcSerialization {
             serializeMathFunction(node[0], childInfo, &sink)
 
         case .operation:
-            // Unreachable: `walk` refuses it.
-            preconditionFailure("the root check admitted a node kind the math-function wrapper cannot emit")
+            // Unreachable: `requireSerializable` refuses it.
+            preconditionFailure("the Swift calc() serializer met a tree no producer makes")
         }
     }
 }
 
-/// False, with nothing appended, for a tree `walk` refuses.
+/// False, with nothing appended, for a root `isSerializableRoot` refuses; a deeper node it would refuse
+/// traps where it is met (`requireSerializable`), as the caller's `false` would.
 ///
 /// `omittingGroupingParenthesis` false is `serializationForCSS`, which wraps a calc-operator root
 /// in `calc(`; true is `serializationForCSSAsFunctionArgument`, for the inner `<calc-sum>` of
@@ -753,7 +775,7 @@ private func calcSerialize(
     _ omittingGroupingParenthesis: Bool
 ) -> Bool {
     let rootInfo = root.info
-    guard walk(root), isSerializableRoot(rootInfo.kind, rootInfo.childCount) else {
+    guard isSerializableRoot(rootInfo.kind, rootInfo.childCount) else {
         return false
     }
 

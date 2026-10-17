@@ -39,6 +39,14 @@
 
 #include "CSSCalcSwiftTypes.h"
 #include "CSSTokenizerSwiftTypes.h"
+#if defined(USE_SWIFT_HTML_FAST_PATH) && USE_SWIFT_HTML_FAST_PATH
+#include "HTMLFastPathParserTypes.h"
+#endif
+// Windows port: the generated header names `CSSValue` (complete, for its SWIFT_RETURNS_RETAINED thunks) and
+// `CSSPropertyParserSwiftCursor`. On the Mac every includer gets them from an earlier file in its unified bundle;
+// here the interop sources compile alone.
+#include "CSSParserTokenRange.h"
+#include "CSSValue.h"
 #include <wtf/Compiler.h>
 
 // FIXME: Remove this suppression once the Swift compatibility header's `SWIFT_ENUM` stops

@@ -2980,7 +2980,7 @@ endif ()
 
 # Generate CSS property names
 add_custom_command(
-    OUTPUT ${WebCore_DERIVED_SOURCES_DIR}/CSSProperties.json ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyInitialValuesGeneratedInlines.h ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyNames.h ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyNames.cpp ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyNames.gperf ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyParsing.h ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyParsing.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleBuilderGenerated.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleChangedAnimatablePropertiesGenerated.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties.h ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties+ConstructionInlines.h ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties+GettersInlines.h ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties+InitialInlines.h ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties+SettersInlines.h ${WebCore_DERIVED_SOURCES_DIR}/StyleExtractorGenerated.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleInterpolationWrapperMap.h ${WebCore_DERIVED_SOURCES_DIR}/StyleInterpolationWrapperMap.cpp ${WebCore_DERIVED_SOURCES_DIR}/StylePropertyShorthandFunctions.h ${WebCore_DERIVED_SOURCES_DIR}/StylePropertyShorthandFunctions.cpp ${WebCore_DERIVED_SOURCES_DIR}/CSSStyleProperties+PropertyNames.idl
+    OUTPUT ${WebCore_DERIVED_SOURCES_DIR}/CSSProperties.json ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyInitialValuesGeneratedInlines.h ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyNames.h ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyNames.cpp ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyNames.gperf ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyParsing.h ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyParsing.cpp ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyParsingSwift.swift ${WebCore_DERIVED_SOURCES_DIR}/StyleBuilderGenerated.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleChangedAnimatablePropertiesGenerated.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties.h ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties+ConstructionInlines.h ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties+GettersInlines.h ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties+InitialInlines.h ${WebCore_DERIVED_SOURCES_DIR}/StyleComputedStyleProperties+SettersInlines.h ${WebCore_DERIVED_SOURCES_DIR}/StyleExtractorGenerated.cpp ${WebCore_DERIVED_SOURCES_DIR}/StyleInterpolationWrapperMap.h ${WebCore_DERIVED_SOURCES_DIR}/StyleInterpolationWrapperMap.cpp ${WebCore_DERIVED_SOURCES_DIR}/StylePropertyShorthandFunctions.h ${WebCore_DERIVED_SOURCES_DIR}/StylePropertyShorthandFunctions.cpp ${WebCore_DERIVED_SOURCES_DIR}/CSSStyleProperties+PropertyNames.idl
     MAIN_DEPENDENCY ${WEBCORE_DIR}/css/scripts/process-css-properties.py
     DEPENDS ${WebCore_CSS_PROPERTY_NAMES} ${_platform_defines_file_dep}
     WORKING_DIRECTORY ${WebCore_DERIVED_SOURCES_DIR}
@@ -3273,6 +3273,38 @@ if (WK_USE_SWIFT_HTML_FAST_PATH)
     list(APPEND WebCore_UNIFIED_SOURCE_EXCLUDES "(^|/)HTMLDocumentParserFastPath\\.cpp( |$)")
 endif ()
 
+# WK_USE_SWIFT_CSS, the counterpart of the WebCore.xcconfig setting: the Swift implementation of CSS
+# tokenizing, the property fast paths and calc(), with the C++ it replaces compiled out under
+# USE(SWIFT_CSS). The C++ sources that call into it include WebCoreSwiftBoundaryTypes.h and so
+# WebCoreSwift-Generated.h, so they compile after the Swift module, outside the unified sources.
+if (WK_USE_SWIFT_CSS)
+    set(WebCore_SWIFT_CSS_SOURCES
+        ${WEBCORE_DIR}/css/calc/CSSCalcSerializationSwift.swift
+        ${WEBCORE_DIR}/css/calc/CSSCalcSimplificationSwift.swift
+        ${WEBCORE_DIR}/css/parser/CSSParserFastPathsSwift.swift
+        ${WEBCORE_DIR}/css/parser/CSSParserTokenBitsSwift.swift
+        ${WEBCORE_DIR}/css/parser/CSSTokenizerSwift.swift
+        ${WEBCORE_DIR}/css/parser/CSSUnitTrieSwift.swift
+        ${WebCore_DERIVED_SOURCES_DIR}/CSSPropertyParsingSwift.swift
+    )
+    set(WebCore_SWIFT_CSS_INTEROP_SOURCES
+        css/calc/CSSCalcTree+ComputedStyleDependencies.cpp
+        css/calc/CSSCalcTree+Serialization.cpp
+        css/calc/CSSCalcTree+Simplification.cpp
+        css/parser/CSSParserFastPaths.cpp
+        css/parser/CSSPropertyParserConsumer+Background.cpp
+        css/parser/CSSPropertyParserConsumer+Primitives.cpp
+        css/parser/CSSTokenizer.cpp
+        css/typedom/CSSNumericValue.cpp
+        style/calc/StyleCalculationTree+Conversion.cpp
+        style/calc/StyleCalculationTree.cpp
+    )
+    foreach (_f IN LISTS WebCore_SWIFT_CSS_INTEROP_SOURCES)
+        string(REGEX REPLACE "([][+.*()^$?|\\\\])" "\\\\\\1" _escaped "${_f}")
+        list(APPEND WebCore_UNIFIED_SOURCE_EXCLUDES "^${_escaped}( |$)")
+    endforeach ()
+endif ()
+
 WEBKIT_COMPUTE_SOURCES(WebCore)
 
 WEBKIT_DEFINE_SUBTARGET_WITH_PREFIX(WebCore WebCoreJSBindings
@@ -3360,57 +3392,148 @@ if (SWIFT_REQUIRED AND APPLE)
     WEBKIT_SETUP_SWIFT_AND_GENERATE_SWIFT_CPP_INTEROP_HEADER(WebCore WebCore
         "${WebCore_PRIVATE_HEADERS_DIR}"
         "WebCoreSwift-Generated.h")
-elseif (WK_USE_SWIFT_HTML_FAST_PATH)
-    target_sources(WebCore PRIVATE
-        ${WEBCORE_DIR}/SIMDHelpers.swift
-        ${WEBCORE_DIR}/SIMDHighBitMask.swift
-        ${WEBCORE_DIR}/SIMDSaturatingSubtract.swift
-        ${WEBCORE_DIR}/SIMDTableLookup.swift
-        ${WEBCORE_DIR}/html/parser/HTMLFastPathParser.swift
-    )
+elseif (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
+    # C++ sources that include WebCoreSwift-Generated.h, and the module map of WebCore_Private's
+    # boundary submodules the Swift imports. Apple platforms get those from WebCore_Private.modulemap
+    # in the framework, a framework module over PrivateHeaders, which the non-Apple ports do not
+    # build; here each submodule names the source-tree headers the interop sources include.
+    set(WebCore_SWIFT_INTEROP_SOURCES)
+    set(_webcore_swift_modules "")
 
-    # C++ sources that include WebCoreSwift-Generated.h.
-    set(WebCore_SWIFT_INTEROP_SOURCES html/parser/HTMLDocumentParserFastPath.cpp)
+    if (WK_USE_SWIFT_HTML_FAST_PATH)
+        target_sources(WebCore PRIVATE
+            ${WEBCORE_DIR}/SIMDHelpers.swift
+            ${WEBCORE_DIR}/SIMDHighBitMask.swift
+            ${WEBCORE_DIR}/SIMDSaturatingSubtract.swift
+            ${WEBCORE_DIR}/SIMDTableLookup.swift
+            ${WEBCORE_DIR}/html/parser/HTMLFastPathParser.swift
+        )
+        list(APPEND WebCore_SWIFT_INTEROP_SOURCES html/parser/HTMLDocumentParserFastPath.cpp)
 
-    # As in WebCore.xcconfig: the C++ and Swift conditions, and the Builtin module for the vendored
-    # SIMD operations in SIMD*.swift.
-    target_compile_definitions(WebCore PRIVATE
-        "$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:USE_SWIFT_HTML_FAST_PATH=1>")
+        # As in WebCore.xcconfig: the C++ and Swift conditions, and the Builtin module for the vendored
+        # SIMD operations in SIMD*.swift.
+        target_compile_definitions(WebCore PRIVATE
+            "$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:USE_SWIFT_HTML_FAST_PATH=1>")
+        webkit_target_add_swift_options(WebCore
+            "-enable-experimental-feature BuiltinModule"
+            "-D USE_SWIFT_HTML_FAST_PATH"
+        )
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+            # HAVE_SSSE3 chooses PSHUFB in SIMDTableLookup.swift; the code generator must be allowed SSSE3
+            # too, or the (LTO) backend cannot select it. nehalem is x86-64-v2 (SSSE3, SSE4.2).
+            webkit_target_add_swift_options(WebCore "-D HAVE_SSSE3" "-target-cpu nehalem")
+        endif ()
+
+        string(APPEND _webcore_swift_modules
+            "    explicit module HTMLFastPathParserTypes {\n"
+            "        header \"${WEBCORE_DIR}/html/parser/HTMLFastPathParserTypes.h\"\n"
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n")
+    endif ()
+
+    if (WK_USE_SWIFT_CSS)
+        target_sources(WebCore PRIVATE ${WebCore_SWIFT_CSS_SOURCES})
+        list(APPEND WebCore_SWIFT_INTEROP_SOURCES ${WebCore_SWIFT_CSS_INTEROP_SOURCES})
+
+        webkit_target_add_swift_options(WebCore
+            "-library-level spi"
+            # So that <ptrcheck.h> defines `__counted_by` as the attribute, which Apple's flags set too
+            # (see WebKitSwiftFlags.cmake), and the boundary headers' counted parameters import as Spans.
+            "-Xcc -fexperimental-bounds-safety-attributes"
+            "-Xcc -fexperimental-late-parse-attributes"
+        )
+        # Per-toolchain workarounds from the build script, e.g. a -sil-disable-pass for a compiler crash.
+        if (WK_SWIFT_CSS_EXTRA_SWIFT_FLAGS)
+            webkit_target_add_swift_options(WebCore ${WK_SWIFT_CSS_EXTRA_SWIFT_FLAGS})
+        endif ()
+
+        # `Core`, the in-tree map's umbrella over every private header, is only what the Swift names
+        # directly.
+        string(APPEND _webcore_swift_modules
+            "    explicit module CSSUnitsSwiftTypes {\n"
+            "        header \"${WEBCORE_DIR}/css/CSSUnitType.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/CSSUnitConversions.h\"\n"
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n"
+            "    explicit module CSSTokenizerSwiftTypes {\n"
+            "        header \"${WEBCORE_DIR}/css/parser/CSSTokenizerSwiftTypes.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/parser/CSSParserTokenBits.h\"\n"
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n"
+            "    explicit module CSSCalcSwiftTypes {\n"
+            "        header \"${WEBCORE_DIR}/css/calc/CSSCalcSwiftTypes.h\"\n"
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n"
+            "    explicit module CSSCalcTypeSwiftTypes {\n"
+            "        header \"${WEBCORE_DIR}/css/calc/CSSCalcType.h\"\n"
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n"
+            "    explicit module CSSPrimitiveNumericCategorySwiftTypes {\n"
+            "        header \"${WEBCORE_DIR}/css/values/primitives/CSSPrimitiveNumericCategory.h\"\n"
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n"
+            "    module Core {\n"
+            "        header \"${WebCore_DERIVED_SOURCES_DIR}/CSSValueKeywords.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/calc/CSSCalcOperator.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/calc/CSSCalcTree+NumericIdentity.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/parser/CSSParserMode.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/values/primitives/CSSPrimitiveNumericRange.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/values/primitives/CSSPrimitiveNumericUnits.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/parser/CSSPropertyParserOptions.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/parser/CSSParserTokenRange.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/CSSValue.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/CSSValueList.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/CSSPrimitiveValue.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/CSSFunctionValue.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/CSSTransformListValue.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/CSSValuePair.h\"\n"
+            "        header \"${WEBCORE_DIR}/css/CSSKeywordValue.h\"\n"
+            "        header \"${WEBCORE_DIR}/style/calc/StyleCalculationTree.h\"\n"
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n")
+    endif ()
+
     webkit_target_add_swift_options(WebCore
         "-enable-experimental-feature SafeInteropWrappers"
-        "-enable-experimental-feature BuiltinModule"
         "-Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib"
-        "-D USE_SWIFT_HTML_FAST_PATH"
         # Apple applies these to every Swift target; WebCore's Swift is written against them.
         ${WEBKIT_SWIFT_EXPERIMENTAL_FEATURE_FLAGS}
         ${WEBKIT_SWIFT_MEMORY_SAFETY_FLAGS}
         "-Xcc -fmodule-map-file=${WTF_HEADERS_DIR}/module.modulemap"
+        # As WebCore.xcconfig: the C++ is built without exceptions (OptionsMSVC.cmake), and with the
+        # importer's clang emitting C++ inline functions with the C++ personality LLVM will not inline
+        # them into Swift.
+        "-Xcc -fno-exceptions"
         ${WebCore_PLATFORM_SWIFT_CLANG_FLAG_PAIRS}
     )
-    if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
-        # HAVE_SSSE3 chooses PSHUFB in SIMDTableLookup.swift; the code generator must be allowed SSSE3
-        # too, or the (LTO) backend cannot select it. nehalem is x86-64-v2 (SSSE3, SSE4.2).
-        webkit_target_add_swift_options(WebCore "-D HAVE_SSSE3" "-target-cpu nehalem")
-    endif ()
+    # No -Xcc -I for WebCore's include directories: swiftc gives its -I paths, which CMake sets from
+    # them, to the clang importer too, and repeating them overflows Windows' 32K command line.
     if (LTO_MODE AND WEBKIT_SWIFT_WHOLE_MODULE)
-        # Bitcode with the ThinLTO summary, so the LTO link optimizes the Swift with its C++ caller.
+        # Bitcode with the ThinLTO summary, so the LTO link optimizes the Swift with its C++ callers.
         # Not the driver's -lto=llvm-thin, which writes <name>.bc to the working directory because
         # CMake's output file map has only an "object" entry.
         webkit_target_add_swift_options(WebCore
             "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -lto=llvm-${LTO_MODE}>"
             "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -emit-bc>")
+    elseif (LTO_MODE)
+        message(WARNING "LTO_MODE is set but Swift is not whole-module (DEVELOPER_MODE), so WebCore's Swift is not LTO'd")
     endif ()
 
-    # WebCore_Private.HTMLFastPathParserTypes, which HTMLFastPathParser.swift imports. Apple
-    # platforms get it from WebCore_Private.modulemap in the framework.
     set(_webcore_swift_module_dir "${CMAKE_CURRENT_BINARY_DIR}/SwiftModuleMap")
     file(WRITE "${_webcore_swift_module_dir}/module.modulemap.in"
         "module WebCore_Private [system] {\n"
-        "    explicit module HTMLFastPathParserTypes {\n"
-        "        header \"${WEBCORE_DIR}/html/parser/HTMLFastPathParserTypes.h\"\n"
-        "        requires cplusplus\n"
+        "    module PlatformExportMacros {\n"
+        "        header \"${WEBCORE_DIR}/platform/PlatformExportMacros.h\"\n"
         "        export *\n"
         "    }\n"
+        "${_webcore_swift_modules}"
         "}\n")
     configure_file("${_webcore_swift_module_dir}/module.modulemap.in" "${_webcore_swift_module_dir}/module.modulemap" COPYONLY)
 

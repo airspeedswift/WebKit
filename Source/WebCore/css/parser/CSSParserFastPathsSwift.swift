@@ -50,7 +50,8 @@ enum CSSSwiftColorOutcome: UInt8 {
 
 /// A code unit a candidate can be spelled in, with the width-specific `parseCSSNumber` upcall, so
 /// that a scan generic over the unit reaches the right C++ function without a runtime test.
-private protocol CSSColorCodeUnit: CSSCodeUnit {
+// Internal rather than private: see `CSSTokenStaging` in CSSTokenizerSwift.swift.
+protocol CSSColorCodeUnit: CSSCodeUnit {
     /// `parseCSSNumber` (CSSParserFastPaths.cpp) over `characters`.
     static func parseCSSNumber(_ characters: Span<Self>) -> WebCore.CSSSwiftDoubleScan
 }

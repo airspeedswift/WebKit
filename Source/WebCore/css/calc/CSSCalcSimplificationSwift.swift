@@ -22,7 +22,11 @@
 // THE POSSIBILITY OF SUCH DAMAGE.
 
 internal import Cxx
+#if canImport(Darwin)
 import Darwin
+#elseif canImport(ucrt)
+import ucrt
+#endif
 public import WebCore_Private.CSSCalcSwiftTypes
 internal import WebCore_Private.CSSCalcTypeSwiftTypes
 // `CSS::Category`, for `Type::determinePercentHint`.
@@ -35,6 +39,19 @@ internal import WebCore_Private.Core
 internal import wtf.Core.MathExtras
 // `isMainThread`, the thread the style calculation store belongs to.
 internal import wtf.Core.MainThread
+
+// The C library's math functions, under names `CalcExecutor`'s same-named members do not shadow.
+// Qualifying them by module instead would name a different module per platform (Darwin, ucrt).
+@inline(always) private func libm_acos(_ a: Double) -> Double { acos(a) }
+@inline(always) private func libm_asin(_ a: Double) -> Double { asin(a) }
+@inline(always) private func libm_atan(_ a: Double) -> Double { atan(a) }
+@inline(always) private func libm_atan2(_ a: Double, _ b: Double) -> Double { atan2(a, b) }
+@inline(always) private func libm_cos(_ a: Double) -> Double { cos(a) }
+@inline(always) private func libm_exp(_ a: Double) -> Double { exp(a) }
+@inline(always) private func libm_log(_ a: Double) -> Double { log(a) }
+@inline(always) private func libm_pow(_ a: Double, _ b: Double) -> Double { pow(a, b) }
+@inline(always) private func libm_sin(_ a: Double) -> Double { sin(a) }
+@inline(always) private func libm_tan(_ a: Double) -> Double { tan(a) }
 
 // calc() simplification, parsing and evaluation in Swift, used when WebCore is built with
 // WK_USE_SWIFT_CSS, in which the C++ simplifier, parser and evaluator are not compiled.
@@ -957,12 +974,12 @@ private enum CalcExecutor {
 
     @inline(always)
     static func sin(_ a: Double) -> Double {
-        Darwin.sin(a)
+        libm_sin(a)
     }
 
     @inline(always)
     static func cos(_ a: Double) -> Double {
-        Darwin.cos(a)
+        libm_cos(a)
     }
 
     /// `OperatorExecutor<Operator::Tan>`.
@@ -981,32 +998,32 @@ private enum CalcExecutor {
         if x == 3 * (Double.pi / 2) {
             return -Double.infinity
         }
-        return Darwin.tan(x)
+        return libm_tan(x)
     }
 
     @inline(always)
     static func asin(_ a: Double) -> Double {
-        radiansToDegrees(Darwin.asin(a))
+        radiansToDegrees(libm_asin(a))
     }
 
     @inline(always)
     static func acos(_ a: Double) -> Double {
-        radiansToDegrees(Darwin.acos(a))
+        radiansToDegrees(libm_acos(a))
     }
 
     @inline(always)
     static func atan(_ a: Double) -> Double {
-        radiansToDegrees(Darwin.atan(a))
+        radiansToDegrees(libm_atan(a))
     }
 
     @inline(always)
     static func atan2(_ a: Double, _ b: Double) -> Double {
-        radiansToDegrees(Darwin.atan2(a, b))
+        radiansToDegrees(libm_atan2(a, b))
     }
 
     @inline(always)
     static func pow(_ a: Double, _ b: Double) -> Double {
-        Darwin.pow(a, b)
+        libm_pow(a, b)
     }
 
     @inline(always)
@@ -1016,18 +1033,18 @@ private enum CalcExecutor {
 
     @inline(always)
     static func log(_ a: Double) -> Double {
-        Darwin.log(a)
+        libm_log(a)
     }
 
     /// `std::log(a) / std::log(b)`, as the C++ writes it; other spellings differ in the last place.
     @inline(always)
     static func log(_ a: Double, _ b: Double) -> Double {
-        Darwin.log(a) / Darwin.log(b)
+        libm_log(a) / libm_log(b)
     }
 
     @inline(always)
     static func exp(_ a: Double) -> Double {
-        Darwin.exp(a)
+        libm_exp(a)
     }
 
     @inline(always)
@@ -4431,7 +4448,8 @@ private func calcParseKeyword(
 /// `<calc-keyword>`'s numeric constants, `lookupConstantNumber` in CSSCalcTree+Parser.cpp.
 private func calcConstantNumber(_ valueID: UInt16) -> Double? {
     switch valueID {
-    case WebCore.CSSValueE.rawValue: return M_E
+    // `std::numbers::e`. Not `M_E`: <math.h> defines it only on request (`_USE_MATH_DEFINES`) on Windows.
+    case WebCore.CSSValueE.rawValue: return 2.718281828459045235360287471352662
     case WebCore.CSSValuePi.rawValue: return Double.pi
     case WebCore.CSSValueInfinity.rawValue: return Double.infinity
     case WebCore.CSSValueNegativeInfinity.rawValue: return -Double.infinity
@@ -7616,7 +7634,9 @@ private func styleCalcDump(_ node: borrowing CalcNode, _ sink: inout WebCore.CSS
 
 /// One slot of `StyleCalcStore`: a tree and its bookkeeping, in one element so that a handle costs
 /// one bounds check.
-private struct StyleCalcStoredTree: ~Copyable {
+// Windows port: internal rather than private, as `CSSTokenStaging` (CSSTokenizerSwift.swift): this private type's
+// metadata is a linkonce_odr alias of a getelementptr in the multi-threaded WMO objects, which lld rejects ("Invalid weak external").
+struct StyleCalcStoredTree: ~Copyable {
     /// Whether a C++ `Child` owns this slot. A tree has exactly one owner, as upstream's
     /// `UniqueRef` tree does, so there is no count: false on the free list and for slot 0.
     var live: Bool
@@ -7917,7 +7937,9 @@ final class StyleCalcStore {
 /// `evaluate`). So was a `Mutex`, which needs no `@unchecked` (+24 per `evaluate`, +140 per blend).
 /// A `nonisolated(unsafe)` global is an `unsafe` use, a `static let` of a non-`Sendable` class is an
 /// error, and `MainActor` is the wrong thread. See webkit-swift-ports/cimpl-0930.
-private final class StyleCalcStoreHolder: @unchecked Sendable {
+// Windows port: internal rather than private, as `CSSTokenStaging` (CSSTokenizerSwift.swift): this private type's
+// metadata is a linkonce_odr alias of a getelementptr in the multi-threaded WMO objects, which lld rejects ("Invalid weak external").
+final class StyleCalcStoreHolder: @unchecked Sendable {
     private let store = StyleCalcStore()
 
     @inline(always)

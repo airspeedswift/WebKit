@@ -270,7 +270,22 @@ bool CSSSwiftTokenSink::takeChunk(std::span<const CSSParserTokenBits> tokenBits 
     // addComment's `tokensBefore` counts from here.
     unsigned firstTokenIndex = parserTokens.size();
 
-    for (auto bits : tokenBits) {
+    for (auto& swiftBits : tokenBits) {
+        // Appended as Swift wrote it, then resolved in place. Fixing up a local copy first writes
+        // it field by field and reads it back whole to append, and on x86-64 a load spanning
+        // several narrower in-flight stores cannot be forwarded from them: that stall was three
+        // quarters of this loop's cycles on Windows. Swift wrote the chunk long before this loop
+        // reads it, so copying from it forwards normally. A check below that fails leaves that token
+        // unresolved, which nothing reads: on false the tokenizer is destroyed (tryCreate).
+        //
+        // No per-chunk reservation: reserveCapacity is exact, so it would reallocate on every
+        // chunk of an input denser than the initial estimate, where tryAppend grows geometrically.
+        // A temporary rather than tryConstructAndAppend(swiftBits), because the bits constructor
+        // is private and Vector would make the access check.
+        if (!parserTokens.tryAppend(CSSParserToken { swiftBits })) [[unlikely]]
+            return false;
+        auto& bits = parserTokens.last().m_bits;
+
         auto parkedOffset = bitsParkedValueOffset(bits);
         if (parkedOffset & cssParserTokenBitsUnescapedValueTag) [[unlikely]] {
             // A value Swift unescaped: its range indexes the per-chunk unescape buffer, which
@@ -300,13 +315,6 @@ bool CSSSwiftTokenSink::takeChunk(std::span<const CSSParserTokenBits> tokenBits 
             bits.numericValue = isResultOK ? numericValue : 0;
             bits.hasParkedNumberRange = 0;
         }
-
-        // No per-chunk reservation: reserveCapacity is exact, so it would reallocate on every
-        // chunk of an input denser than the initial estimate, where tryAppend grows geometrically.
-        // A temporary rather than tryConstructAndAppend(bits), because the bits constructor is
-        // private and Vector would make the access check.
-        if (!parserTokens.tryAppend(CSSParserToken { bits })) [[unlikely]]
-            return false;
     }
 
     // Empty unless wantsObserverRecords(). m_tokenOffsets must be in token order and

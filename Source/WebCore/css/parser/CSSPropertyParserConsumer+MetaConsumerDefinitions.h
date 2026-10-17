@@ -33,6 +33,7 @@
 #include "CSSUnevaluatedCalc.h"
 #if USE(SWIFT_CSS)
 #include "CSSCalcSwiftTypes.h"
+#include "CSSParserContext.h"
 #include "CSSProperty.h"
 #endif
 

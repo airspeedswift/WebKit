@@ -1,4 +1,6 @@
-add_definitions(/bigobj -D__STDC_CONSTANT_MACROS)
+# Not add_definitions: /bigobj would reach swiftc too, when WebCore has Swift.
+add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:/bigobj>")
+add_compile_definitions(__STDC_CONSTANT_MACROS)
 
 include(platform/Adwaita.cmake)
 include(platform/Curl.cmake)
@@ -244,7 +246,7 @@ if (USE_SKIA)
     list(APPEND WebCore_PRIVATE_LIBRARIES ${SHARPYUV_LIBS})
 endif ()
 
-if (WK_USE_SWIFT_HTML_FAST_PATH)
+if (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
     # The same amended MSVC STL and WinSDK modulemaps Source/WebKit/PlatformWin.cmake mounts for
     # WebKit's Swift, which is configured after WebCore. See that file.
     cmake_path(CONVERT "$ENV{SDKROOT}" TO_CMAKE_PATH_LIST _swift_sdkroot)

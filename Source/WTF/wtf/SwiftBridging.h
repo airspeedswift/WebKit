@@ -27,6 +27,16 @@
 
 #include <wtf/Platform.h>
 
+// `__counted_by`, which with `noescape` imports a pointer and count into Swift as a Span. On Darwin
+// <sys/cdefs.h> includes clang's <ptrcheck.h>; elsewhere nothing does.
+#if !defined(__counted_by)
+#if __has_include(<ptrcheck.h>)
+#include <ptrcheck.h>
+#else
+#define __counted_by(N)
+#endif
+#endif
+
 #if __has_include(<swift/bridging>)
 
 #include <swift/bridging>

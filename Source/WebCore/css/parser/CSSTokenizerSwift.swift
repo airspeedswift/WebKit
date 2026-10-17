@@ -1068,8 +1068,10 @@ private func observerRecord(
 }
 
 /// The stack staging buffer's token count. `withTemporaryAllocation` uses the stack only for
-/// requests of at most 1024 bytes (`_isStackAllocationSafe`), and 42 tokens of 24 bytes is 1008.
-private let stackTokenCapacity = 42
+/// requests of at most 1024 bytes (`_isStackAllocationSafe`), so this is as many tokens as fit: 42
+/// of 24 bytes on the Mac, 32 of 32 under the MSVC ABI, where `CSSParserTokenBits`'s `bool`
+/// bitfields start a new allocation unit. A hard-coded 42 made every tokenize heap-allocate there.
+private let stackTokenCapacity = 1024 / MemoryLayout<WebCore.CSSParserTokenBits>.stride
 
 /// The longest input staged on the stack, well above a typical declaration or property value.
 ///
@@ -1084,7 +1086,11 @@ private let heapTokenCapacity = 1024
 /// specialized for each. `withTemporaryAllocation`'s own heap fallback is not used because it
 /// runs the body as a separate function, where the `CSSParserTokenBits` bitfield accessors are
 /// not inlined.
-private protocol CSSTokenStaging: ~Copyable, ~Escapable {
+// Internal rather than private. With the per-file LLVM modules of a multi-threaded whole-module
+// compile, a private protocol's requirement descriptors are linkonce_odr aliases of a
+// getelementptr, which ThinLTO on Windows rejects when it links them: lld's "Invalid weak external"
+// (llvm/lib/Object/IRSymtab.cpp, a weak COFF alias whose aliasee is not a global).
+protocol CSSTokenStaging: ~Copyable, ~Escapable {
     var tokenCapacity: Int { get }
     var isFull: Bool { get }
     var isEmpty: Bool { get }

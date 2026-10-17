@@ -884,8 +884,8 @@ void CSSCalcSwiftSink::appendPayloadArgument(uint8_t part, uint32_t payload, dou
 }
 
 #if !CSS_CALC_CPP_SERIALIZER_COMPILED_IN
-// Whether the tree was serialized. On false nothing was appended: the decision is made before
-// anything is emitted, because a StringBuilder cannot be truncated back.
+// Whether the tree was serialized. On false, for a root the Swift serializer refuses, nothing was
+// appended. A deeper node it would refuse traps where it is met, as both callers below do on false.
 //
 // `omitGroupingParenthesis` is the whole of the difference between the two entry points below, exactly
 // as it is the whole of the difference between the two `SerializationState`s the C++ builds for them.
