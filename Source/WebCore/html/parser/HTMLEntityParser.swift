@@ -29,12 +29,14 @@ internal import WebCore_Private.Core.HTMLEntityTable
 internal import WebCore_Private.HTMLFastPathParserTypes
 // Operators that WebCore's headers declare use these JavaScriptCore and WTF types. Without their definitions, ==, !,
 // << and * do not typecheck in this file.
+#if canImport(JavaScriptCore_Private) // Not a module outside Apple platforms, where the headers are textual.
 internal import JavaScriptCore_Private.Cxx.Snippet
 internal import JavaScriptCore_Private.Cxx.DOMJITCallDOMGetterSnippet
 internal import JavaScriptCore_Private.Cxx.WasmInstanceAnchor
 internal import JavaScriptCore_Private.Cxx.WasmCalleeGroup
 internal import JavaScriptCore_Private.Cxx.WasmModule
 internal import JavaScriptCore_Private.Cxx.WasmModuleDebugInfo
+#endif
 internal import wtf.Core.Stopwatch
 
 /// Consumes the character reference at the start of 8-bit `characters`, for WebVTTTokenizer.
