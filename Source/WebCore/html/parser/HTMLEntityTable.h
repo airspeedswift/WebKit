@@ -49,6 +49,9 @@ class HTMLEntityTable {
 public:
     static std::span<const HTMLEntityTableEntry> entries();
     static std::span<const HTMLEntityTableEntry> entriesStartingWith(char16_t);
+
+    // The entries are static. Binding the span to a table value lets Swift take it as a Span.
+    std::span<const HTMLEntityTableEntry> entriesStartingWithCharacter(char16_t character) const LIFETIME_BOUND { return entriesStartingWith(character); }
 };
 
 } // namespace WebCore
