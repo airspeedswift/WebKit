@@ -25,6 +25,10 @@
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
+#if !defined(USE_SWIFT_HTML_TOKENIZER)
+#define USE_SWIFT_HTML_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
 // Swift uses a SegmentedString only through its member functions. Its spans point into the Strings it
@@ -75,9 +79,11 @@ public:
     SWIFT_UNSAFE void advancePastMultiple16(unsigned count);
     void advancePastMultiple(unsigned count);
 
+#if !USE_SWIFT_HTML_TOKENIZER
     enum AdvancePastResult { DidNotMatch, DidMatch, NotEnoughCharacters };
     AdvancePastResult advancePast(ASCIILiteral literal) { return advancePast<false>(literal); }
     AdvancePastResult advancePastLettersIgnoringASCIICase(ASCIILiteral literal) { return advancePast<true>(literal); }
+#endif
 
     unsigned numberOfCharactersConsumed() const;
 
@@ -144,9 +150,11 @@ private:
 
     void updateAdvanceFunctionPointersIfNecessary();
 
+#if !USE_SWIFT_HTML_TOKENIZER
     template<typename CharacterType> static bool characterMismatch(CharacterType, char, bool lettersIgnoringASCIICase);
     template<bool lettersIgnoringASCIICase> AdvancePastResult advancePast(ASCIILiteral);
     AdvancePastResult advancePastSlowCase(ASCIILiteral, bool lettersIgnoringASCIICase);
+#endif
 
     Substring m_currentSubstring;
     Deque<Substring> m_otherSubstrings;
@@ -393,6 +401,7 @@ inline unsigned SegmentedString::numberOfCharactersConsumed() const
     return m_numberOfCharactersConsumedPriorToCurrentSubstring + m_currentSubstring.numberOfCharactersConsumed();
 }
 
+#if !USE_SWIFT_HTML_TOKENIZER
 template<typename CharacterType> ALWAYS_INLINE bool SegmentedString::characterMismatch(CharacterType a, char b, bool lettersIgnoringASCIICase)
 {
     return lettersIgnoringASCIICase ? !isASCIIAlphaCaselessEqual(a, b) : a != b;
@@ -423,6 +432,7 @@ template<bool lettersIgnoringASCIICase> SegmentedString::AdvancePastResult Segme
     }
     return advancePastSlowCase(literal, lettersIgnoringASCIICase);
 }
+#endif
 
 inline void SegmentedString::updateAdvanceFunctionPointers()
 {

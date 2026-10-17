@@ -30,6 +30,10 @@
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/unicode/CharacterNames.h>
 
+#if !defined(USE_SWIFT_HTML_TOKENIZER)
+#define USE_SWIFT_HTML_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
 struct DoctypeData {
@@ -143,7 +147,9 @@ public:
 
     void beginComment();
     void appendToComment(char);
+#if !USE_SWIFT_HTML_TOKENIZER
     void appendToComment(ASCIILiteral);
+#endif
     void appendToComment(std::span<const Latin1Character>);
     void appendToComment(char16_t);
 
@@ -154,6 +160,9 @@ public:
     using TargetVector = Vector<Latin1Character, 16>;
 
     const TargetVector& processingInstructionTarget() const LIFETIME_BOUND;
+#if USE_SWIFT_HTML_TOKENIZER
+    std::span<const Latin1Character> processingInstructionTargetCharacters() const LIFETIME_BOUND { return m_processingInstructionTarget ? m_processingInstructionTarget->span() : std::span<const Latin1Character> { }; }
+#endif
     const DataVector& processingInstructionData() const LIFETIME_BOUND;
 
     void beginProcessingInstruction();
@@ -480,11 +489,13 @@ inline void HTMLToken::appendToComment(char character)
     m_data.append(character);
 }
 
+#if !USE_SWIFT_HTML_TOKENIZER
 inline void HTMLToken::appendToComment(ASCIILiteral literal)
 {
     ASSERT(m_type == Type::Comment);
     m_data.append(literal.span8());
 }
+#endif
 
 inline void HTMLToken::appendToComment(std::span<const Latin1Character> characters)
 {

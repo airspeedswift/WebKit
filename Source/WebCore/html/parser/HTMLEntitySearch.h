@@ -28,8 +28,13 @@
 #include "HTMLEntityTable.h"
 #include <unicode/umachine.h>
 
+#if !defined(USE_SWIFT_HTML_TOKENIZER)
+#define USE_SWIFT_HTML_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TOKENIZER
 class HTMLEntitySearch {
 public:
     HTMLEntitySearch();
@@ -53,5 +58,6 @@ private:
     const HTMLEntityTableEntry* m_mostRecentMatch { nullptr };
     std::span<const HTMLEntityTableEntry> m_entries;
 };
+#endif
 
 } // namespace WebCore

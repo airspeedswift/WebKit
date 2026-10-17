@@ -30,9 +30,21 @@
 #include "HTMLToken.h"
 #include "InputStreamPreprocessor.h"
 
+#if !defined(USE_SWIFT_HTML_TOKENIZER)
+#define USE_SWIFT_HTML_TOKENIZER 0
+#endif
+
+#if USE_SWIFT_HTML_TOKENIZER
+#include <wtf/SwiftBridging.h>
+#endif
+
 namespace WebCore {
 
 class SegmentedString;
+
+#if USE_SWIFT_HTML_TOKENIZER
+class SWIFT_PRIVATE_FILEID("WebCore/HTMLTokenizer.swift") HTMLTokenizer;
+#endif
 
 class WEBCORE_EXPORT HTMLTokenizer {
 public:
@@ -156,6 +168,7 @@ private:
     };
 
     bool processToken(SegmentedString&);
+#if !USE_SWIFT_HTML_TOKENIZER
     bool processEntity(SegmentedString&);
 
     void LEGACY_NODELETE parseError();
@@ -190,6 +203,7 @@ private:
     bool LEGACY_NODELETE haveBufferedCharacterToken() const;
 
     bool LEGACY_NODELETE shouldSkipNullCharacters(State) const;
+#endif
 
     State m_state { DataState };
     bool m_forceNullCharacterReplacement { false };
@@ -342,9 +356,11 @@ inline void HTMLTokenizer::setScriptDataState()
     m_state = ScriptDataState;
 }
 
+#if !USE_SWIFT_HTML_TOKENIZER
 inline bool HTMLTokenizer::shouldSkipNullCharacters(State state) const
 {
     return state == DataState && !m_forceNullCharacterReplacement;
 }
+#endif
 
 } // namespace WebCore

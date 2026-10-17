@@ -34,14 +34,20 @@
 #include <wtf/text/Latin1Character.h>
 #include <wtf/text/WTFString.h>
 
+#if !defined(USE_SWIFT_HTML_TOKENIZER)
+#define USE_SWIFT_HTML_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
 using HTMLFastPathLatin1Span = std::span<const Latin1Character>;
 using HTMLFastPathUTF16Span = std::span<const char16_t>;
 
+#if !USE_SWIFT_HTML_TOKENIZER
 // consumeHTMLEntity on the source after a '&', writing up to 3 characters at decodedOffset of decoded. Returns
 // (characters read << 2) | characters written. The source is latin1Source unless it is empty.
 uint64_t consumeHTMLEntityForFastPath(HTMLFastPathLatin1Span latin1Source NOESCAPE, HTMLFastPathUTF16Span utf16Source NOESCAPE, char16_t additionalAllowedCharacter, std::span<char16_t> decoded NOESCAPE, size_t decodedOffset);
+#endif
 
 // '\n' followed by spaceCount spaces, at most 32, from NewlineThenWhitespaceStringsTable.
 String newlineThenWhitespaceStringForFastPath(unsigned spaceCount);
