@@ -70,6 +70,7 @@
 #endif
 
 #if USE_SWIFT_HTML_FAST_PATH
+#include "Text.h"
 #include "WebCore-Swift.h"
 #endif
 
@@ -1211,3 +1212,10 @@ bool tryFastParsingHTMLFragment(StringView source, Document& document, Container
 #undef FOR_EACH_SUPPORTED_TAG
 
 } // namespace WebCore
+
+#if USE_SWIFT_HTML_FAST_PATH && defined(_WIN32)
+// HTMLFastPathParser.swift destroys Text nodes through Text's CheckedPtr operator delete, which calls
+// secureZeroBytes<Text>. On Windows the Swift compiler references that instantiation without emitting it, so it
+// is instantiated here.
+template void WTF::secureZeroBytes<WebCore::Text>(WebCore::Text&);
+#endif
