@@ -3272,6 +3272,13 @@ list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/Namespace.cpp)
 if (WK_USE_SWIFT_HTML_FAST_PATH)
     list(APPEND WebCore_UNIFIED_SOURCE_EXCLUDES "(^|/)HTMLDocumentParserFastPath\\.cpp( |$)")
 endif ()
+# Set by WK_USE_SWIFT_HTML_TOKENIZER: these include WebCore-Swift.h too.
+if (WK_USE_SWIFT_HTML_TOKENIZER)
+    list(APPEND WebCore_UNIFIED_SOURCE_EXCLUDES
+        "(^|/)HTMLTokenizer\\.cpp( |$)"
+        "(^|/)WebVTTTokenizer\\.cpp( |$)"
+        "(^|/)XMLDocumentParserLibxml2\\.cpp( |$)")
+endif ()
 
 # WK_USE_SWIFT_CSS, the counterpart of the WebCore.xcconfig setting: the Swift implementation of CSS
 # tokenizing, the property fast paths and calc(), with the C++ it replaces compiled out under
@@ -3399,6 +3406,8 @@ elseif (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
     # build; here each submodule names the source-tree headers the interop sources include.
     set(WebCore_SWIFT_INTEROP_SOURCES)
     set(_webcore_swift_modules "")
+    set(_webcore_swift_core_headers)
+    set(_webcore_swift_core_submodules)
 
     if (WK_USE_SWIFT_HTML_FAST_PATH)
         target_sources(WebCore PRIVATE
@@ -3430,6 +3439,34 @@ elseif (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
             "        requires cplusplus\n"
             "        export *\n"
             "    }\n")
+
+        # The DOM and parser headers the HTML Swift imports one by one (`WebCore_Private.Core.Element` and so on),
+        # each a submodule of Core as in the framework's umbrella map.
+        set(_webcore_swift_core_submodules
+            dom/Attribute.h dom/ContainerNode.h dom/Document.h dom/Element.h html/HTMLElement.h
+            ${WebCore_DERIVED_SOURCES_DIR}/HTMLElementFactory.h html/parser/HTMLNameCache.h dom/Node.h
+            ${WebCore_DERIVED_SOURCES_DIR}/NodeName.h dom/QualifiedName.h dom/Text.h)
+    endif ()
+
+    if (WK_USE_SWIFT_HTML_TOKENIZER)
+        target_sources(WebCore PRIVATE
+            ${WEBCORE_DIR}/html/parser/HTMLEntityParser.swift
+            ${WEBCORE_DIR}/html/parser/HTMLTokenizer.swift
+        )
+        list(APPEND WebCore_SWIFT_INTEROP_SOURCES
+            html/parser/HTMLTokenizer.cpp
+            html/track/WebVTTTokenizer.cpp
+            xml/parser/XMLDocumentParserLibxml2.cpp)
+        # As in WebCore.xcconfig: the jump threading that lets each tokenizer transition branch straight to the next
+        # state, and -O2 for the inline C++ the tokenizer calls.
+        webkit_target_add_swift_options(WebCore
+            "-D USE_SWIFT_HTML_TOKENIZER"
+            "-Xllvm -enable-dfa-jump-thread"
+            "-Xcc -O2"
+        )
+        list(APPEND _webcore_swift_core_submodules
+            platform/text/SegmentedString.h html/parser/HTMLToken.h html/parser/HTMLTokenizer.h
+            html/parser/HTMLEntityParser.h html/parser/HTMLEntityTable.h css/parser/CSSTokenizerInputStream.h)
     endif ()
 
     if (WK_USE_SWIFT_CSS)
@@ -3478,26 +3515,25 @@ elseif (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
             "        requires cplusplus\n"
             "        export *\n"
             "    }\n"
-            "    module Core {\n"
-            "        header \"${WebCore_DERIVED_SOURCES_DIR}/CSSValueKeywords.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/calc/CSSCalcOperator.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/calc/CSSCalcTree+NumericIdentity.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/parser/CSSParserMode.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/values/primitives/CSSPrimitiveNumericRange.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/values/primitives/CSSPrimitiveNumericUnits.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/parser/CSSPropertyParserOptions.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/parser/CSSParserTokenRange.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/CSSValue.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/CSSValueList.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/CSSPrimitiveValue.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/CSSFunctionValue.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/CSSTransformListValue.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/CSSValuePair.h\"\n"
-            "        header \"${WEBCORE_DIR}/css/CSSKeywordValue.h\"\n"
-            "        header \"${WEBCORE_DIR}/style/calc/StyleCalculationTree.h\"\n"
-            "        requires cplusplus\n"
-            "        export *\n"
-            "    }\n")
+            )
+        list(APPEND _webcore_swift_core_headers
+            "${WebCore_DERIVED_SOURCES_DIR}/CSSValueKeywords.h"
+            "${WEBCORE_DIR}/css/calc/CSSCalcOperator.h"
+            "${WEBCORE_DIR}/css/calc/CSSCalcTree+NumericIdentity.h"
+            "${WEBCORE_DIR}/css/parser/CSSParserMode.h"
+            "${WEBCORE_DIR}/css/values/primitives/CSSPrimitiveNumericRange.h"
+            "${WEBCORE_DIR}/css/values/primitives/CSSPrimitiveNumericUnits.h"
+            "${WEBCORE_DIR}/css/parser/CSSPropertyParserOptions.h"
+            "${WEBCORE_DIR}/css/parser/CSSParserTokenRange.h"
+            "${WEBCORE_DIR}/css/CSSValue.h"
+            "${WEBCORE_DIR}/css/CSSValueList.h"
+            "${WEBCORE_DIR}/css/CSSPrimitiveValue.h"
+            "${WEBCORE_DIR}/css/CSSFunctionValue.h"
+            "${WEBCORE_DIR}/css/CSSTransformListValue.h"
+            "${WEBCORE_DIR}/css/CSSValuePair.h"
+            "${WEBCORE_DIR}/css/CSSKeywordValue.h"
+            "${WEBCORE_DIR}/style/calc/StyleCalculationTree.h"
+        )
     endif ()
 
     webkit_target_add_swift_options(WebCore
@@ -3511,6 +3547,8 @@ elseif (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
         # importer's clang emitting C++ inline functions with the C++ personality LLVM will not inline
         # them into Swift.
         "-Xcc -fno-exceptions"
+        # And without the cleanups exceptions would need, so those functions can be inlined too.
+        "-Xcc -fignore-exceptions"
         ${WebCore_PLATFORM_SWIFT_CLANG_FLAG_PAIRS}
     )
     # No -Xcc -I for WebCore's include directories: swiftc gives its -I paths, which CMake sets from
@@ -3524,6 +3562,30 @@ elseif (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
             "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -emit-bc>")
     elseif (LTO_MODE)
         message(WARNING "LTO_MODE is set but Swift is not whole-module (DEVELOPER_MODE), so WebCore's Swift is not LTO'd")
+    endif ()
+
+    # WebCore_Private.Core: the headers the CSS Swift names directly, then one submodule per header the HTML Swift
+    # imports by name (a relative path is under Source/WebCore).
+    if (_webcore_swift_core_headers OR _webcore_swift_core_submodules)
+        string(APPEND _webcore_swift_modules "    module Core {\n")
+        foreach (_h IN LISTS _webcore_swift_core_headers)
+            string(APPEND _webcore_swift_modules "        header \"${_h}\"\n")
+        endforeach ()
+        foreach (_h IN LISTS _webcore_swift_core_submodules)
+            if (NOT IS_ABSOLUTE "${_h}")
+                set(_h "${WEBCORE_DIR}/${_h}")
+            endif ()
+            get_filename_component(_name "${_h}" NAME_WE)
+            string(APPEND _webcore_swift_modules
+                "        explicit module ${_name} {\n"
+                "            header \"${_h}\"\n"
+                "            export *\n"
+                "        }\n")
+        endforeach ()
+        string(APPEND _webcore_swift_modules
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n")
     endif ()
 
     set(_webcore_swift_module_dir "${CMAKE_CURRENT_BINARY_DIR}/SwiftModuleMap")
