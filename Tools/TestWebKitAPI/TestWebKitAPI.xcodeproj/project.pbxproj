@@ -850,6 +850,7 @@
 				WebCore/HEVCUtilitiesTests.cpp,
 				WebCore/HTMLFastPathParserBench.cpp,
 				WebCore/HTMLParserIdioms.cpp,
+				WebCore/HTMLTokenizerBench.cpp,
 				WebCore/HTTPHeaderField.cpp,
 				WebCore/HTTPHeaderMap.cpp,
 				WebCore/HTTPParsers.cpp,

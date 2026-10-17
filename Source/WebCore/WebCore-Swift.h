@@ -51,6 +51,15 @@
 #include "HTMLFastPathParserTypes.h"
 #endif
 
+#if !defined(USE_SWIFT_HTML_TOKENIZER)
+#define USE_SWIFT_HTML_TOKENIZER 0
+#endif
+#if USE_SWIFT_HTML_TOKENIZER
+#include "HTMLEntityParser.h"
+#include "HTMLTokenizer.h"
+#include "SegmentedString.h"
+#endif
+
 #if USE(SWIFT_CSS)
 // The CSS boundary types every thunk in the generated header names, then the header itself.
 #include "WebCoreSwiftBoundaryTypes.h"

@@ -29,6 +29,10 @@
 #include "Attribute.h"
 #include <wtf/TZoneMallocInlines.h>
 
+#if !defined(USE_SWIFT_HTML_TOKENIZER)
+#define USE_SWIFT_HTML_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
 struct DoctypeData {
@@ -137,7 +141,9 @@ public:
 
     void beginComment();
     void appendToComment(char);
+#if !USE_SWIFT_HTML_TOKENIZER
     void appendToComment(ASCIILiteral);
+#endif
     void appendToComment(char16_t);
 
 private:
@@ -433,11 +439,13 @@ inline void HTMLToken::appendToComment(char character)
     m_data.append(character);
 }
 
+#if !USE_SWIFT_HTML_TOKENIZER
 inline void HTMLToken::appendToComment(ASCIILiteral literal)
 {
     ASSERT(m_type == Type::Comment);
     m_data.append(literal.span8());
 }
+#endif
 
 inline void HTMLToken::appendToComment(char16_t character)
 {

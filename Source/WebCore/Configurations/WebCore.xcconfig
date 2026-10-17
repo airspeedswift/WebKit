@@ -41,7 +41,7 @@ WK_USE_SWIFT_TEXT_CODEC_UTF8 = NO;
 WK_SWIFT_TEXT_CODEC_UTF8_DEFINES_NO = USE_SWIFT_TEXT_CODEC_UTF8=0;
 WK_SWIFT_TEXT_CODEC_UTF8_DEFINES_YES = USE_SWIFT_TEXT_CODEC_UTF8=1;
 
-GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(WK_SWIFT_TEXT_CODEC_UTF8_DEFINES_$(WK_USE_SWIFT_TEXT_CODEC_UTF8)) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_DEFINES) $(WK_SWIFT_HTML_FAST_PATH_DEFINES_$(WK_USE_SWIFT_HTML_FAST_PATH));
+GCC_PREPROCESSOR_DEFINITIONS = $(DEBUG_DEFINES) BUILDING_WEBKIT GL_SILENCE_DEPRECATION=1 GLES_SILENCE_DEPRECATION=1 $(ENABLE_PDFJS) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(WK_SWIFT_TEXT_CODEC_UTF8_DEFINES_$(WK_USE_SWIFT_TEXT_CODEC_UTF8)) $(inherited) $(GCC_PREPROCESSOR_DEFINITIONS_$(ENABLE_WEBGPU_SWIFT)) $(WK_USE_SWIFT_CSS_DEFINES) $(WK_SWIFT_HTML_FAST_PATH_DEFINES_$(WK_USE_SWIFT_HTML_FAST_PATH)) $(WK_SWIFT_HTML_TOKENIZER_DEFINES_$(WK_USE_SWIFT_HTML_TOKENIZER));
 GCC_PREPROCESSOR_DEFINITIONS_ENABLE_WEBGPU_SWIFT = ENABLE_WEBGPU_SWIFT;
 
 // WK_USE_SWIFT_CSS (Configurations/CommonBase.xcconfig) selects the Swift implementation of CSS
@@ -55,6 +55,18 @@ WK_USE_SWIFT_CSS_DEFINES_YES = USE_SWIFT_CSS=1;
 WK_USE_SWIFT_HTML_FAST_PATH = YES;
 WK_SWIFT_HTML_FAST_PATH_DEFINES_YES = USE_SWIFT_HTML_FAST_PATH=1;
 WK_SWIFT_HTML_FAST_PATH_CONDITIONS_YES = USE_SWIFT_HTML_FAST_PATH;
+
+// The HTML tokenizer (HTMLTokenizer.cpp) and the HTML entity decoder (HTMLEntityParser.cpp) run in Swift when YES.
+WK_USE_SWIFT_HTML_TOKENIZER = NO;
+WK_SWIFT_HTML_TOKENIZER_DEFINES_YES = USE_SWIFT_HTML_TOKENIZER=1;
+WK_SWIFT_HTML_TOKENIZER_CONDITIONS_YES = USE_SWIFT_HTML_TOKENIZER;
+// -enable-dfa-jump-thread lets LLVM branch from each transition of the tokenizer's state machine, a switch in a
+// loop, straight to the next state's case. -Xcc -O2 compiles the inline C++ that WebCore's Swift calls (HTMLToken's
+// appenders, SegmentedString) at -O2 instead of -Os, so its copy loops vectorize.
+WK_SWIFT_HTML_TOKENIZER_FLAGS_YES = -Xllvm -enable-dfa-jump-thread -Xcc -O2;
+// The Swift compile cache drops -Xcc options.
+SWIFT_ENABLE_COMPILE_CACHE = $(WK_SWIFT_HTML_TOKENIZER_COMPILE_CACHE_$(WK_USE_SWIFT_HTML_TOKENIZER):default=$(inherited));
+WK_SWIFT_HTML_TOKENIZER_COMPILE_CACHE_YES = NO;
 
 WK_OPTIMIZATION_PROFILE_FILE = $(BUILT_PRODUCTS_DIR)/DerivedSources/WebCore/Profiling/$(arch).profdata;
 WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER = $(WK_COMPRESSED_OPTIMIZATION_PROFILE_FOLDER_$(USE_INTERNAL_SDK));
@@ -310,7 +322,7 @@ MODULE_VERIFIER_KIND = builtin;
 // in submodules nothing imports ("foreign reference type 'Callee' has unreachable definition"). The C++ is
 // unaffected: the annotations are attributes Swift reads, and CSSValue carries its own.
 // BuiltinModule is for the vendored SIMD operations in SIMD*.swift, until the standard library has them.
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -DENABLE_SWIFT_BASE_CLASS_ANNOTATIONS=0 -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers -enable-experimental-feature BuiltinModule $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -DENABLE_SWIFT_BASE_CLASS_ANNOTATIONS=0 -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers -enable-experimental-feature BuiltinModule $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS) $(WK_SWIFT_HTML_TOKENIZER_FLAGS_$(WK_USE_SWIFT_HTML_TOKENIZER));
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
@@ -325,4 +337,4 @@ HEADERMAP_USES_VFS = YES;
 // PSHUFB in SIMDTableLookup.swift needs SSSE3, which every x86_64 Mac target has. Other
 // conditions are added to this line; assigning the setting again would replace it.
 WK_SWIFT_SIMD_CONDITIONS[arch=x86_64] = HAVE_SSSE3;
-SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_SWIFT_SIMD_CONDITIONS) $(WK_SWIFT_HTML_FAST_PATH_CONDITIONS_$(WK_USE_SWIFT_HTML_FAST_PATH));
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_SWIFT_SIMD_CONDITIONS) $(WK_SWIFT_HTML_FAST_PATH_CONDITIONS_$(WK_USE_SWIFT_HTML_FAST_PATH)) $(WK_SWIFT_HTML_TOKENIZER_CONDITIONS_$(WK_USE_SWIFT_HTML_TOKENIZER));

@@ -243,6 +243,7 @@ void SegmentedString::setCurrentPosition(OrdinalNumber line, OrdinalNumber colum
     m_numberOfCharactersConsumedPriorToCurrentLine = numberOfCharactersConsumed() + prologLength - columnAftreProlog.zeroBasedInt();
 }
 
+#if !USE_SWIFT_HTML_TOKENIZER
 SegmentedString::AdvancePastResult SegmentedString::advancePastSlowCase(ASCIILiteral literal, bool lettersIgnoringASCIICase)
 {
     constexpr unsigned maxLength = 10;
@@ -264,6 +265,7 @@ SegmentedString::AdvancePastResult SegmentedString::advancePastSlowCase(ASCIILit
     }
     return DidMatch;
 }
+#endif
 
 void SegmentedString::updateAdvanceFunctionPointersForEmptyString()
 {

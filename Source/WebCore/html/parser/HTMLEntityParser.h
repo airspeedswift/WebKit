@@ -32,8 +32,13 @@
 #include <wtf/Forward.h>
 #include <wtf/text/Latin1Character.h>
 
+#if !defined(USE_SWIFT_HTML_TOKENIZER)
+#define USE_SWIFT_HTML_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TOKENIZER
 class DecodedHTMLEntity;
 class SegmentedString;
 
@@ -46,6 +51,7 @@ DecodedHTMLEntity consumeHTMLEntity(StringParsingBuffer<char16_t>&, char16_t add
 
 // This function does not check for "not enough characters" at all.
 DecodedHTMLEntity decodeNamedHTMLEntityForXMLParser(const char*);
+#endif
 
 class DecodedHTMLEntity {
 public:
