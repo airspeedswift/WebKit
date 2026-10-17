@@ -3607,6 +3607,15 @@ elseif (WK_USE_SWIFT_HTML_FAST_PATH OR WK_USE_SWIFT_CSS)
         "WebCoreSwift-Generated.h")
 
     if (WIN32)
+        # The shared importer flags declare WebCore's and PAL's exports __declspec(dllimport), as every other
+        # Swift target sees them. WebCore's own Swift is in WebCore.dll (and PAL is linked into it), so it must
+        # reference them directly: through dllimport it asks for __imp_ symbols the DLL does not import, and does
+        # not instantiate the inline functions and templates a dllimport class leaves to its DLL. Added after the
+        # shared flags, so these definitions win.
+        webkit_target_add_swift_options(WebCore "-Xcc -DWEBCORE_EXPORT=" "-Xcc -DPAL_EXPORT=")
+    endif ()
+
+    if (WIN32)
         # WebCore links its Swift objects with the C++ linker, which needs the import libraries of the
         # Swift runtime those objects auto-link. They are in the SDK, not the toolchain that
         # -print-target-info describes.
