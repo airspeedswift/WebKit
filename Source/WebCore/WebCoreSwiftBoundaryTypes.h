@@ -39,8 +39,17 @@
 
 #include "CSSCalcSwiftTypes.h"
 #include "CSSTokenizerSwiftTypes.h"
+// The HTML islands' boundary types, as WebCore-Swift.h includes them.
 #if defined(USE_SWIFT_HTML_FAST_PATH) && USE_SWIFT_HTML_FAST_PATH
+#include "ContainerNode.h"
+#include "Document.h"
+#include "Element.h"
 #include "HTMLFastPathParserTypes.h"
+#endif
+#if defined(USE_SWIFT_HTML_TOKENIZER) && USE_SWIFT_HTML_TOKENIZER
+#include "HTMLEntityParser.h"
+#include "HTMLTokenizer.h"
+#include "SegmentedString.h"
 #endif
 // Windows port: the generated header names `CSSValue` (complete, for its SWIFT_RETURNS_RETAINED thunks) and
 // `CSSPropertyParserSwiftCursor`. On the Mac every includer gets them from an earlier file in its unified bundle;
