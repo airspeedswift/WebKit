@@ -59,6 +59,13 @@ typedef struct tagXFORM XFORM;
 #endif
 #endif
 
+#if !defined(USE_SWIFT_TRANSFORMATION_MATRIX)
+#define USE_SWIFT_TRANSFORMATION_MATRIX 0
+#endif
+#if USE_SWIFT_TRANSFORMATION_MATRIX
+#include <cmath>
+#endif
+
 namespace WTF {
 class TextStream;
 }
@@ -492,5 +499,10 @@ private:
 };
 
 WEBCORE_EXPORT WTF::TextStream& operator<<(WTF::TextStream&, const TransformationMatrix&);
+
+#if USE_SWIFT_TRANSFORMATION_MATRIX
+double transformationMatrixDeterminant4x4(const TransformationMatrix::Matrix4&);
+inline double transformationMatrixHypot(double x, double y, double z) { return std::hypot(x, y, z); }
+#endif
 
 } // namespace WebCore

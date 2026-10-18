@@ -41,4 +41,11 @@
 // If Swift function parameters or return types depend on C++ types, the
 // relevant headers must be included here.
 
+#if !defined(USE_SWIFT_TRANSFORMATION_MATRIX)
+#define USE_SWIFT_TRANSFORMATION_MATRIX 0
+#endif
+#if USE_SWIFT_TRANSFORMATION_MATRIX
+#include "TransformationMatrix.h"
+#endif
+
 #include "WebCoreSwift-Generated.h"

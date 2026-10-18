@@ -929,6 +929,7 @@
 				WebCore/TextMeasurementCache.cpp,
 				WebCore/TimeRanges.cpp,
 				WebCore/TransformationMatrix.cpp,
+				WebCore/TransformationMatrixBench.cpp,
 				WebCore/U2fCommandConstructorTest.cpp,
 				WebCore/URLParserTextEncoding.cpp,
 				WebCore/UserAgentStringParser.cpp,

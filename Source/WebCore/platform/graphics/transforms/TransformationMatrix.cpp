@@ -44,8 +44,14 @@
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/TextStream.h>
 
+#if !USE_SWIFT_TRANSFORMATION_MATRIX
 #if CPU(X86_64)
 #include <emmintrin.h>
+#endif
+#endif
+
+#if USE_SWIFT_TRANSFORMATION_MATRIX
+#include "WebCore-Swift.h"
 #endif
 
 namespace WebCore {
@@ -75,7 +81,9 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(TransformationMatrix);
 
 using Vector4 = std::array<double, 4>;
+#if !USE_SWIFT_TRANSFORMATION_MATRIX
 using Vector3 = std::array<double, 3>;
+#endif
 
 const TransformationMatrix TransformationMatrix::identity { };
 
@@ -147,6 +155,7 @@ static double LEGACY_NODELETE determinant4x4(const TransformationMatrix::Matrix4
          - d1 * determinant3x3(a2, a3, a4, b2, b3, b4, c2, c3, c4);
 }
 
+#if !USE_SWIFT_TRANSFORMATION_MATRIX
 #if !CPU(ARM64) || !CPU(ADDRESS64)
 // adjoint( original_matrix, inverse_matrix )
 //
@@ -210,6 +219,7 @@ static double LEGACY_NODELETE determinant4x4(const TransformationMatrix::Matrix4
     result[3][3]  =   determinant3x3(a1, a2, a3, b1, b2, b3, c1, c2, c3);
 }
 #endif
+#endif
 
 // Returns false if the matrix is not invertible
 static bool inverse(const TransformationMatrix::Matrix4& matrix, TransformationMatrix::Matrix4& result)
@@ -224,6 +234,12 @@ static bool inverse(const TransformationMatrix::Matrix4& matrix, TransformationM
     // Scale the adjoint matrix to get the inverse
     double inverseDeterminant = 1 / determinant;
 
+#if USE_SWIFT_TRANSFORMATION_MATRIX
+    // Out of line and cold, so that TransformationMatrix::inverse() sets up a stack frame only on the path that calls it.
+    [](const TransformationMatrix::Matrix4& matrix, double inverseDeterminant, TransformationMatrix::Matrix4& result) NEVER_INLINE COLD {
+        transformationMatrixScaledAdjoint(matrix, inverseDeterminant, result);
+    }(matrix, inverseDeterminant, result);
+#else
 #if CPU(ARM64) && CPU(ADDRESS64)
     const double* mat = &(matrix[0][0]);
     double* pr = &(result[0][0]);
@@ -346,6 +362,7 @@ static bool inverse(const TransformationMatrix::Matrix4& matrix, TransformationM
             result[i][j] = result[i][j] * inverseDeterminant;
 
 #endif
+#endif
     return true;
 }
 
@@ -375,6 +392,11 @@ static void LEGACY_NODELETE v4MulPointByMatrix(const Vector4& p, const Transform
                 (p[2] * m[2][3]) + (p[3] * m[3][3]);
 }
 
+#if USE_SWIFT_TRANSFORMATION_MATRIX
+double transformationMatrixDeterminant4x4(const TransformationMatrix::Matrix4& m) { return determinant4x4(m); }
+#endif
+
+#if !USE_SWIFT_TRANSFORMATION_MATRIX
 static double LEGACY_NODELETE v3Length(const Vector3& a)
 {
     return std::hypot(a[0], a[1], a[2]);
@@ -412,6 +434,7 @@ static void LEGACY_NODELETE v3Cross(const Vector3& a, const Vector3& b, Vector3&
     result[1] = (a[2] * b[0]) - (a[0] * b[2]);
     result[2] = (a[0] * b[1]) - (a[1] * b[0]);
 }
+#endif
 
 static bool decompose2(const TransformationMatrix::Matrix4& matrix, TransformationMatrix::Decomposed2Type& result)
 {
@@ -475,6 +498,7 @@ static bool decompose2(const TransformationMatrix::Matrix4& matrix, Transformati
     return true;
 }
 
+#if !USE_SWIFT_TRANSFORMATION_MATRIX
 static bool decompose4(const TransformationMatrix::Matrix4& mat, TransformationMatrix::Decomposed4Type& result)
 {
     TransformationMatrix::Matrix4 localMatrix;
@@ -677,6 +701,7 @@ static bool decompose4(const TransformationMatrix::Matrix4& mat, TransformationM
 
     return true;
 }
+#endif
 
 // End of Supporting Math Functions
 
@@ -1337,6 +1362,9 @@ TransformationMatrix& TransformationMatrix::unzoom(double zoomFactor)
 // this = mat * this.
 TransformationMatrix& TransformationMatrix::multiply(const TransformationMatrix& mat)
 {
+#if USE_SWIFT_TRANSFORMATION_MATRIX
+    transformationMatrixMultiply(*this, mat);
+#else
 #if CPU(ARM64) && CPU(ADDRESS64)
     double* leftMatrix = &(m_matrix[0][0]);
     const double* rightMatrix = &(mat.m_matrix[0][0]);
@@ -1707,6 +1735,7 @@ TransformationMatrix& TransformationMatrix::multiply(const TransformationMatrix&
 
     memcpySpan(std::span { m_matrix }, std::span { tmp });
 #endif
+#endif
     return *this;
 }
 
@@ -2018,6 +2047,9 @@ bool TransformationMatrix::decompose2(Decomposed2Type& decomp) const
 
 bool TransformationMatrix::decompose4(Decomposed4Type& decomp) const
 {
+#if USE_SWIFT_TRANSFORMATION_MATRIX
+    return transformationMatrixDecompose4(*this, decomp);
+#else
     if (isIdentity()) {
         zeroBytes(decomp);
         decomp.perspectiveW = 1;
@@ -2029,6 +2061,7 @@ bool TransformationMatrix::decompose4(Decomposed4Type& decomp) const
     }
 
     return WebCore::decompose4(m_matrix, decomp);
+#endif
 }
 
 void TransformationMatrix::recompose2(const Decomposed2Type& decomp)
