@@ -54,6 +54,15 @@
 #include "WebCore-Swift.h"
 #endif
 
+// The C++ multiply() was inlined into the functions below that multiply by a matrix with constant entries, and the
+// constants folded. The Swift multiply is out of line, so on Windows x64, where those calls are costliest, they use
+// Swift entry points for each shape, which fold the same way and give the same results.
+#if USE_SWIFT_TRANSFORMATION_MATRIX && OS(WINDOWS) && CPU(X86_64)
+#define USE_SWIFT_TRANSFORMATION_MATRIX_SHAPES 1
+#else
+#define USE_SWIFT_TRANSFORMATION_MATRIX_SHAPES 0
+#endif
+
 namespace WebCore {
 
 //
@@ -1107,6 +1116,22 @@ TransformationMatrix& TransformationMatrix::rotate3d(double x, double y, double 
     double sinTheta = snapping == RotationSnapping::Snap90degRotations ? roundEpsilonToZero(sin(angle)) : sin(angle);
     double cosTheta = snapping == RotationSnapping::Snap90degRotations ? roundEpsilonToZero(cos(angle)) : cos(angle);
 
+#if USE_SWIFT_TRANSFORMATION_MATRIX_SHAPES
+    if (x == 1.0)
+        transformationMatrixRotateX(*this, sinTheta, cosTheta);
+    else if (y == 1.0)
+        transformationMatrixRotateY(*this, sinTheta, cosTheta);
+    else if (z == 1.0)
+        transformationMatrixRotateZ(*this, sinTheta, cosTheta);
+    else {
+        double oneMinusCosTheta = 1 - cosTheta;
+        transformationMatrixMultiplyLinear(*this,
+            cosTheta + x * x * oneMinusCosTheta, y * x * oneMinusCosTheta + z * sinTheta, z * x * oneMinusCosTheta - y * sinTheta,
+            x * y * oneMinusCosTheta - z * sinTheta, cosTheta + y * y * oneMinusCosTheta, z * y * oneMinusCosTheta + x * sinTheta,
+            x * z * oneMinusCosTheta + y * sinTheta, y * z * oneMinusCosTheta - x * sinTheta, cosTheta + z * z * oneMinusCosTheta);
+    }
+    return *this;
+#else
     TransformationMatrix mat;
 
     // Optimize cases where the axis is along a major axis
@@ -1175,6 +1200,7 @@ TransformationMatrix& TransformationMatrix::rotate3d(double x, double y, double 
     }
     multiply(mat);
     return *this;
+#endif
 }
 
 TransformationMatrix& TransformationMatrix::rotate(double angle, RotationSnapping snapping)
@@ -1189,7 +1215,11 @@ TransformationMatrix& TransformationMatrix::rotateRadians(double angle, Rotation
 {
     double sinZ = snapping == RotationSnapping::Snap90degRotations ? roundEpsilonToZero(sin(angle)) : sin(angle);
     double cosZ = snapping == RotationSnapping::Snap90degRotations ? roundEpsilonToZero(cos(angle)) : cos(angle);
+#if USE_SWIFT_TRANSFORMATION_MATRIX_SHAPES
+    transformationMatrixRotateZ(*this, sinZ, cosZ);
+#else
     multiply({ cosZ, sinZ, -sinZ, cosZ, 0, 0 });
+#endif
     return *this;
 }
 
@@ -1223,6 +1253,14 @@ TransformationMatrix& TransformationMatrix::rotate3d(double rx, double ry, doubl
     sinTheta = snapping == RotationSnapping::Snap90degRotations ? roundEpsilonToZero(sin(ry)) : sin(ry);
     cosTheta = snapping == RotationSnapping::Snap90degRotations ? roundEpsilonToZero(cos(ry)) : cos(ry);
 
+#if USE_SWIFT_TRANSFORMATION_MATRIX_SHAPES
+    transformationMatrixRotateY(rmat, sinTheta, cosTheta);
+
+    sinTheta = snapping == RotationSnapping::Snap90degRotations ? roundEpsilonToZero(sin(rx)) : sin(rx);
+    cosTheta = snapping == RotationSnapping::Snap90degRotations ? roundEpsilonToZero(cos(rx)) : cos(rx);
+
+    transformationMatrixRotateX(rmat, sinTheta, cosTheta);
+#else
     mat.m_matrix[0][0] = cosTheta;
     mat.m_matrix[0][1] = 0.0;
     mat.m_matrix[0][2] = -sinTheta;
@@ -1255,6 +1293,7 @@ TransformationMatrix& TransformationMatrix::rotate3d(double rx, double ry, doubl
     mat.m_matrix[3][3] = 1.0;
 
     rmat.multiply(mat);
+#endif
 
     multiply(rmat);
     return *this;
@@ -1316,21 +1355,31 @@ TransformationMatrix& TransformationMatrix::skew(double sx, double sy)
     sx = deg2rad(sx);
     sy = deg2rad(sy);
 
+#if USE_SWIFT_TRANSFORMATION_MATRIX_SHAPES
+    double tanY = tan(sy);
+    double tanX = tan(sx);
+    transformationMatrixSkew(*this, tanY, tanX);
+#else
     TransformationMatrix mat;
     mat.m_matrix[0][1] = tan(sy); // note that the y shear goes in the first row
     mat.m_matrix[1][0] = tan(sx); // and the x shear in the second row
 
     multiply(mat);
+#endif
     return *this;
 }
 
 TransformationMatrix& TransformationMatrix::applyPerspective(double p)
 {
+#if USE_SWIFT_TRANSFORMATION_MATRIX_SHAPES
+    transformationMatrixApplyPerspective(*this, p != 0 ? -1 / p : 0.0);
+#else
     TransformationMatrix mat;
     if (p != 0)
         mat.m_matrix[2][3] = -1/p;
 
     multiply(mat);
+#endif
     return *this;
 }
 

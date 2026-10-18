@@ -110,6 +110,68 @@ func transformationMatrixMultiply(_ matrix: inout WebCore.TransformationMatrix, 
     )
 }
 
+#if !arch(arm64)
+// matrix = other * matrix for the shapes of `other` that TransformationMatrix.cpp builds with constant entries. The C++
+// multiply() is inlined into those callers and the constants folded: the products by 1 dropped and each row's product
+// by 0 computed once. multiplyRows() is inlined here and folds the same way. Both folds are exact, so the results are
+// those of transformationMatrixMultiply(). Windows x64 only, from TransformationMatrix.cpp.
+@inline(always)
+private func multiply(
+    _ matrix: inout WebCore.TransformationMatrix,
+    _ o11: Double, _ o12: Double, _ o13: Double, _ o14: Double,
+    _ o21: Double, _ o22: Double, _ o23: Double, _ o24: Double,
+    _ o31: Double, _ o32: Double, _ o33: Double, _ o34: Double,
+    _ o41: Double, _ o42: Double, _ o43: Double, _ o44: Double
+) {
+    multiplyRows(
+        SIMD2(o11, o12), SIMD2(o13, o14), SIMD2(o21, o22), SIMD2(o23, o24),
+        SIMD2(o31, o32), SIMD2(o33, o34), SIMD2(o41, o42), SIMD2(o43, o44),
+        into: &matrix
+    )
+}
+
+// The rotation rotate3d() builds about the x axis.
+@_expose(Cxx)
+func transformationMatrixRotateX(_ matrix: inout WebCore.TransformationMatrix, _ sinTheta: Double, _ cosTheta: Double) {
+    multiply(&matrix, 1, 0, 0, 0, 0, cosTheta, sinTheta, 0, 0, -sinTheta, cosTheta, 0, 0, 0, 0, 1)
+}
+
+// About the y axis.
+@_expose(Cxx)
+func transformationMatrixRotateY(_ matrix: inout WebCore.TransformationMatrix, _ sinTheta: Double, _ cosTheta: Double) {
+    multiply(&matrix, cosTheta, 0, -sinTheta, 0, 0, 1, 0, 0, sinTheta, 0, cosTheta, 0, 0, 0, 0, 1)
+}
+
+// About the z axis, as rotateRadians() does too.
+@_expose(Cxx)
+func transformationMatrixRotateZ(_ matrix: inout WebCore.TransformationMatrix, _ sinTheta: Double, _ cosTheta: Double) {
+    multiply(&matrix, cosTheta, sinTheta, 0, 0, -sinTheta, cosTheta, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+}
+
+// A rotation about an arbitrary axis: a 3x3 linear part, with no translation or perspective.
+@_expose(Cxx)
+func transformationMatrixMultiplyLinear(
+    _ matrix: inout WebCore.TransformationMatrix,
+    _ m11: Double, _ m12: Double, _ m13: Double,
+    _ m21: Double, _ m22: Double, _ m23: Double,
+    _ m31: Double, _ m32: Double, _ m33: Double
+) {
+    multiply(&matrix, m11, m12, m13, 0, m21, m22, m23, 0, m31, m32, m33, 0, 0, 0, 0, 1)
+}
+
+// skew().
+@_expose(Cxx)
+func transformationMatrixSkew(_ matrix: inout WebCore.TransformationMatrix, _ m12: Double, _ m21: Double) {
+    multiply(&matrix, 1, m12, 0, 0, m21, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+}
+
+// applyPerspective().
+@_expose(Cxx)
+func transformationMatrixApplyPerspective(_ matrix: inout WebCore.TransformationMatrix, _ m34: Double) {
+    multiply(&matrix, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, m34, 0, 0, 0, 1)
+}
+#endif
+
 // matrix = other * matrix, with the rows of `other` passed as values. Out of line on ARM64, where the eight vectors
 // arrive in v0-v7. Inlined elsewhere: the Windows x64 convention passes each 16-byte vector by reference, so a call
 // costs eight stores to the stack, eight pointers and eight loads per product.
