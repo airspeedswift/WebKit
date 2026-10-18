@@ -110,8 +110,14 @@ func transformationMatrixMultiply(_ matrix: inout WebCore.TransformationMatrix, 
     )
 }
 
-// matrix = other * matrix, with the rows of `other` passed as values.
+// matrix = other * matrix, with the rows of `other` passed as values. Out of line on ARM64, where the eight vectors
+// arrive in v0-v7. Inlined elsewhere: the Windows x64 convention passes each 16-byte vector by reference, so a call
+// costs eight stores to the stack, eight pointers and eight loads per product.
+#if arch(arm64)
 @inline(never)
+#else
+@inline(always)
+#endif
 private func multiplyRows(
     _ other1Low: SIMD2<Double>,
     _ other1High: SIMD2<Double>,
