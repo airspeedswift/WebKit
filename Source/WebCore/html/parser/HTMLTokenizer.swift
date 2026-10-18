@@ -1070,12 +1070,12 @@ extension WebCore.HTMLTokenizer {
         additionalAllowedCharacter: UInt16
     ) -> Bool {
         var additionalAllowedCharacter = additionalAllowedCharacter
-        // m_state indexes allCases, which lists the states in order. No case handles an m_state outside State.
-        let states = TokenizerState.allCases
-        guard m_state.rawValue < states.count else {
+        // TokenizerState lists the states in State's order, so m_state is a TokenizerState raw value. No case handles
+        // an m_state outside State. Not an index into allCases: where Swift cannot emit that array as a constant
+        // (Windows), reading it initializes a static object through the runtime on every call.
+        guard var state = TokenizerState(rawValue: UInt32(truncatingIfNeeded: m_state.rawValue)) else {
             return false
         }
-        var state = states[Int(m_state.rawValue)]
         defer {
             // State's raw type is the C++ enum's underlying type, unsigned on Apple platforms and int under MSVC.
             m_state = State(rawValue: State.RawValue(state.rawValue))
