@@ -80,6 +80,12 @@ EXCLUDED_SOURCE_FILE_NAMES_NO = JavaScriptCore.swift;
 
 SWIFT_INSTALL_OBJC_HEADER = NO;
 
+// Whole-module: in primary-file mode a module-level `let` holding a constant table stays a lazily initialised
+// global, with a guard on every read.
+SWIFT_COMPILATION_MODE = wholemodule;
+// As WebCore's: a compile cache entry keyed on these flags has been reused across builds whose imported C++ differed.
+SWIFT_ENABLE_COMPILE_CACHE = NO;
+
 BUILD_LIBRARY_FOR_DISTRIBUTION = $(JSC_SUPPORTS_SWIFT);
 
 SWIFT_LIBRARY_LEVEL = $(SWIFT_LIBRARY_LEVEL_JSC_SUPPORTS_SWIFT_$(JSC_SUPPORTS_SWIFT));
@@ -90,7 +96,11 @@ SWIFT_OBJC_INTEROP_MODE = $(SWIFT_OBJC_INTEROP_MODE_$(JSC_SUPPORTS_SWIFT));
 SWIFT_OBJC_INTEROP_MODE_YES = objcxx;
 
 OTHER_SWIFT_FLAGS = $(inherited) $(WK_OTHER_SWIFT_FLAGS_WK_HAS_VALID_JSC_PRIVATE_MODULE_$(JSC_SUPPORTS_SWIFT)) $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
-WK_OTHER_SWIFT_FLAGS_WK_HAS_VALID_JSC_PRIVATE_MODULE_YES = -Xcc -std=c++2b;
+// As WebCore's Swift step: the imported C++ is compiled with the C++'s own exception settings and optimisation,
+// so that C++ inline functions inline into the Swift; the generated header carries `internal` `@_expose(Cxx)`
+// declarations, since SWIFT_LIBRARY_LEVEL is `api` and boundary types therefore come in through an `internal import`;
+// and SafeInteropWrappers gives `__counted_by` + `noescape` parameters their `Span` overloads.
+WK_OTHER_SWIFT_FLAGS_WK_HAS_VALID_JSC_PRIVATE_MODULE_YES = -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -O2 -Xllvm -enable-dfa-jump-thread -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers;
 
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;

@@ -35,7 +35,29 @@ WK_SWIFT_PGO_GEN_FLAGS_YES = -Xfrontend -ir-profile-generate;
 GCC_PREFIX_HEADER = JavaScriptCorePrefix.h;
 GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES);
 GCC_SYMBOLS_PRIVATE_EXTERN = YES;
-OTHER_CFLAGS = $(inherited) -fno-slp-vectorize --system-header-prefix=unicode/ -D__STDC_WANT_LIB_EXT1__=1 $(WK_CLANG_PGO_GEN_FLAGS);
+// JSC_SUPPORTS_SWIFT for the C++ compiles of every target that includes this file: the framework, which
+// compiles JavaScriptCore's Swift, and libJavaScriptCore, which compiles most of its C++. A header that chooses
+// between C++ and Swift under `#if JSC_SUPPORTS_SWIFT` is evaluated in each including translation unit, so both
+// targets have to agree. The condition is JavaScriptCore.xcconfig's, repeated because only the framework target
+// includes that file. Keep the two in step.
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX = YES;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=macosx26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=macosx26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=iphone*26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=iphone*26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=appletv*26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=appletv*26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=watch*26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=watch*26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=xr*26.2*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=xr*26.3*] = ;
+WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX[sdk=bridgeos*] = ;
+WK_JSC_SUPPORTS_SWIFT_FOR_CXX = $(WK_JSC_SUPPORTS_SWIFT_FOR_CXX_$(WK_HAS_VALID_JSC_PRIVATE_MODULE_FOR_CXX)_$(CONFIGURATION));
+WK_JSC_SUPPORTS_SWIFT_FOR_CXX_YES_Debug = YES;
+WK_JSC_SUPPORTS_SWIFT_FOR_CXX_YES_Release = YES;
+OTHER_CFLAGS_JSC_SUPPORTS_SWIFT_YES = -DJSC_SUPPORTS_SWIFT=1;
+
+OTHER_CFLAGS = $(inherited) -fno-slp-vectorize --system-header-prefix=unicode/ -D__STDC_WANT_LIB_EXT1__=1 $(WK_CLANG_PGO_GEN_FLAGS) $(OTHER_CFLAGS_JSC_SUPPORTS_SWIFT_$(WK_JSC_SUPPORTS_SWIFT_FOR_CXX));
 HEADER_SEARCH_PATHS = "${BUILT_PRODUCTS_DIR}/DerivedSources/JavaScriptCore" $(HEADER_SEARCH_PATHS);
 PRODUCT_NAME = JavaScriptCore;
 
