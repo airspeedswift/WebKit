@@ -260,6 +260,44 @@ func transformationMatrixScaledAdjoint(
     _ inverseDeterminant: Double,
     _ result: inout WebCore.TransformationMatrix.Matrix4
 ) {
+    scaledAdjoint(matrix, inverseDeterminant, &result)
+}
+
+// TransformationMatrix.cpp's determinant4x4(), in the same order of operations.
+@inline(always)
+private func determinant4x4(_ m: WebCore.TransformationMatrix.Matrix4) -> Double {
+    let a1 = m[0][0], b1 = m[0][1], c1 = m[0][2], d1 = m[0][3]
+    let a2 = m[1][0], b2 = m[1][1], c2 = m[1][2], d2 = m[1][3]
+    let a3 = m[2][0], b3 = m[2][1], c3 = m[2][2], d3 = m[2][3]
+    let a4 = m[3][0], b4 = m[3][1], c4 = m[3][2], d4 = m[3][3]
+    return a1 * determinant3x3(b2, b3, b4, c2, c3, c4, d2, d3, d4)
+        - b1 * determinant3x3(a2, a3, a4, c2, c3, c4, d2, d3, d4)
+        + c1 * determinant3x3(a2, a3, a4, b2, b3, b4, d2, d3, d4)
+        - d1 * determinant3x3(a2, a3, a4, b2, b3, b4, c2, c3, c4)
+}
+
+// TransformationMatrix.cpp's static inverse(): false if the matrix is not invertible, else result = its inverse. One
+// function on Windows x64, where the determinant in a C++ frame and the adjoint in a Swift one would each save and
+// restore xmm6-xmm15.
+@_expose(Cxx)
+func transformationMatrixInverse(
+    _ matrix: WebCore.TransformationMatrix.Matrix4,
+    _ result: inout WebCore.TransformationMatrix.Matrix4
+) -> Bool {
+    let determinant = determinant4x4(matrix)
+    guard determinant.isNormal else {
+        return false
+    }
+    scaledAdjoint(matrix, 1 / determinant, &result)
+    return true
+}
+
+@inline(always)
+private func scaledAdjoint(
+    _ matrix: WebCore.TransformationMatrix.Matrix4,
+    _ inverseDeterminant: Double,
+    _ result: inout WebCore.TransformationMatrix.Matrix4
+) {
     let a1 = matrix[0][0]
     let b1 = matrix[0][1]
     let c1 = matrix[0][2]
