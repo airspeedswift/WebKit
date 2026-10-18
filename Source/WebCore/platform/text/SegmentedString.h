@@ -334,7 +334,7 @@ inline std::span<const Latin1Character> SegmentedString::currentSubstringSpan8()
 // The caller must ensure at least one character remains after advancing
 // (i.e. count < currentSubstringSpan8().size()), as the function sets
 // the next remaining character as m_currentCharacter.
-inline void SegmentedString::advancePastMultiple8(unsigned count)
+ALWAYS_INLINE void SegmentedString::advancePastMultiple8(unsigned count)
 {
     ASSERT(m_fastPathFlags & Use8BitAdvance);
     ASSERT(count < m_currentSubstring.s.currentCharacter8.size());
@@ -369,7 +369,7 @@ inline std::span<const char16_t> SegmentedString::currentSubstringSpan16() const
 // The caller must ensure at least one character remains after advancing
 // (i.e. count < currentSubstringSpan16().size()), as the function sets
 // the next remaining character as m_currentCharacter.
-inline void SegmentedString::advancePastMultiple16(unsigned count)
+ALWAYS_INLINE void SegmentedString::advancePastMultiple16(unsigned count)
 {
     ASSERT(!m_currentSubstring.is8Bit);
     ASSERT(count < m_currentSubstring.s.currentCharacter16.size());
