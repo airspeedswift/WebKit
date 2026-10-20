@@ -1,0 +1,5 @@
+// The C++ declarations that the Swift compiled into libJavaScriptCore imports (libJavaScriptCore.xcconfig).
+module JSCSwiftBoundary {
+    requires cplusplus
+    export *
+}

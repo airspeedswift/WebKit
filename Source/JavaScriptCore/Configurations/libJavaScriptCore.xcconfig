@@ -73,3 +73,17 @@ STRIP_INSTALLED_PRODUCT = NO;
 
 EXCLUDED_SOURCE_FILE_NAMES = $(inherited);
 EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] = $(inherited) framework.sb;
+
+// Swift compiled into libJavaScriptCore, whose C++ calls it through the generated header JSCSwift-Swift.h. It is
+// a module of its own, apart from the framework's JavaScriptCore module, and it reaches C++ through
+// JSCSwiftBoundary.modulemap, which names headers in the source tree, because libJavaScriptCore builds before the
+// framework's headers are copied. The other settings are the framework's Swift settings in JavaScriptCore.xcconfig.
+SWIFT_MODULE_NAME = JSCSwift;
+SWIFT_INSTALL_OBJC_HEADER = NO;
+SWIFT_COMPILATION_MODE = wholemodule;
+SWIFT_ENABLE_COMPILE_CACHE = NO;
+_SWIFT_EXPLICIT_MODULES_ALLOW_CXX_INTEROP = YES;
+SWIFT_OBJC_INTEROP_MODE = objcxx;
+SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+SWIFT_STRICT_CONCURRENCY = complete;
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/JSCSwiftBoundary.modulemap -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -O2 -Xllvm -enable-dfa-jump-thread -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
