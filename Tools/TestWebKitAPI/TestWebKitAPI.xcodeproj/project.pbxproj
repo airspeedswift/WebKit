@@ -833,6 +833,7 @@
 				WebCore/CryptoDigest.cpp,
 				WebCore/CSSParser.cpp,
 				WebCore/CSSParserFastPaths.cpp,
+				WebCore/CSSTokenizerBench.cpp,
 				WebCore/CSSTokenizerTests.cpp,
 				WebCore/CSSValueAggregates.cpp,
 				WebCore/CtapPinTest.cpp,

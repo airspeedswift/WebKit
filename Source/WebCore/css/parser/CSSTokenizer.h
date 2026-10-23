@@ -59,15 +59,22 @@ public:
     Vector<String>&& escapedStringsForAdoption() { return WTF::move(m_stringPool); }
 
 private:
+#if USE_SWIFT_CSS_TOKENIZER
+    friend struct CSSTokenizerSinkState;
+#endif
+
     CSSTokenizer(StringView string LIFETIME_BOUND, CSSParserObserverWrapper*, bool* constructionSuccess);
 
+#if !USE_SWIFT_CSS_TOKENIZER
     CSSParserToken nextToken();
 
     char16_t LEGACY_NODELETE consume();
     void LEGACY_NODELETE reconsume(char16_t);
+#endif
 
     StringView preprocessString(StringView);
 
+#if !USE_SWIFT_CSS_TOKENIZER
     CSSParserToken consumeNumericToken();
     CSSParserToken consumeIdentLikeToken();
     CSSParserToken consumeNumber();
@@ -120,12 +127,15 @@ private:
     CSSParserToken nameStart(char16_t);
     CSSParserToken stringStart(char16_t);
     CSSParserToken endOfFile(char16_t);
+#endif
 
     StringView registerString(String&&);
     StringView registerString(const String&);
 
+#if !USE_SWIFT_CSS_TOKENIZER
     using CodePoint = CSSParserToken (CSSTokenizer::*)(char16_t);
     static const std::array<CodePoint, 128> codePoints;
+#endif
 
     Vector<CSSParserTokenType, 8> m_blockStack;
     Vector<CSSParserToken, 32> m_tokens;

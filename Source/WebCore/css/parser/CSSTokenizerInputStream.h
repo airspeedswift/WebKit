@@ -31,6 +31,10 @@
 
 #include <wtf/text/StringView.h>
 
+#if !defined(USE_SWIFT_CSS_TOKENIZER)
+#define USE_SWIFT_CSS_TOKENIZER 0
+#endif
+
 namespace WebCore {
 
 constexpr Latin1Character kEndOfFileMarker = 0;
@@ -42,6 +46,7 @@ class CSSTokenizerInputStream {
 public:
     explicit CSSTokenizerInputStream(StringView string LIFETIME_BOUND);
 
+#if !USE_SWIFT_CSS_TOKENIZER
     // Gets the char in the stream. Will return (NUL) kEndOfFileMarker when at the
     // end of the stream.
     char16_t nextInputChar() const
@@ -86,6 +91,7 @@ public:
 
     void advanceUntilNonWhitespace();
     void advanceUntilNewlineOrNonWhitespace();
+#endif
 
     unsigned length() const { return m_stringLength; }
     unsigned offset() const { return std::min(m_offset, m_stringLength); }

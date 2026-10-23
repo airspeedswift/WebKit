@@ -39,8 +39,193 @@
 #include <wtf/text/StringBuilder.h>
 #include <wtf/unicode/CharacterNames.h>
 
+#if USE_SWIFT_CSS_TOKENIZER
+#include "WebCore-Swift.h"
+#endif
+
 namespace WebCore {
 DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSTokenizer);
+
+#if USE_SWIFT_CSS_TOKENIZER
+static_assert(std::is_empty_v<CSSTokenizerSink>);
+static_assert(!std::is_polymorphic_v<CSSTokenizerSink>);
+static_assert(!std::is_default_constructible_v<CSSTokenizerSink>);
+static_assert(!std::is_copy_constructible_v<CSSTokenizerSink>);
+static_assert(!std::is_copy_assignable_v<CSSTokenizerSink>);
+static_assert(!std::is_move_assignable_v<CSSTokenizerSink>);
+static_assert(std::is_move_constructible_v<CSSTokenizerSink>);
+static_assert(!std::is_trivially_destructible_v<CSSTokenizerSink>);
+
+// The token types each member of CSSTokenizerSink accepts, as bits of a mask.
+static constexpr uint64_t simpleTokenTypes = 1ull << BadUrlToken | 1ull << IncludeMatchToken | 1ull << DashMatchToken
+    | 1ull << PrefixMatchToken | 1ull << SuffixMatchToken | 1ull << SubstringMatchToken | 1ull << ColumnToken
+    | 1ull << NewlineToken | 1ull << CDOToken | 1ull << CDCToken | 1ull << ColonToken | 1ull << SemicolonToken
+    | 1ull << CommaToken | 1ull << LeftParenthesisToken | 1ull << RightParenthesisToken | 1ull << LeftBracketToken
+    | 1ull << RightBracketToken | 1ull << LeftBraceToken | 1ull << RightBraceToken | 1ull << BadStringToken;
+static constexpr uint64_t valueTokenTypes = 1ull << IdentToken | 1ull << FunctionToken | 1ull << AtKeywordToken
+    | 1ull << UrlToken | 1ull << StringToken;
+static_assert(numberOfCSSParserTokenTypes <= 64);
+
+// The token types each block type goes with: openers and functions start a block, closers may end one.
+static constexpr uint64_t blockStartTokenTypes = 1ull << LeftParenthesisToken | 1ull << LeftBracketToken | 1ull << LeftBraceToken
+    | 1ull << FunctionToken;
+static constexpr uint64_t blockEndTokenTypes = 1ull << RightParenthesisToken | 1ull << RightBracketToken | 1ull << RightBraceToken;
+static constexpr std::array<uint64_t, 3> tokenTypesForBlockType {
+    (simpleTokenTypes | valueTokenTypes) & ~blockStartTokenTypes,
+    blockStartTokenTypes,
+    blockEndTokenTypes,
+};
+static_assert(!CSSParserToken::NotBlock && CSSParserToken::BlockStart == 1 && CSSParserToken::BlockEnd == 2);
+
+// CSSTokenizerSwift.swift keeps its own copies of these.
+static_assert(replacementCharacter == 0xFFFD);
+static_assert(UCHAR_MAX_VALUE == 0x10FFFF);
+static_assert(!kEndOfFileMarker);
+
+// The state behind the CSSTokenizerSink that the constructor passes to the Swift scanner.
+struct CSSTokenizerSinkState final : CSSTokenizerSink {
+    WTF_FORBID_HEAP_ALLOCATION;
+public:
+    CSSTokenizerSinkState(CSSTokenizer& tokenizer, CSSParserObserverWrapper* wrapper)
+        : tokenizer(tokenizer)
+        , wrapper(wrapper)
+    {
+    }
+
+    static CSSParserToken::BlockType checkedBlockType(uint8_t type, uint8_t blockType, uint64_t types)
+    {
+        RELEASE_ASSERT(type < 64 && blockType <= CSSParserToken::BlockEnd && ((types & tokenTypesForBlockType[blockType]) >> type & 1));
+        return static_cast<CSSParserToken::BlockType>(blockType);
+    }
+
+    unsigned inputLength() const { return tokenizer.m_input.length(); }
+
+    StringView range(uint32_t start, uint32_t length)
+    {
+        RELEASE_ASSERT(length <= inputLength() && start <= inputLength() - length);
+        return tokenizer.m_input.rangeAt(start, length);
+    }
+
+    void pool(std::span<const char16_t> characters)
+    {
+        RELEASE_ASSERT(characters.size() <= inputLength());
+        pooledValue = tokenizer.registerString(String { StringImpl::create8BitIfPossible(characters) });
+        hasPooledValue = true;
+    }
+
+    // A range of the input, or the value pool() left pending, which only one token can take.
+    StringView value(bool pooled, uint32_t start, uint32_t length)
+    {
+        if (!pooled)
+            return range(start, length);
+        RELEASE_ASSERT(hasPooledValue);
+        return pooledValue;
+    }
+
+    [[clang::always_inline]] CSSParserToken number(bool isInteger, uint8_t sign, uint32_t start, uint32_t length, double value)
+    {
+        RELEASE_ASSERT(sign <= MinusSign);
+        auto text = range(start, length);
+        bool isResultOK = !std::isnan(value);
+        if (!isResultOK)
+            value = text.is8Bit() ? charactersToDouble(text.span8(), &isResultOK) : charactersToDouble(text.span16(), &isResultOK);
+        return CSSParserToken(isResultOK ? value : 0.0, isInteger ? IntegerValueType : NumberValueType, static_cast<NumericSign>(sign), text);
+    }
+
+    bool append(CSSParserToken&& token)
+    {
+        hasPooledValue = false;
+        return tokenizer.m_tokens.tryAppend(WTF::move(token));
+    }
+
+    CSSTokenizer& tokenizer;
+    CSSParserObserverWrapper* const wrapper;
+    StringView pooledValue;
+    bool hasPooledValue { false };
+};
+
+// Every CSSTokenizerSink is a CSSTokenizerSinkState: only the constructor makes one, on its stack, and
+// Swift cannot copy or move it.
+[[clang::always_inline]] static CSSTokenizerSinkState& sinkState(CSSTokenizerSink& sink)
+{
+    return static_cast<CSSTokenizerSinkState&>(sink);
+}
+
+CSSTokenizerSink::CSSTokenizerSink(CSSTokenizerSink&&)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+CSSTokenizerSink::~CSSTokenizerSink() = default;
+
+[[clang::always_inline]] bool CSSTokenizerSink::hasObserver()
+{
+    return sinkState(*this).wrapper;
+}
+
+[[clang::always_inline]] bool CSSTokenizerSink::simpleToken(uint8_t type, uint8_t blockType)
+{
+    auto& state = sinkState(*this);
+    return state.append(CSSParserToken(static_cast<CSSParserTokenType>(type), state.checkedBlockType(type, blockType, simpleTokenTypes)));
+}
+
+[[clang::always_inline]] bool CSSTokenizerSink::whitespaceToken(uint32_t count)
+{
+    auto& state = sinkState(*this);
+    RELEASE_ASSERT(count && count <= state.inputLength());
+    return state.append(CSSParserToken(count));
+}
+
+[[clang::always_inline]] bool CSSTokenizerSink::delimiterToken(char16_t character)
+{
+    auto& state = sinkState(*this);
+    RELEASE_ASSERT(isASCII(character));
+    return state.append(CSSParserToken(DelimiterToken, character));
+}
+
+[[clang::always_inline]] bool CSSTokenizerSink::valueToken(uint8_t type, uint8_t blockType, bool pooled, uint32_t start, uint32_t length)
+{
+    auto& state = sinkState(*this);
+    return state.append(CSSParserToken(static_cast<CSSParserTokenType>(type), state.value(pooled, start, length), state.checkedBlockType(type, blockType, valueTokenTypes)));
+}
+
+[[clang::always_inline]] bool CSSTokenizerSink::hashToken(bool isIdentifier, bool pooled, uint32_t start, uint32_t length)
+{
+    auto& state = sinkState(*this);
+    return state.append(CSSParserToken(isIdentifier ? HashTokenId : HashTokenUnrestricted, state.value(pooled, start, length)));
+}
+
+[[clang::always_inline]] bool CSSTokenizerSink::numericToken(CSSTokenizerNumericKind kind, bool isInteger, uint8_t sign, uint32_t start, uint32_t length, uint32_t unitStart, uint32_t unitLength, double value)
+{
+    auto& state = sinkState(*this);
+    RELEASE_ASSERT(kind <= CSSTokenizerPooledDimension);
+    auto token = state.number(isInteger, sign, start, length, value);
+    if (kind == CSSTokenizerPercentage)
+        token.convertToPercentage();
+    else if (kind != CSSTokenizerNumber)
+        token.convertToDimensionWithUnit(state.value(kind == CSSTokenizerPooledDimension, unitStart, unitLength));
+    return state.append(WTF::move(token));
+}
+
+[[clang::always_inline]] void CSSTokenizerSink::poolValue([[clang::noescape]] std::span<const char16_t> value)
+{
+    sinkState(*this).pool(value);
+}
+
+[[clang::always_inline]] void CSSTokenizerSink::observeToken(uint32_t start)
+{
+    auto& state = sinkState(*this);
+    RELEASE_ASSERT(state.wrapper && start <= state.inputLength());
+    state.wrapper->addToken(start);
+}
+
+[[clang::always_inline]] void CSSTokenizerSink::observeComment(uint32_t start, uint32_t end)
+{
+    auto& state = sinkState(*this);
+    RELEASE_ASSERT(state.wrapper && start <= end && end <= state.inputLength());
+    state.wrapper->addComment(start, end, state.tokenizer.tokenCount());
+}
+#endif // USE_SWIFT_CSS_TOKENIZER
 
 // https://drafts.csswg.org/css-syntax/#input-preprocessing
 StringView CSSTokenizer::preprocessString(StringView string)
@@ -61,6 +246,9 @@ StringView CSSTokenizer::preprocessString(StringView string)
     auto preprocessSpan16 = [&](auto characters) -> StringView {
         // UTF-16 string need to replace any null characters and any unpaired surrogates.
 
+#if USE_SWIFT_CSS_TOKENIZER
+        bool hasUnpairedSurrogate = cssHasUnpairedSurrogate(characters);
+#else
         bool hasUnpairedSurrogate = [&] {
             for (WTF::CodePointIterator<char16_t> iterator(characters); !iterator.atEnd(); ++iterator) {
                 if (U_IS_SURROGATE(*iterator))
@@ -68,6 +256,7 @@ StringView CSSTokenizer::preprocessString(StringView string)
             }
             return false;
         }();
+#endif
 
         if (!hasUnpairedSurrogate) {
             // When there are no unpaired surrogates, we can treat this just like the Latin-1 case.
@@ -144,6 +333,16 @@ CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper* wrapper,
         return;
     }
 
+#if USE_SWIFT_CSS_TOKENIZER
+    CSSTokenizerSinkState sink { *this, wrapper };
+    auto input = m_input.rangeAt(0, m_input.length());
+    if (!(input.is8Bit() ? cssTokenize8(byteCast<uint8_t>(input.span8()), sink) : cssTokenize16(input.span16(), sink))) [[unlikely]] {
+        // When constructionSuccessPtr is null, our policy is to crash on failure.
+        RELEASE_ASSERT(constructionSuccessPtr);
+        *constructionSuccessPtr = false;
+        return;
+    }
+#else
     unsigned offset = 0;
     while (true) {
         CSSParserToken token = nextToken();
@@ -164,9 +363,12 @@ CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper* wrapper,
         }
         offset = m_input.offset();
     }
+#endif
 
     if (wrapper) {
+#if !USE_SWIFT_CSS_TOKENIZER
         wrapper->addToken(offset);
+#endif
         wrapper->finalizeConstruction(m_tokens.begin());
     }
 }
@@ -186,6 +388,7 @@ bool CSSTokenizer::isWhitespace(CSSParserTokenType type)
     return type == NonNewlineWhitespaceToken || type == NewlineToken;
 }
 
+#if !USE_SWIFT_CSS_TOKENIZER
 CSSParserToken CSSTokenizer::newline(char16_t)
 {
     return CSSParserToken(NewlineToken);
@@ -906,6 +1109,7 @@ bool CSSTokenizer::nextCharsAreIdentifier()
     reconsume(first);
     return areIdentifier;
 }
+#endif
 
 StringView CSSTokenizer::registerString(String&& string)
 {

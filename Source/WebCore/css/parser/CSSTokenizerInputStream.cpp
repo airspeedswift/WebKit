@@ -44,6 +44,7 @@ CSSTokenizerInputStream::CSSTokenizerInputStream(StringView string)
 {
 }
 
+#if !USE_SWIFT_CSS_TOKENIZER
 void CSSTokenizerInputStream::advanceUntilNonWhitespace()
 {
     // Using ASCII whitespace here rather than CSS space since we don't do preprocessing
@@ -88,5 +89,6 @@ double CSSTokenizerInputStream::getDouble(unsigned start, unsigned end) const
     // FIXME: It looks like callers ensure we have a valid number
     return isResultOK ? result : 0.0;
 }
+#endif
 
 } // namespace WebCore

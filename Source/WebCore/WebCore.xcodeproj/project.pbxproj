@@ -315,6 +315,7 @@
 		07D6A4F81BF2307D00174146 /* AudioTrackPrivateMediaStream.h in Headers */ = {isa = PBXBuildFile; fileRef = 07D6A4F61BF2307D00174146 /* AudioTrackPrivateMediaStream.h */; };
 		07E047C3305A9DB000DFCC4B /* SwiftStub.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07E047C2305A9DB000DFCC4B /* SwiftStub.swift */; };
 		5A1E00000000000000000002 /* SIMDHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1E00000000000000000001 /* SIMDHelpers.swift */; };
+		C55A00000000000000000004 /* CSSTokenizerSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = C55A00000000000000000003 /* CSSTokenizerSwift.swift */; };
 		5A1E00000000000000000004 /* SIMDTableLookup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1E00000000000000000003 /* SIMDTableLookup.swift */; };
 		5A1E00000000000000000006 /* SIMDSaturatingSubtract.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1E00000000000000000005 /* SIMDSaturatingSubtract.swift */; };
 		5A1E00000000000000000008 /* SIMDHighBitMask.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1E00000000000000000007 /* SIMDHighBitMask.swift */; };
@@ -1199,6 +1200,7 @@
 		317D3FF3215599F40034E3B9 /* PointerEvent.h in Headers */ = {isa = PBXBuildFile; fileRef = 317D3FF2215599E30034E3B9 /* PointerEvent.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		31815A311F9A6C8F00FCBF89 /* ImageBitmap.h in Headers */ = {isa = PBXBuildFile; fileRef = 31D26BBF1F86D189008FF255 /* ImageBitmap.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		318210D92C59B17E00C334B4 /* CSSTokenizer.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7C5E8D2BE2A8FB00AE645C /* CSSTokenizer.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		C55A00000000000000000002 /* CSSTokenizerSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = C55A00000000000000000001 /* CSSTokenizerSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		318891611AB7EEA100EA627B /* missingImage@3x.png in Resources */ = {isa = PBXBuildFile; fileRef = CDF419991AB0DA14004E64E1 /* missingImage@3x.png */; };
 		318EAD4D1FA91380008CEF86 /* ImageBitmapRenderingContextSettings.h in Headers */ = {isa = PBXBuildFile; fileRef = 318EAD4A1FA91157008CEF86 /* ImageBitmapRenderingContextSettings.h */; };
 		319848011A1D817B00A13318 /* CSSAnimationEvent.h in Headers */ = {isa = PBXBuildFile; fileRef = 319847FF1A1D816700A13318 /* CSSAnimationEvent.h */; };
@@ -20019,6 +20021,8 @@
 		BC7C5E8D2BE2A8FB00AE645C /* CSSTokenizer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSTokenizer.h; sourceTree = "<group>"; };
 		BC7C5E8E2BE2A8FB00AE645C /* CSSTokenizerInputStream.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CSSTokenizerInputStream.cpp; sourceTree = "<group>"; };
 		BC7C5E8F2BE2A8FB00AE645C /* CSSTokenizerInputStream.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSTokenizerInputStream.h; sourceTree = "<group>"; };
+		C55A00000000000000000003 /* CSSTokenizerSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CSSTokenizerSwift.swift; sourceTree = "<group>"; };
+		C55A00000000000000000001 /* CSSTokenizerSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSTokenizerSwiftTypes.h; sourceTree = "<group>"; };
 		BC7C5E902BE2A8FB00AE645C /* CSSSubstitutionParser.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CSSSubstitutionParser.cpp; sourceTree = "<group>"; };
 		BC7C5E912BE2A8FB00AE645C /* CSSSubstitutionParser.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSSSubstitutionParser.h; sourceTree = "<group>"; };
 		BC7C5E922BE2A8FB00AE645C /* MediaQueryBlockWatcher.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = MediaQueryBlockWatcher.cpp; sourceTree = "<group>"; };
@@ -33878,6 +33882,8 @@
 				BC7C5E8D2BE2A8FB00AE645C /* CSSTokenizer.h */,
 				BC7C5E8E2BE2A8FB00AE645C /* CSSTokenizerInputStream.cpp */,
 				BC7C5E8F2BE2A8FB00AE645C /* CSSTokenizerInputStream.h */,
+				C55A00000000000000000003 /* CSSTokenizerSwift.swift */,
+				C55A00000000000000000001 /* CSSTokenizerSwiftTypes.h */,
 				BC7C5E922BE2A8FB00AE645C /* MediaQueryBlockWatcher.cpp */,
 				BC7C5E932BE2A8FB00AE645C /* MediaQueryBlockWatcher.h */,
 				BC7C5E942BE2A8FB00AE645C /* MutableCSSSelector.cpp */,
@@ -45248,6 +45254,7 @@
 				BC3CC2282DE79F6D0032971C /* CSSTextShadow.h in Headers */,
 				318210D92C59B17E00C334B4 /* CSSTokenizer.h in Headers */,
 				3169B7DA2C63091700024DBA /* CSSTokenizerInputStream.h in Headers */,
+				C55A00000000000000000002 /* CSSTokenizerSwiftTypes.h in Headers */,
 				9AB1F38018E2489A00534743 /* CSSToLengthConversionData.h in Headers */,
 				2A538A2D26F0104C00965FC8 /* CSSTransformComponent.h in Headers */,
 				71DB0FD929007C910071AC42 /* CSSTransformListValue.h in Headers */,
@@ -51213,6 +51220,7 @@
 				A833C7CA0A2CF06B00D57664 /* SVGNames.cpp in Sources */,
 				07E047C3305A9DB000DFCC4B /* SwiftStub.swift in Sources */,
 				5A1E00000000000000000002 /* SIMDHelpers.swift in Sources */,
+				C55A00000000000000000004 /* CSSTokenizerSwift.swift in Sources */,
 				5A1E00000000000000000004 /* SIMDTableLookup.swift in Sources */,
 				5A1E00000000000000000006 /* SIMDSaturatingSubtract.swift in Sources */,
 				5A1E00000000000000000008 /* SIMDHighBitMask.swift in Sources */,
