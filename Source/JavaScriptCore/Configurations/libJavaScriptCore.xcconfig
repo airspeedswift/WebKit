@@ -71,8 +71,9 @@ ENABLE_USER_SCRIPT_SANDBOXING = NO;
 
 STRIP_INSTALLED_PRODUCT = NO;
 
-EXCLUDED_SOURCE_FILE_NAMES = $(inherited);
-EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] = $(inherited) framework.sb;
+EXCLUDED_SOURCE_FILE_NAMES = $(inherited) $(WK_SWIFT_BIGINT_DIGITS_EXCLUDED_$(WK_JSC_SUPPORTS_SWIFT_FOR_CXX));
+EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] = $(inherited) framework.sb $(WK_SWIFT_BIGINT_DIGITS_EXCLUDED_$(WK_JSC_SUPPORTS_SWIFT_FOR_CXX));
+WK_SWIFT_BIGINT_DIGITS_EXCLUDED_ = JSBigIntDigits.swift JSBigIntDigitsAddSub.swift JSBigIntDigitsDivide.swift JSBigIntDigitsFFT.swift JSBigIntDigitsMultiply.swift JSBigIntDigitsPrimitives.swift;
 
 // Swift compiled into libJavaScriptCore, whose C++ calls it through the generated header JSCSwift-Swift.h. It is
 // a module of its own, apart from the framework's JavaScriptCore module, and it reaches C++ through
@@ -87,3 +88,9 @@ SWIFT_OBJC_INTEROP_MODE = objcxx;
 SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 SWIFT_STRICT_CONCURRENCY = complete;
 OTHER_SWIFT_FLAGS = $(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/JSCSwiftBoundary.modulemap -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -O2 -Xllvm -enable-dfa-jump-thread -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -enable-experimental-feature SafeInteropWrappers $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+
+// BaseTarget.xcconfig's WK_USE_SWIFT_BIGINT_DIGITS, for JSBigInt's digit arithmetic in Swift.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(WK_SWIFT_BIGINT_DIGITS_CONDITIONS_$(WK_JSC_SUPPORTS_SWIFT_FOR_CXX)_$(WK_USE_SWIFT_BIGINT_DIGITS));
+WK_SWIFT_BIGINT_DIGITS_CONDITIONS_YES_YES = USE_SWIFT_BIGINT_DIGITS;
+WK_SWIFT_BIGINT_DIGITS_CONDITIONS_YES_YES[arch=armv7*] = ;
+WK_SWIFT_BIGINT_DIGITS_CONDITIONS_YES_YES[arch=i386] = ;

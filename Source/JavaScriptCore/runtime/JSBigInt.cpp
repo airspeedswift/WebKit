@@ -59,6 +59,11 @@
 #include <wtf/Int128.h>
 #include <wtf/MathExtras.h>
 
+#if USE_SWIFT_BIGINT_DIGITS
+#include "JSBigIntSwiftDigits.h"
+#include "JSCSwift-Swift.h"
+#endif
+
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
@@ -666,6 +671,7 @@ using TwoDigit = UInt128;
 using TwoDigit = uint64_t;
 #endif
 
+#if !USE_SWIFT_BIGINT_DIGITS
 // Where a column's carry lives between the three accumulator digits. Keeping it in the condition
 // flags is the shortest instruction sequence, but there is only one flag register, so a scheduler
 // interleaving several accumulations has to save and restore it. Materializing the carry as a value
@@ -2464,6 +2470,7 @@ ALWAYS_INLINE std::span<JSBigInt::Digit> JSBigInt::multiplyDigitsInto(std::span<
         return multiplyComba(x, y, result);
     return multiplySchoolbook(x, y, result);
 }
+#endif
 
 template <typename BigIntImpl1, typename BigIntImpl2>
 JSBigInt::ImplResult JSBigInt::multiplyImpl(JSGlobalObject* globalObject, BigIntImpl1 x, BigIntImpl2 y)
@@ -2515,7 +2522,12 @@ JSBigInt::ImplResult JSBigInt::multiplyImpl(JSGlobalObject* globalObject, BigInt
     bigInt->finishCreation(vm);
     bigInt->setSign(resultSign);
 
+#if !USE_SWIFT_BIGINT_DIGITS
     std::span<Digit> result = multiplyDigitsInto(xSpan, ySpan, bigInt->digits());
+#else
+    bool isSquare = xSpan.data() == ySpan.data() && xSpan.size() == ySpan.size();
+    std::span<Digit> result = bigInt->digits().first(JSCSwift::jsBigIntMultiplyDigits(xSpan, isSquare ? std::span<const Digit> { } : ySpan, isSquare, bigInt->digits()));
+#endif
     ASSERT(!result.empty());
     if (!result.back())
         result = result.first(result.size() - 1);
@@ -2534,6 +2546,7 @@ JSValue JSBigInt::multiply(JSGlobalObject* globalObject, JSBigInt* x, JSBigInt* 
     return multiplyImpl(globalObject, HeapBigIntImpl { x }, HeapBigIntImpl { y }).payload;
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 // The algorithm is from "Division by Invariant Integers using Multiplication", Granlund and Montgomery, PLDI'94.
 // https://gmplib.org/~tege/divcnst-pldi94.pdf
 // This is summarized in "Improved division by invariant integers", Moller and Granlund, as "Previous Methods".
@@ -2603,6 +2616,7 @@ private:
     const Digit m_divisor { };
     const Digit m_inverse { };
 };
+#endif
 
 // Computes Q(uotient) and remainder for A/b, such that
 // Q = (A - remainder) / b, with 0 <= remainder < b.
@@ -2610,6 +2624,7 @@ private:
 // Q may be the same as A for an in-place division.
 std::span<JSBigInt::Digit> JSBigInt::divideSingle(std::span<Digit> q, Digit& remainder, std::span<const Digit> a, Digit b)
 {
+#if !USE_SWIFT_BIGINT_DIGITS
     RELEASE_ASSERT(b != 0);
     RELEASE_ASSERT(a.size() > 0);
     remainder = 0;
@@ -2632,8 +2647,17 @@ std::span<JSBigInt::Digit> JSBigInt::divideSingle(std::span<Digit> q, Digit& rem
     for (size_t i = length; i-- > 0;)
         digitDiv(remainder, a[i], b, remainder);
     return { };
+#else
+    size_t quotientLength = a.back() >= b ? a.size() : a.size() - 1;
+    if (q.data() == a.data())
+        remainder = JSCSwift::jsBigIntDivideSingleInPlace(q.first(a.size()), b);
+    else
+        remainder = JSCSwift::jsBigIntDivideSingle(q, a, b);
+    return q.empty() ? q : q.first(quotientLength);
+#endif
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 JSBigInt::Digit JSBigInt::addAndReturnCarry(std::span<Digit> z, std::span<const Digit> x, std::span<const Digit> y)
 {
     RELEASE_ASSERT(z.size() >= y.size() && x.size() >= y.size());
@@ -3262,6 +3286,7 @@ std::span<JSBigInt::Digit> JSBigInt::remainderSameSize(std::span<Digit> r, std::
 
     return r.first(n);
 }
+#endif
 
 template <typename BigIntImpl1, typename BigIntImpl2>
 JSBigInt::ImplResult JSBigInt::divideImpl(JSGlobalObject* globalObject, BigIntImpl1 x, BigIntImpl2 y)
@@ -3308,7 +3333,11 @@ JSBigInt::ImplResult JSBigInt::divideImpl(JSGlobalObject* globalObject, BigIntIm
     }
 
     if (xSpan.size() == ySpan.size()) {
+#if !USE_SWIFT_BIGINT_DIGITS
         auto quotientDigit = divideSameSize(xSpan, ySpan);
+#else
+        auto quotientDigit = JSCSwift::jsBigIntDivideSameSize(xSpan, ySpan);
+#endif
         if (!quotientDigit)
             RELEASE_AND_RETURN(scope, zeroImpl(vm));
 
@@ -3321,7 +3350,13 @@ JSBigInt::ImplResult JSBigInt::divideImpl(JSGlobalObject* globalObject, BigIntIm
     }
 
     Vector<Digit, 16> q(qLength);
+#if !USE_SWIFT_BIGINT_DIGITS
     auto [qSpan, rSpan] = divideDigitsInto(q.mutableSpan(), { }, xSpan, ySpan);
+#else
+    // JSBigIntDigits*.swift copies these constants.
+    static_assert(maxLength == 16384 && digitBits == 64 && halfDigitBits == 32);
+    auto qSpan = q.mutableSpan().first(JSCSwift::jsBigIntDivideDigits(q.mutableSpan(), { }, xSpan, ySpan));
+#endif
     RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, resultSign, qSpan));
 }
 
@@ -3366,6 +3401,7 @@ JSValue JSBigInt::unaryMinus(JSGlobalObject* globalObject, JSBigInt* x)
     return unaryMinusImpl(globalObject, HeapBigIntImpl { x }).payload;
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 JSBigInt::ComparisonResult JSBigInt::compareDigits(std::span<const Digit> x, std::span<const Digit> y)
 {
     x = normalize(x);
@@ -3444,6 +3480,7 @@ std::span<JSBigInt::Digit> JSBigInt::oneShiftedLeft(std::span<Digit> result, uns
     result[digitIndex] = static_cast<Digit>(1) << (bitIndex % digitBits);
     return result;
 }
+#endif
 
 // https://tc39.es/proposal-bigint-math/#sec-bigint.sqrt
 JSValue JSBigInt::sqrt(JSGlobalObject* globalObject, JSBigInt* bigInt)
@@ -3458,6 +3495,7 @@ JSValue JSBigInt::sqrt(JSGlobalObject* globalObject, JSBigInt* bigInt)
 
     auto value = bigInt->digits();
     Vector<Digit, 16> resultStorage(value.size() + 2);
+#if !USE_SWIFT_BIGINT_DIGITS
     Vector<Digit, 16> quotientStorage(value.size() + 2);
     Vector<Digit, 16> sumStorage(value.size() + 2);
     Vector<Digit, 16> nextStorage(value.size() + 2);
@@ -3477,6 +3515,9 @@ JSValue JSBigInt::sqrt(JSGlobalObject* globalObject, JSBigInt* bigInt)
 
         result = spanCopy(resultStorage.mutableSpan(), next);
     }
+#else
+    auto result = resultStorage.mutableSpan().first(JSCSwift::jsBigIntSqrtDigits(value, resultStorage.mutableSpan()));
+#endif
 
     RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, false, result));
 }
@@ -3490,11 +3531,14 @@ JSValue JSBigInt::cbrt(JSGlobalObject* globalObject, JSBigInt* bigInt)
     if (bigInt->isZero())
         RELEASE_AND_RETURN(scope, bigInt);
 
+#if !USE_SWIFT_BIGINT_DIGITS
     constexpr std::array<Digit, 1> three = { 3 };
+#endif
 
     bool sign = bigInt->sign();
     auto value = bigInt->digits();
     Vector<Digit, 16> resultStorage(value.size() + 2);
+#if !USE_SWIFT_BIGINT_DIGITS
     Vector<Digit, 16> squaredStorage(value.size() + 2);
     Vector<Digit, 16> quotientStorage(value.size() + 2);
     Vector<Digit, 16> doubledStorage(value.size() + 2);
@@ -3518,10 +3562,14 @@ JSValue JSBigInt::cbrt(JSGlobalObject* globalObject, JSBigInt* bigInt)
 
         result = spanCopy(resultStorage.mutableSpan(), next);
     }
+#else
+    auto result = resultStorage.mutableSpan().first(JSCSwift::jsBigIntCbrtDigits(value, resultStorage.mutableSpan()));
+#endif
 
     RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, sign, result));
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 // Compute the multiplicative inverse Inv, approximately floor(2^(2n*digitBits) / B), for cached
 // modulo. Given divisor B with n digits, the inverse has n+1 digits.
 // Uses V8's bit-negation trick to avoid a (2n+1)-digit dividend:
@@ -3991,6 +4039,7 @@ std::span<const JSBigInt::Digit> JSBigInt::cachedMod(VM& vm, std::span<Digit> r,
 
     return r.first(n);
 }
+#endif
 
 template <typename BigIntImpl1, typename BigIntImpl2>
 JSBigInt::ImplResult JSBigInt::remainderImpl(JSGlobalObject* globalObject, BigIntImpl1 x, BigIntImpl2 y)
@@ -4052,22 +4101,40 @@ JSBigInt::ImplResult JSBigInt::remainderImpl(JSGlobalObject* globalObject, BigIn
                     JSBigInt* bigInt = new (NotNull, cell) JSBigInt(vm, vm.bigIntStructure.get(), resultLength);
                     bigInt->finishCreation(vm);
                     bigInt->setSign(x.sign());
+#if !USE_SWIFT_BIGINT_DIGITS
                     auto rSpan = normalize(cachedMod(vm, bigInt->digits(), xSpan, ySpan));
+#else
+                    // JSBigIntDigits*.swift copies these constants.
+                    static_assert(maxCachedModDivisorSize == 32 && maxFixedCachedModDivisorSize == 4);
+                    auto rSpan = normalize(bigInt->digits().first(JSCSwift::jsBigIntCachedMod(bigInt->digits(), xSpan, ySpan, vm.m_bigIntFoldFactor, vm.m_bigIntCachedInverse.span())));
+#endif
                     if (rSpan.empty())
                         RELEASE_AND_RETURN(scope, zeroImpl(vm));
                     bigInt->setLength(rSpan.size());
                     return bigInt;
                 }
                 Vector<Digit, maxCachedModDivisorSize> r(resultLength);
+#if !USE_SWIFT_BIGINT_DIGITS
                 auto rSpan = cachedMod(vm, r.mutableSpan(), xSpan, ySpan);
+#else
+                auto rSpan = r.mutableSpan().first(JSCSwift::jsBigIntCachedMod(r.mutableSpan(), xSpan, ySpan, vm.m_bigIntFoldFactor, vm.m_bigIntCachedInverse.span()));
+#endif
                 RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, x.sign(), rSpan));
             }
         } else if (vm.m_nextCachedBigIntDivisor.get() == y.toHeapBigInt(globalObject)) {
             if (++vm.m_bigIntDivisorCount >= 100) {
                 vm.m_cachedBigIntDivisor.setWithoutWriteBarrier(y.toHeapBigInt(globalObject));
+#if !USE_SWIFT_BIGINT_DIGITS
                 vm.m_bigIntFoldFactor = cachedModFoldFactor(ySpan);
                 if (!vm.m_bigIntFoldFactor)
                     cachedModMakeInverse(vm, ySpan); // Compute inverse when appropriate fold-factor is not found.
+#else
+                vm.m_bigIntFoldFactor = JSCSwift::jsBigIntCachedModFoldFactor(ySpan);
+                if (!vm.m_bigIntFoldFactor) {
+                    vm.m_bigIntCachedInverse.resize(ySpan.size() + 1);
+                    JSCSwift::jsBigIntCachedModMakeInverse(ySpan, vm.m_bigIntCachedInverse.mutableSpan());
+                }
+#endif
             }
         } else if (ySpan.size() >= 2 && ySpan.size() <= maxCachedModDivisorSize) {
             vm.m_nextCachedBigIntDivisor.setWithoutWriteBarrier(y.toHeapBigInt(globalObject));
@@ -4078,9 +4145,17 @@ JSBigInt::ImplResult JSBigInt::remainderImpl(JSGlobalObject* globalObject, BigIn
     Vector<Digit, 16> r(ySpan.size());
     std::span<const Digit> rSpan;
     if (xSpan.size() == ySpan.size())
+#if !USE_SWIFT_BIGINT_DIGITS
         rSpan = remainderSameSize(r.mutableSpan(), xSpan, ySpan);
+#else
+        rSpan = r.mutableSpan().first(JSCSwift::jsBigIntRemainderSameSize(r.mutableSpan(), xSpan, ySpan));
+#endif
     else
+#if !USE_SWIFT_BIGINT_DIGITS
         rSpan = std::get<1>(divideDigitsInto({ }, r.mutableSpan(), xSpan, ySpan));
+#else
+        rSpan = r.mutableSpan().first(JSCSwift::jsBigIntDivideDigits({ }, r.mutableSpan(), xSpan, ySpan));
+#endif
     RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, x.sign(), rSpan));
 }
 
@@ -4452,6 +4527,7 @@ JSValue JSBigInt::bitwiseNot(JSGlobalObject* globalObject, JSBigInt* x)
     return bitwiseNotImpl(globalObject, HeapBigIntImpl { x }).payload;
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 // {carry} must point to an initialized Digit and will either be incremented
 // by one or left alone.
 inline JSBigInt::Digit JSBigInt::digitAdd(Digit a, Digit b, Digit& carry)
@@ -4473,6 +4549,7 @@ inline JSBigInt::Digit JSBigInt::digitAdd3(Digit a, Digit b, Digit c, Digit& car
     carry = static_cast<Digit>(carryFromPartial) | static_cast<Digit>(carryFromC);
     return result;
 }
+#endif
 
 // {borrow} must point to an initialized Digit and will either be incremented
 // by one or left alone.
@@ -4483,6 +4560,7 @@ inline JSBigInt::Digit JSBigInt::digitSub(Digit a, Digit b, Digit& borrow)
     return static_cast<Digit>(result);
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 // {borrowOut} is set to 0 or 1. {borrowIn} must be 0 or 1.
 inline JSBigInt::Digit JSBigInt::digitSub2(Digit a, Digit b, Digit borrowIn, Digit& borrowOut)
 {
@@ -4503,6 +4581,7 @@ ALWAYS_INLINE std::tuple<JSBigInt::Digit, JSBigInt::Digit> JSBigInt::digitMul(Di
     Digit low = static_cast<Digit>(result);
     return { low, high };
 }
+#endif
 
 // Raises {base} to the power of {exponent}. Does not check for overflow.
 inline JSBigInt::Digit JSBigInt::digitPow(Digit base, Digit exponent)
@@ -4519,6 +4598,7 @@ inline JSBigInt::Digit JSBigInt::digitPow(Digit base, Digit exponent)
     return result;
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 // Returns the quotient.
 // quotient = (high << digitBits + low - remainder) / divisor
 inline JSBigInt::Digit JSBigInt::digitDiv(Digit high, Digit low, Digit divisor, Digit& remainder)
@@ -4642,6 +4722,7 @@ void JSBigInt::multiplyAdd(std::span<const Digit> source, Digit factor, Digit su
     } else
         ASSERT(!(carry + high));
 }
+#endif
 
 bool JSBigInt::equals(JSBigInt* x, JSBigInt* y)
 {
@@ -4739,6 +4820,7 @@ JSBigInt::ComparisonResult JSBigInt::compare(JSValue x, JSValue y)
     return compare(x.asHeapBigInt(), y.asHeapBigInt());
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 std::span<JSBigInt::Digit> JSBigInt::addSchoolbook(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result)
 {
     RELEASE_ASSERT(x.size() >= y.size());
@@ -4793,6 +4875,7 @@ ALWAYS_INLINE std::span<JSBigInt::Digit> JSBigInt::addDigitsInto(std::span<const
     }
     return addSchoolbook(x, y, result);
 }
+#endif
 
 template <typename BigIntImpl1, typename BigIntImpl2>
 JSBigInt::ImplResult JSBigInt::absoluteAdd(JSGlobalObject* globalObject, BigIntImpl1 x, BigIntImpl2 y, bool resultSign)
@@ -4817,7 +4900,11 @@ JSBigInt::ImplResult JSBigInt::absoluteAdd(JSGlobalObject* globalObject, BigIntI
     unsigned resultLength = x.length() + 1;
     if (resultLength > maxLength) [[unlikely]] {
         Vector<Digit> scratch(resultLength);
+#if !USE_SWIFT_BIGINT_DIGITS
         auto span = addSchoolbook(x.digits(), y.digits(), scratch.mutableSpan());
+#else
+        auto span = scratch.mutableSpan().first(JSCSwift::jsBigIntAddDigits(x.digits(), y.digits(), scratch.mutableSpan()));
+#endif
         RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, resultSign, span));
     }
 
@@ -4831,7 +4918,11 @@ JSBigInt::ImplResult JSBigInt::absoluteAdd(JSGlobalObject* globalObject, BigIntI
     bigInt->finishCreation(vm);
     bigInt->setSign(resultSign);
 
+#if !USE_SWIFT_BIGINT_DIGITS
     auto span = addDigitsInto(x.digits(), y.digits(), bigInt->digits());
+#else
+    auto span = bigInt->digits().first(JSCSwift::jsBigIntAddDigits(x.digits(), y.digits(), bigInt->digits()));
+#endif
     ASSERT(!span.empty());
     if (!span.back())
         bigInt->setLength(span.size() - 1);
@@ -4839,6 +4930,7 @@ JSBigInt::ImplResult JSBigInt::absoluteAdd(JSGlobalObject* globalObject, BigIntI
     return bigInt;
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 std::span<JSBigInt::Digit> JSBigInt::subSchoolbook(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result)
 {
     RELEASE_ASSERT(x.size() >= y.size());
@@ -4894,6 +4986,7 @@ ALWAYS_INLINE std::span<JSBigInt::Digit> JSBigInt::subDigitsInto(std::span<const
     }
     return subSchoolbook(x, y, result);
 }
+#endif
 
 template <typename BigIntImpl1, typename BigIntImpl2>
 JSBigInt::ImplResult JSBigInt::absoluteSub(JSGlobalObject* globalObject, BigIntImpl1 x, BigIntImpl2 y, bool resultSign)
@@ -4915,7 +5008,11 @@ JSBigInt::ImplResult JSBigInt::absoluteSub(JSGlobalObject* globalObject, BigIntI
     unsigned resultLength = x.length();
     if (resultLength > maxInPlaceSubSize) [[unlikely]] {
         Vector<Digit> scratch(resultLength);
+#if !USE_SWIFT_BIGINT_DIGITS
         auto span = subSchoolbook(x.digits(), y.digits(), scratch.mutableSpan());
+#else
+        auto span = scratch.mutableSpan().first(JSCSwift::jsBigIntSubDigits(x.digits(), y.digits(), scratch.mutableSpan()));
+#endif
         RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, resultSign, span));
     }
 
@@ -4929,12 +5026,17 @@ JSBigInt::ImplResult JSBigInt::absoluteSub(JSGlobalObject* globalObject, BigIntI
     bigInt->finishCreation(vm);
     bigInt->setSign(resultSign);
 
+#if !USE_SWIFT_BIGINT_DIGITS
     auto span = normalize(subDigitsInto(x.digits(), y.digits(), bigInt->digits()));
+#else
+    auto span = normalize(bigInt->digits().first(JSCSwift::jsBigIntSubDigits(x.digits(), y.digits(), bigInt->digits())));
+#endif
     ASSERT(!span.empty());
     bigInt->setLength(span.size());
     return bigInt;
 }
 
+#if !USE_SWIFT_BIGINT_DIGITS
 // Returns whether (factor1 * factor2) > (high << digitBits) + low.
 inline bool JSBigInt::productGreaterThan(Digit factor1, Digit factor2, Digit high, Digit low)
 {
@@ -4980,27 +5082,37 @@ inline std::span<JSBigInt::Digit> JSBigInt::absoluteBitwiseOp(std::span<const Di
 
     return result.first(resultLength);
 }
+#endif
 
 std::span<JSBigInt::Digit> JSBigInt::absoluteAnd(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result)
 {
+#if !USE_SWIFT_BIGINT_DIGITS
     ASSERT(result.size() >= andLength(x, y));
     auto digitOperation = [](Digit a, Digit b) {
         return a & b;
     };
     return absoluteBitwiseOp(x, y, ExtraDigitsHandling::Skip, digitOperation, result);
+#else
+    return result.first(JSCSwift::jsBigIntAndDigits(x, y, result));
+#endif
 }
 
 std::span<JSBigInt::Digit> JSBigInt::absoluteOr(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result)
 {
+#if !USE_SWIFT_BIGINT_DIGITS
     ASSERT(result.size() >= orLength(x, y));
     auto digitOperation = [](Digit a, Digit b) {
         return a | b;
     };
     return absoluteBitwiseOp(x, y, ExtraDigitsHandling::Copy, digitOperation, result);
+#else
+    return result.first(JSCSwift::jsBigIntOrDigits(x, y, result));
+#endif
 }
 
 std::span<JSBigInt::Digit> JSBigInt::absoluteAndNot(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result)
 {
+#if !USE_SWIFT_BIGINT_DIGITS
     // x & ~y
     RELEASE_ASSERT(result.size() >= andNotLength(x, y));
 
@@ -5012,19 +5124,27 @@ std::span<JSBigInt::Digit> JSBigInt::absoluteAndNot(std::span<const Digit> x, st
         result[i] = x[i];
 
     return result.first(x.size());
+#else
+    return result.first(JSCSwift::jsBigIntAndNotDigits(x, y, result));
+#endif
 }
 
 std::span<JSBigInt::Digit> JSBigInt::absoluteXor(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result)
 {
+#if !USE_SWIFT_BIGINT_DIGITS
     ASSERT(result.size() >= xorLength(x, y));
     auto digitOperation = [](Digit a, Digit b) {
         return a ^ b;
     };
     return absoluteBitwiseOp(x, y, ExtraDigitsHandling::Copy, digitOperation, result);
+#else
+    return result.first(JSCSwift::jsBigIntXorDigits(x, y, result));
+#endif
 }
 
 std::span<JSBigInt::Digit> JSBigInt::absoluteAddOne(std::span<const Digit> x, std::span<Digit> result)
 {
+#if !USE_SWIFT_BIGINT_DIGITS
     RELEASE_ASSERT(result.size() > x.size());
     Digit carry = 1;
     size_t i = 0;
@@ -5036,10 +5156,14 @@ std::span<JSBigInt::Digit> JSBigInt::absoluteAddOne(std::span<const Digit> x, st
     if (carry)
         result[i++] = carry;
     return result.first(i);
+#else
+    return result.first(JSCSwift::jsBigIntAddOneDigits(x, result));
+#endif
 }
 
 std::span<JSBigInt::Digit> JSBigInt::absoluteSubOne(std::span<const Digit> x, std::span<Digit> result)
 {
+#if !USE_SWIFT_BIGINT_DIGITS
     ASSERT(!x.empty());
     RELEASE_ASSERT(result.size() >= x.size());
     Digit borrow = 1;
@@ -5050,6 +5174,9 @@ std::span<JSBigInt::Digit> JSBigInt::absoluteSubOne(std::span<const Digit> x, st
     }
     ASSERT(!borrow);
     return result.first(x.size());
+#else
+    return result.first(JSCSwift::jsBigIntSubOneDigits(x, result));
+#endif
 }
 
 template <typename BigIntImpl1, typename BigIntImpl2>
@@ -5079,6 +5206,7 @@ JSBigInt::ImplResult JSBigInt::leftShiftByAbsolute(JSGlobalObject* globalObject,
     Vector<Digit, 16> resultVector(resultLength);
     auto result = resultVector.mutableSpan();
     RELEASE_ASSERT(result.size() == resultLength);
+#if !USE_SWIFT_BIGINT_DIGITS
     if (!bitsShift) {
         size_t i = 0;
         for (; i < digitShift; i++)
@@ -5102,6 +5230,9 @@ JSBigInt::ImplResult JSBigInt::leftShiftByAbsolute(JSGlobalObject* globalObject,
         else
             ASSERT(!carry);
     }
+#else
+    JSCSwift::jsBigIntShiftLeftDigits(xSpan, digitShift, bitsShift, result);
+#endif
 
     RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, x.sign(), result));
 }
@@ -5161,6 +5292,7 @@ JSBigInt::ImplResult JSBigInt::rightShiftByAbsolute(JSGlobalObject* globalObject
     RELEASE_ASSERT(result.size() == resultLength);
     RELEASE_ASSERT(resultLength >= 1);
 
+#if !USE_SWIFT_BIGINT_DIGITS
     if (!bitsShift) {
         result[resultLength - 1] = 0;
         for (size_t i = digitalShift; i < length; i++)
@@ -5186,6 +5318,9 @@ JSBigInt::ImplResult JSBigInt::rightShiftByAbsolute(JSGlobalObject* globalObject
             RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, sign, finalResult));
         }
     }
+#else
+    JSCSwift::jsBigIntShiftRightDigits(xSpan, digitalShift, bitsShift, mustRoundDown, result);
+#endif
 
     RELEASE_AND_RETURN(scope, tryCreateFromImpl(globalObject, vm, sign, result));
 }
@@ -5657,7 +5792,11 @@ JSValue JSBigInt::parseInt(JSGlobalObject* nullOrGlobalObjectForOOM, VM& vm, std
 
         ASSERT(static_cast<uint64_t>(static_cast<Digit>(multiplier)) == multiplier);
         ASSERT(static_cast<uint64_t>(static_cast<Digit>(digit)) == digit);
+#if !USE_SWIFT_BIGINT_DIGITS
         multiplyAdd(resultVector.span(), static_cast<Digit>(multiplier), static_cast<Digit>(digit), resultVector.mutableSpan());
+#else
+        JSCSwift::jsBigIntMultiplyAddInPlace(resultVector.mutableSpan(), static_cast<Digit>(multiplier), static_cast<Digit>(digit));
+#endif
     }
 
     return tryCreateFromImpl(nullOrGlobalObjectForOOM, vm, sign == ParseIntSign::Signed, resultVector.span());

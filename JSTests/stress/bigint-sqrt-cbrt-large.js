@@ -1,7 +1,8 @@
 //@ requireOptions("--useBigIntMathMethods=1")
 
 // BigInt.sqrt and BigInt.cbrt divide into a quotient buffer longer than the quotient, and their first
-// divisor is a power of two. Operands this long take the Burnikel-Ziegler division.
+// divisor is a power of two. Operands of 200 digits and more take the Burnikel-Ziegler division; 14 and 15
+// digits are either side of the largest operand whose scratch stays on the stack.
 
 function shouldBe(actual, expected, message) {
     if (actual !== expected)
@@ -27,7 +28,7 @@ function makeOperand(width, digits, seed) {
 }
 
 for (const width of [32, 64]) {
-    for (const digits of [200, 301, 1000]) {
+    for (const digits of [14, 15, 200, 301, 1000]) {
         const x = makeOperand(width, digits, digits);
         shouldBeRoot(BigInt.sqrt(x), 2n, x, `${width} bit digits, sqrt of ${digits}`);
         shouldBeRoot(BigInt.cbrt(x), 3n, x, `${width} bit digits, cbrt of ${digits}`);

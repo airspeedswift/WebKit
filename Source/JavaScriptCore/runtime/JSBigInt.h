@@ -34,6 +34,10 @@
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
 
+#if !defined(USE_SWIFT_BIGINT_DIGITS)
+#define USE_SWIFT_BIGINT_DIGITS 0
+#endif
+
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
@@ -319,16 +323,22 @@ public:
     static constexpr Digit halfDigitMask = (1ull << halfDigitBits) - 1;
 
     // Digit arithmetic helpers.
+#if !USE_SWIFT_BIGINT_DIGITS
     static Digit LEGACY_NODELETE digitAdd(Digit a, Digit b, Digit& carry);
     static Digit LEGACY_NODELETE digitAdd3(Digit a, Digit b, Digit c, Digit& carry);
+#endif
     static Digit LEGACY_NODELETE digitSub(Digit a, Digit b, Digit& borrow);
+#if !USE_SWIFT_BIGINT_DIGITS
     static Digit LEGACY_NODELETE digitSub2(Digit a, Digit b, Digit borrowIn, Digit& borrowOut);
     static std::tuple<Digit, Digit> digitMul(Digit a, Digit b);
     static Digit LEGACY_NODELETE digitDiv(Digit high, Digit low, Digit divisor, Digit& remainder);
+#endif
     static Digit LEGACY_NODELETE digitPow(Digit base, Digit exponent);
+#if !USE_SWIFT_BIGINT_DIGITS
     static Digit LEGACY_NODELETE subtractAndReturnBorrow(std::span<Digit> z, std::span<const Digit> x, std::span<const Digit> y);
     static Digit LEGACY_NODELETE addAndReturnCarry(std::span<Digit> z, std::span<const Digit> x, std::span<const Digit> y);
     static bool productGreaterThan(Digit factor1, Digit factor2, Digit high, Digit low);
+#endif
 
 
 private:
@@ -362,6 +372,7 @@ private:
     
     template <typename BigIntImpl1, typename BigIntImpl2>
     static ComparisonResult LEGACY_NODELETE absoluteCompare(BigIntImpl1 x, BigIntImpl2 y);
+#if !USE_SWIFT_BIGINT_DIGITS
     static void multiplyAdd(std::span<const Digit> source, Digit factor, Digit summand, std::span<Digit> result);
     static std::span<Digit> multiplySingle(std::span<const Digit> multiplicand, Digit multiplier, std::span<Digit> result);
     static std::span<Digit> multiplySchoolbook(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result);
@@ -390,8 +401,10 @@ private:
     static void toom3Main(std::span<Digit> z, std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> scratch);
     class FFTContainer;
     static std::span<Digit> multiplyFFT(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result);
+#endif
 
     static std::span<Digit> LEGACY_NODELETE divideSingle(std::span<Digit> q, Digit& remainder, std::span<const Digit>, Digit);
+#if !USE_SWIFT_BIGINT_DIGITS
     static std::tuple<std::span<Digit>, std::span<Digit>> divideSchoolbook(std::span<Digit> q, std::span<Digit> r, std::span<const Digit>, std::span<const Digit>);
     static void burnikelZieglerBasecase(std::span<Digit> q, std::span<Digit> r, std::span<const Digit>, std::span<const Digit>);
     static void burnikelZieglerD3n2n(std::span<Digit> q, std::span<Digit> r, std::span<const Digit> a1a2, std::span<const Digit> a3, std::span<const Digit>, std::span<Digit> scratch);
@@ -415,6 +428,7 @@ private:
     static std::span<Digit> multiplyDigits(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result);
     static std::span<Digit> divideDigits(std::span<Digit> quotient, std::span<const Digit> x, std::span<const Digit> y);
     static std::span<Digit> oneShiftedLeft(std::span<Digit> result, unsigned bitIndex);
+#endif
 
     enum class RoundingResult {
         RoundDown,
@@ -424,6 +438,7 @@ private:
 
     static RoundingResult LEGACY_NODELETE decideRounding(JSBigInt*, int32_t mantissaBitsUnset, int32_t digitIndex, uint64_t currentDigit);
 
+#if !USE_SWIFT_BIGINT_DIGITS
     enum class ExtraDigitsHandling {
         Copy,
         Skip
@@ -431,6 +446,7 @@ private:
 
     template<typename BitwiseOp>
     static std::span<Digit> absoluteBitwiseOp(std::span<const Digit> x, std::span<const Digit> y, ExtraDigitsHandling, NOESCAPE const BitwiseOp&, std::span<Digit> result);
+#endif
 
     static size_t andLength(std::span<const Digit> x, std::span<const Digit> y) { return std::min(x.size(), y.size()); }
     static size_t orLength(std::span<const Digit> x, std::span<const Digit> y) { return std::max(x.size(), y.size()); }
@@ -448,16 +464,19 @@ private:
     static ImplResult absoluteAddOne(JSGlobalObject*, std::span<const Digit> x, bool resultSign);
     static ImplResult absoluteSubOne(JSGlobalObject*, std::span<const Digit> x, bool resultSign);
 
+#if !USE_SWIFT_BIGINT_DIGITS
     static Digit LEGACY_NODELETE inplaceAdd(std::span<Digit> z, std::span<const Digit> x);
     static Digit LEGACY_NODELETE inplaceSub(std::span<Digit> z, std::span<const Digit> x);
     static Digit LEGACY_NODELETE inplaceAddAndPropagate(std::span<Digit> z, std::span<const Digit> x);
     static Digit LEGACY_NODELETE inplaceSubAndPropagate(std::span<Digit> z, std::span<const Digit> x);
+#endif
 
     static constexpr unsigned maxCachedModDivisorSize = 32; // 2048-bit divisors on 64-bit
     static constexpr unsigned maxFixedCachedModDivisorSize = 4;
     static constexpr unsigned maxInPlaceSubSize = 16;
     static constexpr unsigned maxInPlaceCachedModSize = 8;
     static_assert(maxInPlaceCachedModSize <= maxCachedModDivisorSize);
+#if !USE_SWIFT_BIGINT_DIGITS
     // Only divisors that remainderImpl arms have a cached inverse, and cachedModFixed takes that
     // inverse as a span whose extent is fixed at compile time.
     static_assert(maxFixedCachedModDivisorSize <= maxCachedModDivisorSize);
@@ -477,6 +496,7 @@ private:
 
     static std::span<Digit> rightShift(std::span<Digit> z, std::span<const Digit> x, unsigned);
     static std::span<Digit> leftShift(std::span<Digit> z, std::span<const Digit> x, unsigned);
+#endif
 
     static String toStringBasePowerOfTwo(VM&, JSGlobalObject*, JSBigInt*, unsigned radix);
     class ToStringFormatter;

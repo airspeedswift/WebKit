@@ -769,6 +769,7 @@
 				WebKit/WKWebView/WKWebExtensionAPILocalization.mm = "-fobjc-arc";
 			};
 			membershipExceptions = (
+				JavaScriptCore/BigIntBench.cpp,
 				JavaScriptCore/DisallowVMEntry.cpp,
 				JavaScriptCore/InspectorConsoleMessage.cpp,
 				JavaScriptCore/JSRunLoopTimer.mm,

@@ -119,6 +119,31 @@ testDiv(BigInt("-18364758544493064720"), BigInt("-4660"), 0xE0042813BE5DCn);
 testDiv(BigInt("-18364758544493064720"), BigInt("-4275878552"), 0x100000000n);
 testDiv(BigInt("-18364758544493064720"), BigInt("-18364758544493064720"), 0x1n);
 
+// Dividends of 32, 63 and 64 digits by divisors of 15, 31 and 32 digits.
+{
+    let mix = 0x9e3779b97f4a7c15n;
+    function digits(count) {
+        let value = 1n;
+        for (let i = 0; i < count; i++) {
+            mix = BigInt.asUintN(64, mix * 6364136223846793005n + 1442695040888963407n);
+            value = (value << 64n) | mix;
+        }
+        return value >> 1n;
+    }
+    for (const [xDigits, yDigits] of [[32, 15], [63, 31], [63, 32], [64, 31], [64, 32]]) {
+        const x = digits(xDigits);
+        const y = digits(yDigits);
+        const q = x / y;
+        const r = x % y;
+        const sizes = xDigits + " / " + yDigits + " digits: ";
+        assert.sameValue(q * y + r, x, sizes + "(x / y) * y + x % y should be x");
+        assert(r >= 0n && r < y);
+        assert.sameValue(-x / y, -q, sizes + "-x / y should be -(x / y)");
+        assert.sameValue(-x % y, -r, sizes + "-x % y should be -(x % y)");
+        assert.sameValue(x / -y, -q, sizes + "x / -y should be -(x / y)");
+    }
+}
+
 // Test division by 0
 try {
     let a = 102122311n / 0n;

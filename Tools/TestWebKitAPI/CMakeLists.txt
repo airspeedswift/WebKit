@@ -223,6 +223,7 @@ if (ENABLE_JAVASCRIPTCORE)
     set(TestJavaScriptCore_SOURCES
         Runner/TestsController.cpp
 
+        Tests/JavaScriptCore/BigIntBench.cpp
         Tests/JavaScriptCore/DisallowVMEntry.cpp
         Tests/JavaScriptCore/InspectorConsoleMessage.cpp
         Tests/JavaScriptCore/MarkedVector.cpp

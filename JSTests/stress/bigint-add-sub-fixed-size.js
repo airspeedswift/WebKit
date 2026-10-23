@@ -59,6 +59,13 @@ for (let length = 1; length <= 6; ++length) {
     check(allOnes - 1n, one, `no carry out, ${length} digits`);
     check(0n, allOnes, `zero and all ones, ${length} digits`);
 
+    // A one-digit operand against a wider one, with a carry or a borrow that stops part way.
+    if (length > 1) {
+        check(allOnes - (1n << 64n), one, `carry stops at the second digit, ${length} digits`);
+        check((1n << BigInt(64 * (length - 1))) + (1n << 64n), one, `borrow stops at the second digit, ${length} digits`);
+        check(randomOfLength(length), randomOfLength(1), `random and one digit, ${length} digits`);
+    }
+
     for (let round = 0; round < 8; ++round) {
         let a = randomOfLength(length);
         let b = randomOfLength(length);
