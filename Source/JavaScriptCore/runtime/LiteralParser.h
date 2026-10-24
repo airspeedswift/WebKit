@@ -36,6 +36,14 @@
 #include <wtf/text/StringBuilder.h>
 #include <wtf/text/WTFString.h>
 
+#if !defined(USE_SWIFT_JSON_PARSER)
+#define USE_SWIFT_JSON_PARSER 0
+#endif
+
+#if USE_SWIFT_JSON_PARSER
+#include "LiteralParserSwiftTypes.h"
+#endif
+
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
@@ -53,6 +61,7 @@ enum JSONPPathEntryType : uint8_t {
     JSONPPathEntryTypeCall // <prior entries>(JSON)
 };
 
+#if !USE_SWIFT_JSON_PARSER
 enum ParserState : uint8_t {
     StartParseObject, StartParseArray, StartParseExpression,
     StartParseStatement, StartParseStatementEndStatement,
@@ -66,6 +75,7 @@ enum TokenType : uint8_t {
     TokNull, TokEnd, TokDot, TokAssign, TokSemi, TokError, TokErrorSpace };
 
 enum class JSONIdentifierHint : uint8_t { MaybeIdentifier, Unknown };
+#endif // !USE_SWIFT_JSON_PARSER
 
 struct JSONPPathEntry {
     Identifier m_pathEntryName;
@@ -110,6 +120,7 @@ private:
 };
 
 
+#if !USE_SWIFT_JSON_PARSER
 template<typename CharacterType> struct LiteralParserToken {
     WTF_MAKE_NONCOPYABLE(LiteralParserToken);
 
@@ -328,6 +339,39 @@ private:
     Vector<Identifier, 16, UnsafeVectorOverflow> m_identifierStack;
     Vector<JSONRanges::Entry, 8> m_rangesStack;
 };
+#else
+
+template<typename CharType, JSONReviverMode reviverMode>
+class LiteralParser {
+public:
+    LiteralParser(JSGlobalObject* globalObject, std::span<const CharType> characters, ParserMode mode, CodeBlock* nullOrCodeBlock = nullptr)
+        : m_globalObject(globalObject)
+        , m_nullOrCodeBlock(nullOrCodeBlock)
+        , m_characters(characters)
+        , m_mode(mode)
+    {
+    }
+
+    String getErrorMessage() const;
+
+    JSValue tryLiteralParse() requires (reviverMode == JSONReviverMode::Disabled) { return parse(JSONParseEntry::Value); }
+    JSValue tryLiteralParse(JSONRanges* sourceRanges) requires (reviverMode == JSONReviverMode::Enabled) { return parse(JSONParseEntry::Value, sourceRanges); }
+    JSValue tryEval() requires (reviverMode == JSONReviverMode::Disabled) { return parse(JSONParseEntry::Eval); }
+    JSValue tryLiteralParsePrimitiveValue() requires (reviverMode == JSONReviverMode::Disabled) { return parse(JSONParseEntry::PrimitiveValue); }
+    bool tryJSONPParse(Vector<JSONPData>& results, bool needsFullSourceInfo) requires (reviverMode == JSONReviverMode::Disabled) { return !!parse(JSONParseEntry::Program, nullptr, &results, needsFullSourceInfo); }
+
+private:
+    JSValue parse(JSONParseEntry, JSONRanges* = nullptr, Vector<JSONPData>* = nullptr, bool needsFullSourceInfo = false);
+
+    JSGlobalObject* const m_globalObject;
+    CodeBlock* const m_nullOrCodeBlock;
+    const std::span<const CharType> m_characters;
+    const ParserMode m_mode;
+    String m_errorMessage;
+    JSONParseFailure m_failure { };
+};
+
+#endif // !USE_SWIFT_JSON_PARSER
 
 } // namespace JSC
 

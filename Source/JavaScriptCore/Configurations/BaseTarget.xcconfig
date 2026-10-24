@@ -33,7 +33,12 @@ WK_SWIFT_PGO_GEN_FLAGS = $(WK_SWIFT_PGO_GEN_FLAGS_$(ENABLE_LLVM_PROFILE_GENERATI
 WK_SWIFT_PGO_GEN_FLAGS_YES = -Xfrontend -ir-profile-generate;
 
 GCC_PREFIX_HEADER = JavaScriptCorePrefix.h;
-GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES);
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES) $(WK_SWIFT_JSON_PARSER_DEFINES_$(WK_USE_SWIFT_JSON_PARSER));
+
+// LiteralParser parses in Swift (runtime/LiteralParserSwift.swift) when YES. Both targets need the define, since the
+// framework compiles the Swift and libJavaScriptCore compiles LiteralParser's callers.
+WK_USE_SWIFT_JSON_PARSER = NO;
+WK_SWIFT_JSON_PARSER_DEFINES_YES = USE_SWIFT_JSON_PARSER=1;
 GCC_SYMBOLS_PRIVATE_EXTERN = YES;
 // JSC_SUPPORTS_SWIFT for the C++ compiles of every target that includes this file: the framework, which
 // compiles JavaScriptCore's Swift, and libJavaScriptCore, which compiles most of its C++. A header that chooses

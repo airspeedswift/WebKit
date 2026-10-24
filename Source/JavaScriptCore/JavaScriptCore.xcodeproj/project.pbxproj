@@ -1770,6 +1770,9 @@
 		A7D9A29817A0BC7400EE2618 /* DFGLICMPhase.h in Headers */ = {isa = PBXBuildFile; fileRef = A7D9A29317A0BC7400EE2618 /* DFGLICMPhase.h */; };
 		A7DCB97312E5193F00911940 /* WriteBarrier.h in Headers */ = {isa = PBXBuildFile; fileRef = A7DCB77912E3D90500911940 /* WriteBarrier.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A7E2EA6B0FB460CF00601F06 /* LiteralParser.h in Headers */ = {isa = PBXBuildFile; fileRef = A7E2EA690FB460CF00601F06 /* LiteralParser.h */; };
+		A20771A48C1FCDC7B3E7443D /* LiteralParserSwiftTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 6A2E371885174327623F0235 /* LiteralParserSwiftTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		64511C588C8CAC615A91A1E6 /* LiteralParserSwiftFacade.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 211A39312E7FFD60F660439C /* LiteralParserSwiftFacade.cpp */; };
+		647BC1488A9E180741120884 /* LiteralParserSwift.swift in Sources */ = {isa = PBXBuildFile; fileRef = 610BBE6327462B6DC5EE68CF /* LiteralParserSwift.swift */; };
 		A7E5A3A81797432D00E893C0 /* CompilationResult.h in Headers */ = {isa = PBXBuildFile; fileRef = A7E5A3A61797432D00E893C0 /* CompilationResult.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A7F2996C17A0BB670010417A /* FTLFail.h in Headers */ = {isa = PBXBuildFile; fileRef = A7F2996A17A0BB670010417A /* FTLFail.h */; };
 		A7F9935F0FD7325100A0B2D0 /* JSONObject.h in Headers */ = {isa = PBXBuildFile; fileRef = A7F9935D0FD7325100A0B2D0 /* JSONObject.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -5766,6 +5769,9 @@
 		A7DCB77912E3D90500911940 /* WriteBarrier.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WriteBarrier.h; sourceTree = "<group>"; };
 		A7E2EA690FB460CF00601F06 /* LiteralParser.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LiteralParser.h; sourceTree = "<group>"; };
 		A7E2EA6A0FB460CF00601F06 /* LiteralParser.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = LiteralParser.cpp; sourceTree = "<group>"; };
+		610BBE6327462B6DC5EE68CF /* LiteralParserSwift.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiteralParserSwift.swift; sourceTree = "<group>"; };
+		211A39312E7FFD60F660439C /* LiteralParserSwiftFacade.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LiteralParserSwiftFacade.cpp; sourceTree = "<group>"; };
+		6A2E371885174327623F0235 /* LiteralParserSwiftTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LiteralParserSwiftTypes.h; sourceTree = "<group>"; };
 		A7E5A3A51797432D00E893C0 /* CompilationResult.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CompilationResult.cpp; sourceTree = "<group>"; };
 		A7E5A3A61797432D00E893C0 /* CompilationResult.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CompilationResult.h; sourceTree = "<group>"; };
 		A7E5AB361799E4B200D2833D /* X86Disassembler.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = X86Disassembler.cpp; path = disassembler/X86Disassembler.cpp; sourceTree = "<group>"; };
@@ -9529,6 +9535,9 @@
 				148B1417225DD1D700D6E998 /* LeafExecutable.h */,
 				A7E2EA6A0FB460CF00601F06 /* LiteralParser.cpp */,
 				A7E2EA690FB460CF00601F06 /* LiteralParser.h */,
+				610BBE6327462B6DC5EE68CF /* LiteralParserSwift.swift */,
+				211A39312E7FFD60F660439C /* LiteralParserSwiftFacade.cpp */,
+				6A2E371885174327623F0235 /* LiteralParserSwiftTypes.h */,
 				F692A8680255597D01FF60F7 /* Lookup.cpp */,
 				F692A8690255597D01FF60F7 /* Lookup.h */,
 				28806E21155E478A93FA7B02 /* MachineContext.h */,
@@ -12596,6 +12605,7 @@
 				86D3B3C310159D7F002865E7 /* LinkBuffer.h in Headers */,
 				E3637EE9236E56B00096BD0A /* LinkTimeConstant.h in Headers */,
 				A7E2EA6B0FB460CF00601F06 /* LiteralParser.h in Headers */,
+				A20771A48C1FCDC7B3E7443D /* LiteralParserSwiftTypes.h in Headers */,
 				FE20CE9E15F04A9500DF3430 /* LLIntCLoop.h in Headers */,
 				0F4680CA14BBB16C00BFE272 /* LLIntCommon.h in Headers */,
 				0F4680D314BBD16700BFE272 /* LLIntData.h in Headers */,
@@ -14701,6 +14711,8 @@
 			files = (
 				077B97302FD2BBE10042BC77 /* JavaScriptCore.swift in Sources */,
 				44F93E0E2AE71FBD00FFA37C /* JavaScriptCoreFramework.cpp in Sources */,
+				64511C588C8CAC615A91A1E6 /* LiteralParserSwiftFacade.cpp in Sources */,
+				647BC1488A9E180741120884 /* LiteralParserSwift.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
