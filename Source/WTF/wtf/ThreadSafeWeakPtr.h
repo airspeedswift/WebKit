@@ -321,7 +321,7 @@ public:
     static constexpr uintptr_t destructionStartedFlag = 1ull << (sizeof(uintptr_t) * CHAR_BIT - 1);
     static constexpr uintptr_t refIncrement = 2;
 
-    void ref() const
+    SWIFT_UNSAFE void ref() const
     {
         bool didRefStrongOnly = m_bits.transaction([&](uintptr_t& bits) {
             if (!isStrongOnly(bits))
@@ -337,7 +337,7 @@ public:
         std::bit_cast<ThreadSafeWeakPtrControlBlock*>(bits())->strongRef();
     }
 
-    void deref() const
+    SWIFT_UNSAFE void deref() const
     {
         uintptr_t newStrongOnlyRefCount = 0;
         bool didDerefStrongOnly = m_bits.transaction([&](uintptr_t& bits) {
