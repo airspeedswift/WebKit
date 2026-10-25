@@ -45,6 +45,10 @@ class ScriptElement;
 class ActiveParserSession {
 public:
     explicit ActiveParserSession(Document*);
+#if defined(__swift__)
+    // Swift would otherwise copy a session, and each copy would decrement the document's active parser count.
+    ActiveParserSession(const ActiveParserSession&) = delete;
+#endif
     ~ActiveParserSession();
 
 private:
@@ -67,7 +71,9 @@ class HTMLParserScheduler final : public RefCountedAndCanMakeWeakPtr<HTMLParserS
     WTF_MAKE_TZONE_ALLOCATED(HTMLParserScheduler);
     WTF_MAKE_NONCOPYABLE(HTMLParserScheduler);
 public:
-    static Ref<HTMLParserScheduler> LEGACY_NODELETE create(HTMLDocumentParser&);
+    // Only HTMLDocumentParser makes and detaches its scheduler, and the state checks below are debug-only, so these
+    // are unsafe in Swift.
+    SWIFT_UNSAFE static Ref<HTMLParserScheduler> LEGACY_NODELETE create(HTMLDocumentParser&);
     ~HTMLParserScheduler();
 
     void detach();
@@ -89,19 +95,19 @@ public:
     }
     bool shouldYieldBeforeExecutingScript(const ScriptElement*, PumpSession&);
 
-    void scheduleForResume();
+    SWIFT_UNSAFE void scheduleForResume();
     bool isScheduledForResume() const { return m_isSuspendedWithActiveTimer || m_continueNextChunkTimer.isActive() || m_documentHasActiveParserYieldTokens; }
 
-    void suspend();
-    void resume();
+    SWIFT_UNSAFE void suspend();
+    SWIFT_UNSAFE void resume();
 
-    void didBeginYieldingParser()
+    SWIFT_UNSAFE void didBeginYieldingParser()
     {
         ASSERT(!m_documentHasActiveParserYieldTokens);
         m_documentHasActiveParserYieldTokens = true;
     }
 
-    void didEndYieldingParser()
+    SWIFT_UNSAFE void didEndYieldingParser()
     {
         ASSERT(m_documentHasActiveParserYieldTokens);
         m_documentHasActiveParserYieldTokens = false;

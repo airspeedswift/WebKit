@@ -57,16 +57,16 @@ public:
     // CheckedPtr interface
     uint32_t checkedPtrCount() const final { return CanMakeCheckedPtr::checkedPtrCount(); }
     uint32_t checkedPtrCountWithoutThreadCheck() const final { return CanMakeCheckedPtr::checkedPtrCountWithoutThreadCheck(); }
-    void incrementCheckedPtrCount() const final { CanMakeCheckedPtr::incrementCheckedPtrCount(); }
-    void decrementCheckedPtrCount() const final { CanMakeCheckedPtr::decrementCheckedPtrCount(); }
-    void setDidBeginCheckedPtrDeletion() final { CanMakeCheckedPtr::setDidBeginCheckedPtrDeletion(); }
+    SWIFT_UNSAFE void incrementCheckedPtrCount() const final { CanMakeCheckedPtr::incrementCheckedPtrCount(); }
+    SWIFT_UNSAFE void decrementCheckedPtrCount() const final { CanMakeCheckedPtr::decrementCheckedPtrCount(); }
+    SWIFT_UNSAFE void setDidBeginCheckedPtrDeletion() final { CanMakeCheckedPtr::setDidBeginCheckedPtrDeletion(); }
 
     HTMLDocumentParser* asHTMLDocumentParser() final { return this; }
 
     static void parseDocumentFragment(const String&, DocumentFragment&, Element& contextElement, OptionSet<ParserContentPolicy> = { ParserContentPolicy::AllowScriptingContent }, CustomElementRegistry* = nullptr);
 
-    // For HTMLParserScheduler.
-    void resumeParsingAfterYield();
+    // For HTMLParserScheduler. Its preconditions are checked only in debug builds, so it is unsafe in Swift.
+    SWIFT_UNSAFE void resumeParsingAfterYield();
 
     // For HTMLTreeBuilder.
     HTMLTokenizer& tokenizer() LIFETIME_BOUND;
