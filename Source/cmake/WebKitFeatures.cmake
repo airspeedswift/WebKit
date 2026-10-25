@@ -541,6 +541,12 @@ macro(WEBKIT_OPTION_END)
     endif ()
 
     option(WK_BUILD_WEBCORE_SWIFT "Build WebCore's Swift sources, as the Xcode project does" OFF)
+    # The counterpart of the WebCore.xcconfig setting of the same name: the HTML fragment fast path
+    # parses and builds its DOM in HTMLFastPathParser.swift.
+    option(WK_USE_SWIFT_HTML_FAST_PATH "Parse HTML fragments on the fast path with WebCore's HTMLFastPathParser.swift" OFF)
+    if (WK_USE_SWIFT_HTML_FAST_PATH)
+        set(WK_BUILD_WEBCORE_SWIFT ON)
+    endif ()
 
     # A Swift feature still on with a too-old toolchain was requested explicitly
     # (the default declines to auto-enable it), so fail loudly rather than drop it

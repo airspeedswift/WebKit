@@ -3287,6 +3287,12 @@ list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/NodeName.cpp)
 GENERATE_DOM_NAME_ENUM(Namespace)
 list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/Namespace.cpp)
 
+# Set by WK_USE_SWIFT_HTML_FAST_PATH. HTMLDocumentParserFastPath.cpp then includes WebCore-Swift.h, so it
+# compiles in WebCore_SwiftInterop, after WebCore's Swift module.
+if (WK_USE_SWIFT_HTML_FAST_PATH)
+    list(APPEND WebCore_UNIFIED_SOURCE_EXCLUDES "(^|/)HTMLDocumentParserFastPath\\.cpp( |$)")
+endif ()
+
 WEBKIT_COMPUTE_SOURCES(WebCore)
 
 WEBKIT_DEFINE_SUBTARGET_WITH_PREFIX(WebCore WebCoreJSBindings
@@ -3387,6 +3393,33 @@ elseif (WK_BUILD_WEBCORE_SWIFT)
 
     # C++ sources that include WebCoreSwift-Generated.h.
     set(WebCore_SWIFT_INTEROP_SOURCES SwiftStubInterop.cpp)
+    # The WebCore_Private submodules (below) WebCore's Swift imports besides PlatformExportMacros, and the
+    # headers it imports one by one from Core (a relative path is under Source/WebCore).
+    set(_webcore_swift_modules "")
+    set(_webcore_swift_core_submodules)
+
+    # As WebCore.xcconfig's WK_USE_SWIFT_HTML_FAST_PATH: the C++ and Swift conditions, and the C++ condition for the
+    # headers the Swift imports, which Xcode gives WebCore's Swift from the target's preprocessor definitions.
+    if (WK_USE_SWIFT_HTML_FAST_PATH)
+        list(APPEND WebCore_SWIFT_INTEROP_SOURCES html/parser/HTMLDocumentParserFastPath.cpp)
+        target_compile_definitions(WebCore PRIVATE "$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:USE_SWIFT_HTML_FAST_PATH=1>")
+        webkit_target_add_swift_options(WebCore "-D USE_SWIFT_HTML_FAST_PATH" "-Xcc -DUSE_SWIFT_HTML_FAST_PATH=1")
+        string(APPEND _webcore_swift_modules
+            "    explicit module HTMLFastPathParserTypes {\n"
+            "        header \"${WEBCORE_DIR}/html/parser/HTMLFastPathParserTypes.h\"\n"
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n")
+        list(APPEND _webcore_swift_core_submodules
+            dom/Attribute.h dom/ContainerNode.h dom/Document.h dom/Element.h html/HTMLElement.h
+            ${WebCore_DERIVED_SOURCES_DIR}/HTMLElementFactory.h html/parser/HTMLNameCache.h dom/Node.h
+            ${WebCore_DERIVED_SOURCES_DIR}/NodeName.h dom/QualifiedName.h dom/Text.h)
+        if (WIN32)
+            # Document's map of std::unique_ptr<Locale>: with the MSVC standard library the importer instantiates
+            # its destructor, which needs Locale's definition, so the Document submodule has PlatformLocale.h too.
+            set(_webcore_swift_core_submodule_headers_Document platform/text/PlatformLocale.h)
+        endif ()
+    endif ()
 
     webkit_target_add_swift_options(WebCore
         "-library-level spi"
@@ -3430,7 +3463,32 @@ elseif (WK_BUILD_WEBCORE_SWIFT)
 
     # The WebCore_Private submodules WebCore's Swift imports. Apple platforms get them from
     # WebCore_Private.modulemap, a framework module over PrivateHeaders, which the other ports do not
-    # build; here each names its header in the source tree.
+    # build; here each names its header in the source tree. The headers imported one by one
+    # (`WebCore_Private.Core.Element` and so on) are each a submodule of Core, as in the framework's
+    # umbrella map.
+    if (_webcore_swift_core_submodules)
+        string(APPEND _webcore_swift_modules "    module Core {\n")
+        foreach (_h IN LISTS _webcore_swift_core_submodules)
+            if (NOT IS_ABSOLUTE "${_h}")
+                set(_h "${WEBCORE_DIR}/${_h}")
+            endif ()
+            get_filename_component(_name "${_h}" NAME_WE)
+            string(APPEND _webcore_swift_modules
+                "        explicit module ${_name} {\n"
+                "            header \"${_h}\"\n")
+            # Headers a submodule needs besides its own, set as _webcore_swift_core_submodule_headers_<name>.
+            foreach (_extra IN LISTS _webcore_swift_core_submodule_headers_${_name})
+                string(APPEND _webcore_swift_modules "            header \"${WEBCORE_DIR}/${_extra}\"\n")
+            endforeach ()
+            string(APPEND _webcore_swift_modules
+                "            export *\n"
+                "        }\n")
+        endforeach ()
+        string(APPEND _webcore_swift_modules
+            "        requires cplusplus\n"
+            "        export *\n"
+            "    }\n")
+    endif ()
     set(_webcore_swift_module_dir "${CMAKE_CURRENT_BINARY_DIR}/SwiftModuleMap")
     file(WRITE "${_webcore_swift_module_dir}/module.modulemap.in"
         "module WebCore_Private [system] {\n"
@@ -3438,6 +3496,7 @@ elseif (WK_BUILD_WEBCORE_SWIFT)
         "        header \"${WEBCORE_DIR}/platform/PlatformExportMacros.h\"\n"
         "        export *\n"
         "    }\n"
+        "${_webcore_swift_modules}"
         "}\n")
     configure_file("${_webcore_swift_module_dir}/module.modulemap.in" "${_webcore_swift_module_dir}/module.modulemap" COPYONLY)
 
