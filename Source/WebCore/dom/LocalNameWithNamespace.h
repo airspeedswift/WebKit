@@ -34,6 +34,7 @@ namespace WebCore {
 // expanded name should be treated as identical regardless of how they were prefixed.
 class LocalNameWithNamespace {
 public:
+    LocalNameWithNamespace() = delete;
     LocalNameWithNamespace(const AtomString& namespaceURI, const AtomString& localName)
         : m_canonical(nullAtom(), localName, namespaceURI) { }
     LocalNameWithNamespace(const QualifiedName& qualifiedName)

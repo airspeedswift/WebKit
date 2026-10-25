@@ -75,6 +75,8 @@ public:
     // NOTE: This constructor is not actually implemented, it's just defined so MSVC
     // will let us use a zero-length array of Attributes.
     Attribute();
+#else
+    Attribute() = delete;
 #endif
 
 private:

@@ -53,6 +53,10 @@ template<typename T, typename PtrTraits>
 class CheckedRef {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED(CheckedRef);
 public:
+#if defined(__swift__)
+    // Swift would otherwise give CheckedRef an init() that leaves it null.
+    CheckedRef() = delete;
+#endif
 
     ~CheckedRef()
     {

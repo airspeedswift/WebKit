@@ -58,6 +58,10 @@ template<typename T>
 class InlineWeakRef {
     WTF_FORBID_HEAP_ALLOCATION_ALLOWING_PLACEMENT_NEW;
 public:
+#if defined(__swift__)
+    // Swift would otherwise give InlineWeakRef an init() that leaves it null.
+    InlineWeakRef() = delete;
+#endif
     ALWAYS_INLINE InlineWeakRef(T& ptr) : m_ptr(&weakRef(ptr)) { }
     ALWAYS_INLINE InlineWeakRef(const InlineWeakRef& o) : m_ptr(weakRef(*o.m_ptr)) { }
     template<typename X> InlineWeakRef(const InlineWeakRef<X>& o) : m_ptr(weakRef(*o.m_ptr)) { }

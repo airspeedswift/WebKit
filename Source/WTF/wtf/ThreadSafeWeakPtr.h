@@ -573,6 +573,10 @@ template<class T> ThreadSafeWeakPtr(const T*) -> ThreadSafeWeakPtr<T>;
 template<typename T>
 class ThreadSafeWeakRef {
 public:
+#if defined(__swift__)
+    // Swift would otherwise give ThreadSafeWeakRef an init() that leaves it null.
+    ThreadSafeWeakRef() = delete;
+#endif
     ThreadSafeWeakRef(const ThreadSafeWeakRef& other) { m_storage.copyFrom(other.m_storage); }
 
     ThreadSafeWeakRef(ThreadSafeWeakRef&& other) { m_storage.moveFrom(other.m_storage); }

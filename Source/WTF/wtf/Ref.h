@@ -94,6 +94,11 @@ public:
             RefDerefTraits::derefIfNotNull(ptr);
     }
 
+#if defined(__swift__)
+    // Swift would otherwise give Ref an init() that leaves it null.
+    Ref() = delete;
+#endif
+
     Ref(T& object)
         : m_ptr(&RefDerefTraits::ref(object))
     {
