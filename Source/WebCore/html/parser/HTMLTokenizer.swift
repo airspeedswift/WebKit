@@ -31,17 +31,43 @@ internal import WebCore_Private.Core.HTMLEntityTable
 internal import WebCore_Private.Core.CSSTokenizerInputStream // kEndOfFileMarker
 // Operators that WebCore's headers declare use these JavaScriptCore and WTF types. Without their definitions, ==, !,
 // << and * do not typecheck in this file.
+#if canImport(JavaScriptCore_Private) // Not a module outside Apple platforms, where the headers are textual.
 internal import JavaScriptCore_Private.Cxx.Snippet
 internal import JavaScriptCore_Private.Cxx.DOMJITCallDOMGetterSnippet
 internal import JavaScriptCore_Private.Cxx.WasmInstanceAnchor
 internal import JavaScriptCore_Private.Cxx.WasmCalleeGroup
 internal import JavaScriptCore_Private.Cxx.WasmModule
 internal import JavaScriptCore_Private.Cxx.WasmModuleDebugInfo
+#endif
 internal import wtf.Core.Stopwatch
 #if USE_SWIFT_HTML_PER_TOKEN
 internal import WebCore_Private.Core.Attribute
 internal import WebCore_Private.Core.HTMLNameCache
 internal import WebCore_Private.Core.QualifiedName
+#endif
+
+#if os(Windows)
+// FIXME: With the MSVC standard library, Swift does not import SegmentedString's span accessors (SegmentedString.h),
+// so these give its free-function forms the members' names.
+extension WebCore.SegmentedString {
+    @_lifetime(borrow self)
+    func currentSubstringBytes8() -> Span<UInt8> {
+        WebCore.segmentedStringCurrentSubstringBytes8(self)
+    }
+
+    @_lifetime(borrow self)
+    func currentSubstringSpan16() -> Span<UInt16> {
+        WebCore.segmentedStringCurrentSubstringSpan16(self)
+    }
+}
+
+// FIXME: The same for HTMLToken's span accessors (HTMLToken.h).
+extension WebCore.HTMLToken {
+    @_lifetime(borrow self)
+    func processingInstructionTargetCharacters() -> Span<WTF.Latin1Character> {
+        WebCore.htmlTokenProcessingInstructionTargetCharacters(self)
+    }
+}
 #endif
 
 /// Runs HTMLTokenizer::processToken on `tokenizer` and `source`.
@@ -104,8 +130,10 @@ private func processToken(
     #endif
 }
 
+// FIXME: Internal for the reason HTMLFastPathCodeUnit (HTMLFastPathParser.swift) is: private declarations do not link
+// under ThinLTO on Windows.
 /// HTMLTokenizer::State, in the same order, which HTMLTokenizer::processToken checks with a static_assert.
-private enum TokenizerState: UInt32, CaseIterable {
+internal enum TokenizerState: UInt32, CaseIterable {
     case data
     case characterReferenceInData
     case rcdata
@@ -412,10 +440,12 @@ private var rightSquareBracketCharacter: SIMD16<UInt8> {
     SIMD16(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x5D, 0xFF, 0x00)
 }
 
+// FIXME: Internal for the reason HTMLFastPathCodeUnit (HTMLFastPathParser.swift) is: private declarations do not link
+// under ThinLTO on Windows.
 /// The second table that a run also ends at, for characters whose low four bits are those of a special character.
 ///
 /// None, '-', ' ', ']', or the ' ', '<' and '=' of an attribute name.
-private enum AdditionalSpecialCharacters {
+internal enum AdditionalSpecialCharacters {
     case none
     case hyphenMinus
     case space
@@ -434,8 +464,10 @@ private enum AdditionalSpecialCharacters {
     }
 }
 
+// FIXME: Internal, with its conformances' members, for the reason HTMLFastPathCodeUnit (HTMLFastPathParser.swift)
+// is: private declarations do not link under ThinLTO on Windows.
 /// A code unit of a SegmentedString substring, as plainTextLength reads it.
-private protocol PlainTextCodeUnit: FixedWidthInteger, UnsignedInteger {
+internal protocol PlainTextCodeUnit: FixedWidthInteger, UnsignedInteger {
     /// tableMatchNibbles of code units `offset` to `offset + 15` of `characters` against `specialCharacters`, and
     /// against `additionalSpecialCharacters`. A code unit above 0xFF matches neither.
     static func specialCharacterMatches(
@@ -448,7 +480,7 @@ private protocol PlainTextCodeUnit: FixedWidthInteger, UnsignedInteger {
 
 extension UInt8: PlainTextCodeUnit {
     @inline(always)
-    fileprivate static func specialCharacterMatches(
+    static func specialCharacterMatches(
         _ characters: Span<UInt8>,
         at offset: Int,
         _ specialCharacters: SIMD16<UInt8>,
@@ -465,7 +497,7 @@ extension UInt8: PlainTextCodeUnit {
 
 extension UInt16: PlainTextCodeUnit {
     @inline(always)
-    fileprivate static func specialCharacterMatches(
+    static func specialCharacterMatches(
         _ characters: Span<UInt16>,
         at offset: Int,
         _ specialCharacters: SIMD16<UInt8>,
@@ -1776,7 +1808,8 @@ extension WebCore.HTMLTokenizer {
         }
         var state = states[Int(m_state.rawValue)]
         defer {
-            m_state = State(rawValue: state.rawValue)
+            // State's raw type is the C++ enum's underlying type: unsigned on Apple platforms, int under MSVC.
+            m_state = State(rawValue: State.RawValue(state.rawValue))
         }
 
         if !m_bufferedEndTagName.isEmpty() && !state.isEndTagBuffering {

@@ -382,12 +382,17 @@ static String textRuns(ASCIILiteral newline, unsigned seed)
 static void appendAttributeValue(StringBuilder& builder, Generator& generator, ASCIILiteral newline)
 {
     switch (generator.below(3)) {
-    case 0:
-        builder.append('"', proseWords[generator.below(std::size(proseWords))], ' ', generator.below(1000));
+    case 0: {
+        // One generator call per statement: the order a compiler evaluates function arguments in is unspecified
+        // (clang-cl, like MSVC, goes right to left), and the input must be the same on every platform.
+        auto word = proseWords[generator.below(std::size(proseWords))];
+        auto number = generator.below(1000);
+        builder.append('"', word, ' ', number);
         if (!generator.below(8))
             builder.append(newline, "next line"_s);
         builder.append('"');
         break;
+    }
     case 1:
         builder.append('\'', 'x', generator.below(100), " y\'"_s);
         break;
@@ -409,7 +414,8 @@ static String attributeHeavy(ASCIILiteral newline, unsigned seed)
         builder.append('<', tag);
         unsigned count = 6 + generator.below(7);
         for (unsigned i = 0; i < count; ++i) {
-            builder.append(generator.below(10) ? " "_s : newline, names[generator.below(std::size(names))]);
+            auto separator = generator.below(10) ? " "_s : newline;
+            builder.append(separator, names[generator.below(std::size(names))]);
             if (generator.below(10)) {
                 builder.append('=');
                 appendAttributeValue(builder, generator, newline);

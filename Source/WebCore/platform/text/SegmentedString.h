@@ -172,6 +172,17 @@ private:
     void (SegmentedString::*m_advanceAndUpdateLineNumberFunction)() { &SegmentedString::advanceEmpty };
 };
 
+#if USE_SWIFT_HTML_TOKENIZER
+#if OS(WINDOWS)
+// FIXME: With the MSVC standard library, Swift does not import a member function of this class that returns a
+// std::span, LIFETIME_BOUND or not ("may return an interior pointer"). It does import these, which take the string
+// LIFETIME_BOUND, with a Span overload whose lifetime depends on the string; HTMLTokenizer.swift calls them through
+// the members' names.
+inline std::span<const uint8_t> segmentedStringCurrentSubstringBytes8(const SegmentedString& string LIFETIME_BOUND) { return string.currentSubstringBytes8(); }
+inline std::span<const char16_t> segmentedStringCurrentSubstringSpan16(const SegmentedString& string LIFETIME_BOUND) { return string.currentSubstringSpan16(); }
+#endif
+#endif
+
 inline SegmentedString::Substring::Substring(StringView passedStringView)
     : originalLength(passedStringView.length())
 {
