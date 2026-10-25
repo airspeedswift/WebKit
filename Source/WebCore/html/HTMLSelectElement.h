@@ -59,8 +59,8 @@ public:
     USING_CAN_MAKE_WEAKPTR(HTMLElement);
 
     // PopupMenuClient ref-counting (disambiguate from FormAssociatedElement)
-    void ref() const final { HTMLFormControlElement::ref(); }
-    void deref() const final { HTMLFormControlElement::deref(); }
+    SWIFT_UNSAFE void ref() const final { HTMLFormControlElement::ref(); }
+    SWIFT_UNSAFE void deref() const final { HTMLFormControlElement::deref(); }
 
     static Ref<HTMLSelectElement> create(const QualifiedName&, Document&);
     static Ref<HTMLSelectElement> create(Document&);

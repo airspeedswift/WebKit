@@ -56,8 +56,8 @@ public:
     virtual ~HTMLLinkElement();
 
     // CachedResourceClient.
-    void ref() const final { HTMLElement::ref(); }
-    void deref() const final { HTMLElement::deref(); }
+    SWIFT_UNSAFE void ref() const final { HTMLElement::ref(); }
+    SWIFT_UNSAFE void deref() const final { HTMLElement::deref(); }
 
     URL href() const;
     WEBCORE_EXPORT const AtomString& LEGACY_NODELETE rel() const;

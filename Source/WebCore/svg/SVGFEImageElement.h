@@ -40,8 +40,8 @@ public:
     virtual ~SVGFEImageElement();
 
     // CachedResourceClient.
-    void ref() const final { SVGFilterPrimitiveStandardAttributes::ref(); }
-    void deref() const final { SVGFilterPrimitiveStandardAttributes::deref(); }
+    SWIFT_UNSAFE void ref() const final { SVGFilterPrimitiveStandardAttributes::ref(); }
+    SWIFT_UNSAFE void deref() const final { SVGFilterPrimitiveStandardAttributes::deref(); }
 
     bool renderingTaintsOrigin() const;
 

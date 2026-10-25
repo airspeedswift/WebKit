@@ -202,8 +202,8 @@ public:
     USING_CAN_MAKE_WEAKPTR(SINGLE_ARG(CanMakeWeakPtr<HTMLMediaElement, WeakPtrFactoryInitialization::Eager>));
 
     // ActiveDOMObject, AudioSessionConfigurationChangeObserver.
-    void ref() const final { HTMLElement::ref(); }
-    void deref() const final { HTMLElement::deref(); }
+    SWIFT_UNSAFE void ref() const final { HTMLElement::ref(); }
+    SWIFT_UNSAFE void deref() const final { HTMLElement::deref(); }
 
     TrackOpaqueRoot& trackOpaqueRoot() { return m_trackOpaqueRoot; }
 
@@ -214,7 +214,7 @@ public:
     bool hasVideo() const override { return false; }
     WEBCORE_EXPORT bool hasAudio() const override;
 
-    WEBCORE_EXPORT static HashSet<WeakRef<HTMLMediaElement>>& LEGACY_NODELETE allMediaElements();
+    SWIFT_MAIN_ACTOR WEBCORE_EXPORT static HashSet<WeakRef<HTMLMediaElement>>& LEGACY_NODELETE allMediaElements();
 
     WEBCORE_EXPORT void rewind(double timeDelta);
     WEBCORE_EXPORT void returnToRealtime() override;
@@ -765,8 +765,8 @@ public:
     // CheckedPtr interface
     uint32_t checkedPtrCount() const { return CanMakeCheckedPtr<Node>::checkedPtrCount(); }
     uint32_t checkedPtrCountWithoutThreadCheck() const { return CanMakeCheckedPtr<Node>::checkedPtrCountWithoutThreadCheck(); }
-    void incrementCheckedPtrCount() const { CanMakeCheckedPtr<Node>::incrementCheckedPtrCount(); }
-    void decrementCheckedPtrCount() const { CanMakeCheckedPtr<Node>::decrementCheckedPtrCount(); }
+    SWIFT_UNSAFE void incrementCheckedPtrCount() const { CanMakeCheckedPtr<Node>::incrementCheckedPtrCount(); }
+    SWIFT_UNSAFE void decrementCheckedPtrCount() const { CanMakeCheckedPtr<Node>::decrementCheckedPtrCount(); }
     void setDidBeginCheckedPtrDeletion()
     {
         PlatformMediaSessionClient::setDidBeginCheckedPtrDeletion();

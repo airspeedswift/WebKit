@@ -41,8 +41,8 @@ public:
     virtual ~ProcessingInstruction();
 
     // CachedResourceClient.
-    void ref() const final { CharacterData::ref(); }
-    void deref() const final { CharacterData::deref(); }
+    SWIFT_UNSAFE void ref() const final { CharacterData::ref(); }
+    SWIFT_UNSAFE void deref() const final { CharacterData::deref(); }
 
     const String& target() const LIFETIME_BOUND { return m_target; }
 

@@ -73,8 +73,8 @@ public:
     TreeScope* parentTreeScope() const { return m_parentTreeScope; }
     void setParentTreeScope(TreeScope&);
 
-    WEBCORE_EXPORT void LEGACY_NODELETE ref() const;
-    WEBCORE_EXPORT void deref() const;
+    SWIFT_UNSAFE WEBCORE_EXPORT void LEGACY_NODELETE ref() const;
+    SWIFT_UNSAFE WEBCORE_EXPORT void deref() const;
 
     Element* LEGACY_NODELETE focusedElementInScope();
     Element* LEGACY_NODELETE pointerLockElement() const;

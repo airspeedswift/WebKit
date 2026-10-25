@@ -40,8 +40,8 @@ public:
     virtual ~SVGUseElement();
 
     // CachedResourceClient.
-    void ref() const final { SVGGraphicsElement::ref(); }
-    void deref() const final { SVGGraphicsElement::deref(); }
+    SWIFT_UNSAFE void ref() const final { SVGGraphicsElement::ref(); }
+    SWIFT_UNSAFE void deref() const final { SVGGraphicsElement::deref(); }
 
     void invalidateShadowTree();
     void updateUserAgentShadowTree() final;

@@ -69,8 +69,8 @@ public:
     bool willRespondToMouseClickEventsWithEditability(Editability) const final;
 
     // PopupOpeningObserver.
-    void ref() const final { HTMLDivElement::ref(); }
-    void deref() const final { HTMLDivElement::deref(); }
+    SWIFT_UNSAFE void ref() const final { HTMLDivElement::ref(); }
+    SWIFT_UNSAFE void deref() const final { HTMLDivElement::deref(); }
 
 private:
     SpinButtonElement(Document&, SpinButtonOwner&);

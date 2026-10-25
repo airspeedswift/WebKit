@@ -473,21 +473,21 @@ public:
     virtual ~Document();
 
     // FrameDestructionObserver.
-    void ref() const final { ContainerNode::ref(); }
-    void deref() const final { ContainerNode::deref(); }
+    SWIFT_UNSAFE void ref() const final { ContainerNode::ref(); }
+    SWIFT_UNSAFE void deref() const final { ContainerNode::deref(); }
 
     // Nodes belonging to this document increase referencingNodeCount -
     // these are enough to keep the document from being destroyed, but
     // not enough to keep it from removing its children. This allows a
     // node that outlives its document to still have a valid document
     // pointer without introducing reference cycles.
-    ALWAYS_INLINE void incrementReferencingNodeCount(unsigned count = 1)
+    SWIFT_UNSAFE ALWAYS_INLINE void incrementReferencingNodeCount(unsigned count = 1)
     {
         ASSERT(!deletionHasBegun());
         m_referencingNodeCount += count;
     }
 
-    ALWAYS_INLINE void decrementReferencingNodeCount(unsigned count = 1)
+    SWIFT_UNSAFE ALWAYS_INLINE void decrementReferencingNodeCount(unsigned count = 1)
     {
         ASSERT_WITH_SECURITY_IMPLICATION(m_referencingNodeCount >= count);
 
@@ -505,11 +505,11 @@ public:
 
     unsigned referencingNodeCount() const { return m_referencingNodeCount; }
 
-    void removedLastRef();
+    SWIFT_UNSAFE void removedLastRef();
 
     using DocumentsMap = HashMap<ScriptExecutionContextIdentifier, WeakRef<Document, WeakPtrImplWithEventTargetData>>;
-    WEBCORE_EXPORT static DocumentsMap::ValuesIteratorRange LEGACY_NODELETE allDocuments();
-    WEBCORE_EXPORT static DocumentsMap& LEGACY_NODELETE allDocumentsMap();
+    SWIFT_MAIN_ACTOR WEBCORE_EXPORT static DocumentsMap::ValuesIteratorRange LEGACY_NODELETE allDocuments();
+    SWIFT_MAIN_ACTOR WEBCORE_EXPORT static DocumentsMap& LEGACY_NODELETE allDocumentsMap();
 
     MediaQueryMatcher& mediaQueryMatcher();
 

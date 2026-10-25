@@ -466,3 +466,15 @@
 #define BASE_CLASS_SWIFT_SHARED_REFERENCE(_retain, _release)
 #define DERIVED_CLASS_SWIFT_SHARED_REFERENCE(_retain, _release) SWIFT_SHARED_REFERENCE(_retain, _release) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT
 #endif
+
+// SWIFT_MAIN_ACTOR isolates a declaration to the main actor in Swift, for functions that reach objects that belong
+// to the main thread from global state.
+#if __has_attribute(swift_attr)
+#ifndef SWIFT_MAIN_ACTOR
+#define SWIFT_MAIN_ACTOR __attribute__((swift_attr("@MainActor")))
+#endif
+#else
+#ifndef SWIFT_MAIN_ACTOR
+#define SWIFT_MAIN_ACTOR
+#endif
+#endif

@@ -46,8 +46,8 @@ enum class AttachmentAssociatedElementType : uint8_t {
 
 class AttachmentAssociatedElement {
 public:
-    void ref() const { refAttachmentAssociatedElement(); }
-    void deref() const { derefAttachmentAssociatedElement(); }
+    SWIFT_UNSAFE void ref() const { refAttachmentAssociatedElement(); }
+    SWIFT_UNSAFE void deref() const { derefAttachmentAssociatedElement(); }
 
     virtual ~AttachmentAssociatedElement() = default;
 
