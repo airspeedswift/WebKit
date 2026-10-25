@@ -44,8 +44,8 @@ public:
     static Ref<HTMLTrackElement> create(const QualifiedName&, Document&);
 
     // ActiveDOMObject.
-    void ref() const final { HTMLElement::ref(); }
-    void deref() const final { HTMLElement::deref(); }
+    SWIFT_UNSAFE void ref() const final { HTMLElement::ref(); }
+    SWIFT_UNSAFE void deref() const final { HTMLElement::deref(); }
 
     using HTMLElement::scriptExecutionContext;
 

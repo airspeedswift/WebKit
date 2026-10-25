@@ -37,7 +37,7 @@ class UserTypingGestureIndicator {
     WTF_MAKE_NONCOPYABLE(UserTypingGestureIndicator);
 public:
     WEBCORE_EXPORT static bool LEGACY_NODELETE processingUserTypingGesture();
-    WEBCORE_EXPORT static Node* LEGACY_NODELETE focusedElementAtGestureStart();
+    SWIFT_MAIN_ACTOR WEBCORE_EXPORT static Node* LEGACY_NODELETE focusedElementAtGestureStart();
 
     WEBCORE_EXPORT explicit UserTypingGestureIndicator(LocalFrame&);
     WEBCORE_EXPORT ~UserTypingGestureIndicator();

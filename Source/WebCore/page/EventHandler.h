@@ -206,7 +206,7 @@ public:
     void cancelDragAndDrop(const PlatformMouseEvent&, std::unique_ptr<Pasteboard>&&, OptionSet<DragOperation>, bool draggingFiles);
     DragEventTargetData performDragAndDrop(const PlatformMouseEvent&, std::unique_ptr<Pasteboard>&&, OptionSet<DragOperation>, bool draggingFiles, const HitTestResult&, DragData&&);
     void updateDragStateAfterEditDragIfNeeded(Element& rootEditableElement);
-    static Element* LEGACY_NODELETE draggedElement();
+    SWIFT_MAIN_ACTOR static Element* LEGACY_NODELETE draggedElement();
 #endif
 
     void scheduleHoverStateUpdate();

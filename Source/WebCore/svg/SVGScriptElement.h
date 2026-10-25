@@ -38,8 +38,8 @@ public:
     using PropertyRegistry = SVGPropertyOwnerRegistry<SVGScriptElement, SVGElement, SVGURIReference>;
 
     // ActiveDOMObject
-    void ref() const final { SVGElement::ref(); }
-    void deref() const final { SVGElement::deref(); }
+    SWIFT_UNSAFE void ref() const final { SVGElement::ref(); }
+    SWIFT_UNSAFE void deref() const final { SVGElement::deref(); }
 
     bool async() const;
 

@@ -86,8 +86,8 @@ class WEBCORE_EXPORT EventTarget : public ScriptWrappable, public CanMakeWeakPtr
 public:
     static Ref<EventTarget> LEGACY_NODELETE create(ScriptExecutionContext&);
 
-    inline void ref(); // Defined in EventTargetInlines.h.
-    inline void deref(); // Defined in EventTargetInlines.h.
+    SWIFT_UNSAFE inline void ref(); // Defined in EventTargetInlines.h.
+    SWIFT_UNSAFE inline void deref(); // Defined in EventTargetInlines.h.
 
     virtual enum EventTargetInterfaceType LEGACY_NODELETE eventTargetInterface() const = 0;
     virtual ScriptExecutionContext* scriptExecutionContext() const = 0;

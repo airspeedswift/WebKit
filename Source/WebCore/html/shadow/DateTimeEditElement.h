@@ -67,8 +67,8 @@ public:
 
     virtual ~DateTimeEditElement();
 
-    void ref() const final { HTMLDivElement::ref(); }
-    void deref() const final { HTMLDivElement::deref(); }
+    SWIFT_UNSAFE void ref() const final { HTMLDivElement::ref(); }
+    SWIFT_UNSAFE void deref() const final { HTMLDivElement::deref(); }
 
     void addField(Ref<DateTimeFieldElement>);
     Element& LEGACY_NODELETE fieldsWrapperElement() const;

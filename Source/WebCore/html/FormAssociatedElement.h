@@ -27,8 +27,8 @@ namespace WebCore {
 // https://html.spec.whatwg.org/multipage/forms.html#form-associated-element
 class FormAssociatedElement {
 public:
-    void ref() const { refFormAssociatedElement(); }
-    void deref() const { derefFormAssociatedElement(); }
+    SWIFT_UNSAFE void ref() const { refFormAssociatedElement(); }
+    SWIFT_UNSAFE void deref() const { derefFormAssociatedElement(); }
 
     virtual ~FormAssociatedElement() { RELEASE_ASSERT(!m_form); }
     virtual HTMLElement& asHTMLElement() = 0;
