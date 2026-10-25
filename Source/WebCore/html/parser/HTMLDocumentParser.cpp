@@ -297,7 +297,11 @@ bool HTMLDocumentParser::pumpTokenizerLoop(SynchronousMode mode, bool parsingFra
         if (mode == SynchronousMode::AllowYield && parserScheduler->shouldYieldBeforeToken(session)) [[unlikely]]
             return true;
 
+#if USE_SWIFT_HTML_PER_TOKEN
+        auto token = m_tokenizer.nextToken(m_input.current(), m_tokenAttributes);
+#else
         auto token = m_tokenizer.nextToken(m_input.current());
+#endif
         if (!token)
             return false;
 
@@ -355,7 +359,11 @@ void HTMLDocumentParser::pumpTokenizer(SynchronousMode mode)
 
 void HTMLDocumentParser::constructTreeFromHTMLToken(HTMLTokenizer::TokenPtr& rawToken)
 {
+#if USE_SWIFT_HTML_PER_TOKEN
+    AtomHTMLToken token(*rawToken, WTF::move(m_tokenAttributes));
+#else
     AtomHTMLToken token(*rawToken);
+#endif
 
     // We clear the rawToken in case constructTree
     // synchronously re-enters the parser. We don't clear the token immedately

@@ -39,6 +39,13 @@
 #include "WebCore-Swift.h"
 #endif
 
+#if USE_SWIFT_HTML_PER_TOKEN
+#if !USE_SWIFT_HTML_TOKENIZER
+#error "USE_SWIFT_HTML_PER_TOKEN needs USE_SWIFT_HTML_TOKENIZER"
+#endif
+#include <wtf/SetForScope.h>
+#endif
+
 namespace WebCore {
 
 using namespace HTMLNames;
@@ -1607,6 +1614,19 @@ bool HTMLTokenizer::processToken(SegmentedString& source)
     return false;
 #endif
 }
+
+#if USE_SWIFT_HTML_PER_TOKEN
+thread_local HTMLTokenAttributes* HTMLTokenizer::s_tokenAttributes { nullptr };
+
+bool HTMLTokenizer::processToken(SegmentedString& source, HTMLTokenAttributes& attributes)
+{
+    static_assert(makesTokenAttributesBit == 0x8000, "HTMLTokenizer.swift has the same value");
+    ASSERT(!(m_additionalAllowedCharacter & makesTokenAttributesBit));
+    ASSERT(!s_tokenAttributes);
+    SetForScope scope { s_tokenAttributes, &attributes };
+    return processHTMLTokenizerToken(*this, source, m_additionalAllowedCharacter | makesTokenAttributesBit);
+}
+#endif
 
 String HTMLTokenizer::bufferedCharacters() const
 {
