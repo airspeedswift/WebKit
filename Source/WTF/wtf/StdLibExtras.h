@@ -1398,6 +1398,18 @@ template<NonConstByteType T, typename U> constexpr auto byteCast(const U& value)
     return ByteCastTraits<U>::template cast<T>(value);
 }
 
+// Latin-1 characters as their bytes and back, for Swift, which reaches neither byteCast nor a span's bytes for a
+// span of Latin1Character.
+inline std::span<const uint8_t> bytesOfLatin1Characters(std::span<const Latin1Character> characters LIFETIME_BOUND)
+{
+    return byteCast<uint8_t>(characters);
+}
+
+inline std::span<const Latin1Character> latin1CharactersOfBytes(std::span<const uint8_t> bytes LIFETIME_BOUND)
+{
+    return byteCast<Latin1Character>(bytes);
+}
+
 template<IntegralOrEnum T> constexpr auto unsignedCast(T value)
 {
     return static_cast<std::make_unsigned_t<T>>(value);

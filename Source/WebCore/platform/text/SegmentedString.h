@@ -66,6 +66,8 @@ public:
     void advancePastNewline(); // Faster than calling advance when we know the current character is a newline.
 
     std::span<const Latin1Character> currentSubstringSpan8() const LIFETIME_BOUND;
+    // For Swift, which cannot view a span of Latin1Character as bytes.
+    std::span<const uint8_t> currentSubstringBytes8() const LIFETIME_BOUND { return byteCast<uint8_t>(currentSubstringSpan8()); }
     void advancePastMultiple8(unsigned count);
     std::span<const char16_t> currentSubstringSpan16() const LIFETIME_BOUND;
     void advancePastMultiple16(unsigned count);
