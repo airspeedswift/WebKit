@@ -93,7 +93,8 @@ public:
     void appendToPublicIdentifier(char16_t);
     void appendToSystemIdentifier(char16_t);
 
-    std::unique_ptr<DoctypeData> releaseDoctypeData();
+    // Unsafe in Swift, which does not check a null std::unique_ptr before dereferencing it.
+    SWIFT_UNSAFE std::unique_ptr<DoctypeData> releaseDoctypeData();
 
     // StartTag, EndTag.
 
@@ -170,7 +171,7 @@ private:
     bool m_isReplacedNullCharacter { false };
 
     // For StartTag and EndTag
-    bool m_selfClosing;
+    bool m_selfClosing { false };
     AttributeList m_attributes;
 #if ASSERT_ENABLED
     bool m_hasCurrentAttribute { false };
@@ -227,6 +228,7 @@ inline void HTMLToken::appendToName(char16_t character)
 inline void HTMLToken::setForceQuirks()
 {
     ASSERT(m_type == Type::DOCTYPE);
+    RELEASE_ASSERT(m_doctypeData);
     m_doctypeData->forceQuirks = true;
 }
 
@@ -248,6 +250,7 @@ inline void HTMLToken::beginDOCTYPE(char16_t character)
 inline void HTMLToken::setPublicIdentifierToEmptyString()
 {
     ASSERT(m_type == Type::DOCTYPE);
+    RELEASE_ASSERT(m_doctypeData);
     m_doctypeData->hasPublicIdentifier = true;
     m_doctypeData->publicIdentifier.clear();
 }
@@ -255,6 +258,7 @@ inline void HTMLToken::setPublicIdentifierToEmptyString()
 inline void HTMLToken::setSystemIdentifierToEmptyString()
 {
     ASSERT(m_type == Type::DOCTYPE);
+    RELEASE_ASSERT(m_doctypeData);
     m_doctypeData->hasSystemIdentifier = true;
     m_doctypeData->systemIdentifier.clear();
 }
@@ -263,6 +267,7 @@ inline void HTMLToken::appendToPublicIdentifier(char16_t character)
 {
     ASSERT(character);
     ASSERT(m_type == Type::DOCTYPE);
+    RELEASE_ASSERT(m_doctypeData);
     ASSERT(m_doctypeData->hasPublicIdentifier);
     m_doctypeData->publicIdentifier.append(character);
 }
@@ -271,6 +276,7 @@ inline void HTMLToken::appendToSystemIdentifier(char16_t character)
 {
     ASSERT(character);
     ASSERT(m_type == Type::DOCTYPE);
+    RELEASE_ASSERT(m_doctypeData);
     ASSERT(m_doctypeData->hasSystemIdentifier);
     m_doctypeData->systemIdentifier.append(character);
 }
@@ -518,6 +524,7 @@ inline void HTMLToken::appendToProcessingInstructionTarget(Latin1Character chara
     ASSERT(character);
     ASSERT(isASCII(character));
     ASSERT(m_type == Type::ProcessingInstruction);
+    RELEASE_ASSERT(m_processingInstructionTarget);
     m_processingInstructionTarget->append(character);
 }
 
