@@ -32,6 +32,7 @@
 #include <wtf/HashTraits.h>
 #include <wtf/PrintStream.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/SwiftBridging.h>
 
 #if USE(CF)
 #include <CoreFoundation/CoreFoundation.h>
@@ -306,8 +307,9 @@ public:
     
     WTF_EXPORT_PRIVATE void dump(PrintStream& out) const;
     
-    enum EmptyValueTag { EmptyValue };
-    enum DeletedValueTag { DeletedValue };
+    // Swift sees these as unsafe: a BitVector made from one holds a value that its accessors read as a pointer.
+    enum SWIFT_UNSAFE EmptyValueTag { EmptyValue };
+    enum SWIFT_UNSAFE DeletedValueTag { DeletedValue };
     
     BitVector(EmptyValueTag)
         : m_bitsOrPointer(0)

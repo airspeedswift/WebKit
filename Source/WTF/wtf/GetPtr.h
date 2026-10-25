@@ -20,11 +20,13 @@
 #pragma once
 
 #include <memory>
+#include <wtf/SwiftBridging.h>
 
 namespace WTF {
 
-enum HashTableDeletedValueType { HashTableDeletedValue };
-enum HashTableEmptyValueType { HashTableEmptyValue };
+// Swift sees these as unsafe: a value made from one holds a sentinel pointer that is not an object.
+enum SWIFT_UNSAFE HashTableDeletedValueType { HashTableDeletedValue };
+enum SWIFT_UNSAFE HashTableEmptyValueType { HashTableEmptyValue };
 
 template <typename T> inline T* getPtr(T* p) { return p; }
 
