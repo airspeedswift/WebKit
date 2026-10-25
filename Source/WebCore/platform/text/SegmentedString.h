@@ -68,9 +68,12 @@ public:
     std::span<const Latin1Character> currentSubstringSpan8() const LIFETIME_BOUND;
     // For Swift, which cannot view a span of Latin1Character as bytes.
     std::span<const uint8_t> currentSubstringBytes8() const LIFETIME_BOUND { return byteCast<uint8_t>(currentSubstringSpan8()); }
-    void advancePastMultiple8(unsigned count);
+    // Each assumes that the current substring has its width, which only a debug assertion checks, so Swift uses
+    // advancePastMultiple() instead.
+    SWIFT_UNSAFE void advancePastMultiple8(unsigned count);
     std::span<const char16_t> currentSubstringSpan16() const LIFETIME_BOUND;
-    void advancePastMultiple16(unsigned count);
+    SWIFT_UNSAFE void advancePastMultiple16(unsigned count);
+    void advancePastMultiple(unsigned count);
 
     enum AdvancePastResult { DidNotMatch, DidMatch, NotEnoughCharacters };
     AdvancePastResult advancePast(ASCIILiteral literal) { return advancePast<false>(literal); }
@@ -370,6 +373,19 @@ inline void SegmentedString::advancePastMultiple16(unsigned count)
     m_currentCharacter = m_currentSubstring.s.currentCharacter16[0];
     if (m_currentSubstring.s.currentCharacter16.size() == 1) [[unlikely]]
         updateAdvanceFunctionPointersForSingleCharacterSubstring();
+}
+
+// Advances past `count` characters in the current substring, as advancePastMultiple8() or advancePastMultiple16()
+// does for its width. Crashes on an 8-bit substring of fewer than two characters, and unless at least one character
+// remains after advancing.
+inline void SegmentedString::advancePastMultiple(unsigned count)
+{
+    if (m_fastPathFlags & Use8BitAdvance) {
+        advancePastMultiple8(count);
+        return;
+    }
+    RELEASE_ASSERT(!m_currentSubstring.is8Bit);
+    advancePastMultiple16(count);
 }
 
 inline unsigned SegmentedString::numberOfCharactersConsumed() const
