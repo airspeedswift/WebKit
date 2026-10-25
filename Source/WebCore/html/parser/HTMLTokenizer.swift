@@ -67,6 +67,18 @@ extension WebCore.HTMLToken {
     func processingInstructionTargetCharacters() -> Span<WTF.Latin1Character> {
         WebCore.htmlTokenProcessingInstructionTargetCharacters(self)
     }
+
+    #if USE_SWIFT_HTML_PER_TOKEN
+    @_lifetime(borrow self)
+    func attributeName(_ i: Int) -> Span<UInt16> {
+        WebCore.htmlTokenAttributeName(self, i)
+    }
+
+    @_lifetime(borrow self)
+    func attributeValue(_ i: Int) -> Span<UInt16> {
+        WebCore.htmlTokenAttributeValue(self, i)
+    }
+    #endif
 }
 #endif
 

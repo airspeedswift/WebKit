@@ -59,6 +59,13 @@ struct HTMLTokenAttributes {
     Vector<Attribute> attributes;
     bool hasDuplicateAttribute { false };
 };
+
+#if OS(WINDOWS)
+// FIXME: MSVC does not allow a thread_local static data member in an exported class, so on Windows the
+// HTMLTokenizer::s_tokenAttributes below is this namespace-scope variable. constinit, so that reading it needs no
+// check for a dynamic initializer.
+extern constinit thread_local HTMLTokenAttributes* s_tokenAttributes;
+#endif
 #endif
 
 #if USE_SWIFT_HTML_TOKENIZER
@@ -198,7 +205,9 @@ private:
     static constexpr char16_t makesTokenAttributesBit = 0x8000;
 
     // Where HTMLTokenizer.swift puts the attributes; non-null only during processToken(SegmentedString&, HTMLTokenAttributes&).
+#if !OS(WINDOWS)
     static thread_local HTMLTokenAttributes* s_tokenAttributes;
+#endif
     ALWAYS_INLINE static HTMLTokenAttributes& tokenAttributes()
     {
         RELEASE_ASSERT(s_tokenAttributes);

@@ -553,6 +553,12 @@ macro(WEBKIT_OPTION_END)
     if (WK_USE_SWIFT_HTML_TOKENIZER AND NOT WK_USE_SWIFT_HTML_FAST_PATH)
         message(FATAL_ERROR "WK_USE_SWIFT_HTML_TOKENIZER needs WK_USE_SWIFT_HTML_FAST_PATH: the C++ fast path calls the C++ entity decoder")
     endif ()
+    # The counterpart of the WebCore.xcconfig setting of the same name: HTMLTokenizer.swift makes the tree
+    # builder's tag names and attributes as it scans.
+    option(WK_USE_SWIFT_HTML_PER_TOKEN "Make the HTML tree builder's tag names and attributes in WebCore's HTMLTokenizer.swift" OFF)
+    if (WK_USE_SWIFT_HTML_PER_TOKEN AND NOT WK_USE_SWIFT_HTML_TOKENIZER)
+        message(FATAL_ERROR "WK_USE_SWIFT_HTML_PER_TOKEN needs WK_USE_SWIFT_HTML_TOKENIZER, whose HTMLTokenizer.swift makes them")
+    endif ()
 
     # A Swift feature still on with a too-old toolchain was requested explicitly
     # (the default declines to auto-enable it), so fail loudly rather than drop it

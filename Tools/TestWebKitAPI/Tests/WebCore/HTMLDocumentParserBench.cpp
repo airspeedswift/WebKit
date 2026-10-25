@@ -424,8 +424,12 @@ static String longAttributeValues()
         case 2: {
             builder.append("<div style=\""_s);
             unsigned declarations = 3 + generator.below(4);
-            for (unsigned i = 0; i < declarations; ++i)
-                builder.append(properties[generator.below(std::size(properties))], ": "_s, generator.below(64), "px; "_s);
+            for (unsigned i = 0; i < declarations; ++i) {
+                // One generator call per statement: the order a compiler evaluates function arguments in is
+                // unspecified (clang-cl, like MSVC, goes right to left), and the input must be the same everywhere.
+                auto property = properties[generator.below(std::size(properties))];
+                builder.append(property, ": "_s, generator.below(64), "px; "_s);
+            }
             builder.append("\">"_s);
             appendWord(builder, generator);
             builder.append("</div>\n"_s);
@@ -495,8 +499,11 @@ static String unknownTags()
             tag.append(generator.below(50));
         builder.append('<', tag.toString());
         unsigned count = generator.below(4);
-        for (unsigned i = 0; i < count; ++i)
-            builder.append(' ', names[i + generator.below(std::size(names) - i)], "=\"v"_s, generator.below(20), '"');
+        for (unsigned i = 0; i < count; ++i) {
+            // One generator call per statement, as in longAttributeValues.
+            auto name = names[i + generator.below(std::size(names) - i)];
+            builder.append(' ', name, "=\"v"_s, generator.below(20), '"');
+        }
         builder.append('>');
         appendWord(builder, generator);
         builder.append("</"_s, tag.toString(), ">\n"_s);
@@ -633,14 +640,22 @@ static String foreignContent()
     StringBuilder builder;
     while (builder.length() < 1 << 20) {
         switch (generator.below(3)) {
-        case 0:
+        case 0: {
             builder.append("<svg viewBox=\"0 0 "_s, 10 + generator.below(90), " 100\" preserveAspectRatio=\"xMidYMid meet\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">"_s);
-            for (unsigned i = 0; i < 4; ++i)
-                builder.append("<path d=\"M"_s, generator.below(100), ' ', generator.below(100), "L"_s, generator.below(100), ' ', generator.below(100), "Z\" stroke=\"#333\" stroke-width=\""_s, 1 + generator.below(4), "\" stroke-linecap=round fill=none/>"_s);
-            builder.append("<use xlink:href=\"#icon-"_s, generator.below(40), "\" x=\"0\" y=\"0\"/><clipPath id=c"_s, generator.below(100), "><rect width=10 height=10/></clipPath>"_s);
+            for (unsigned i = 0; i < 4; ++i) {
+                // One generator call per statement, as in longAttributeValues.
+                auto x1 = generator.below(100);
+                auto y1 = generator.below(100);
+                auto x2 = generator.below(100);
+                auto y2 = generator.below(100);
+                builder.append("<path d=\"M"_s, x1, ' ', y1, "L"_s, x2, ' ', y2, "Z\" stroke=\"#333\" stroke-width=\""_s, 1 + generator.below(4), "\" stroke-linecap=round fill=none/>"_s);
+            }
+            auto icon = generator.below(40);
+            builder.append("<use xlink:href=\"#icon-"_s, icon, "\" x=\"0\" y=\"0\"/><clipPath id=c"_s, generator.below(100), "><rect width=10 height=10/></clipPath>"_s);
             builder.append("<linearGradient gradientUnits=userSpaceOnUse gradientTransform=\"rotate(45)\"><stop offset=0 stop-color=red/></linearGradient>"_s);
             builder.append("<foreignObject width=10 height=10><p>x</p></foreignObject><text xml:lang=en textLength=40>t</text></svg>\n"_s);
             break;
+        }
         case 1:
             builder.append("<math display=block definitionURL=\"http://example.com/def\"><mrow><mi mathvariant=bold>x</mi><mo stretchy=false>=</mo><mfrac linethickness=2><mn>"_s, generator.below(1000), "</mn><mi mathvariant=\"double-struck\">y</mi></mfrac></mrow>"_s);
             builder.append("<annotation-xml encoding=\"text/html\"><span title=t>h</span></annotation-xml></math>\n"_s);
