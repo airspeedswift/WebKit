@@ -38,10 +38,43 @@ internal import JavaScriptCore_Private.Cxx.WasmCalleeGroup
 internal import JavaScriptCore_Private.Cxx.WasmModule
 internal import JavaScriptCore_Private.Cxx.WasmModuleDebugInfo
 internal import wtf.Core.Stopwatch
+#if USE_SWIFT_HTML_PER_TOKEN
+internal import WebCore_Private.Core.Attribute
+internal import WebCore_Private.Core.HTMLNameCache
+internal import WebCore_Private.Core.QualifiedName
+#endif
 
 /// Runs HTMLTokenizer::processToken on `tokenizer` and `source`.
 ///
 /// Tokenizes `source` until the token is complete or `source` runs out. Returns true if the token is ready.
+///
+/// HTMLTokenizer::processToken passes `*this` as `tokenizer`, and as `source` the SegmentedString its caller passed
+/// in: HTMLDocumentParser's input stream, or a local of the preload scanner, the meta charset parser or another
+/// user of HTMLTokenizer. Nothing else may change either of them until this returns. The C++ called from here:
+/// - HTMLToken's append and begin functions, setSelfClosing, clear, makeEndOfFile and makeReplacedNullCharacter, and
+///   their Vector growth, and processingInstructionTargetCharacters;
+/// - the tokenizer's m_appropriateEndTagName, m_bufferedEndTagName and m_temporaryBuffer, which are Vectors;
+/// - InputStreamPreprocessor's peek and advance functions;
+/// - SegmentedString's advance functions, pushBack, currentSubstringBytes8, currentSubstringSpan16,
+///   advancePastMultiple, advancePastMultiple8 and advancePastMultiple16;
+/// - the static entity table, and String's constructor from a span.
+///
+/// With USE_SWIFT_HTML_PER_TOKEN, also:
+/// - HTMLToken's attributeCount, attributeName and attributeValue;
+/// - HTMLTokenizer::setTokenTagName, which calls findTagName and AtomString's constructor from a span;
+/// - HTMLTokenizer's reserveTokenAttributes, tokenAttributesContainLocalName, appendTokenAttribute and
+///   setTokenHasDuplicateAttribute, which reach the HTMLDocumentParser's HTMLTokenAttributes through
+///   s_tokenAttributes, and grow its Vector of Attribute;
+/// - HTMLNameCache's makeAttributeQualifiedName and makeAttributeValue, for 8-bit and 16-bit characters, which reach
+///   the name cache's arrays, WTF::equal, AtomStringImpl::add, QualifiedName's constructor, nullAtom and emptyAtom;
+/// - Attribute's constructor, and the destructors of QualifiedName, AtomString and Attribute, and of the cache
+///   entries they replace: StringImpl::destroy, AtomStringImpl::remove, QualifiedName::QualifiedNameImpl's
+///   destructor and fastFree.
+///
+/// None of these reaches the tokenizer or the source except through what this file passes it, runs script or a
+/// callback, or uses another thread. Only setTokenTagName and the four attribute functions reach the parser: they
+/// write HTMLDocumentParser::m_tokenAttributes, which is neither the tokenizer nor the input stream and which the
+/// parser reads after this returns. Scripts run from the tree builder, after this returns.
 @_expose(Cxx)
 func processHTMLTokenizerToken(
     _ tokenizer: inout WebCore.HTMLTokenizer,
@@ -64,7 +97,11 @@ private func processToken(
     _ source: inout WebCore.SegmentedString,
     _ additionalAllowedCharacter: UInt16
 ) -> Bool {
+    #if USE_SWIFT_HTML_PER_TOKEN
+    tokenizer.processTokenMakingAttributes(from: &source, additionalAllowedCharacter: additionalAllowedCharacter)
+    #else
     tokenizer.processToken(from: &source, additionalAllowedCharacter: additionalAllowedCharacter)
+    #endif
 }
 
 /// HTMLTokenizer::State, in the same order, which HTMLTokenizer::processToken checks with a static_assert.
@@ -660,6 +697,601 @@ private func advancePast<let length: Int>(
     }
     return .didMatch
 }
+
+#if USE_SWIFT_HTML_PER_TOKEN
+/// HTMLTokenizer::makesTokenAttributesBit, which HTMLTokenizer.cpp checks with a static_assert.
+private let makesTokenAttributesBit: UInt16 = 0x8000
+
+/// The shortest tag emitTagInCurrentSubstring emits: "<a>".
+private let shortestTagLength = 3
+
+private let latinCapitalLetterZ: UInt16 = 0x5A
+
+private let graveAccent: UInt16 = 0x60
+
+extension WebCore.HTMLTokenizer {
+    /// Runs processToken, and makes the tag name and attributes of a tag token when `additionalAllowedCharacter`
+    /// has makesTokenAttributesBit.
+    @inline(always)
+    fileprivate mutating func processTokenMakingAttributes(
+        from source: inout WebCore.SegmentedString,
+        additionalAllowedCharacter: UInt16
+    ) -> Bool {
+        let makesAttributes = additionalAllowedCharacter & makesTokenAttributesBit != 0
+        if makesAttributes && startsTagInDataState(&source) && emitTagInCurrentSubstring(&source) {
+            return true
+        }
+        let character = additionalAllowedCharacter & ~makesTokenAttributesBit
+        guard processToken(from: &source, additionalAllowedCharacter: character) else {
+            return false
+        }
+        if makesAttributes {
+            makeTokenAttributes()
+        }
+        return true
+    }
+
+    /// AtomHTMLToken's tag name and initializeAttributes on m_token's attributes, for a tag token.
+    private func makeTokenAttributes() {
+        let type = m_token.type()
+        guard type == .StartTag || type == .EndTag else {
+            return
+        }
+        setTokenTagName()
+        let count = m_token.attributeCount()
+        guard count != 0 else {
+            return
+        }
+        // As AtomHTMLToken::initializeAttributes, which keeps the size in an unsigned.
+        Self.reserveTokenAttributes(UInt32(truncatingIfNeeded: count))
+        var index = 0
+        while index < count {
+            let name: Span<UInt16> = m_token.attributeName(index)
+            if !name.isEmpty {
+                let qualifiedName = WebCore.HTMLNameCache.makeAttributeQualifiedName(name)
+                if Self.tokenAttributesContainLocalName(qualifiedName) {
+                    Self.setTokenHasDuplicateAttribute()
+                } else {
+                    let value: Span<UInt16> = m_token.attributeValue(index)
+                    Self.appendTokenAttribute(
+                        consuming: WebCore.Attribute(
+                            consuming: consume qualifiedName,
+                            consuming: WebCore.HTMLNameCache.makeAttributeValue(value)
+                        )
+                    )
+                }
+            }
+            index += 1
+        }
+    }
+
+    /// Whether the next token starts with a less-than sign in the data state, with nothing buffered.
+    ///
+    /// The sign starts an 8-bit substring long enough for the shortest tag.
+    @inline(always)
+    private func startsTagInDataState(_ source: inout WebCore.SegmentedString) -> Bool {
+        guard m_state.rawValue == TokenizerState.data.rawValue && m_token.type() == .Uninitialized else {
+            return false
+        }
+        let characters: Span<UInt8> = source.currentSubstringBytes8()
+        guard characters.count >= shortestTagLength else {
+            return false
+        }
+        return UInt16(characters[0]) == lessThanSign
+    }
+
+    /// Emits the tag that starts at the current character, if it can be tokenized without the state machine.
+    ///
+    /// That needs the whole tag in the current substring, with no character references, '\0', '\r' or parse errors,
+    /// and no '<', which ends a tag when usePreHTML5ParserQuirks is set. Makes the tag name and attributes as
+    /// makeTokenAttributes does, from the source's characters, and leaves the tokenizer and the source as processToken
+    /// would after the tag. Returns false, having changed nothing, for any other input.
+    @inline(never)
+    private mutating func emitTagInCurrentSubstring(_ source: inout WebCore.SegmentedString) -> Bool {
+        if hasBufferedEndTag {
+            return false
+        }
+        let scannedTag: ScannedTag?
+        do {
+            let characters: Span<UInt8> = source.currentSubstringBytes8()
+            scannedTag = scanTagName(characters)
+            if let tag = scannedTag, !tag.nameEndsAtWhitespace {
+                makeTagName(characters, tag)
+            }
+        }
+        guard let tag = scannedTag else {
+            return false
+        }
+        if tag.nameEndsAtWhitespace {
+            return emitTagWithAttributesInCurrentSubstring(&source, tag)
+        }
+        return emitScannedTag(&source, tag)
+    }
+
+    /// emitTagInCurrentSubstring for a tag whose name scanTagName found to end at a whitespace character.
+    @inline(never)
+    private mutating func emitTagWithAttributesInCurrentSubstring(
+        _ source: inout WebCore.SegmentedString,
+        _ scannedTag: ScannedTag
+    ) -> Bool {
+        var tag = scannedTag
+        // One for each bit of ScannedTag's foldedNames.
+        var attributes = [16 of ScannedAttribute](repeating: ScannedAttribute())
+        do {
+            let characters: Span<UInt8> = source.currentSubstringBytes8()
+            do {
+                var attributeSpan = attributes.mutableSpan
+                guard scanAttributes(characters, &tag, &attributeSpan) else {
+                    return false
+                }
+            }
+            makeTag(characters, tag, attributes.span)
+        }
+        return emitScannedTag(&source, tag)
+    }
+
+    /// Advances `source` past the tag that scanTagName or scanAttributes found, as processToken does.
+    @inline(always)
+    private mutating func emitScannedTag(_ source: inout WebCore.SegmentedString, _ tag: ScannedTag) -> Bool {
+        // The '>' is before the end of the current substring, which the scan checked.
+        var length = tag.greaterThanSignOffset
+        if tag.containsNewline {
+            length = advancePastNewlines(&source, length)
+        }
+        source.advancePastMultiple(UInt32(truncatingIfNeeded: length))
+        _ = m_preprocessor.peek(&source, false)
+        return emitAndResumeInDataState(&source)
+    }
+
+    /// What processToken and makeTokenAttributes do for the tag that scanAttributes found in `characters`.
+    @inline(always)
+    private mutating func makeTag(
+        _ characters: Span<UInt8>,
+        _ tag: ScannedTag,
+        _ attributes: Span<ScannedAttribute>
+    ) {
+        makeTagName(characters, tag)
+        guard tag.attributeCount != 0 else {
+            return
+        }
+        // At most the 16 that emitTagWithAttributesInCurrentSubstring has room for.
+        Self.reserveTokenAttributes(UInt32(truncatingIfNeeded: tag.attributeCount))
+        var index = 0
+        while index < tag.attributeCount {
+            let attribute = attributes[index]
+            let name = characters.extracting(Int(attribute.nameStart)..<Int(attribute.nameEnd))
+            let foldsName = tag.foldedNames & 1 << index != 0
+            let qualifiedName =
+                foldsName
+                ? makeFoldedAttributeName(name)
+                : WebCore.HTMLNameCache.makeAttributeQualifiedName(WTF.latin1CharactersOfBytes(name))
+            if Self.tokenAttributesContainLocalName(qualifiedName) {
+                Self.setTokenHasDuplicateAttribute()
+            } else {
+                Self.appendTokenAttribute(
+                    consuming: WebCore.Attribute(
+                        consuming: consume qualifiedName,
+                        consuming: WebCore.HTMLNameCache.makeAttributeValue(
+                            WTF.latin1CharactersOfBytes(
+                                characters.extracting(Int(attribute.valueStart)..<Int(attribute.valueEnd))
+                            )
+                        )
+                    )
+                )
+            }
+            index += 1
+        }
+    }
+
+    /// The tag name part of makeTag.
+    @inline(always)
+    private mutating func makeTagName(_ characters: Span<UInt8>, _ tag: ScannedTag) {
+        let nameStart = tag.isEndTag ? 2 : 1
+        let firstCharacter = convertASCIIAlphaToLower(UInt16(characters[nameStart]))
+        if tag.isEndTag {
+            m_token.beginEndTag(WTF.Latin1Character(firstCharacter))
+            m_appropriateEndTagName.clear()
+        } else {
+            m_token.beginStartTag(WTF.Latin1Character(firstCharacter))
+            m_appropriateEndTagName.shrink(0)
+            m_appropriateEndTagName.append(consuming: UInt16(firstCharacter))
+        }
+        var index = nameStart + 1
+        while index < tag.nameEnd {
+            let lowercaseCharacter = toASCIILower(UInt16(characters[index]))
+            m_token.appendToName(lowercaseCharacter)
+            if !tag.isEndTag {
+                m_appropriateEndTagName.append(consuming: lowercaseCharacter)
+            }
+            index += 1
+        }
+        if tag.selfClosing {
+            m_token.setSelfClosing()
+        }
+
+        setTokenTagName()
+    }
+}
+
+/// The longest attribute name with ASCII upper case letters that emitTagInCurrentSubstring emits.
+private let maximumFoldedAttributeNameLength = 32
+
+/// An attribute that scanAttributes found: offsets into the characters it scanned, which a substring's length,
+/// at most StringImpl::MaxLength, bounds.
+private struct ScannedAttribute {
+    var nameStart: Int32 = 0
+    var nameEnd: Int32 = 0
+    var valueStart: Int32 = 0
+    var valueEnd: Int32 = 0
+}
+
+/// A tag that scanTagName or scanAttributes found, as offsets from its less-than sign in the characters scanned.
+private struct ScannedTag {
+    var isEndTag = false
+    var nameEnd = 0
+    var selfClosing = false
+    var greaterThanSignOffset = 0
+    var attributeCount = 0
+    var containsNewline = false
+    /// The name ends at the whitespace character at nameEnd, and scanAttributes scans the rest of the tag.
+    var nameEndsAtWhitespace = false
+    /// Bit i is set when the name of attribute i has ASCII upper case letters.
+    ///
+    /// One bit for each of the 16 attributes emitTagWithAttributesInCurrentSubstring has room for.
+    var foldedNames: UInt16 = 0
+}
+
+/// Advances `source` past each '\n' in its first `length` characters, which are in the current 8-bit substring and
+/// start with a character other than '\n', and returns the number of those characters left after the last '\n'.
+/// advancePastMultiple8 starts a new line as advance does only for a '\n' it starts at, so each advance after the
+/// first starts at a '\n'.
+@inline(never)
+private func advancePastNewlines(_ source: inout WebCore.SegmentedString, _ length: Int) -> Int {
+    var remaining = length
+    var offset = newlineOffset(in: source.currentSubstringBytes8(), before: remaining)
+    while offset < remaining {
+        source.advancePastMultiple(UInt32(truncatingIfNeeded: offset))
+        // Cannot overflow: newlineOffset returned an offset of at least 1 and less than remaining.
+        remaining &-= offset
+        offset = newlineOffset(in: source.currentSubstringBytes8(), before: remaining)
+    }
+    return remaining
+}
+
+/// The offset of the first '\n' in `characters` after the first character and before `length`, or `length`.
+@inline(always)
+private func newlineOffset(in characters: Span<UInt8>, before length: Int) -> Int {
+    var offset = 1
+    while offset < length && UInt16(characters[offset]) != newlineCharacter {
+        offset += 1
+    }
+    return offset
+}
+
+private enum ScanState {
+    case beforeAttributeName
+    case afterAttributeName
+    case beforeAttributeValue
+    case afterAttributeValueQuoted
+    case selfClosingStartTag
+}
+
+/// isTokenizerWhitespace, noting a '\n' in `containsNewline` for emitScannedTag's line count.
+@inline(always)
+private func isScannedWhitespace(_ character: UInt16, _ containsNewline: inout Bool) -> Bool {
+    if character == space {
+        return true
+    }
+    if character > formFeed {
+        return false
+    }
+    containsNewline = containsNewline || character == newlineCharacter
+    return character == newlineCharacter || character == characterTabulation || character == formFeed
+}
+
+/// Whether `character` ends a scan wherever it is.
+///
+/// '\0' is also the end of file marker, the preprocessor handles '\r', and '<' ends a tag when
+/// usePreHTML5ParserQuirks is set.
+@inline(always)
+private func endsScan(_ character: UInt16) -> Bool {
+    character == 0 || character == carriageReturn || character == lessThanSign
+}
+
+/// Scans the name of the tag that starts at `characters[0]`.
+///
+/// `characters[0]` is a '<'. Follows the tag open, end tag open and tag name states. Gives the tag when its name
+/// ends with '>' or "/>" in `characters`, or with nameEndsAtWhitespace set when it ends at a whitespace character.
+/// Returns nil for any other input, which the state machine tokenizes.
+@inline(always)
+private func scanTagName(_ characters: Span<UInt8>) -> ScannedTag? {
+    let count = characters.count
+    guard count >= shortestTagLength else {
+        return nil
+    }
+    var tag = ScannedTag()
+    var index = 1
+    if UInt16(characters[index]) == solidus {
+        tag.isEndTag = true
+        index = 2
+    }
+    let firstCharacter = UInt16(characters[index])
+    guard isASCIIAlpha(firstCharacter) else {
+        return nil
+    }
+    index += 1
+    while index < count {
+        let character = UInt16(characters[index])
+        // Every character that ends the name or the scan is at most '>'.
+        if character > greaterThanSign {
+            index += 1
+            continue
+        }
+        if character == greaterThanSign {
+            tag.nameEnd = index
+            tag.greaterThanSignOffset = index
+            return tag
+        }
+        if character == solidus {
+            // The self-closing start tag state, which only a '>' leaves for the data state.
+            let next = index + 1
+            guard next < count && UInt16(characters[next]) == greaterThanSign else {
+                return nil
+            }
+            tag.nameEnd = index
+            tag.selfClosing = true
+            tag.greaterThanSignOffset = next
+            return tag
+        }
+        var containsNewline = false
+        if isScannedWhitespace(character, &containsNewline) {
+            tag.nameEnd = index
+            tag.containsNewline = containsNewline
+            tag.nameEndsAtWhitespace = true
+            return tag
+        }
+        if endsScan(character) {
+            return nil
+        }
+        index += 1
+    }
+    return nil
+}
+
+/// Finds the attributes of the tag that starts at `characters[0]`, from the whitespace character at `tag.nameEnd`.
+///
+/// Follows the tokenizer's tag states, and returns false unless the whole tag is in `characters` and needs none of
+/// the processing emitTagInCurrentSubstring leaves to the state machine.
+private func scanAttributes(
+    _ characters: Span<UInt8>,
+    _ tag: inout ScannedTag,
+    _ attributes: inout MutableSpan<ScannedAttribute>
+) -> Bool {
+    let count = characters.count
+    // Cannot overflow: nameEnd is the offset of a character in `characters`.
+    var index = tag.nameEnd &+ 1
+    var state = ScanState.beforeAttributeName
+    var attributeCount = 0
+    var containsNewline = tag.containsNewline
+    while index < count {
+        var character = UInt16(characters[index])
+        switch state {
+        case .beforeAttributeName, .afterAttributeName:
+            if isScannedWhitespace(character, &containsNewline) {
+                break
+            }
+            if character == solidus {
+                state = .selfClosingStartTag
+                break
+            }
+            if character == greaterThanSign {
+                tag.greaterThanSignOffset = index
+                tag.attributeCount = attributeCount
+                tag.containsNewline = containsNewline
+                return true
+            }
+            if character == equalsSign && state == .afterAttributeName {
+                state = .beforeAttributeValue
+                break
+            }
+            if endsScan(character) || character == quotationMark || character == apostrophe || character == equalsSign {
+                return false
+            }
+            guard attributeCount < attributes.count else {
+                return false
+            }
+            // The attribute name state.
+            let nameStart = index
+            var foldsName = isASCIIUpper(character)
+            while true {
+                index += 1
+                guard index < count else {
+                    return false
+                }
+                character = UInt16(characters[index])
+                // Every character that ends the name or the scan is below the ASCII letters.
+                if character > latinCapitalLetterZ {
+                    continue
+                }
+                if character > greaterThanSign {
+                    foldsName = foldsName || isASCIIUpper(character)
+                    continue
+                }
+                if isScannedWhitespace(character, &containsNewline) || character == solidus
+                    || character == equalsSign || character == greaterThanSign
+                {
+                    break
+                }
+                if endsScan(character) || character == quotationMark || character == apostrophe {
+                    return false
+                }
+            }
+            if foldsName && index - nameStart > maximumFoldedAttributeNameLength {
+                return false
+            }
+            // A substring is at most StringImpl::MaxLength characters, which Int32 holds.
+            let nameEnd = Int32(truncatingIfNeeded: index)
+            attributes[attributeCount] = ScannedAttribute(
+                nameStart: Int32(truncatingIfNeeded: nameStart),
+                nameEnd: nameEnd,
+                valueStart: nameEnd,
+                valueEnd: nameEnd
+            )
+            if foldsName {
+                tag.foldedNames |= 1 << attributeCount
+            }
+            attributeCount += 1
+            if character == greaterThanSign {
+                tag.greaterThanSignOffset = index
+                tag.attributeCount = attributeCount
+                tag.containsNewline = containsNewline
+                return true
+            }
+            state =
+                character == solidus
+                ? .selfClosingStartTag : character == equalsSign ? .beforeAttributeValue : .afterAttributeName
+
+        case .beforeAttributeValue:
+            if isScannedWhitespace(character, &containsNewline) {
+                break
+            }
+            if character == greaterThanSign {
+                tag.greaterThanSignOffset = index
+                tag.attributeCount = attributeCount
+                tag.containsNewline = containsNewline
+                return true
+            }
+            let valueStart: Int
+            if character == quotationMark || character == apostrophe {
+                // The attribute value (double-quoted) and (single-quoted) states.
+                let quote = character
+                index += 1
+                valueStart = index
+                let specialCharacters =
+                    quote == quotationMark
+                    ? doubleQuotedAttributeValueSpecialCharacters : singleQuotedAttributeValueSpecialCharacters
+                while true {
+                    // Sixteen characters at a time to the next one the loop below has to look at. index is at
+                    // most count; testing that as load16 does, unsigned, lets the compiler drop load16's check.
+                    // Cannot overflow: index is at most count.
+                    if UInt(bitPattern: index) <= UInt(bitPattern: count) && count &- index >= 16 {
+                        let matches = tableMatchNibbles(
+                            lowBytes: load16(characters, at: index),
+                            highBytes: SIMD16(),
+                            specialCharacters
+                        )
+                        // Cannot overflow: index + 16 is at most count.
+                        if matches == 0 {
+                            index &+= 16
+                            continue
+                        }
+                        // Cannot overflow: trailingZeroBitCount / 4 is below 16, and index + 16 is at most count.
+                        index &+= matches.trailingZeroBitCount / 4
+                    }
+                    guard UInt(bitPattern: index) < UInt(bitPattern: count) else {
+                        return false
+                    }
+                    character = UInt16(characters[index])
+                    if character == quote {
+                        break
+                    }
+                    // '\0', '\n', '\r' and '&' are below the other characters a value has.
+                    if character <= ampersand {
+                        if character == 0 || character == carriageReturn || character == ampersand {
+                            return false
+                        }
+                        containsNewline = containsNewline || character == newlineCharacter
+                    }
+                    index += 1
+                }
+                state = .afterAttributeValueQuoted
+            } else {
+                if endsScan(character) || character == ampersand || character == equalsSign || character == graveAccent {
+                    return false
+                }
+                // The attribute value (unquoted) state.
+                valueStart = index
+                while true {
+                    index += 1
+                    guard index < count else {
+                        return false
+                    }
+                    character = UInt16(characters[index])
+                    if isScannedWhitespace(character, &containsNewline) || character == greaterThanSign {
+                        break
+                    }
+                    if endsScan(character) || character == ampersand || character == quotationMark
+                        || character == apostrophe || character == equalsSign || character == graveAccent
+                    {
+                        return false
+                    }
+                }
+                state = .beforeAttributeName
+            }
+            // Cannot overflow: this state follows an attribute name, which attributeCount counts.
+            let attributeIndex = attributeCount &- 1
+            // A substring is at most StringImpl::MaxLength characters, which Int32 holds.
+            attributes[attributeIndex].valueStart = Int32(truncatingIfNeeded: valueStart)
+            attributes[attributeIndex].valueEnd = Int32(truncatingIfNeeded: index)
+            if character == greaterThanSign {
+                tag.greaterThanSignOffset = index
+                tag.attributeCount = attributeCount
+                tag.containsNewline = containsNewline
+                return true
+            }
+
+        case .afterAttributeValueQuoted:
+            if isScannedWhitespace(character, &containsNewline) {
+                state = .beforeAttributeName
+                break
+            }
+            if character == solidus {
+                state = .selfClosingStartTag
+                break
+            }
+            if character == greaterThanSign {
+                tag.greaterThanSignOffset = index
+                tag.attributeCount = attributeCount
+                tag.containsNewline = containsNewline
+                return true
+            }
+            return false
+
+        case .selfClosingStartTag:
+            guard character == greaterThanSign else {
+                return false
+            }
+            tag.selfClosing = true
+            tag.greaterThanSignOffset = index
+            tag.attributeCount = attributeCount
+            tag.containsNewline = containsNewline
+            return true
+        }
+        index += 1
+    }
+    return false
+}
+
+/// HTMLNameCache's name for `name`, at most maximumFoldedAttributeNameLength characters, in ASCII lower case.
+@inline(never)
+private func makeFoldedAttributeName(_ name: Span<UInt8>) -> WebCore.QualifiedName {
+    // maximumFoldedAttributeNameLength characters.
+    var folded = [32 of UInt8](repeating: 0)
+    do {
+        var foldedSpan = folded.mutableSpan
+        var index = 0
+        while index < name.count {
+            let character = name[index]
+            foldedSpan[index] = UInt8(truncatingIfNeeded: toASCIILower(UInt16(character)))
+            index += 1
+        }
+    }
+    return WebCore.HTMLNameCache.makeAttributeQualifiedName(
+        WTF.latin1CharactersOfBytes(folded.span.extracting(0..<name.count))
+    )
+}
+
+#endif
 
 // HTMLTokenizer.h gives this file access to the tokenizer's private members, inside extensions of it.
 extension WebCore.HTMLTokenizer {

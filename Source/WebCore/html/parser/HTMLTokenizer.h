@@ -34,13 +34,32 @@
 #define USE_SWIFT_HTML_TOKENIZER 0
 #endif
 
+#if !defined(USE_SWIFT_HTML_PER_TOKEN)
+#define USE_SWIFT_HTML_PER_TOKEN 0
+#endif
+
 #if USE_SWIFT_HTML_TOKENIZER
 #include <wtf/SwiftBridging.h>
+#endif
+
+#if USE_SWIFT_HTML_PER_TOKEN
+#include "TagName.h"
 #endif
 
 namespace WebCore {
 
 class SegmentedString;
+
+#if USE_SWIFT_HTML_PER_TOKEN
+// The tree builder's tag name and attributes for the tag token that HTMLTokenizer::nextToken(SegmentedString&, HTMLTokenAttributes&) returns.
+// AtomHTMLToken's constructor moves them out, leaving it ready for the next tag.
+struct HTMLTokenAttributes {
+    TagName tagName { TagName::Unknown };
+    AtomString name; // TagName::Unknown only.
+    Vector<Attribute> attributes;
+    bool hasDuplicateAttribute { false };
+};
+#endif
 
 #if USE_SWIFT_HTML_TOKENIZER
 class SWIFT_PRIVATE_FILEID("WebCore/HTMLTokenizer.swift") HTMLTokenizer;
@@ -53,6 +72,10 @@ public:
     // If we can't parse a whole token, this returns null.
     class TokenPtr;
     TokenPtr nextToken(SegmentedString&);
+#if USE_SWIFT_HTML_PER_TOKEN
+    // Also makes the tree builder's attributes of a returned tag token.
+    TokenPtr nextToken(SegmentedString&, HTMLTokenAttributes&);
+#endif
 
     // Returns a copy of any characters buffered internally by the tokenizer.
     // The tokenizer buffers characters when searching for the </script> token that terminates a script element.
@@ -168,6 +191,31 @@ private:
     };
 
     bool processToken(SegmentedString&);
+#if USE_SWIFT_HTML_PER_TOKEN
+    bool processToken(SegmentedString&, HTMLTokenAttributes&);
+
+    // Set in the additional allowed character passed to HTMLTokenizer.swift when it makes the attributes.
+    static constexpr char16_t makesTokenAttributesBit = 0x8000;
+
+    // Where HTMLTokenizer.swift puts the attributes; non-null only during processToken(SegmentedString&, HTMLTokenAttributes&).
+    static thread_local HTMLTokenAttributes* s_tokenAttributes;
+    ALWAYS_INLINE static HTMLTokenAttributes& tokenAttributes()
+    {
+        RELEASE_ASSERT(s_tokenAttributes);
+        return *s_tokenAttributes;
+    }
+    ALWAYS_INLINE void setTokenTagName() const
+    {
+        auto& attributes = tokenAttributes();
+        attributes.tagName = findTagName(m_token.name());
+        if (attributes.tagName == TagName::Unknown) [[unlikely]]
+            attributes.name = AtomString(m_token.name().span());
+    }
+    ALWAYS_INLINE static void reserveTokenAttributes(unsigned size) { tokenAttributes().attributes.reserveCapacity(size); }
+    ALWAYS_INLINE static bool tokenAttributesContainLocalName(const QualifiedName& name) { return tokenAttributes().attributes.containsIf([&](auto& attribute) { return attribute.localName().impl() == name.localName().impl(); }); }
+    ALWAYS_INLINE static void appendTokenAttribute(Attribute&& attribute) { tokenAttributes().attributes.append(WTF::move(attribute)); }
+    ALWAYS_INLINE static void setTokenHasDuplicateAttribute() { tokenAttributes().hasDuplicateAttribute = true; }
+#endif
 #if !USE_SWIFT_HTML_TOKENIZER
     bool processEntity(SegmentedString&);
 
@@ -302,6 +350,13 @@ inline HTMLTokenizer::TokenPtr HTMLTokenizer::nextToken(SegmentedString& source)
 {
     return TokenPtr(processToken(source) ? &m_token : nullptr);
 }
+
+#if USE_SWIFT_HTML_PER_TOKEN
+inline HTMLTokenizer::TokenPtr HTMLTokenizer::nextToken(SegmentedString& source, HTMLTokenAttributes& attributes)
+{
+    return TokenPtr(processToken(source, attributes) ? &m_token : nullptr);
+}
+#endif
 
 inline size_t HTMLTokenizer::numberOfBufferedCharacters() const
 {

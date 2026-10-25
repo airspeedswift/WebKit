@@ -26,7 +26,10 @@
 #include "config.h"
 
 #include "Helpers/Test.h"
+#include "TestPlatformStrategies.h"
 #include <WebCore/DocumentFragment.h>
+#include <WebCore/DocumentInlines.h>
+#include <WebCore/DocumentParser.h>
 #include <WebCore/Element.h>
 #include <WebCore/ElementInlines.h>
 #include <WebCore/ExceptionOr.h>
@@ -709,6 +712,33 @@ static String sixteenBitString(const String& string)
     return String(characters.span());
 }
 
+// The attributes of the first element in the body, after a document parse of `markup` appended in chunks of
+// `chunkLength` characters.
+static String parseFirstElementAttributes(const Settings& settings, const String& markup, unsigned chunkLength)
+{
+    auto document = HTMLDocument::create(nullptr, settings, aboutBlankURL());
+    EXPECT_FALSE(document->open().hasException());
+    for (unsigned i = 0; i < markup.length(); i += chunkLength) {
+        RefPtr parser = document->parser();
+        if (!parser)
+            break;
+        parser->appendSynchronously(RefPtr { markup.substring(i, chunkLength).impl() });
+    }
+    document->close();
+    RefPtr body = document->body();
+    RefPtr element = body ? dynamicDowncast<Element>(body->firstChild()) : nullptr;
+    EXPECT_TRUE(element);
+    if (!element)
+        return String();
+    StringBuilder builder;
+    for (unsigned i = 0; i < element->attributeCount(); ++i) {
+        if (i)
+            builder.append(' ');
+        builder.append(element->attributeAt(i).localName(), '=', element->attributeAt(i).value());
+    }
+    return builder.toString();
+}
+
 static String repeatedCharacter(char character, unsigned count)
 {
     StringBuilder builder;
@@ -1247,6 +1277,124 @@ TEST(WebCoreHTMLParser, TokenizerEndTagsInText)
             }
         }
     }
+}
+
+TEST(WebCoreHTMLParser, DocumentParserAttributeCountsAndNameLengths)
+{
+    ensureTestPlatformStrategiesInstalled();
+    ProcessWarming::initializeNames();
+    auto settings = Settings::create(nullptr);
+
+    auto expectAttributes = [&](const String& expected, const String& markup) {
+        for (unsigned chunkLength : { std::numeric_limits<unsigned>::max(), 1u, 7u }) {
+            EXPECT_EQ(expected, parseFirstElementAttributes(settings.get(), markup, chunkLength));
+            EXPECT_EQ(expected, parseFirstElementAttributes(settings.get(), sixteenBitString(markup), chunkLength));
+        }
+    };
+
+    // 16 and 17 attributes, and 17 whose last is a duplicate of the first.
+    StringBuilder sixteenAttributes;
+    StringBuilder sixteenAttributesExpected;
+    for (unsigned i = 0; i < 16; ++i) {
+        sixteenAttributes.append(" a"_s, i, '=', i);
+        sixteenAttributesExpected.append(i ? " a"_s : "a"_s, i, '=', i);
+    }
+    expectAttributes(sixteenAttributesExpected.toString(), makeString("<div"_s, sixteenAttributes.toString(), "></div>"_s));
+    expectAttributes(makeString(sixteenAttributesExpected.toString(), " a16=16"_s), makeString("<div"_s, sixteenAttributes.toString(), " a16=16></div>"_s));
+    expectAttributes(sixteenAttributesExpected.toString(), makeString("<div"_s, sixteenAttributes.toString(), " A0=x></div>"_s));
+
+    // Names with upper case letters, of 15 to 17 and 31 to 33 characters, first and as a duplicate of a lower case
+    // name.
+    for (unsigned length : { 15u, 16u, 17u, 31u, 32u, 33u }) {
+        auto lowercaseName = repeatedCharacter('q', length);
+        for (auto& name : { makeString('Q', repeatedCharacter('q', length - 1)), makeString(repeatedCharacter('q', length - 1), 'Q'), repeatedCharacter('Q', length) }) {
+            expectAttributes(makeString(lowercaseName, "=1"_s), makeString("<p "_s, name, "=1></p>"_s));
+            expectAttributes(makeString(lowercaseName, "=1 b=2"_s), makeString("<p "_s, lowercaseName, "=1 "_s, name, "=3 b=2></p>"_s));
+        }
+    }
+}
+
+TEST(WebCoreHTMLParser, DocumentParserQuotedAttributeValueLengths)
+{
+    ensureTestPlatformStrategiesInstalled();
+    ProcessWarming::initializeNames();
+    auto settings = Settings::create(nullptr);
+
+    // Values of 15, 16, 17, 31, 32 and 33 characters in each quoting, plain and with a character that the quoted
+    // attribute value states handle, or that only ends an unquoted value, at each position.
+    struct Special {
+        String markup;
+        String value;
+    };
+    const std::array specials { Special { "\n"_s, "\n"_s }, Special { "\r"_s, "\n"_s }, Special { "\r\n"_s, "\n"_s },
+        Special { "&amp;"_s, "&"_s }, Special { String { "\0"_span8 }, String::fromCodePoint(replacementCharacter) },
+        Special { "\""_s, "\""_s }, Special { "'"_s, "'"_s }, Special { ">"_s, ">"_s }, Special { "<"_s, "<"_s }, Special { "="_s, "="_s },
+        Special { " "_s, " "_s } };
+    for (unsigned length : { 15u, 16u, 17u, 31u, 32u, 33u }) {
+        StringBuilder valueBuilder;
+        for (unsigned i = 0; i < length; ++i)
+            valueBuilder.append(static_cast<Latin1Character>('a' + i % 26));
+        auto value = valueBuilder.toString();
+        for (char quote : { '"', '\'' }) {
+            auto expect = [&](const String& expected, const String& markupValue) {
+                auto markup = makeString("<p a="_s, quote, markupValue, quote, " b=1></p>"_s);
+                EXPECT_TRUE(markup.is8Bit());
+                auto expectedAttributes = makeString("a="_s, expected, " b=1"_s);
+                for (unsigned chunkLength : { std::numeric_limits<unsigned>::max(), 7u }) {
+                    EXPECT_EQ(expectedAttributes, parseFirstElementAttributes(settings.get(), markup, chunkLength));
+                    EXPECT_EQ(expectedAttributes, parseFirstElementAttributes(settings.get(), sixteenBitString(markup), chunkLength));
+                }
+            };
+            expect(value, value);
+            for (unsigned position = 0; position < length; ++position) {
+                for (auto& special : specials) {
+                    if (special.markup.length() == 1 && special.markup[0] == quote)
+                        continue;
+                    expect(makeString(value.left(position), special.value, value.substring(position + 1)),
+                        makeString(value.left(position), special.markup, value.substring(position + 1)));
+                }
+            }
+        }
+    }
+}
+
+TEST(WebCoreHTMLParser, DocumentParserTagsAtChunkEnds)
+{
+    ensureTestPlatformStrategiesInstalled();
+    ProcessWarming::initializeNames();
+    auto settings = Settings::create(nullptr);
+
+    // The body's markup after a document parse of `chunks`, appended in order.
+    auto parseBody = [&](std::initializer_list<String> chunks) -> String {
+        auto document = HTMLDocument::create(nullptr, settings.get(), aboutBlankURL());
+        EXPECT_FALSE(document->open().hasException());
+        for (auto& chunk : chunks) {
+            RefPtr parser = document->parser();
+            if (!parser)
+                break;
+            parser->appendSynchronously(RefPtr { chunk.impl() });
+        }
+        document->close();
+        RefPtr body = document->body();
+        EXPECT_TRUE(body);
+        return body ? body->innerHTML() : String();
+    };
+    auto expectBody = [&](ASCIILiteral expected, ASCIILiteral first, ASCIILiteral second) {
+        EXPECT_EQ(String { expected }, parseBody({ String { first }, String { second } }));
+        EXPECT_EQ(String { expected }, parseBody({ sixteenBitString(String { first }), sixteenBitString(String { second }) }));
+    };
+
+    // A chunk that ends two and three characters after a '<': one short of the shortest tag, and the shortest tag.
+    expectBody("<b>x</b>"_s, "<b"_s, ">x"_s);
+    expectBody("<b>x</b>"_s, "<b>"_s, "x"_s);
+    expectBody("y<b>x</b>"_s, "y<b"_s, ">x"_s);
+    expectBody("y<b>x</b>"_s, "y<b>"_s, "x"_s);
+    expectBody("<b c=\"1\">x</b>"_s, "<b"_s, " c=1>x"_s);
+    expectBody("<b>x</b>y"_s, "<b>x</"_s, "b>y"_s);
+    expectBody("<b>x</b>y"_s, "<b>x</b"_s, ">y"_s);
+    expectBody("<b>x</b>y"_s, "<b>x</b>"_s, "y"_s);
+    expectBody("y&lt;&gt;x"_s, "y<"_s, ">x"_s);
+    expectBody("y&lt;&gt;x"_s, "y<>"_s, "x"_s);
 }
 
 } // namespace TestWebKitAPI

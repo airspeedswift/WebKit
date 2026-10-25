@@ -859,6 +859,7 @@
 				WebCore/GridPosition.cpp,
 				WebCore/H264UtilitiesTests.cpp,
 				WebCore/HEVCUtilitiesTests.cpp,
+				WebCore/HTMLDocumentParserBench.cpp,
 				WebCore/HTMLFastPathParserBench.cpp,
 				WebCore/HTMLParserIdioms.cpp,
 				WebCore/HTMLTokenizerBench.cpp,

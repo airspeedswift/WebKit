@@ -33,13 +33,25 @@
 #include <wtf/HashSet.h>
 #include <wtf/text/AtomStringHash.h>
 
+#if !defined(USE_SWIFT_HTML_PER_TOKEN)
+#define USE_SWIFT_HTML_PER_TOKEN 0
+#endif
+
+#if USE_SWIFT_HTML_PER_TOKEN
+#include "HTMLTokenizer.h"
+#endif
+
 namespace WebCore {
 
 class AtomHTMLToken {
 public:
     using Type = HTMLToken::Type;
 
+#if USE_SWIFT_HTML_PER_TOKEN
+    AtomHTMLToken(HTMLToken&, HTMLTokenAttributes&&);
+#else
     explicit AtomHTMLToken(HTMLToken&);
+#endif
     AtomHTMLToken(Type, TagName, const AtomString& name, Vector<Attribute>&& = { }); // Only StartTag or EndTag.
     AtomHTMLToken(Type, TagName, Vector<Attribute>&& = { }); // Only StartTag or EndTag.
 
@@ -88,7 +100,9 @@ public:
     bool hasDuplicateAttribute() const { return m_hasDuplicateAttribute; }
 
 private:
+#if !USE_SWIFT_HTML_PER_TOKEN
     void initializeAttributes(const HTMLToken::AttributeList& attributes);
+#endif
 
     AtomString m_name; // StartTag, EndTag, DOCTYPE, ProcessingInstruction.
     String m_data; // Comment, ProcessingInstruction.
@@ -247,6 +261,7 @@ inline bool hasAttribute(const Vector<Attribute>& attributes, const AtomString& 
     return false;
 }
 
+#if !USE_SWIFT_HTML_PER_TOKEN
 inline void AtomHTMLToken::initializeAttributes(const HTMLToken::AttributeList& attributes)
 {
     unsigned size = attributes.size();
@@ -271,6 +286,9 @@ inline void AtomHTMLToken::initializeAttributes(const HTMLToken::AttributeList& 
 }
 
 inline AtomHTMLToken::AtomHTMLToken(HTMLToken& token)
+#else
+inline AtomHTMLToken::AtomHTMLToken(HTMLToken& token, HTMLTokenAttributes&& attributes)
+#endif
     : m_type(token.type())
 {
     switch (m_type) {
@@ -289,10 +307,20 @@ inline AtomHTMLToken::AtomHTMLToken(HTMLToken& token)
     case Type::StartTag:
     case Type::EndTag:
         m_selfClosing = token.selfClosing();
+#if USE_SWIFT_HTML_PER_TOKEN
+        m_tagName = attributes.tagName;
+        m_name = WTF::move(attributes.name);
+        m_attributes = WTF::move(attributes.attributes);
+        // As initializeAttributes does when it drops an attribute, keep no spare capacity.
+        if (m_attributes.size() < m_attributes.capacity()) [[unlikely]]
+            m_attributes.shrinkToFit();
+        m_hasDuplicateAttribute = std::exchange(attributes.hasDuplicateAttribute, false);
+#else
         m_tagName = findTagName(token.name());
         if (m_tagName == TagName::Unknown) [[unlikely]]
             m_name = AtomString(token.name().span());
         initializeAttributes(token.attributes());
+#endif
         return;
     case Type::Comment: {
         if (token.commentIsAll8BitData())

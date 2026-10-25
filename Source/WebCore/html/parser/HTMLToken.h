@@ -34,6 +34,10 @@
 #define USE_SWIFT_HTML_TOKENIZER 0
 #endif
 
+#if !defined(USE_SWIFT_HTML_PER_TOKEN)
+#define USE_SWIFT_HTML_PER_TOKEN 0
+#endif
+
 namespace WebCore {
 
 struct DoctypeData {
@@ -104,6 +108,11 @@ public:
 
     bool selfClosing() const;
     const AttributeList& attributes() const LIFETIME_BOUND;
+#if USE_SWIFT_HTML_PER_TOKEN
+    size_t attributeCount() const { return m_attributes.size(); }
+    std::span<const char16_t> attributeName(size_t i) const LIFETIME_BOUND { return m_attributes[i].name.span(); }
+    std::span<const char16_t> attributeValue(size_t i) const LIFETIME_BOUND { return m_attributes[i].value.span(); }
+#endif
 
     void beginStartTag(Latin1Character);
 
