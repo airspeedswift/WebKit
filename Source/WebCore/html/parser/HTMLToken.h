@@ -215,6 +215,14 @@ inline std::span<const Latin1Character> htmlTokenProcessingInstructionTargetChar
 #endif
 #endif
 
+#if USE_SWIFT_HTML_PER_TOKEN
+#if OS(WINDOWS)
+// FIXME: As htmlTokenProcessingInstructionTargetCharacters.
+inline std::span<const char16_t> htmlTokenAttributeName(const HTMLToken& token LIFETIME_BOUND, size_t i) { return token.attributeName(i); }
+inline std::span<const char16_t> htmlTokenAttributeValue(const HTMLToken& token LIFETIME_BOUND, size_t i) { return token.attributeValue(i); }
+#endif
+#endif
+
 inline void HTMLToken::clear()
 {
     m_type = Type::Uninitialized;

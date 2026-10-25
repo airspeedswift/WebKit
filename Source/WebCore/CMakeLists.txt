@@ -3441,6 +3441,13 @@ elseif (WK_BUILD_WEBCORE_SWIFT)
             html/parser/HTMLEntityParser.h html/parser/HTMLEntityTable.h css/parser/CSSTokenizerInputStream.h)
     endif ()
 
+    # As WebCore.xcconfig's WK_USE_SWIFT_HTML_PER_TOKEN. The headers HTMLTokenizer.swift then imports are the
+    # fast path's.
+    if (WK_USE_SWIFT_HTML_PER_TOKEN)
+        target_compile_definitions(WebCore PRIVATE "$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:USE_SWIFT_HTML_PER_TOKEN=1>")
+        webkit_target_add_swift_options(WebCore "-D USE_SWIFT_HTML_PER_TOKEN" "-Xcc -DUSE_SWIFT_HTML_PER_TOKEN=1")
+    endif ()
+
     webkit_target_add_swift_options(WebCore
         "-library-level spi"
         # For the vendored SIMD operations in SIMD*.swift, until the standard library has them.

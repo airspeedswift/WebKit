@@ -1616,7 +1616,11 @@ bool HTMLTokenizer::processToken(SegmentedString& source)
 }
 
 #if USE_SWIFT_HTML_PER_TOKEN
+#if OS(WINDOWS)
+constinit thread_local HTMLTokenAttributes* s_tokenAttributes { nullptr };
+#else
 thread_local HTMLTokenAttributes* HTMLTokenizer::s_tokenAttributes { nullptr };
+#endif
 
 bool HTMLTokenizer::processToken(SegmentedString& source, HTMLTokenAttributes& attributes)
 {
