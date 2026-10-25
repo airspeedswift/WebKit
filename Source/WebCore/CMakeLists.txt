@@ -3292,6 +3292,13 @@ list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/Namespace.cpp)
 if (WK_USE_SWIFT_HTML_FAST_PATH)
     list(APPEND WebCore_UNIFIED_SOURCE_EXCLUDES "(^|/)HTMLDocumentParserFastPath\\.cpp( |$)")
 endif ()
+# Set by WK_USE_SWIFT_HTML_TOKENIZER: these include WebCore-Swift.h too.
+if (WK_USE_SWIFT_HTML_TOKENIZER)
+    list(APPEND WebCore_UNIFIED_SOURCE_EXCLUDES
+        "(^|/)HTMLTokenizer\\.cpp( |$)"
+        "(^|/)WebVTTTokenizer\\.cpp( |$)"
+        "(^|/)XMLDocumentParserLibxml2\\.cpp( |$)")
+endif ()
 
 WEBKIT_COMPUTE_SOURCES(WebCore)
 
@@ -3419,6 +3426,19 @@ elseif (WK_BUILD_WEBCORE_SWIFT)
             # its destructor, which needs Locale's definition, so the Document submodule has PlatformLocale.h too.
             set(_webcore_swift_core_submodule_headers_Document platform/text/PlatformLocale.h)
         endif ()
+    endif ()
+
+    # As WebCore.xcconfig's WK_USE_SWIFT_HTML_TOKENIZER.
+    if (WK_USE_SWIFT_HTML_TOKENIZER)
+        list(APPEND WebCore_SWIFT_INTEROP_SOURCES
+            html/parser/HTMLTokenizer.cpp
+            html/track/WebVTTTokenizer.cpp
+            xml/parser/XMLDocumentParserLibxml2.cpp)
+        target_compile_definitions(WebCore PRIVATE "$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:USE_SWIFT_HTML_TOKENIZER=1>")
+        webkit_target_add_swift_options(WebCore "-D USE_SWIFT_HTML_TOKENIZER" "-Xcc -DUSE_SWIFT_HTML_TOKENIZER=1")
+        list(APPEND _webcore_swift_core_submodules
+            platform/text/SegmentedString.h html/parser/HTMLToken.h html/parser/HTMLTokenizer.h
+            html/parser/HTMLEntityParser.h html/parser/HTMLEntityTable.h css/parser/CSSTokenizerInputStream.h)
     endif ()
 
     webkit_target_add_swift_options(WebCore

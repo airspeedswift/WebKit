@@ -205,6 +205,16 @@ private:
 
 const HTMLToken::Attribute* findAttribute(const Vector<HTMLToken::Attribute>&, StringView name);
 
+#if USE_SWIFT_HTML_TOKENIZER
+#if OS(WINDOWS)
+// FIXME: With the MSVC standard library, Swift does not import a member function of this class that returns a
+// std::span, LIFETIME_BOUND or not ("may return an interior pointer"). It does import these, which take the token
+// LIFETIME_BOUND, with a Span overload whose lifetime depends on the token; HTMLTokenizer.swift calls them through
+// the members' names.
+inline std::span<const Latin1Character> htmlTokenProcessingInstructionTargetCharacters(const HTMLToken& token LIFETIME_BOUND) { return token.processingInstructionTargetCharacters(); }
+#endif
+#endif
+
 inline void HTMLToken::clear()
 {
     m_type = Type::Uninitialized;

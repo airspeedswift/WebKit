@@ -306,6 +306,7 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/HEVCUtilitiesTests.cpp
         Tests/WebCore/HTMLFastPathParserBench.cpp
         Tests/WebCore/HTMLParserIdioms.cpp
+        Tests/WebCore/HTMLTokenizerBench.cpp
         Tests/WebCore/HTTPHeaderField.cpp
         Tests/WebCore/HTTPHeaderMap.cpp
         Tests/WebCore/HTTPParsers.cpp
