@@ -51,7 +51,7 @@ class HTMLDocumentParser : public ScriptableDocumentParser, private HTMLScriptRu
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED_WITH_HEAP_IDENTIFIER(HTMLDocumentParser, HTMLDocumentParser);
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(HTMLDocumentParser);
 public:
-    static Ref<HTMLDocumentParser> create(HTMLDocument&, OptionSet<ParserContentPolicy> = DefaultParserContentPolicy);
+    SWIFT_UNSAFE static Ref<HTMLDocumentParser> create(HTMLDocument&, OptionSet<ParserContentPolicy> = DefaultParserContentPolicy);
     virtual ~HTMLDocumentParser();
 
     // CheckedPtr interface
