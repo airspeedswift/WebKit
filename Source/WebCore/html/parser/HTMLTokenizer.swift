@@ -145,7 +145,7 @@ private func processToken(
 // FIXME: Internal for the reason HTMLFastPathCodeUnit (HTMLFastPathParser.swift) is: private declarations do not link
 // under ThinLTO on Windows.
 /// HTMLTokenizer::State, in the same order, which HTMLTokenizer::processToken checks with a static_assert.
-internal enum TokenizerState: UInt32, CaseIterable {
+internal enum TokenizerState: UInt32 {
     case data
     case characterReferenceInData
     case rcdata
@@ -1813,12 +1813,11 @@ extension WebCore.HTMLTokenizer {
         additionalAllowedCharacter: UInt16
     ) -> Bool {
         var additionalAllowedCharacter = additionalAllowedCharacter
-        // m_state indexes allCases, which lists the states in order. No case handles an m_state outside State.
-        let states = TokenizerState.allCases
-        guard m_state.rawValue < states.count else {
+        // TokenizerState lists the states in State's order, so m_state is its raw value, whatever State's raw type (int
+        // under MSVC, with no negative value). No case handles an m_state outside State.
+        guard var state = TokenizerState(rawValue: TokenizerState.RawValue(truncatingIfNeeded: m_state.rawValue)) else {
             return false
         }
-        var state = states[Int(m_state.rawValue)]
         defer {
             // State's raw type is the C++ enum's underlying type: unsigned on Apple platforms, int under MSVC.
             m_state = State(rawValue: State.RawValue(state.rawValue))
