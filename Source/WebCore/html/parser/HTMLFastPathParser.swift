@@ -26,12 +26,14 @@
 internal import WebCore_Private.HTMLFastPathParserTypes
 // Operators that WebCore's headers declare use these JavaScriptCore and WTF types. Without their definitions, ==, !,
 // << and * do not typecheck in this file.
+#if canImport(JavaScriptCore_Private) // Not a module outside Apple platforms, where the headers are textual.
 internal import JavaScriptCore_Private.Cxx.Snippet
 internal import JavaScriptCore_Private.Cxx.DOMJITCallDOMGetterSnippet
 internal import JavaScriptCore_Private.Cxx.WasmInstanceAnchor
 internal import JavaScriptCore_Private.Cxx.WasmCalleeGroup
 internal import JavaScriptCore_Private.Cxx.WasmModule
 internal import JavaScriptCore_Private.Cxx.WasmModuleDebugInfo
+#endif
 internal import wtf.Core.Stopwatch
 internal import WebCore_Private.Core.Attribute
 internal import WebCore_Private.Core.ContainerNode
@@ -103,8 +105,11 @@ private func parseFragment<CodeUnit: HTMLFastPathCodeUnit>(
     return parser.parse(context)
 }
 
+// FIXME: Internal rather than private, with its conformances' members and the types below that say so, until private
+// declarations link under ThinLTO on Windows. CMake compiles a module with -num-threads, so Swift gives a private
+// declaration linkonce_odr linkage there, and lld rejects some of the aliases that makes ("Invalid weak external").
 /// A code unit of the fast path's input: a Latin-1 character or a UTF-16 code unit.
-private protocol HTMLFastPathCodeUnit: FixedWidthInteger, UnsignedInteger {
+internal protocol HTMLFastPathCodeUnit: FixedWidthInteger, UnsignedInteger {
     /// Consumes the character reference that starts `input`, just after its '&', as consumeHTMLEntity reads it, and
     /// writes the 0 to 3 characters it decodes to at `offset` of `decoded`, which has room for 3 there. Returns how many
     /// characters it read, shifted left by 2, or'ed with how many it wrote. `input` is not empty.
@@ -136,9 +141,10 @@ private protocol HTMLFastPathCodeUnit: FixedWidthInteger, UnsignedInteger {
     static func attributeWindow(_ input: Span<Self>, at offset: Int) -> AttributeWindow
 }
 
+// FIXME: Internal for the reason HTMLFastPathCodeUnit is.
 /// Four bits per code unit of sixteen, the first in the least significant, as matchNibbles(_:at:_:) gives them: 0xF
 /// where the code unit is in the class, and 0 elsewhere.
-private struct AttributeWindow {
+internal struct AttributeWindow {
     /// Attribute name characters (isAttributeNameCharacter).
     var nameCharacters: UInt64
     /// ASCII upper-case letters.
@@ -220,7 +226,7 @@ func tableMatchNibbles(lowBytes: SIMD16<UInt8>, highBytes: SIMD16<UInt8>, _ tabl
 }
 
 extension UInt8: HTMLFastPathCodeUnit {
-    fileprivate static func consumeCharacterReference(
+    static func consumeCharacterReference(
         _ input: Span<UInt8>,
         _ additionalAllowedCharacter: UInt16,
         _ decoded: inout MutableSpan<UInt16>,
@@ -242,38 +248,38 @@ extension UInt8: HTMLFastPathCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func makeString(_ characters: Span<UInt8>) -> WTF.String {
+    static func makeString(_ characters: Span<UInt8>) -> WTF.String {
         WTF.String(WTF.latin1CharactersOfBytes(characters))
     }
 
     @inline(always)
-    fileprivate static func makeAttributeQualifiedName(_ name: Span<UInt8>) -> WebCore.QualifiedName {
+    static func makeAttributeQualifiedName(_ name: Span<UInt8>) -> WebCore.QualifiedName {
         WebCore.HTMLNameCache.makeAttributeQualifiedName(WTF.latin1CharactersOfBytes(name))
     }
 
     @inline(always)
-    fileprivate static func makeAttributeValue(_ value: Span<UInt8>) -> WTF.AtomString {
+    static func makeAttributeValue(_ value: Span<UInt8>) -> WTF.AtomString {
         WebCore.HTMLNameCache.makeAttributeValue(WTF.latin1CharactersOfBytes(value))
     }
 
     @inline(always)
-    fileprivate static func matchNibbles(_ input: Span<UInt8>, at offset: Int, _ table: SIMD16<UInt8>) -> UInt64 {
+    static func matchNibbles(_ input: Span<UInt8>, at offset: Int, _ table: SIMD16<UInt8>) -> UInt64 {
         tableMatchNibbles(lowBytes: load16(input, at: offset), highBytes: SIMD16(), table)
     }
 
     @inline(always)
-    fileprivate static func eightCodeUnits(_ input: Span<UInt8>, at offset: Int) -> (lowBytes: UInt64, highBytes: UInt64) {
+    static func eightCodeUnits(_ input: Span<UInt8>, at offset: Int) -> (lowBytes: UInt64, highBytes: UInt64) {
         (UInt64(littleEndian: input.bytes.load(fromByteOffset: offset, as: UInt64.self)), 0)
     }
 
     @inline(always)
-    fileprivate static func attributeWindow(_ input: Span<UInt8>, at offset: Int) -> AttributeWindow {
+    static func attributeWindow(_ input: Span<UInt8>, at offset: Int) -> AttributeWindow {
         classifyAttributeWindow(lowBytes: load16(input, at: offset), highBytes: SIMD16())
     }
 }
 
 extension UInt16: HTMLFastPathCodeUnit {
-    fileprivate static func consumeCharacterReference(
+    static func consumeCharacterReference(
         _ input: Span<UInt16>,
         _ additionalAllowedCharacter: UInt16,
         _ decoded: inout MutableSpan<UInt16>,
@@ -295,17 +301,17 @@ extension UInt16: HTMLFastPathCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func makeString(_ characters: Span<UInt16>) -> WTF.String {
+    static func makeString(_ characters: Span<UInt16>) -> WTF.String {
         WTF.String(characters)
     }
 
     @inline(always)
-    fileprivate static func makeAttributeQualifiedName(_ name: Span<UInt16>) -> WebCore.QualifiedName {
+    static func makeAttributeQualifiedName(_ name: Span<UInt16>) -> WebCore.QualifiedName {
         WebCore.HTMLNameCache.makeAttributeQualifiedName(name)
     }
 
     @inline(always)
-    fileprivate static func makeAttributeValue(_ value: Span<UInt16>) -> WTF.AtomString {
+    static func makeAttributeValue(_ value: Span<UInt16>) -> WTF.AtomString {
         WebCore.HTMLNameCache.makeAttributeValue(value)
     }
 
@@ -325,7 +331,7 @@ extension UInt16: HTMLFastPathCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func eightCodeUnits(_ input: Span<UInt16>, at offset: Int) -> (lowBytes: UInt64, highBytes: UInt64) {
+    static func eightCodeUnits(_ input: Span<UInt16>, at offset: Int) -> (lowBytes: UInt64, highBytes: UInt64) {
         let units = input.bytes.load(fromByteOffset: offset &* 2, as: SIMD8<UInt16>.self)
         return (
             UInt64(littleEndian: bitCast(SIMD8<UInt8>(truncatingIfNeeded: units), to: UInt64.self)),
@@ -334,7 +340,7 @@ extension UInt16: HTMLFastPathCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func attributeWindow(_ input: Span<UInt16>, at offset: Int) -> AttributeWindow {
+    static func attributeWindow(_ input: Span<UInt16>, at offset: Int) -> AttributeWindow {
         let bytes = input.bytes
         let low = bytes.load(fromByteOffset: offset &* 2, as: SIMD8<UInt16>.self)
         let high = bytes.load(fromByteOffset: offset &* 2 &+ 16, as: SIMD8<UInt16>.self)
@@ -468,8 +474,9 @@ private func indexOfNonSpace<CodeUnit: HTMLFastPathCodeUnit>(_ input: Span<CodeU
     return offset
 }
 
+// FIXME: Internal for the reason HTMLFastPathCodeUnit is.
 /// The tags the fast path supports.
-private enum FastPathTag {
+internal enum FastPathTag {
     case a, b, body, br, button, div, footer, i, input, li, label, option, ol, p, select, span, strong, ul
 
     /// The tag of a context element whose children the fast path can parse, or nil.
@@ -752,9 +759,10 @@ private func decodeCharacterReference<CodeUnit: HTMLFastPathCodeUnit>(
     index += 1
 }
 
+// FIXME: Internal for the reason HTMLFastPathCodeUnit is.
 /// The element whose children are being parsed, as far as the rules for its children go: its tag, whether it is itself
 /// in phrasing content, and whether it or an element that contains it is an <a>, or an <li>.
-private struct ParentState {
+internal struct ParentState {
     var tag: FastPathTag
     var inPhrasingContent: Bool
     var insideOfTagA: Bool
@@ -768,9 +776,10 @@ extension ParentState {
     }
 }
 
+// FIXME: Internal for the reason HTMLFastPathCodeUnit is.
 /// What an open element closes back to: the element that contains it, or nil for the destination parent, and that
 /// element's state.
-private struct OpenElement {
+internal struct OpenElement {
     let parent: WebCore.HTMLElement?
     let parentState: ParentState
 }
@@ -790,8 +799,9 @@ private enum TextRun {
 /// characters if `isDecoded`.
 private typealias AttributeValue = (offset: Int, length: Int, isDecoded: Bool)
 
+// FIXME: Internal for the reason HTMLFastPathCodeUnit is.
 /// Where the name of an attribute already set on the element being parsed is in the input.
-private struct AttributeNameLocation {
+internal struct AttributeNameLocation {
     let start: Int
     let length: Int
 }

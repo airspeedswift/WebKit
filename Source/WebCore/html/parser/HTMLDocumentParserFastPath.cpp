@@ -1211,3 +1211,12 @@ bool tryFastParsingHTMLFragment(StringView source, Document& document, Container
 #undef FOR_EACH_SUPPORTED_TAG
 
 } // namespace WebCore
+
+#if USE_SWIFT_HTML_FAST_PATH
+#if OS(WINDOWS)
+// FIXME: HTMLFastPathParser.swift releases Text nodes, and Text's CheckedPtr operator delete calls
+// secureZeroBytes<Text>. On Windows the Swift compiler references that instantiation without emitting it, so it is
+// instantiated here.
+template void WTF::secureZeroBytes<WebCore::Text>(WebCore::Text&);
+#endif
+#endif
