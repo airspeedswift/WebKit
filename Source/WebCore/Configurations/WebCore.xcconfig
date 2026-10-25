@@ -280,7 +280,10 @@ MODULE_VERIFIER_KIND = builtin;
 // -O2 compiles those inline C++ functions as WebCore's C++ is, not at the importer's default -Os, so their loops
 // vectorize. -enable-dfa-jump-thread lets LLVM branch from each transition of a state machine written as a switch
 // in a loop straight to the next state.
-OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -O2 -Xllvm -enable-dfa-jump-thread -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -std=c++2b -Xcc -fno-exceptions -Xcc -fignore-exceptions -Xcc -O2 -Xllvm -enable-dfa-jump-thread -Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib -Xfrontend -emit-clang-header-min-access -Xfrontend internal -Werror SendableClosureCaptures $(WK_SWIFT_PGO_USE_FLAGS) $(WK_SWIFT_PGO_GEN_FLAGS);
+// Swift that holds C++ state must not let it reach another thread. Several of the diagnostics that catch that
+// are warnings in Swift 6 mode outside any diagnostic group, so warnings are errors too.
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
 // The compile cache drops -Xcc options, so it is off for WebCore's Swift.
 SWIFT_ENABLE_COMPILE_CACHE = NO;
 
