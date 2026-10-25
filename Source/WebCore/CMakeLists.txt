@@ -3372,6 +3372,105 @@ if (SWIFT_REQUIRED AND APPLE)
     WEBKIT_SETUP_SWIFT_AND_GENERATE_SWIFT_CPP_INTEROP_HEADER(WebCore WebCore
         "${WebCore_PRIVATE_HEADERS_DIR}"
         "WebCoreSwift-Generated.h")
+elseif (WK_BUILD_WEBCORE_SWIFT)
+    # The Swift sources the WebCore Xcode project compiles, with WebCore.xcconfig's Swift settings.
+    # SwiftStub.swift is left out: it imports Foundation, and these Swift sources already emit symbols.
+    target_sources(WebCore PRIVATE
+        ${WEBCORE_DIR}/SIMDHelpers.swift
+        ${WEBCORE_DIR}/SIMDHighBitMask.swift
+        ${WEBCORE_DIR}/SIMDSaturatingSubtract.swift
+        ${WEBCORE_DIR}/SIMDTableLookup.swift
+        ${WEBCORE_DIR}/html/parser/HTMLEntityParser.swift
+        ${WEBCORE_DIR}/html/parser/HTMLFastPathParser.swift
+        ${WEBCORE_DIR}/html/parser/HTMLTokenizer.swift
+    )
+
+    # C++ sources that include WebCoreSwift-Generated.h.
+    set(WebCore_SWIFT_INTEROP_SOURCES SwiftStubInterop.cpp)
+
+    webkit_target_add_swift_options(WebCore
+        "-library-level spi"
+        # For the vendored SIMD operations in SIMD*.swift, until the standard library has them.
+        "-enable-experimental-feature BuiltinModule"
+        # Apple applies these to every Swift target; WebCore's Swift is written against them.
+        ${WEBKIT_SWIFT_EXPERIMENTAL_FEATURE_FLAGS}
+        ${WEBKIT_SWIFT_MEMORY_SAFETY_FLAGS}
+        "-Xcc -fmodule-map-file=${WTF_HEADERS_DIR}/module.modulemap"
+        # As WebCore.xcconfig: the C++ is built without exceptions, and without -fno-exceptions and
+        # -fignore-exceptions the C++ inline functions the Swift calls carry an exception personality and
+        # cleanups, and LLVM does not inline them into it. -O2 rather than the importer's -Os for that C++,
+        # and jump threading for state machines written as a switch in a loop.
+        "-Xcc -fno-exceptions"
+        "-Xcc -fignore-exceptions"
+        "-Xcc -O2"
+        "-Xllvm -enable-dfa-jump-thread"
+        # As WebCore.xcconfig: Swift zero-initializes a C++ type with no default constructor and only warns
+        # that this is deprecated; such a value can hold a null pointer the type never allows.
+        "-Werror DeprecatedDeclaration"
+        ${WebCore_PLATFORM_SWIFT_CLANG_FLAG_PAIRS}
+    )
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        # HAVE_SSSE3 chooses PSHUFB in SIMDTableLookup.swift, as WebCore.xcconfig sets it for x86_64. The code
+        # generator must be allowed SSSE3 too, or the (LTO) backend cannot select it. nehalem is x86-64-v2
+        # (SSSE3, SSE4.2).
+        webkit_target_add_swift_options(WebCore "-D HAVE_SSSE3" "-target-cpu nehalem")
+    endif ()
+    # No -Xcc -I for WebCore's include directories: swiftc gives its -I paths, which CMake sets from
+    # them, to the clang importer too, and repeating them overflows Windows' 32K command line.
+    if (LTO_MODE AND WEBKIT_SWIFT_WHOLE_MODULE)
+        # Bitcode with the ThinLTO summary, so the LTO link optimizes the Swift with its C++ callers.
+        # Not the driver's -lto=llvm-thin, which writes <name>.bc to the working directory because
+        # CMake's output file map has only an "object" entry.
+        webkit_target_add_swift_options(WebCore
+            "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -lto=llvm-${LTO_MODE}>"
+            "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xfrontend -emit-bc>")
+    elseif (LTO_MODE)
+        message(WARNING "LTO_MODE is set but Swift is not whole-module (DEVELOPER_MODE), so WebCore's Swift is not LTO'd")
+    endif ()
+
+    # The WebCore_Private submodules WebCore's Swift imports. Apple platforms get them from
+    # WebCore_Private.modulemap, a framework module over PrivateHeaders, which the other ports do not
+    # build; here each names its header in the source tree.
+    set(_webcore_swift_module_dir "${CMAKE_CURRENT_BINARY_DIR}/SwiftModuleMap")
+    file(WRITE "${_webcore_swift_module_dir}/module.modulemap.in"
+        "module WebCore_Private [system] {\n"
+        "    module PlatformExportMacros {\n"
+        "        header \"${WEBCORE_DIR}/platform/PlatformExportMacros.h\"\n"
+        "        export *\n"
+        "    }\n"
+        "}\n")
+    configure_file("${_webcore_swift_module_dir}/module.modulemap.in" "${_webcore_swift_module_dir}/module.modulemap" COPYONLY)
+
+    WEBKIT_SETUP_SWIFT_AND_GENERATE_SWIFT_CPP_INTEROP_HEADER(WebCore WebCore
+        "${_webcore_swift_module_dir}"
+        "WebCoreSwift-Generated.h")
+
+    if (WIN32)
+        # The shared importer flags declare WebCore's and PAL's exports __declspec(dllimport), as every
+        # other Swift target sees them. WebCore's own Swift is in WebCore.dll, with PAL, so it references
+        # them directly: through dllimport it would ask for __imp_ symbols the DLL does not import, and
+        # leave the inline functions and templates of an exported class to a DLL that is itself. Undefined
+        # and defined again after the shared flags, so these definitions win without a redefinition
+        # warning.
+        webkit_target_add_swift_options(WebCore
+            "-Xcc -UWEBCORE_EXPORT" "-Xcc -DWEBCORE_EXPORT="
+            "-Xcc -UPAL_EXPORT" "-Xcc -DPAL_EXPORT=")
+
+        # WebCore links its Swift objects with the C++ linker, which needs the import libraries of the
+        # Swift runtime those objects auto-link. They are in the SDK, not the toolchain that
+        # -print-target-info describes.
+        cmake_path(CONVERT "$ENV{SDKROOT}" TO_CMAKE_PATH_LIST _swift_sdkroot)
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+            set(_swift_sdk_arch aarch64)
+        else ()
+            set(_swift_sdk_arch x86_64)
+        endif ()
+        set(_swift_sdk_lib_dir "${_swift_sdkroot}/usr/lib/swift/windows/${_swift_sdk_arch}")
+        if (NOT EXISTS "${_swift_sdk_lib_dir}/swiftCore.lib")
+            message(FATAL_ERROR "No swiftCore.lib in ${_swift_sdk_lib_dir}; is SDKROOT set?")
+        endif ()
+        target_link_directories(WebCore PRIVATE "${_swift_sdk_lib_dir}")
+    endif ()
 endif ()
 
 WEBKIT_FRAMEWORK(WebCore)

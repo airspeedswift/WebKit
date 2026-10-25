@@ -540,10 +540,12 @@ macro(WEBKIT_OPTION_END)
         endif ()
     endif ()
 
+    option(WK_BUILD_WEBCORE_SWIFT "Build WebCore's Swift sources, as the Xcode project does" OFF)
+
     # A Swift feature still on with a too-old toolchain was requested explicitly
     # (the default declines to auto-enable it), so fail loudly rather than drop it
     # silently. Apple is gated elsewhere; non-Clang is already rejected above.
-    if (NOT APPLE AND COMPILER_IS_CLANG AND (ENABLE_BACK_FORWARD_LIST_SWIFT OR ENABLE_IPC_TESTING_SWIFT))
+    if (NOT APPLE AND COMPILER_IS_CLANG AND (ENABLE_BACK_FORWARD_LIST_SWIFT OR ENABLE_IPC_TESTING_SWIFT OR WK_BUILD_WEBCORE_SWIFT))
         _WEBKIT_DETECT_SWIFT_CXX_INTEROP_SUPPORT(_swift_interop_ok)
         if (NOT _swift_interop_ok)
             message(FATAL_ERROR
@@ -557,7 +559,7 @@ macro(WEBKIT_OPTION_END)
         endif ()
     endif ()
 
-    if (ENABLE_BACK_FORWARD_LIST_SWIFT OR ENABLE_IPC_TESTING_SWIFT)
+    if (ENABLE_BACK_FORWARD_LIST_SWIFT OR ENABLE_IPC_TESTING_SWIFT OR WK_BUILD_WEBCORE_SWIFT)
         set(SWIFT_REQUIRED ON)
     else ()
         set(SWIFT_REQUIRED OFF)
