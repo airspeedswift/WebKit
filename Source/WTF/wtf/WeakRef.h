@@ -54,6 +54,10 @@ enum class EnableWeakPtrThreadingAssertions : bool { No, Yes };
 template<typename T, typename WeakPtrImpl>
 class WeakRef {
 public:
+#if defined(__swift__)
+    // Swift would otherwise give WeakRef an init() that leaves it null.
+    WeakRef() = delete;
+#endif
     WeakRef(const T& object, EnableWeakPtrThreadingAssertions shouldEnableAssertions = EnableWeakPtrThreadingAssertions::Yes) requires (!IsSmartPtr<T>::value && !std::is_pointer_v<T>)
         : m_impl(object.weakImpl())
 #if !ASSERT_WITH_SECURITY_IMPLICATION_DISABLED

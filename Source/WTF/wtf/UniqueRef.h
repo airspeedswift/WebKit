@@ -70,6 +70,10 @@ UniqueRef<T> makeUniqueRefFromNonNullUniquePtr(std::unique_ptr<T>&& ptr)
 template<typename T>
 class SWIFT_SELF_CONTAINED UniqueRef {
 public:
+#if defined(__swift__)
+    // Swift would otherwise give UniqueRef an init() that leaves it null.
+    UniqueRef() = delete;
+#endif
     template <typename U>
     UniqueRef(UniqueRef<U>&& other)
         : m_ref(other.m_ref.release())
