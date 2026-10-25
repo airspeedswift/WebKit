@@ -552,7 +552,7 @@ private func plainTextLength<CodeUnit: PlainTextCodeUnit>(
         }
         return index - 1
     }
-    let firstMatches = CodeUnit.specialCharacterMatches(characters, at: 1, specialCharacters, or: additionalSpecialCharacters)
+    let firstMatches = blockSpecialCharacterMatches(characters, at: 1, specialCharacters, or: additionalSpecialCharacters)
     if firstMatches != 0 {
         return firstMatches.trailingZeroBitCount / 4
     }
@@ -571,11 +571,30 @@ private func plainTextLength<CodeUnit: PlainTextCodeUnit>(
     }
     // The last sixteen characters, overlapping the first sixteen, which have no match.
     let lastBlock = end - 16
-    let lastMatches = CodeUnit.specialCharacterMatches(characters, at: lastBlock, specialCharacters, or: additionalSpecialCharacters)
+    let lastMatches = blockSpecialCharacterMatches(characters, at: lastBlock, specialCharacters, or: additionalSpecialCharacters)
     if lastMatches != 0 {
         return lastBlock - 1 + lastMatches.trailingZeroBitCount / 4
     }
     return end - 1
+}
+
+/// specialCharacterMatches for plainTextLength's first and last blocks.
+///
+/// Out of line on Windows. plainTextLength is inlined into processToken in many states, and the vectors of an inlined
+/// block check are live across processToken's calls into C++. The Windows x64 calling convention keeps xmm6-xmm15
+/// callee-saved, so processToken would save and restore them on every call, once per token.
+#if os(Windows)
+@inline(never)
+#else
+@inline(always)
+#endif
+private func blockSpecialCharacterMatches<CodeUnit: PlainTextCodeUnit>(
+    _ characters: Span<CodeUnit>,
+    at offset: Int,
+    _ specialCharacters: SIMD16<UInt8>,
+    or additionalSpecialCharacters: AdditionalSpecialCharacters
+) -> UInt64 {
+    CodeUnit.specialCharacterMatches(characters, at: offset, specialCharacters, or: additionalSpecialCharacters)
 }
 
 /// The offset of the first character of `characters` that the tables match, or its count if none does.
