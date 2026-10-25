@@ -1668,7 +1668,7 @@
 		449D864F2640C9C5000122DE /* HighlightVisibility.h in Headers */ = {isa = PBXBuildFile; fileRef = 449D864D2640C9B9000122DE /* HighlightVisibility.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		44A20DB90F84166C00B3E1FE /* WebCoreURLResponseIOS.h in Headers */ = {isa = PBXBuildFile; fileRef = 44A20DB80F84166C00B3E1FE /* WebCoreURLResponseIOS.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		44A28AAC12DFB8AC00AE923B /* MathMLElementFactory.h in Headers */ = {isa = PBXBuildFile; fileRef = 44A28AAB12DFB8AC00AE923B /* MathMLElementFactory.h */; };
-		44A28AAF12DFB8BF00AE923B /* MathMLNames.h in Headers */ = {isa = PBXBuildFile; fileRef = 44A28AAE12DFB8BF00AE923B /* MathMLNames.h */; };
+		44A28AAF12DFB8BF00AE923B /* MathMLNames.h in Headers */ = {isa = PBXBuildFile; fileRef = 44A28AAE12DFB8BF00AE923B /* MathMLNames.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		44A678412CAE887B003757E5 /* CaretPosition.h in Headers */ = {isa = PBXBuildFile; fileRef = 44A6783E2CAE887B003757E5 /* CaretPosition.h */; };
 		44AA32A32BD2C7D40011B04B /* SVGResourcesCache.h in Headers */ = {isa = PBXBuildFile; fileRef = 44AA329F2BD2C7D20011B04B /* SVGResourcesCache.h */; };
 		44AA32A52BD2C7D40011B04B /* SVGResourcesCycleSolver.h in Headers */ = {isa = PBXBuildFile; fileRef = 44AA32A12BD2C7D30011B04B /* SVGResourcesCycleSolver.h */; };
@@ -2702,7 +2702,7 @@
 		6565815109D13043000E61D7 /* CSSValueKeywords.h in Headers */ = {isa = PBXBuildFile; fileRef = 6565814809D13043000E61D7 /* CSSValueKeywords.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		656581B209D14EE6000E61D7 /* UserAgentStyleSheets.h in Headers */ = {isa = PBXBuildFile; fileRef = 656581AE09D14EE6000E61D7 /* UserAgentStyleSheets.h */; };
 		656581FE09D1508D000E61D7 /* SVGElementFactory.h in Headers */ = {isa = PBXBuildFile; fileRef = 656581E709D1508D000E61D7 /* SVGElementFactory.h */; };
-		6565820209D1508D000E61D7 /* XLinkNames.h in Headers */ = {isa = PBXBuildFile; fileRef = 656581EB09D1508D000E61D7 /* XLinkNames.h */; };
+		6565820209D1508D000E61D7 /* XLinkNames.h in Headers */ = {isa = PBXBuildFile; fileRef = 656581EB09D1508D000E61D7 /* XLinkNames.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		656D37320ADBA5DE00A4554D /* LoaderNSURLExtras.h in Headers */ = {isa = PBXBuildFile; fileRef = 656D371A0ADBA5DE00A4554D /* LoaderNSURLExtras.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		656D37360ADBA5DE00A4554D /* DocumentLoader.h in Headers */ = {isa = PBXBuildFile; fileRef = 656D371E0ADBA5DE00A4554D /* DocumentLoader.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		656D373A0ADBA5DE00A4554D /* FormState.h in Headers */ = {isa = PBXBuildFile; fileRef = 656D37220ADBA5DE00A4554D /* FormState.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -3591,7 +3591,7 @@
 		8A28C3C228E4EC07001018B9 /* ValidityStateFlags.h in Headers */ = {isa = PBXBuildFile; fileRef = 8A28C3C128E4EC07001018B9 /* ValidityStateFlags.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		8A3017F12998332B00261006 /* EXTDisjointTimerQuery.h in Headers */ = {isa = PBXBuildFile; fileRef = 8A3017E82998325D00261006 /* EXTDisjointTimerQuery.h */; };
 		8A3017F3299833A200261006 /* WebGLTimerQueryEXT.h in Headers */ = {isa = PBXBuildFile; fileRef = 8A3017DB299830E700261006 /* WebGLTimerQueryEXT.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		8A309C9F123950BE00CB9204 /* NestingLevelIncrementer.h in Headers */ = {isa = PBXBuildFile; fileRef = 8A309C9E123950BE00CB9204 /* NestingLevelIncrementer.h */; };
+		8A309C9F123950BE00CB9204 /* NestingLevelIncrementer.h in Headers */ = {isa = PBXBuildFile; fileRef = 8A309C9E123950BE00CB9204 /* NestingLevelIncrementer.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		8A3FCB16293C12FF00D1728A /* ValidatedFormListedElement.h in Headers */ = {isa = PBXBuildFile; fileRef = 8A3FCB14293C12FE00D1728A /* ValidatedFormListedElement.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		8A3FCB1B293C131F00D1728A /* HTMLMaybeFormAssociatedCustomElement.h in Headers */ = {isa = PBXBuildFile; fileRef = 8A3FCB19293C131F00D1728A /* HTMLMaybeFormAssociatedCustomElement.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		8A413AE01207BBA50082016E /* ScriptRunner.h in Headers */ = {isa = PBXBuildFile; fileRef = 8A413ADE1207BBA50082016E /* ScriptRunner.h */; };
@@ -4002,15 +4002,15 @@
 		977B37261228721700B81FF8 /* HTMLTreeBuilder.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B37221228721700B81FF8 /* HTMLTreeBuilder.h */; };
 		977B3863122883E900B81FF8 /* CSSPreloadScanner.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B384A122883E900B81FF8 /* CSSPreloadScanner.h */; };
 		977B3865122883E900B81FF8 /* HTMLConstructionSite.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B384C122883E900B81FF8 /* HTMLConstructionSite.h */; };
-		977B3867122883E900B81FF8 /* HTMLDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B384E122883E900B81FF8 /* HTMLDocumentParser.h */; };
+		977B3867122883E900B81FF8 /* HTMLDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B384E122883E900B81FF8 /* HTMLDocumentParser.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B386A122883E900B81FF8 /* HTMLEntityParser.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3851122883E900B81FF8 /* HTMLEntityParser.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B386C122883E900B81FF8 /* HTMLEntitySearch.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3853122883E900B81FF8 /* HTMLEntitySearch.h */; };
 		977B386D122883E900B81FF8 /* HTMLEntityTable.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3854122883E900B81FF8 /* HTMLEntityTable.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B386F122883E900B81FF8 /* HTMLFormattingElementList.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3856122883E900B81FF8 /* HTMLFormattingElementList.h */; };
-		977B3871122883E900B81FF8 /* HTMLParserScheduler.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3858122883E900B81FF8 /* HTMLParserScheduler.h */; };
+		977B3871122883E900B81FF8 /* HTMLParserScheduler.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3858122883E900B81FF8 /* HTMLParserScheduler.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B3873122883E900B81FF8 /* HTMLPreloadScanner.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385A122883E900B81FF8 /* HTMLPreloadScanner.h */; };
 		977B3875122883E900B81FF8 /* HTMLScriptRunner.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385C122883E900B81FF8 /* HTMLScriptRunner.h */; };
-		977B3876122883E900B81FF8 /* HTMLScriptRunnerHost.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385D122883E900B81FF8 /* HTMLScriptRunnerHost.h */; };
+		977B3876122883E900B81FF8 /* HTMLScriptRunnerHost.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385D122883E900B81FF8 /* HTMLScriptRunnerHost.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		5A2F00000000000000000001 /* HTMLToken.h in Headers */ = {isa = PBXBuildFile; fileRef = 97C1F552122855CB00EDE616 /* HTMLToken.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B3878122883E900B81FF8 /* HTMLTokenizer.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385F122883E900B81FF8 /* HTMLTokenizer.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		978AD67514130A8D00C7CAE3 /* HTMLSpanElement.h in Headers */ = {isa = PBXBuildFile; fileRef = 978AD67214130A8D00C7CAE3 /* HTMLSpanElement.h */; };
@@ -4049,7 +4049,7 @@
 		97BC6A571505F081001B74AC /* SQLTransactionCoordinator.h in Headers */ = {isa = PBXBuildFile; fileRef = 97BC6A151505F081001B74AC /* SQLTransactionCoordinator.h */; };
 		97BC6A581505F081001B74AC /* SQLTransactionErrorCallback.h in Headers */ = {isa = PBXBuildFile; fileRef = 97BC6A161505F081001B74AC /* SQLTransactionErrorCallback.h */; };
 		97BC84841236FD93000C6161 /* TextDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = 97BC84821236FD93000C6161 /* TextDocumentParser.h */; };
-		97BC849B12370A4B000C6161 /* HTMLInputStream.h in Headers */ = {isa = PBXBuildFile; fileRef = 97BC849A12370A4B000C6161 /* HTMLInputStream.h */; };
+		97BC849B12370A4B000C6161 /* HTMLInputStream.h in Headers */ = {isa = PBXBuildFile; fileRef = 97BC849A12370A4B000C6161 /* HTMLInputStream.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		97BC84B412371180000C6161 /* TextDocument.h in Headers */ = {isa = PBXBuildFile; fileRef = 97BC84B212371180000C6161 /* TextDocument.h */; };
 		97C078501165D5BE003A32EF /* SuffixTree.h in Headers */ = {isa = PBXBuildFile; fileRef = 97C0784F1165D5BE003A32EF /* SuffixTree.h */; };
 		97C471DC12F925BD0086354B /* ContentSecurityPolicy.h in Headers */ = {isa = PBXBuildFile; fileRef = 97C471DA12F925BD0086354B /* ContentSecurityPolicy.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -4136,7 +4136,7 @@
 		9BBA2CAB1F679E0C00FD1C1E /* WebContentReader.h in Headers */ = {isa = PBXBuildFile; fileRef = 9BF433761F67619B00E1FD71 /* WebContentReader.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		9BC6C21B13CCC97B008E0337 /* HTMLTextFormControlElement.h in Headers */ = {isa = PBXBuildFile; fileRef = 9BC6C21913CCC97B008E0337 /* HTMLTextFormControlElement.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		9BD0BF9312A42BF50072FD43 /* ScopedEventQueue.h in Headers */ = {isa = PBXBuildFile; fileRef = 9BD0BF9112A42BF50072FD43 /* ScopedEventQueue.h */; };
-		9BD4E9171C462872005065BC /* JSCustomElementInterface.h in Headers */ = {isa = PBXBuildFile; fileRef = 9BD4E9151C462872005065BC /* JSCustomElementInterface.h */; };
+		9BD4E9171C462872005065BC /* JSCustomElementInterface.h in Headers */ = {isa = PBXBuildFile; fileRef = 9BD4E9151C462872005065BC /* JSCustomElementInterface.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		9BD4E91B1C462CFC005065BC /* CustomElementRegistry.h in Headers */ = {isa = PBXBuildFile; fileRef = 9BD4E9191C462CFC005065BC /* CustomElementRegistry.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		9BD90BB12DD574CC00937E3D /* SystemPreviewInfo.h in Headers */ = {isa = PBXBuildFile; fileRef = 9BD90BB02DD5743000937E3D /* SystemPreviewInfo.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		9BD90BBD2DD5F79600937E3D /* ProcessSwapDisposition.h in Headers */ = {isa = PBXBuildFile; fileRef = 9BD90BBC2DD5F79600937E3D /* ProcessSwapDisposition.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -4595,9 +4595,9 @@
 		A833C7CA0A2CF06B00D57664 /* SVGNames.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 656581E809D1508D000E61D7 /* SVGNames.cpp */; };
 		A833C7CC0A2CF07400D57664 /* XLinkNames.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 656581EA09D1508D000E61D7 /* XLinkNames.cpp */; };
 		A833C80C0A2CF25600D57664 /* XMLNames.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A833C80A0A2CF25600D57664 /* XMLNames.cpp */; };
-		A833C80D0A2CF25600D57664 /* XMLNames.h in Headers */ = {isa = PBXBuildFile; fileRef = A833C80B0A2CF25600D57664 /* XMLNames.h */; };
+		A833C80D0A2CF25600D57664 /* XMLNames.h in Headers */ = {isa = PBXBuildFile; fileRef = A833C80B0A2CF25600D57664 /* XMLNames.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A84D827C11D333ED00972990 /* RawDataDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = A84D827B11D333ED00972990 /* RawDataDocumentParser.h */; };
-		A84D82C111D3474800972990 /* ScriptableDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = A84D82BF11D3474800972990 /* ScriptableDocumentParser.h */; };
+		A84D82C111D3474800972990 /* ScriptableDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = A84D82BF11D3474800972990 /* ScriptableDocumentParser.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A84EBD830CB8C97700079609 /* JSStyleSheetList.h in Headers */ = {isa = PBXBuildFile; fileRef = A84EBD810CB8C97700079609 /* JSStyleSheetList.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A853123D11D0471B00D4D077 /* ParserContentPolicy.h in Headers */ = {isa = PBXBuildFile; fileRef = A853123C11D0471B00D4D077 /* ParserContentPolicy.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A863E2011343412000274926 /* UnicodeBidi.h in Headers */ = {isa = PBXBuildFile; fileRef = A863E2001343412000274926 /* UnicodeBidi.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -4640,7 +4640,7 @@
 		A89943280B42338800D7C802 /* BitmapImage.h in Headers */ = {isa = PBXBuildFile; fileRef = A89943260B42338700D7C802 /* BitmapImage.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A89CCC530F44E98100B5DA10 /* ReplaceNodeWithSpanCommand.h in Headers */ = {isa = PBXBuildFile; fileRef = A89CCC510F44E98100B5DA10 /* ReplaceNodeWithSpanCommand.h */; };
 		A8A0CCCAC9805312E1E53FC0 /* UnifiedSource33-header-RenderStyleGetters.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5DE923E85927C51244CECFDD /* UnifiedSource33-header-RenderStyleGetters.cpp */; };
-		A8C228A111D5722E00D5A7D3 /* DecodedDataDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = A8C2289F11D5722E00D5A7D3 /* DecodedDataDocumentParser.h */; };
+		A8C228A111D5722E00D5A7D3 /* DecodedDataDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = A8C2289F11D5722E00D5A7D3 /* DecodedDataDocumentParser.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A8C4A7FD09D563270003AC8D /* StyledElement.h in Headers */ = {isa = PBXBuildFile; fileRef = A8C4A7EB09D563270003AC8D /* StyledElement.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A8C4A80709D563270003AC8D /* Element.h in Headers */ = {isa = PBXBuildFile; fileRef = A8C4A7F509D563270003AC8D /* Element.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A8C4A80B09D563270003AC8D /* Attribute.h in Headers */ = {isa = PBXBuildFile; fileRef = A8C4A7F909D563270003AC8D /* Attribute.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -6252,7 +6252,7 @@
 		D640B24B2E30589300EB6C49 /* UALowEntropyJSON.h in Headers */ = {isa = PBXBuildFile; fileRef = D640B2472E30587100EB6C49 /* UALowEntropyJSON.h */; };
 		D640B24F2E3058D500EB6C49 /* UADataValues.h in Headers */ = {isa = PBXBuildFile; fileRef = D640B24C2E3058C800EB6C49 /* UADataValues.h */; };
 		D6489D26166FFCF1007C031B /* JSHTMLTemplateElement.h in Headers */ = {isa = PBXBuildFile; fileRef = D6489D24166FFCF1007C031B /* JSHTMLTemplateElement.h */; };
-		D66817FB166FE6D700FA07B4 /* HTMLTemplateElement.h in Headers */ = {isa = PBXBuildFile; fileRef = D6EFC0BC1666DF7A003D291E /* HTMLTemplateElement.h */; };
+		D66817FB166FE6D700FA07B4 /* HTMLTemplateElement.h in Headers */ = {isa = PBXBuildFile; fileRef = D6EFC0BC1666DF7A003D291E /* HTMLTemplateElement.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		D669F992A34B36EDA5435687 /* UnifiedSource19-header-RenderStyleGetters.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5250A569CD8198C008B831C9 /* UnifiedSource19-header-RenderStyleGetters.cpp */; };
 		D6E082672F5A3AED009B51B0 /* CachedMatchFinder.h in Headers */ = {isa = PBXBuildFile; fileRef = D6E082652F5A3AD7009B51B0 /* CachedMatchFinder.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		D6E276B014637455001D280A /* MutationObserverRegistration.h in Headers */ = {isa = PBXBuildFile; fileRef = D6E276AE14637455001D280A /* MutationObserverRegistration.h */; };
@@ -6883,7 +6883,7 @@
 		E3C99A091DC3D41C00794AD3 /* DOMJITCheckDOM.h in Headers */ = {isa = PBXBuildFile; fileRef = E3C99A081DC3D41700794AD3 /* DOMJITCheckDOM.h */; };
 		E3CA0BFC2673F47C009FDD67 /* JSDOMBindingSecurityInlines.h in Headers */ = {isa = PBXBuildFile; fileRef = E3CA0BFA2673F478009FDD67 /* JSDOMBindingSecurityInlines.h */; };
 		E3E4E2A81E3B17100023BB8A /* ScriptElementCachedScriptFetcher.h in Headers */ = {isa = PBXBuildFile; fileRef = E3E4E2A61E3B16FC0023BB8A /* ScriptElementCachedScriptFetcher.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		E3FA38641D71812D00AA5950 /* PendingScriptClient.h in Headers */ = {isa = PBXBuildFile; fileRef = E3FA38611D716E7600AA5950 /* PendingScriptClient.h */; };
+		E3FA38641D71812D00AA5950 /* PendingScriptClient.h in Headers */ = {isa = PBXBuildFile; fileRef = E3FA38611D716E7600AA5950 /* PendingScriptClient.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E401B3632A942E3F0018B557 /* ScopedName.h in Headers */ = {isa = PBXBuildFile; fileRef = E401B3622A942E3E0018B557 /* ScopedName.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E401C27517CE53EC00C41A35 /* ElementIteratorAssertions.h in Headers */ = {isa = PBXBuildFile; fileRef = E401C27417CE53EC00C41A35 /* ElementIteratorAssertions.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E401E0A41C3C0B8300F34D10 /* StyleChange.h in Headers */ = {isa = PBXBuildFile; fileRef = E401E0A31C3C0B8300F34D10 /* StyleChange.h */; settings = {ATTRIBUTES = (Private, ); }; };
