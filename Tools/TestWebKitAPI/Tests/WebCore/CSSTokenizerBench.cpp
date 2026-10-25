@@ -75,11 +75,13 @@ private:
 
 static String sourceRoot()
 {
+    // __FILE__ is written with the platform's path separators.
     StringView file = StringView::fromLatin1(__FILE__);
-    auto end = file.find("/Tools/TestWebKitAPI/"_s);
-    if (end == notFound)
-        return { };
-    return file.left(end).toString();
+    for (auto directory : { "/Tools/TestWebKitAPI/"_s, "\\Tools\\TestWebKitAPI\\"_s }) {
+        if (auto end = file.find(directory); end != notFound)
+            return file.left(end).toString();
+    }
+    return { };
 }
 
 static String readSourceFile(ASCIILiteral relativePath)

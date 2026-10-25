@@ -24,12 +24,14 @@
 #if USE_SWIFT_CSS_TOKENIZER
 
 // Without these, no operator in this file type-checks: WebCore's C++ operators name types these modules define.
+#if canImport(JavaScriptCore_Private) // Not a module outside Apple platforms, where the headers are textual.
 internal import JavaScriptCore_Private.Cxx.Snippet
 internal import JavaScriptCore_Private.Cxx.DOMJITCallDOMGetterSnippet
 internal import JavaScriptCore_Private.Cxx.WasmInstanceAnchor
 internal import JavaScriptCore_Private.Cxx.WasmCalleeGroup
 internal import JavaScriptCore_Private.Cxx.WasmModule
 internal import JavaScriptCore_Private.Cxx.WasmModuleDebugInfo
+#endif
 internal import wtf.Core.Stopwatch
 
 internal import WebCore_Private.Core.CSSParserToken
@@ -93,7 +95,12 @@ private func code(_ sign: WebCore.NumericSign) -> UInt8 {
 /// Nothing here looks above U+007F except to ask whether a code unit is ASCII, which is all the name code
 /// point rule needs, so scanning by code unit is right for 16-bit input too: surrogates are name code
 /// points, and preprocessing has replaced unpaired ones.
-private protocol CSSCodeUnit: FixedWidthInteger & UnsignedInteger {
+///
+/// FIXME: Make this and its witnesses private again once a private protocol links under LTO on Windows. With more
+/// than one object file per module (the CMake build's -num-threads), a private protocol's requirement descriptors are
+/// linkonce_odr aliases to offsets into the protocol descriptor, which LLVM's COFF bitcode symbol table rejects as an
+/// "Invalid weak external" (IRSymtab.cpp), so WebCore.dll does not link.
+protocol CSSCodeUnit: FixedWidthInteger & UnsignedInteger {
     /// The index of the first of the first sixteen code units of `units`, which holds seventeen, that is a
     /// `*` followed by a `/`; 16 when there is none.
     static func commentEndIndex(_ units: Span<Self>) -> Int
@@ -105,7 +112,7 @@ private protocol CSSCodeUnit: FixedWidthInteger & UnsignedInteger {
 
 extension UInt8: CSSCodeUnit {
     @inline(always)
-    fileprivate static func commentEndIndex(_ units: Span<UInt8>) -> Int {
+    static func commentEndIndex(_ units: Span<UInt8>) -> Int {
         // A lane of `pair` is zero where the code unit is `*` and the next is `/`; `(pair - 1) & ~pair` sets
         // the top bit of exactly those lanes.
         let pair = (load16(units, at: 0) ^ 0x2A) | (load16(units, at: 1) ^ 0x2F)
@@ -115,7 +122,7 @@ extension UInt8: CSSCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func leadingSpaceOrTabCount(_ units: Span<UInt8>) -> Int {
+    static func leadingSpaceOrTabCount(_ units: Span<UInt8>) -> Int {
         // `x | (0 - x)` has its top bit set exactly when `x` is not zero, so a lane of `other` has its top bit
         // set exactly when the code unit is neither a space nor a tab.
         let v = load16(units, at: 0)
@@ -128,7 +135,7 @@ extension UInt8: CSSCodeUnit {
 
 extension UInt16: CSSCodeUnit {
     @inline(always)
-    fileprivate static func commentEndIndex(_ units: Span<UInt16>) -> Int {
+    static func commentEndIndex(_ units: Span<UInt16>) -> Int {
         // As for 8-bit input, comparing whole code units, so that U+012A is not a `*`.
         let bytes = units.bytes
         let low =
@@ -143,7 +150,7 @@ extension UInt16: CSSCodeUnit {
     }
 
     @inline(always)
-    fileprivate static func leadingSpaceOrTabCount(_ units: Span<UInt16>) -> Int {
+    static func leadingSpaceOrTabCount(_ units: Span<UInt16>) -> Int {
         // As for 8-bit input, comparing whole code units, so that U+0120 is not a space; then the top bit of
         // each lane's high byte, gathered into eight bits per lane.
         let bytes = units.bytes
