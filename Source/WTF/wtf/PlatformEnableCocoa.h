@@ -446,6 +446,15 @@
 #define ENABLE_IMAGE_ANALYSIS_FOR_MACHINE_READABLE_CODES 1
 #endif
 
+// The Swift port of ImageDecoderCG (platform/graphics/cg/ImageDecoderCG.swift). Off by default.
+// The Swift files are gated on the Swift compilation condition of the same name, which WebCore's
+// Swift build does not derive from this header: to enable, set both
+// GCC_PREPROCESSOR_DEFINITIONS='$(inherited) ENABLE_IMAGE_DECODER_CG_SWIFT=1' and
+// SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) ENABLE_IMAGE_DECODER_CG_SWIFT'.
+#if !defined(ENABLE_IMAGE_DECODER_CG_SWIFT)
+#define ENABLE_IMAGE_DECODER_CG_SWIFT 0
+#endif
+
 #if !defined(ENABLE_INPUT_TYPE_WEEK_PICKER) \
     && (PLATFORM(IOS) || PLATFORM(MACCATALYST) || PLATFORM(VISION))
 #define ENABLE_INPUT_TYPE_WEEK_PICKER 1

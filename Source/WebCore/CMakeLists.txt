@@ -3362,6 +3362,15 @@ if (SWIFT_REQUIRED AND APPLE)
     # FIXME: Remove SwiftStub.swift once WebCore has real Swift sources.
     target_sources(WebCore PRIVATE ${WEBCORE_DIR}/SwiftStub.swift)
 
+    # The Swift port of ImageDecoderCG, as in WebCore.xcodeproj. Each file is empty unless
+    # ENABLE(IMAGE_DECODER_CG_SWIFT) (wtf/PlatformEnableCocoa.h, off by default).
+    target_sources(WebCore PRIVATE
+        ${WEBCORE_DIR}/platform/cf/SafeCFNumber.swift
+        ${WEBCORE_DIR}/platform/graphics/ImageDecoding.swift
+        ${WEBCORE_DIR}/platform/graphics/cg/ImageDecoderCG.swift
+        ${WEBCORE_DIR}/platform/graphics/cg/ImageDecodingCG.swift
+    )
+
     webkit_target_add_swift_options(WebCore
         "-library-level spi"
     )

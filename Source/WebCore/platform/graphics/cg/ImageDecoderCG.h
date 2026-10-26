@@ -34,11 +34,17 @@
 namespace WebCore {
 
 class SharedBuffer;
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+class AnyCGImageDecoder; // Swift (ImageDecodingCG.swift); complete only in ImageDecoderCG.cpp.
+#endif
 
 class ImageDecoderCG final : public ImageDecoder {
     WTF_MAKE_TZONE_ALLOCATED(ImageDecoderCG);
 public:
     ImageDecoderCG(FragmentedSharedBuffer& data, AlphaOption, GammaAndColorProfileOption);
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+    ~ImageDecoderCG();
+#endif
 
     static Ref<ImageDecoderCG> create(FragmentedSharedBuffer& data, AlphaOption alphaOption, GammaAndColorProfileOption gammaAndColorProfileOption)
     {
@@ -56,7 +62,11 @@ public:
     size_t frameCount() const final;
     size_t primaryFrameIndex() const final;
     RepetitionCount repetitionCount() const final;
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+    String uti() const final;
+#else
     String uti() const final { return m_uti; }
+#endif
     String filenameExtension() const final;
     String accessibilityDescription() const final;
     std::optional<IntPoint> hotSpot() const final;
@@ -76,7 +86,11 @@ public:
     PlatformImagePtr createFrameImageAtIndex(size_t, SubsamplingLevel = SubsamplingLevel::Default, const DecodingOptions& = DecodingOptions(DecodingMode::Synchronous)) final;
 
     void setData(const FragmentedSharedBuffer&, bool allDataReceived) final;
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+    bool isAllDataReceived() const final;
+#else
     bool isAllDataReceived() const final { return m_isAllDataReceived; }
+#endif
     void clearFrameBufferCache(size_t) final { }
 
     static String decodeUTI(CGImageSourceRef, const SharedBuffer&);
@@ -98,10 +112,17 @@ private:
     std::optional<SpatialImageEyeProperties> spatialEyePropertiesAtIndex(unsigned) const;
 #endif
 
+#if !ENABLE(IMAGE_DECODER_CG_SWIFT)
     bool m_isAllDataReceived { false };
+#endif
     std::atomic<bool> m_isXBitmapImage { false };
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+    // Owns the data, UTI and encoded-data status; shares m_nativeDecoder (see ImageDecoderCG.cpp).
+    const std::unique_ptr<AnyCGImageDecoder> m_swiftDecoder;
+#else
     mutable EncodedDataStatus m_encodedDataStatus { EncodedDataStatus::Unknown };
     String m_uti;
+#endif
     const RetainPtr<CGImageSourceRef> m_nativeDecoder;
 };
 
