@@ -43,6 +43,10 @@
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/cf/TypeCastsCF.h>
 
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+#include "WebCore-Swift.h"
+#endif
+
 #include "CoreVideoSoftLink.h"
 #include "MediaAccessibilitySoftLink.h"
 
@@ -56,6 +60,7 @@ namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ImageDecoderCG);
 
+#if !ENABLE(IMAGE_DECODER_CG_SWIFT)
 const CFStringRef WebCoreCGImagePropertyAVISDictionary = CFSTR("{AVIS}");
 const CFStringRef WebCoreCGImagePropertyHEICSDictionary = CFSTR("{HEICS}");
 const CFStringRef WebCoreCGImagePropertyFrameInfoArray = CFSTR("FrameInfo");
@@ -63,7 +68,9 @@ const CFStringRef WebCoreCGImagePropertyFrameInfoArray = CFSTR("FrameInfo");
 const CFStringRef WebCoreCGImagePropertyUnclampedDelayTime = CFSTR("UnclampedDelayTime");
 const CFStringRef WebCoreCGImagePropertyDelayTime = CFSTR("DelayTime");
 const CFStringRef WebCoreCGImagePropertyLoopCount = CFSTR("LoopCount");
+#endif
 
+#if !ENABLE(IMAGE_DECODER_CG_SWIFT) || ENABLE(SPATIAL_IMAGE_DETECTION)
 #if HAVE(IMAGE_RESTRICTED_DECODING) && USE(APPLE_INTERNAL_SDK)
 const CFStringRef kCGImageSourceEnableRestrictedDecoding = CFSTR("kCGImageSourceEnableRestrictedDecoding");
 #endif
@@ -71,11 +78,15 @@ const CFStringRef kCGImageSourceEnableRestrictedDecoding = CFSTR("kCGImageSource
 #if HAVE(IMAGEIO_CREATE_UNPREMULTIPLIED_PNG)
 const CFStringRef kCGImageSourceCreateUnpremultipliedPNG = CFSTR("kCGImageSourceCreateUnpremultipliedPNG");
 #endif
+#endif
 
+#if !ENABLE(IMAGE_DECODER_CG_SWIFT)
 #if ENABLE(QUICKLOOK_FULLSCREEN)
 constexpr float panoramicImageAspectRatioThreshold = 2.0;
 #endif
+#endif
 
+#if !ENABLE(IMAGE_DECODER_CG_SWIFT) || ENABLE(SPATIAL_IMAGE_DETECTION)
 static RetainPtr<CFMutableDictionaryRef> createImageSourceOptions()
 {
     RetainPtr<CFMutableDictionaryRef> options = adoptCF(CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
@@ -97,7 +108,9 @@ static RetainPtr<CFMutableDictionaryRef> createImageSourceOptions()
 
     return options;
 }
+#endif
 
+#if !ENABLE(IMAGE_DECODER_CG_SWIFT)
 static RetainPtr<CFMutableDictionaryRef> createImageSourceThumbnailOptions()
 {
     RetainPtr<CFMutableDictionaryRef> options = createImageSourceOptions();
@@ -134,7 +147,9 @@ static void appendImageSourceOption(CFMutableDictionaryRef options, DecodingDest
     UNUSED_PARAM(decodingDestination);
 #endif
 }
+#endif
 
+#if !ENABLE(IMAGE_DECODER_CG_SWIFT) || ENABLE(SPATIAL_IMAGE_DETECTION)
 static RetainPtr<CFMutableDictionaryRef> imageSourceMetadataOptions()
 {
     static NeverDestroyed<RetainPtr<CFMutableDictionaryRef>> options = [] {
@@ -144,7 +159,9 @@ static RetainPtr<CFMutableDictionaryRef> imageSourceMetadataOptions()
     }();
     return options.get();
 }
+#endif
 
+#if !ENABLE(IMAGE_DECODER_CG_SWIFT)
 static RetainPtr<CFDictionaryRef> imageSourceOptions(SubsamplingLevel subsamplingLevel = SubsamplingLevel::Default, DecodingDestination decodingDestination = DecodingDestination::Base)
 {
     static NeverDestroyed<RetainPtr<CFMutableDictionaryRef>> options = createImageSourceOptions();
@@ -297,6 +314,36 @@ static std::optional<IntSize> densityCorrectedSizeFromProperties(CFDictionaryRef
         static_cast<ImageResolution::ResolutionUnit>(resolutionUnit)
     });
 }
+#endif
+
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+// The Swift decoder over the source the constructor created. It gets what createImageSourceOptions()
+// and isSupportedImageType() read, as values: the SPI option keys, ProcessCapabilities, HAVE() flags
+// and UTIRegistry's two sets.
+static std::unique_ptr<AnyCGImageDecoder> createSwiftDecoder(CGImageSourceRef source)
+{
+    // Capacity 0: unbounded. A non-zero capacity is a hard maximum for CFArrayCreateMutable.
+    RetainPtr supportedTypes = adoptCF(CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks));
+    for (auto& type : supportedImageTypes())
+        CFArrayAppendValue(supportedTypes.get(), type.createCFString().get());
+    for (auto& type : additionalSupportedImageTypes())
+        CFArrayAppendValue(supportedTypes.get(), type.createCFString().get());
+
+    bool enableRestrictedDecoding = false;
+#if HAVE(IMAGE_RESTRICTED_DECODING) && USE(APPLE_INTERNAL_SDK)
+    enableRestrictedDecoding = ProcessCapabilities::isHEICDecodingEnabled() || ProcessCapabilities::isAVIFDecodingEnabled();
+#endif
+    bool createUnpremultipliedPNG = false;
+#if HAVE(IMAGEIO_CREATE_UNPREMULTIPLIED_PNG)
+    createUnpremultipliedPNG = true;
+#endif
+
+    // makeForImageSource takes `source` as `sending`, i.e. at +1, and its generated C++ thunk does not retain it.
+    return makeUniqueWithoutFastMallocCheck<AnyCGImageDecoder>(AnyCGImageDecoder::makeForImageSource(retainPtr(source).leakRef(), supportedTypes.get(),
+        kCGImageSourceShouldPreferRGB32, kCGImageSourceSkipMetadata, kCGImageSourceUseHardwareAcceleration,
+        ProcessCapabilities::isHardwareAcceleratedDecodingDisabled(), enableRestrictedDecoding, createUnpremultipliedPNG));
+}
+#endif
 
 ImageDecoderCG::ImageDecoderCG(FragmentedSharedBuffer& data, AlphaOption, GammaAndColorProfileOption)
 {
@@ -311,7 +358,14 @@ ImageDecoderCG::ImageDecoderCG(FragmentedSharedBuffer& data, AlphaOption, GammaA
         lazyInitialize(m_nativeDecoder, adoptCF(CGImageSourceCreateIncremental(options.get())));
     } else
         lazyInitialize(m_nativeDecoder, adoptCF(CGImageSourceCreateIncremental(nullptr)));
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+    lazyInitialize(m_swiftDecoder, createSwiftDecoder(m_nativeDecoder.get()));
+#endif
 }
+
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+ImageDecoderCG::~ImageDecoderCG() = default;
+#endif
 
 size_t ImageDecoderCG::bytesDecodedToDetermineProperties() const
 {
@@ -340,6 +394,179 @@ String ImageDecoderCG::accessibilityDescription() const
     return description.get();
 }
 
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+// The raw values the Swift mirrors in ImageDecoding.swift assume.
+// Every enumerator, so a reordering in the middle is caught too, not only an insertion.
+static_assert(static_cast<uint8_t>(EncodedDataStatus::Error) == 0);
+static_assert(static_cast<uint8_t>(EncodedDataStatus::Unknown) == 1);
+static_assert(static_cast<uint8_t>(EncodedDataStatus::TypeAvailable) == 2);
+static_assert(static_cast<uint8_t>(EncodedDataStatus::SizeAvailable) == 3);
+static_assert(static_cast<uint8_t>(EncodedDataStatus::Complete) == 4);
+static_assert(static_cast<uint8_t>(DecodingStatus::Invalid) == 0);
+static_assert(static_cast<uint8_t>(DecodingStatus::Partial) == 1);
+static_assert(static_cast<uint8_t>(DecodingStatus::Complete) == 2);
+static_assert(static_cast<uint8_t>(DecodingStatus::Decoding) == 3);
+static_assert(static_cast<uint8_t>(DecodingMode::Auto) == 0);
+static_assert(static_cast<uint8_t>(DecodingMode::Synchronous) == 1);
+static_assert(static_cast<uint8_t>(DecodingMode::Asynchronous) == 2);
+static_assert(static_cast<uint8_t>(DecodingDestination::Base) == 0);
+static_assert(static_cast<uint8_t>(DecodingDestination::BaseAndGainMap) == 1);
+static_assert(static_cast<uint8_t>(DecodingDestination::ShouldDecodeToHDR) == 2);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::FromImage) == 0);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::OriginTopLeft) == 1);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::OriginTopRight) == 2);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::OriginBottomRight) == 3);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::OriginBottomLeft) == 4);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::OriginLeftTop) == 5);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::OriginRightTop) == 6);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::OriginRightBottom) == 7);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::OriginLeftBottom) == 8);
+static_assert(static_cast<uint8_t>(ImageOrientation::Orientation::None) == 1);
+
+static String fromSwift(const swift::String& string)
+{
+    std::string utf8 = string;
+    return String::fromUTF8(std::span { utf8 });
+}
+
+static IntSize fromSwift(const ImageDecoderIntSize& size)
+{
+    return { size.getWidth(), size.getHeight() };
+}
+
+static uint8_t swiftDecodingDestination(const DecodingOptions& options)
+{
+#if HAVE(SUPPORT_HDR_DISPLAY_APIS)
+    return static_cast<uint8_t>(options.decodingDestination());
+#else
+    // appendImageSourceOption(DecodingDestination) adds nothing without HAVE(SUPPORT_HDR_DISPLAY_APIS).
+    UNUSED_PARAM(options);
+    return static_cast<uint8_t>(DecodingDestination::Base);
+#endif
+}
+
+static swift::Optional<ImageDecoderIntSize> swiftSizeForDrawing(const DecodingOptions& options)
+{
+    if (auto size = options.sizeForDrawing())
+        return swift::Optional<ImageDecoderIntSize>::init(ImageDecoderIntSize::init(size->width(), size->height()));
+    return swift::Optional<ImageDecoderIntSize>::none();
+}
+
+String ImageDecoderCG::uti() const
+{
+    return fromSwift(m_swiftDecoder->getDecoder().uti());
+}
+
+bool ImageDecoderCG::isAllDataReceived() const
+{
+    return m_swiftDecoder->getDecoder().isAllDataReceived();
+}
+
+EncodedDataStatus ImageDecoderCG::encodedDataStatus() const
+{
+    return static_cast<EncodedDataStatus>(m_swiftDecoder->getDecoder().encodedDataStatus());
+}
+
+bool ImageDecoderCG::hasHDRGainMap() const
+{
+#if HAVE(SUPPORT_HDR_DISPLAY)
+    return m_swiftDecoder->getDecoder().hasHDRGainMap();
+#else
+    return false;
+#endif
+}
+
+size_t ImageDecoderCG::frameCount() const
+{
+    return m_swiftDecoder->getDecoder().frameCount();
+}
+
+size_t ImageDecoderCG::primaryFrameIndex() const
+{
+    return m_swiftDecoder->getDecoder().primaryFrameIndex();
+}
+
+RepetitionCount ImageDecoderCG::repetitionCount() const
+{
+    return m_swiftDecoder->getDecoder().repetitionCount();
+}
+
+std::optional<IntPoint> ImageDecoderCG::hotSpot() const
+{
+    auto decoder = m_swiftDecoder->getDecoder();
+    auto x = decoder.hotSpotX();
+    auto y = decoder.hotSpotY();
+    if (!x.isSome() || !y.isSome())
+        return std::nullopt;
+    return IntPoint(x.getSome(), y.getSome());
+}
+
+IntSize ImageDecoderCG::frameSizeAtIndex(size_t index, SubsamplingLevel subsamplingLevel) const
+{
+    return fromSwift(m_swiftDecoder->getDecoder().frameSizeAtIndex(index, static_cast<swift::Int>(subsamplingLevel)));
+}
+
+FloatSize ImageDecoderCG::frameDensityAtIndex(size_t index) const
+{
+    auto decoder = m_swiftDecoder->getDecoder();
+    return { decoder.frameDensityWidthAtIndex(index), decoder.frameDensityHeightAtIndex(index) };
+}
+
+bool ImageDecoderCG::frameIsCompleteAtIndex(size_t index) const
+{
+    ASSERT(frameCount());
+    return m_swiftDecoder->getDecoder().frameIsCompleteAtIndex(index);
+}
+
+ImageOrientation ImageDecoderCG::frameOrientationAtIndex(size_t index) const
+{
+    return static_cast<ImageOrientation::Orientation>(m_swiftDecoder->getDecoder().frameOrientationAtIndex(index));
+}
+
+std::optional<IntSize> ImageDecoderCG::frameDensityCorrectedSizeAtIndex(size_t index) const
+{
+    auto size = m_swiftDecoder->getDecoder().frameDensityCorrectedSizeAtIndex(index);
+    if (!size.isSome())
+        return std::nullopt;
+    return fromSwift(size.getSome());
+}
+
+Seconds ImageDecoderCG::frameDurationAtIndex(size_t index) const
+{
+    return Seconds(m_swiftDecoder->getDecoder().frameDurationAtIndex(index));
+}
+
+bool ImageDecoderCG::frameHasAlphaAtIndex(size_t index) const
+{
+    return m_swiftDecoder->getDecoder().frameHasAlphaAtIndex(index);
+}
+
+bool ImageDecoderCG::fetchFrameMetaDataAtIndex(size_t index, SubsamplingLevel subsamplingLevel, const DecodingOptions& options, ImageFrame& frame) const
+{
+    auto fetched = m_swiftDecoder->getDecoder().fetchFrameMetaDataAtIndex(index, static_cast<swift::Int>(subsamplingLevel),
+        static_cast<uint8_t>(options.decodingMode()), swiftDecodingDestination(options), swiftSizeForDrawing(options));
+    if (!fetched.isSome())
+        return false;
+    auto metadata = fetched.getSome();
+
+    frame.m_naturalSize = { metadata.getNaturalWidth(), metadata.getNaturalHeight() };
+    if (options.hasSizeForDrawing()) {
+        ASSERT(frame.hasNativeImage(options.decodingDestination()));
+        frame.m_size = frame.nativeImage(options.decodingDestination())->size();
+    } else
+        frame.m_size = frame.m_naturalSize;
+
+    if (metadata.hasDensity())
+        frame.m_density = { metadata.getDensityWidth(), metadata.getDensityHeight() };
+    auto densityCorrectedSize = metadata.getDensityCorrectedSize();
+    frame.m_densityCorrectedSize = densityCorrectedSize.isSome() ? std::optional { fromSwift(densityCorrectedSize.getSome()) } : std::nullopt;
+    frame.m_subsamplingLevel = subsamplingLevel;
+    frame.m_hasAlpha = metadata.hasAlpha();
+    frame.m_orientation = static_cast<ImageOrientation::Orientation>(metadata.getOrientation());
+    frame.m_decodingStatus = static_cast<DecodingStatus>(metadata.getDecodingStatus());
+    return true;
+}
+#else
 EncodedDataStatus ImageDecoderCG::encodedDataStatus() const
 {
     if (m_encodedDataStatus == EncodedDataStatus::Error || m_encodedDataStatus == EncodedDataStatus::Complete)
@@ -632,6 +859,7 @@ bool ImageDecoderCG::fetchFrameMetaDataAtIndex(size_t index, SubsamplingLevel su
     frame.m_decodingStatus = frameIsComplete ? DecodingStatus::Complete : DecodingStatus::Partial;
     return true;
 }
+#endif // ENABLE(IMAGE_DECODER_CG_SWIFT)
 
 std::optional<GainMap> ImageDecoderCG::frameGainMapAtIndex(size_t index, const DecodingOptions& decodingOptions)
 {
@@ -671,6 +899,13 @@ std::optional<GainMap> ImageDecoderCG::frameGainMapAtIndex(size_t index, const D
 PlatformImagePtr ImageDecoderCG::createFrameImageAtIndex(size_t index, SubsamplingLevel subsamplingLevel, const DecodingOptions& decodingOptions)
 {
     LOG(Images, "ImageDecoder %p createFrameImageAtIndex %lu", this, index);
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+    ASSERT(decodingOptions.decodingMode() != DecodingMode::Auto);
+    // Decoded on m_nativeDecoder (the source Swift was given) with no Swift lock held, so main-thread
+    // calls are not blocked by a background decode. Returned at +1.
+    RetainPtr image = adoptCF(m_swiftDecoder->createFrameImageAtIndex(m_nativeDecoder.get(), index, static_cast<swift::Int>(subsamplingLevel),
+        static_cast<uint8_t>(decodingOptions.decodingMode()), swiftDecodingDestination(decodingOptions), swiftSizeForDrawing(decodingOptions)));
+#else
     RetainPtr<CFDictionaryRef> options;
     RetainPtr<CGImageRef> image;
 
@@ -693,6 +928,7 @@ PlatformImagePtr ImageDecoderCG::createFrameImageAtIndex(size_t index, Subsampli
         options = imageSourceThumbnailOptions(subsamplingLevel, size, decodingOptions.decodingDestination());
         image = adoptCF(CGImageSourceCreateThumbnailAtIndex(m_nativeDecoder.get(), index, options.get()));
     }
+#endif // ENABLE(IMAGE_DECODER_CG_SWIFT)
     
 #if PLATFORM(IOS_FAMILY)
     // <rdar://problem/7371198> - CoreGraphics changed the default caching behaviour in iOS 4.0 to kCGImageCachingTransient
@@ -797,6 +1033,12 @@ String ImageDecoderCG::decodeUTI(CGImageSourceRef imageSource, const SharedBuffe
 
 void ImageDecoderCG::setData(const FragmentedSharedBuffer& data, bool allDataReceived)
 {
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+    // The CFData goes to CGImageSourceUpdateData unchanged (no copy of the bytes). Swift takes it as
+    // `sending`, i.e. at +1, and its generated C++ thunk does not retain it.
+    m_swiftDecoder->setData(data.makeContiguous()->createCFData().leakRef(), allDataReceived);
+    m_isXBitmapImage = uti() == "public.xbitmap-image"_s;
+#else
     m_isAllDataReceived = allDataReceived;
     
     auto contiguousData = data.makeContiguous();
@@ -808,6 +1050,7 @@ void ImageDecoderCG::setData(const FragmentedSharedBuffer& data, bool allDataRec
     
     m_uti = decodeUTI(contiguousData.get());
     m_isXBitmapImage = m_uti == "public.xbitmap-image"_s;
+#endif
 }
 
 bool ImageDecoderCG::canDecodeType(const String& mimeType)
@@ -815,6 +1058,19 @@ bool ImageDecoderCG::canDecodeType(const String& mimeType)
     return MIMETypeRegistry::isSupportedImageMIMEType(mimeType);
 }
 
+#if ENABLE(IMAGE_DECODER_CG_SWIFT)
+#if ENABLE(QUICKLOOK_FULLSCREEN)
+bool ImageDecoderCG::isMaybePanoramic() const
+{
+    return m_swiftDecoder->getDecoder().isMaybePanoramic();
+}
+
+bool ImageDecoderCG::isPanorama() const
+{
+    return m_swiftDecoder->getDecoder().isPanorama();
+}
+#endif
+#else
 #if ENABLE(QUICKLOOK_FULLSCREEN)
 bool ImageDecoderCG::isMaybePanoramic() const
 {
@@ -837,6 +1093,7 @@ bool ImageDecoderCG::isPanorama() const
     return imageSize.minDimension() > panoramicImageMinDimension && imageSize.maxDimension() < panoramicImageMaxDimension;
 }
 #endif
+#endif // ENABLE(IMAGE_DECODER_CG_SWIFT)
 
 #if ENABLE(SPATIAL_IMAGE_DETECTION)
 bool ImageDecoderCG::isSpatial() const

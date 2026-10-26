@@ -315,6 +315,10 @@
 		07D6A4F41BED5F8800174146 /* MockRealtimeAudioSource.h in Headers */ = {isa = PBXBuildFile; fileRef = 07D6A4F21BED5F8800174146 /* MockRealtimeAudioSource.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		07D6A4F81BF2307D00174146 /* AudioTrackPrivateMediaStream.h in Headers */ = {isa = PBXBuildFile; fileRef = 07D6A4F61BF2307D00174146 /* AudioTrackPrivateMediaStream.h */; };
 		07E047C3305A9DB000DFCC4B /* SwiftStub.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07E047C2305A9DB000DFCC4B /* SwiftStub.swift */; };
+		B4B3B213B38019AA5A40E14D /* SafeCFNumber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06D1D0F9489AA841E6676033 /* SafeCFNumber.swift */; };
+		88C34489AB3494E36F0B2E95 /* ImageDecoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 497FC327EBC4E5B9C5128FAC /* ImageDecoding.swift */; };
+		ED666582528540CAF79EE240 /* ImageDecoderCG.swift in Sources */ = {isa = PBXBuildFile; fileRef = F123D54F8A383CE1B55FCBAD /* ImageDecoderCG.swift */; };
+		0C8AB8D60605AC220A644356 /* ImageDecodingCG.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0466F593C29D685485891EB /* ImageDecodingCG.swift */; };
 		07E047C5305A9DB000DFCC4B /* SwiftStubInterop.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 07E047C4305A9DB000DFCC4B /* SwiftStubInterop.cpp */; };
 		07E047C7305A9DB000DFCC4B /* WebCore-Swift.h in Headers */ = {isa = PBXBuildFile; fileRef = 07E047C6305A9DB000DFCC4B /* WebCore-Swift.h */; };
 		07E2C0732C1396FE00BE6743 /* WritingToolsTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = 07E2C0722C1396F600BE6743 /* WritingToolsTypes.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -8167,6 +8171,10 @@
 		07D6A4F61BF2307D00174146 /* AudioTrackPrivateMediaStream.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = AudioTrackPrivateMediaStream.h; path = platform/mediastream/AudioTrackPrivateMediaStream.h; sourceTree = SOURCE_ROOT; };
 		07DB47062BC27E0A00B5A958 /* WritingSuggestionData.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = WritingSuggestionData.h; sourceTree = "<group>"; };
 		07E047C2305A9DB000DFCC4B /* SwiftStub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftStub.swift; sourceTree = "<group>"; };
+		06D1D0F9489AA841E6676033 /* SafeCFNumber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeCFNumber.swift; sourceTree = "<group>"; };
+		497FC327EBC4E5B9C5128FAC /* ImageDecoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecoding.swift; sourceTree = "<group>"; };
+		F123D54F8A383CE1B55FCBAD /* ImageDecoderCG.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecoderCG.swift; sourceTree = "<group>"; };
+		D0466F593C29D685485891EB /* ImageDecodingCG.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecodingCG.swift; sourceTree = "<group>"; };
 		07E047C4305A9DB000DFCC4B /* SwiftStubInterop.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = SwiftStubInterop.cpp; sourceTree = "<group>"; };
 		07E047C6305A9DB000DFCC4B /* WebCore-Swift.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "WebCore-Swift.h"; sourceTree = "<group>"; };
 		07E117061489EBEB00EC5ACE /* JSTextTrackCueCustom.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = JSTextTrackCueCustom.cpp; sourceTree = "<group>"; };
@@ -25613,6 +25621,7 @@
 				5CBC8DAA1AAA302200E1C803 /* MediaAccessibilitySoftLink.cpp */,
 				5CBC8DAB1AAA302200E1C803 /* MediaAccessibilitySoftLink.h */,
 				2D76BB8319456F8100CFD29A /* RunLoopObserverCF.cpp */,
+				06D1D0F9489AA841E6676033 /* SafeCFNumber.swift */,
 				512DD8E20D91E2B4000F89EE /* SharedBufferCF.cpp */,
 			);
 			path = cf;
@@ -36584,6 +36593,8 @@
 				72BAC3AB23E1E544008D741C /* ImageBufferIOSurfaceBackend.h */,
 				555B87EA1CAAF0AB00349425 /* ImageDecoderCG.cpp */,
 				555B87EB1CAAF0AB00349425 /* ImageDecoderCG.h */,
+				F123D54F8A383CE1B55FCBAD /* ImageDecoderCG.swift */,
+				D0466F593C29D685485891EB /* ImageDecodingCG.swift */,
 				55BBD42624DB534300BB6E0C /* ImageUtilitiesCG.cpp */,
 				B27535320B053814002CE64F /* IntPointCG.cpp */,
 				B27535330B053814002CE64F /* IntRectCG.cpp */,
@@ -36645,6 +36656,7 @@
 				CD9D827C1C7BB2ED006FF066 /* cv */,
 				0FE5FBC91C3DD5060007A2CA /* displaylists */,
 				A75E8B7F0E1DE2B0007F2481 /* filters */,
+				497FC327EBC4E5B9C5128FAC /* ImageDecoding.swift */,
 				441AF0A70EBA7BBF0044ED4B /* ios */,
 				CD892F5A1FB52ACF009333D2 /* iso */,
 				B27535490B053814002CE64F /* mac */,
@@ -51188,6 +51200,10 @@
 				41514FDB2E92DC40002074EA /* StreamPipeToUtilities.cpp in Sources */,
 				A833C7CA0A2CF06B00D57664 /* SVGNames.cpp in Sources */,
 				07E047C3305A9DB000DFCC4B /* SwiftStub.swift in Sources */,
+				B4B3B213B38019AA5A40E14D /* SafeCFNumber.swift in Sources */,
+				88C34489AB3494E36F0B2E95 /* ImageDecoding.swift in Sources */,
+				ED666582528540CAF79EE240 /* ImageDecoderCG.swift in Sources */,
+				0C8AB8D60605AC220A644356 /* ImageDecodingCG.swift in Sources */,
 				07E047C5305A9DB000DFCC4B /* SwiftStubInterop.cpp in Sources */,
 				C1692DD223D23ABD006E88F7 /* SystemBattery.mm in Sources */,
 				329C0C2328BD96D600F187D2 /* TagName.cpp in Sources */,
