@@ -35,7 +35,9 @@
 #include "NodeRenderStyle.h"
 #include "RenderView.h"
 #include "ScriptElementCachedScriptFetcher.h"
+#include <wtf/HexNumber.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/text/StringBuilder.h>
 #include "FrameDestructionObserverInlines.h"
 
 namespace WebCore {
@@ -81,6 +83,48 @@ CachedResourceRequest PreloadRequest::resourceRequest(Document& document)
         request.setPriority(DefaultResourceLoadPriority::asyncScript);
 
     return request;
+}
+
+static void appendQuotedForTesting(StringBuilder& builder, const String& string)
+{
+    if (string.isNull()) {
+        builder.append("null"_s);
+        return;
+    }
+    builder.append('"');
+    for (unsigned i = 0; i < string.length(); ++i) {
+        char16_t character = string[i];
+        if (character == '"' || character == '\\')
+            builder.append('\\', character);
+        else if (character < 0x20 || character >= 0x7F)
+            builder.append("\\u"_s, hex(character, 4));
+        else
+            builder.append(character);
+    }
+    builder.append('"');
+}
+
+String PreloadRequest::descriptionForTesting() const
+{
+    StringBuilder builder;
+    builder.append("initiator="_s, m_initiatorType, " url="_s);
+    appendQuotedForTesting(builder, m_resourceURL);
+    builder.append(" base="_s);
+    appendQuotedForTesting(builder, m_baseURL.string());
+    builder.append(" charset="_s);
+    appendQuotedForTesting(builder, m_charset);
+    builder.append(" media="_s);
+    appendQuotedForTesting(builder, m_mediaAttribute);
+    builder.append(" crossOrigin="_s);
+    appendQuotedForTesting(builder, m_crossOriginMode);
+    builder.append(" nonce="_s);
+    appendQuotedForTesting(builder, m_nonceAttribute);
+    builder.append(" integrity="_s);
+    appendQuotedForTesting(builder, m_integrityAttribute);
+    builder.append(" async="_s, m_scriptIsAsync ? "1"_s : "0"_s, " type="_s, static_cast<unsigned>(m_resourceType),
+        " scriptType="_s, static_cast<unsigned>(m_scriptType), " referrerPolicy="_s, static_cast<unsigned>(m_referrerPolicy),
+        " fetchPriority="_s, static_cast<unsigned>(m_fetchPriority));
+    return builder.toString();
 }
 
 Ref<HTMLResourcePreloader> HTMLResourcePreloader::create(Document& document)

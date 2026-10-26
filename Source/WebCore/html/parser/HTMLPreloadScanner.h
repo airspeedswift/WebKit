@@ -105,6 +105,7 @@ public:
 
     void appendToEnd(const SegmentedString&);
     void scan(HTMLResourcePreloader&, Document&);
+    PreloadRequestStream scanRequests(Document&);
 
 private:
     TokenPreloadScanner m_scanner;
@@ -113,5 +114,9 @@ private:
 };
 
 WEBCORE_EXPORT bool testPreloadScannerViewportSupport(Document*);
+
+// For tests: appends each source to one scanner and scans after each append, as HTMLDocumentParser does with
+// received data, and returns every request each scan made, then the document's viewport arguments.
+WEBCORE_EXPORT String testPreloadScannerRequests(Document&, std::span<const String> sources);
 
 } // namespace WebCore
