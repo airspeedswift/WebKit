@@ -3467,6 +3467,11 @@ elseif (WK_BUILD_WEBCORE_SWIFT)
         # As WebCore.xcconfig: Swift zero-initializes a C++ type with no default constructor and only warns
         # that this is deprecated; such a value can hold a null pointer the type never allows.
         "-Werror DeprecatedDeclaration"
+        # As WebCore.xcconfig: Swift that holds C++ state must not let it reach another thread. Several of the
+        # diagnostics that catch that are warnings in Swift 6 mode outside any diagnostic group, so warnings are
+        # errors too (SWIFT_TREAT_WARNINGS_AS_ERRORS).
+        "-Werror SendableClosureCaptures"
+        -warnings-as-errors
         ${WebCore_PLATFORM_SWIFT_CLANG_FLAG_PAIRS}
     )
     if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
