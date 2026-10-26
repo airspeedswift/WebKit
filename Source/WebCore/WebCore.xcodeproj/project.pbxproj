@@ -4000,7 +4000,7 @@
 		976F36EB14686225005E93B4 /* SecurityContext.h in Headers */ = {isa = PBXBuildFile; fileRef = 976F36E914686225005E93B4 /* SecurityContext.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B37241228721700B81FF8 /* HTMLElementStack.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B37201228721700B81FF8 /* HTMLElementStack.h */; };
 		977B37261228721700B81FF8 /* HTMLTreeBuilder.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B37221228721700B81FF8 /* HTMLTreeBuilder.h */; };
-		977B3863122883E900B81FF8 /* CSSPreloadScanner.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B384A122883E900B81FF8 /* CSSPreloadScanner.h */; };
+		977B3863122883E900B81FF8 /* CSSPreloadScanner.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B384A122883E900B81FF8 /* CSSPreloadScanner.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B3865122883E900B81FF8 /* HTMLConstructionSite.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B384C122883E900B81FF8 /* HTMLConstructionSite.h */; };
 		977B3867122883E900B81FF8 /* HTMLDocumentParser.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B384E122883E900B81FF8 /* HTMLDocumentParser.h */; };
 		977B386A122883E900B81FF8 /* HTMLEntityParser.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3851122883E900B81FF8 /* HTMLEntityParser.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -4008,7 +4008,7 @@
 		977B386D122883E900B81FF8 /* HTMLEntityTable.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3854122883E900B81FF8 /* HTMLEntityTable.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B386F122883E900B81FF8 /* HTMLFormattingElementList.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3856122883E900B81FF8 /* HTMLFormattingElementList.h */; };
 		977B3871122883E900B81FF8 /* HTMLParserScheduler.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B3858122883E900B81FF8 /* HTMLParserScheduler.h */; };
-		977B3873122883E900B81FF8 /* HTMLPreloadScanner.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385A122883E900B81FF8 /* HTMLPreloadScanner.h */; };
+		977B3873122883E900B81FF8 /* HTMLPreloadScanner.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385A122883E900B81FF8 /* HTMLPreloadScanner.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		977B3875122883E900B81FF8 /* HTMLScriptRunner.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385C122883E900B81FF8 /* HTMLScriptRunner.h */; };
 		977B3876122883E900B81FF8 /* HTMLScriptRunnerHost.h in Headers */ = {isa = PBXBuildFile; fileRef = 977B385D122883E900B81FF8 /* HTMLScriptRunnerHost.h */; };
 		5A2F00000000000000000001 /* HTMLToken.h in Headers */ = {isa = PBXBuildFile; fileRef = 97C1F552122855CB00EDE616 /* HTMLToken.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -4659,7 +4659,7 @@
 		A8D064FC0A23C0CC005E7203 /* JSHTMLFormElement.h in Headers */ = {isa = PBXBuildFile; fileRef = A8D064FA0A23C0CC005E7203 /* JSHTMLFormElement.h */; };
 		A8D06B390A265DCD005E7203 /* HTMLNames.h in Headers */ = {isa = PBXBuildFile; fileRef = A8D06B370A265DCD005E7203 /* HTMLNames.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A8D06B3A0A265DCD005E7203 /* HTMLNames.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A8D06B380A265DCD005E7203 /* HTMLNames.cpp */; };
-		A8D223FE16B52E4E00157288 /* HTMLResourcePreloader.h in Headers */ = {isa = PBXBuildFile; fileRef = A8D223FC16B52E4E00157288 /* HTMLResourcePreloader.h */; };
+		A8D223FE16B52E4E00157288 /* HTMLResourcePreloader.h in Headers */ = {isa = PBXBuildFile; fileRef = A8D223FC16B52E4E00157288 /* HTMLResourcePreloader.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A8DF3FCE097FA0FC0052981B /* HTMLFormControlsCollection.h in Headers */ = {isa = PBXBuildFile; fileRef = A8DF3FC6097FA0FB0052981B /* HTMLFormControlsCollection.h */; };
 		A8DF3FD0097FA0FC0052981B /* HTMLCollection.h in Headers */ = {isa = PBXBuildFile; fileRef = A8DF3FC8097FA0FB0052981B /* HTMLCollection.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		A8DF3FD4097FA0FC0052981B /* HTMLNameCollection.h in Headers */ = {isa = PBXBuildFile; fileRef = A8DF3FCC097FA0FB0052981B /* HTMLNameCollection.h */; };
