@@ -540,7 +540,7 @@ public:
     bool shouldNotFireMutationEvents() const { return m_shouldNotFireMutationEvents; }
     void setShouldNotFireMutationEvents(bool fire) { m_shouldNotFireMutationEvents = fire; }
 
-    void setMarkupUnsafe(const String&, OptionSet<ParserContentPolicy>);
+    SWIFT_UNSAFE void setMarkupUnsafe(const String&, OptionSet<ParserContentPolicy>);
     static ExceptionOr<Ref<Document>> parseHTMLUnsafe(Document&, Variant<Ref<TrustedHTML>, String>&&);
 
     Element* elementForAccessKey(const String& key);
