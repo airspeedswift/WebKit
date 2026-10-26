@@ -626,6 +626,8 @@ HTMLPreloadScanner::HTMLPreloadScanner(const HTMLParserOptions& options, const U
 {
 }
 
+HTMLPreloadScanner::~HTMLPreloadScanner() = default;
+
 void HTMLPreloadScanner::appendToEnd(const SegmentedString& source)
 {
     m_source.append(source);
