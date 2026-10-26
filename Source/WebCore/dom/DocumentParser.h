@@ -49,14 +49,14 @@ public:
     virtual bool LEGACY_NODELETE hasInsertionPoint() { return true; }
 
     // insert is used by document.write.
-    virtual void insert(SegmentedString&&) = 0;
+    SWIFT_UNSAFE virtual void insert(SegmentedString&&) = 0;
 
     // appendBytes and flush are used by DocumentWriter (the loader).
     virtual void appendBytes(DocumentWriter&, std::span<const uint8_t>) = 0;
     virtual void flush(DocumentWriter&) = 0;
 
-    virtual void append(RefPtr<StringImpl>&&) = 0;
-    virtual void appendSynchronously(RefPtr<StringImpl>&& inputSource) { append(WTF::move(inputSource)); }
+    SWIFT_UNSAFE virtual void append(RefPtr<StringImpl>&&) = 0;
+    SWIFT_UNSAFE virtual void appendSynchronously(RefPtr<StringImpl>&& inputSource) { append(WTF::move(inputSource)); }
 
     virtual void finish() = 0;
 

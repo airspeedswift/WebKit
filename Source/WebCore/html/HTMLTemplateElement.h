@@ -42,7 +42,7 @@ class HTMLTemplateElement final : public HTMLElement {
     WTF_MAKE_TZONE_ALLOCATED(HTMLTemplateElement);
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(HTMLTemplateElement);
 public:
-    static Ref<HTMLTemplateElement> create(const QualifiedName&, Document&);
+    SWIFT_UNSAFE static Ref<HTMLTemplateElement> create(const QualifiedName&, Document&);
     virtual ~HTMLTemplateElement();
 
     DocumentFragment& fragmentForInsertion() const;

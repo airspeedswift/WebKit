@@ -73,23 +73,23 @@ public:
 
     void setConnectedCallback(JSC::JSObject*);
     bool hasConnectedCallback() const { return !!m_connectedCallback; }
-    void invokeConnectedCallback(Element&);
+    SWIFT_UNSAFE void invokeConnectedCallback(Element&);
 
     void setDisconnectedCallback(JSC::JSObject*);
     bool hasDisconnectedCallback() const { return !!m_disconnectedCallback; }
-    void invokeDisconnectedCallback(Element&);
+    SWIFT_UNSAFE void invokeDisconnectedCallback(Element&);
 
     void setConnectedMoveCallback(JSC::JSObject*);
     bool hasConnectedMoveCallback() const { return !!m_connectedMoveCallback; }
-    void invokeConnectedMoveCallback(Element&);
+    SWIFT_UNSAFE void invokeConnectedMoveCallback(Element&);
 
     void setAdoptedCallback(JSC::JSObject*);
     bool hasAdoptedCallback() const { return !!m_adoptedCallback; }
-    void invokeAdoptedCallback(Element&, Document& oldDocument, Document& newDocument);
+    SWIFT_UNSAFE void invokeAdoptedCallback(Element&, Document& oldDocument, Document& newDocument);
 
     void setAttributeChangedCallback(JSC::JSObject* callback, Vector<AtomString>&& observedAttributes);
     bool observesAttribute(const AtomString& name) const { return m_observedAttributes.contains(name); }
-    void invokeAttributeChangedCallback(Element&, const QualifiedName&, const AtomString& oldValue, const AtomString& newValue);
+    SWIFT_UNSAFE void invokeAttributeChangedCallback(Element&, const QualifiedName&, const AtomString& oldValue, const AtomString& newValue);
 
     void disableElementInternals() { m_isElementInternalsDisabled = true; }
     bool isElementInternalsDisabled() const { return m_isElementInternalsDisabled; }
@@ -102,19 +102,19 @@ public:
 
     void setFormAssociatedCallback(JSC::JSObject*);
     bool hasFormAssociatedCallback() const { return !!m_formAssociatedCallback; }
-    void invokeFormAssociatedCallback(Element&, HTMLFormElement*);
+    SWIFT_UNSAFE void invokeFormAssociatedCallback(Element&, HTMLFormElement*);
 
     void setFormResetCallback(JSC::JSObject*);
     bool hasFormResetCallback() const { return !!m_formResetCallback; }
-    void invokeFormResetCallback(Element&);
+    SWIFT_UNSAFE void invokeFormResetCallback(Element&);
 
     void setFormDisabledCallback(JSC::JSObject*);
     bool hasFormDisabledCallback() const { return !!m_formDisabledCallback; }
-    void invokeFormDisabledCallback(Element&, bool isDisabled);
+    SWIFT_UNSAFE void invokeFormDisabledCallback(Element&, bool isDisabled);
 
     void setFormStateRestoreCallback(JSC::JSObject*);
     bool hasFormStateRestoreCallback() const { return !!m_formStateRestoreCallback; }
-    void invokeFormStateRestoreCallback(Element&, CustomElementFormValue state);
+    SWIFT_UNSAFE void invokeFormStateRestoreCallback(Element&, CustomElementFormValue state);
 
     ScriptExecutionContext* LEGACY_NODELETE scriptExecutionContext() const;
     JSC::JSObject* constructor() { return m_constructor.get(); }
