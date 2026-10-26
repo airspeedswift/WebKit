@@ -101,11 +101,12 @@ private:
 class HTMLPreloadScanner {
     WTF_MAKE_TZONE_ALLOCATED(HTMLPreloadScanner);
 public:
-    HTMLPreloadScanner(const HTMLParserOptions&, const URL& documentURL, float deviceScaleFactor = 1.0);
+    WEBCORE_EXPORT HTMLPreloadScanner(const HTMLParserOptions&, const URL& documentURL, float deviceScaleFactor = 1.0);
+    WEBCORE_EXPORT ~HTMLPreloadScanner();
 
-    void appendToEnd(const SegmentedString&);
+    WEBCORE_EXPORT void appendToEnd(const SegmentedString&);
     void scan(HTMLResourcePreloader&, Document&);
-    PreloadRequestStream scanRequests(Document&);
+    WEBCORE_EXPORT PreloadRequestStream scanRequests(Document&);
 
 private:
     TokenPreloadScanner m_scanner;

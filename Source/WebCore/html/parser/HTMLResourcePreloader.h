@@ -61,7 +61,7 @@ public:
     CachedResource::Type resourceType() const { return m_resourceType; }
 
     // For tests: every field, in declaration order, on one line.
-    String descriptionForTesting() const;
+    WEBCORE_EXPORT String descriptionForTesting() const;
 
 private:
     URL completeURL(Document&);
