@@ -58,7 +58,7 @@ public:
     SWIFT_UNSAFE virtual void append(RefPtr<StringImpl>&&) = 0;
     SWIFT_UNSAFE virtual void appendSynchronously(RefPtr<StringImpl>&& inputSource) { append(WTF::move(inputSource)); }
 
-    virtual void finish() = 0;
+    SWIFT_UNSAFE virtual void finish() = 0;
 
     // FIXME: processingData() is only used by DocumentLoader::isLoadingInAPISense
     // and is very unclear as to what it actually means.  The LegacyHTMLDocumentParser

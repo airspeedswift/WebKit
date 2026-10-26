@@ -108,7 +108,7 @@ private:
     void stopWatchingForLoad(PendingScript&) final;
     HTMLInputStream& inputStream() LIFETIME_BOUND final;
     bool hasPreloadScanner() const final;
-    void appendCurrentInputStreamToPreloadScannerAndScan() final;
+    SWIFT_UNSAFE void appendCurrentInputStreamToPreloadScannerAndScan() final;
 
     // PendingScriptClient
     void notifyFinished(PendingScript&) final;

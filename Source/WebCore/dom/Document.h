@@ -896,11 +896,11 @@ public:
     WEBCORE_EXPORT ExceptionOr<void> closeForBindings();
 
     // FIXME: We should rename this at some point and give back the name 'close' to the HTML specified one.
-    WEBCORE_EXPORT void close();
+    SWIFT_UNSAFE WEBCORE_EXPORT void close();
     // In some situations (see the code), we ignore document.close().
     // explicitClose() bypass these checks and actually tries to close the
     // input stream.
-    void explicitClose();
+    SWIFT_UNSAFE void explicitClose();
     // implicitClose() actually does the work of closing the input stream.
     void implicitClose();
 
