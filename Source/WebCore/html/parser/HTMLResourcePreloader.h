@@ -60,6 +60,9 @@ public:
     void setScriptIsAsync(bool value) { m_scriptIsAsync = value; }
     CachedResource::Type resourceType() const { return m_resourceType; }
 
+    // For tests: every field, in declaration order, on one line.
+    String descriptionForTesting() const;
+
 private:
     URL completeURL(Document&);
 

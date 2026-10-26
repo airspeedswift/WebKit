@@ -51,6 +51,7 @@
 #include <wtf/SortedArrayMap.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/WeakRef.h>
+#include <wtf/text/StringBuilder.h>
 
 namespace WebCore {
 
@@ -632,6 +633,11 @@ void HTMLPreloadScanner::appendToEnd(const SegmentedString& source)
 
 void HTMLPreloadScanner::scan(HTMLResourcePreloader& preloader, Document& document)
 {
+    preloader.preload(scanRequests(document));
+}
+
+PreloadRequestStream HTMLPreloadScanner::scanRequests(Document& document)
+{
     ASSERT(isMainThread()); // HTMLTokenizer::updateStateFor only works on the main thread.
 
     const URL& startingBaseElementURL = document.baseElementURL();
@@ -648,7 +654,7 @@ void HTMLPreloadScanner::scan(HTMLResourcePreloader& preloader, Document& docume
         m_scanner.scan(*token, requests, document);
     }
 
-    preloader.preload(WTF::move(requests));
+    return requests;
 }
 
 bool testPreloadScannerViewportSupport(Document* document)
@@ -660,6 +666,28 @@ bool testPreloadScannerViewportSupport(Document* document)
     scanner.appendToEnd(String("<meta name=viewport content='width=400'>"_s));
     scanner.scan(preloader, *document);
     return document->viewportArguments().width == 400;
+}
+
+String testPreloadScannerRequests(Document& document, std::span<const String> sources)
+{
+    HTMLParserOptions options(document);
+    HTMLPreloadScanner scanner(options, document.url(), document.deviceScaleFactor());
+    StringBuilder result;
+    for (auto& source : sources) {
+        scanner.appendToEnd(source);
+        result.append("scan\n"_s);
+        for (auto& request : scanner.scanRequests(document))
+            result.append(request->descriptionForTesting(), '\n');
+    }
+    auto viewport = document.viewportArguments();
+    result.append("viewport width="_s, viewport.width, " height="_s, viewport.height, " zoom="_s, viewport.zoom,
+        " minZoom="_s, viewport.minZoom, " maxZoom="_s, viewport.maxZoom, " userZoom="_s, viewport.userZoom,
+        " orientation="_s, viewport.orientation, " shrinkToFit="_s, viewport.shrinkToFit,
+        " type="_s, static_cast<unsigned>(viewport.type), " viewportFit="_s, static_cast<unsigned>(viewport.viewportFit),
+        " widthWasExplicit="_s, viewport.widthWasExplicit ? "1"_s : "0"_s,
+        " interactiveWidget="_s, static_cast<unsigned>(viewport.interactiveWidgetValue),
+        " disabledAdaptations="_s, static_cast<unsigned>(document.disabledAdaptations().toRaw()), '\n');
+    return result.toString();
 }
 
 }
