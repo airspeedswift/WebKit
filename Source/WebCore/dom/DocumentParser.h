@@ -91,7 +91,7 @@ public:
     // callstacks, but not produce any more nodes.
     // It is impossible for the parser to touch the rest of WebCore after
     // detach is called.
-    virtual void detach();
+    SWIFT_UNSAFE virtual void detach();
 
     void setDocumentWasLoadedAsPartOfNavigation() { m_documentWasLoadedAsPartOfNavigation = true; }
     bool documentWasLoadedAsPartOfNavigation() const { return m_documentWasLoadedAsPartOfNavigation; }

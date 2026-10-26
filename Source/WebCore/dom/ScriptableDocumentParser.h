@@ -42,7 +42,7 @@ public:
 
     virtual bool hasScriptsWaitingForStylesheets() const { return false; }
 
-    void executeScriptsWaitingForStylesheetsSoon();
+    SWIFT_UNSAFE void executeScriptsWaitingForStylesheetsSoon();
 
     // Returns true if the parser didn't yield or pause or synchronously execute a script,
     // so calls to FrameConsoleClient should be associated with the parser's text position.
