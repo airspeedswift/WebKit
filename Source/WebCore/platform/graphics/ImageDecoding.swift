@@ -448,8 +448,10 @@ final class AnyImageDecoder: Sendable {
     @usableFromInline func uti() -> String { base.uti() }
     @usableFromInline func filenameExtension() -> String { base.filenameExtension() }
     @usableFromInline func accessibilityDescription() -> String { base.accessibilityDescription() }
-    @usableFromInline func hotSpotX() -> Int32? { base.hotSpot()?.x }
-    @usableFromInline func hotSpotY() -> Int32? { base.hotSpot()?.y }
+    // Not `Int32?`: the generated header allocates the optional's 5 bytes and copies 8 into them.
+    @usableFromInline func hasHotSpot() -> Bool { base.hotSpot() != nil }
+    @usableFromInline func hotSpotX() -> Int32 { base.hotSpot()?.x ?? 0 }
+    @usableFromInline func hotSpotY() -> Int32 { base.hotSpot()?.y ?? 0 }
     @usableFromInline func isPanorama() -> Bool { base.isPanorama() }
     @usableFromInline func isSpatial() -> Bool { base.isSpatial() }
     @usableFromInline func spatialLeftEyeFrameIndex() -> UInt32? { base.spatialLeftEyeFrameIndex() }

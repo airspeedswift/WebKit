@@ -494,11 +494,9 @@ RepetitionCount ImageDecoderCG::repetitionCount() const
 std::optional<IntPoint> ImageDecoderCG::hotSpot() const
 {
     auto decoder = m_swiftDecoder->getDecoder();
-    auto x = decoder.hotSpotX();
-    auto y = decoder.hotSpotY();
-    if (!x.isSome() || !y.isSome())
+    if (!decoder.hasHotSpot())
         return std::nullopt;
-    return IntPoint(x.getSome(), y.getSome());
+    return IntPoint(decoder.hotSpotX(), decoder.hotSpotY());
 }
 
 IntSize ImageDecoderCG::frameSizeAtIndex(size_t index, SubsamplingLevel subsamplingLevel) const
