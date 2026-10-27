@@ -55,8 +55,29 @@ enum class FrameKind : uint8_t { None, Array, Object };
 // container is `top`, a member, so its Structures stay on the stack too. The 32 frames around it are in
 // `savedFrames`, also a member; frames beyond those, and every frame of a parse that records source ranges, are in
 // `frames`, with their cells in `frameCells`. A sink for one mode parses only that mode.
+// The sink's characters are Swift's: 8-bit characters are uint8_t there (LiteralParserSwiftTypes.h), and
+// Latin1Character here, which is a struct of one byte.
+template<typename CharType> using SinkCharacter = std::conditional_t<std::is_same_v<CharType, Latin1Character>, uint8_t, CharType>;
+template<typename SinkCharType> using StateCharacter = std::conditional_t<std::is_same_v<SinkCharType, uint8_t>, Latin1Character, SinkCharType>;
+
+template<typename CharType> ALWAYS_INLINE std::span<const SinkCharacter<CharType>> sinkCharacters(std::span<const CharType> characters LIFETIME_BOUND)
+{
+    if constexpr (std::is_same_v<CharType, Latin1Character>)
+        return byteCast<uint8_t>(characters);
+    else
+        return characters;
+}
+
+template<typename SinkCharType> ALWAYS_INLINE std::span<const StateCharacter<SinkCharType>> stateCharacters(std::span<const SinkCharType> characters LIFETIME_BOUND)
+{
+    if constexpr (std::is_same_v<SinkCharType, uint8_t>)
+        return byteCast<Latin1Character>(characters);
+    else
+        return characters;
+}
+
 template<typename CharType, JSONParseSinkMode sinkMode>
-struct JSONParseState final : public JSONParseSink<CharType, sinkMode> {
+struct JSONParseState final : public JSONParseSink<SinkCharacter<CharType>, sinkMode> {
     WTF_FORBID_HEAP_ALLOCATION;
 public:
     struct Frame {
@@ -497,6 +518,9 @@ JSArray* JSONParseState<CharType, sinkMode>::materializeArray(unsigned stackBase
     return array;
 }
 
+// The state whose sink takes SinkCharType.
+template<typename SinkCharType, JSONParseSinkMode sinkMode> using StateFor = JSONParseState<StateCharacter<SinkCharType>, sinkMode>;
+
 } // namespace
 
 // The sink's member functions are always inlined, but not declared inline, so the explicit instantiations below emit
@@ -504,7 +528,7 @@ JSArray* JSONParseState<CharType, sinkMode>::materializeArray(unsigned stackBase
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::beginArray(size_t start)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     if (!state.iterative())
         return state.beginContainer({ .kind = FrameKind::Array, .elementStackBase = static_cast<unsigned>(state.elementStack.size()) }, start);
     auto scope = DECLARE_THROW_SCOPE(state.vm);
@@ -516,7 +540,7 @@ ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::beginArray(size_t s
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::endArray(size_t end)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(state.top.kind == FrameKind::Array);
     if (state.iterative())
         return state.endContainer(state.top.container, end);
@@ -531,7 +555,7 @@ ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::endArray(size_t end
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::beginObject(size_t start)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     JSObject* object = constructEmptyObject(state.globalObject);
     Structure* structure = object->structure();
     uint8_t structureNameIndex = state.mode() == StrictJSON ? static_cast<uint8_t>(JSONCache::nameIndex(StructureID::encode(structure))) : 0;
@@ -541,7 +565,7 @@ ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::beginObject(size_t 
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::endObject(size_t end)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(state.top.kind == FrameKind::Object);
     return state.endContainer(state.top.container, end);
 }
@@ -549,7 +573,7 @@ ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::endObject(size_t en
 template<typename CharType, JSONParseSinkMode sinkMode>
 void JSONParseSink<CharType, sinkMode>::beginCacheScope()
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(!state.parsingScope);
     state.parsingScope.emplace(state.jsonCache);
 }
@@ -557,14 +581,14 @@ void JSONParseSink<CharType, sinkMode>::beginCacheScope()
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA void JSONParseSink<CharType, sinkMode>::key(std::span<const CharType> characters NOESCAPE, size_t charactersToEnd)
 {
-    static_cast<JSONParseState<CharType, sinkMode>&>(*this).resolveKey(characters, charactersToEnd);
+    static_cast<StateFor<CharType, sinkMode>&>(*this).resolveKey(stateCharacters(characters), charactersToEnd);
 }
 
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA void JSONParseSink<CharType, sinkMode>::decodedKey(JSONParseInput8 characters8 NOESCAPE, JSONParseInput16 characters16 NOESCAPE)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
-    characters16.empty() ? state.resolveKey(characters8, 0) : state.resolveKey(characters16, 0);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
+    characters16.empty() ? state.resolveKey(stateCharacters(characters8), 0) : state.resolveKey(characters16, 0);
 }
 
 // The key and the colon after it at remaining, when JSONCache predicts them for the innermost object's Structure,
@@ -572,11 +596,11 @@ ALWAYS_INLINE_LAMBDA void JSONParseSink<CharType, sinkMode>::decodedKey(JSONPars
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA size_t JSONParseSink<CharType, sinkMode>::consumeCachedKey(std::span<const CharType> remaining NOESCAPE)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     auto& frame = state.top;
     RELEASE_ASSERT(frame.kind == FrameKind::Object && state.mode() == StrictJSON && !state.iterative());
     Structure* structure = frame.structure;
-    auto* entry = state.jsonCache.findName(StructureID::encode(structure), frame.structureNameIndex, remaining);
+    auto* entry = state.jsonCache.findName(StructureID::encode(structure), frame.structureNameIndex, stateCharacters(remaining));
     if (!entry)
         return 0;
     frame.originalStructure = structure;
@@ -589,7 +613,7 @@ ALWAYS_INLINE_LAMBDA size_t JSONParseSink<CharType, sinkMode>::consumeCachedKey(
 template<typename CharType, JSONParseSinkMode sinkMode>
 void JSONParseSink<CharType, sinkMode>::setValueRange(size_t start, size_t end)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(start <= end && end <= state.input.size());
     state.valueRange = { static_cast<unsigned>(start), static_cast<unsigned>(end) };
 }
@@ -597,13 +621,13 @@ void JSONParseSink<CharType, sinkMode>::setValueRange(size_t start, size_t end)
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::stringValue(size_t start, size_t length, bool cache)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(start <= state.input.size() && length <= state.input.size() - start);
     JSString* string = state.jsonCache.makeJSString(state.vm, state.input.subspan(start, length));
     if (cache) {
         // The source text from the opening quote to the closing one is exactly what a later match compares against.
         RELEASE_ASSERT(state.is8Bit && state.mode() == StrictJSON && start && length < state.input.size() - start);
-        if constexpr (std::is_same_v<CharType, Latin1Character>)
+        if constexpr (std::is_same_v<CharType, uint8_t>)
             state.jsonCache.addString(state.input.subspan(start - 1), length + 2, string);
     }
     return state.leafValue(string);
@@ -612,17 +636,17 @@ ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::stringValue(size_t 
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::decodedStringValue(JSONParseInput8 characters8 NOESCAPE, JSONParseInput16 characters16 NOESCAPE)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
-    return state.leafValue(characters16.empty() ? state.jsonCache.makeJSString(state.vm, characters8) : state.jsonCache.makeJSString(state.vm, characters16));
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
+    return state.leafValue(characters16.empty() ? state.jsonCache.makeJSString(state.vm, stateCharacters(characters8)) : state.jsonCache.makeJSString(state.vm, characters16));
 }
 
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::cachedStringValue(std::span<const CharType> remaining NOESCAPE, size_t& length)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(state.is8Bit && state.mode() == StrictJSON);
-    if constexpr (std::is_same_v<CharType, Latin1Character>) {
-        if (auto* entry = state.jsonCache.findString(remaining)) {
+    if constexpr (std::is_same_v<CharType, uint8_t>) {
+        if (auto* entry = state.jsonCache.findString(stateCharacters(remaining))) {
             length = entry->textLength;
             return state.leafValue(entry->string);
         }
@@ -633,25 +657,25 @@ ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::cachedStringValue(s
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::int32Value(int32_t value)
 {
-    return static_cast<JSONParseState<CharType, sinkMode>&>(*this).leafValue(jsNumber(value));
+    return static_cast<StateFor<CharType, sinkMode>&>(*this).leafValue(jsNumber(value));
 }
 
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::numberValue(double value)
 {
-    return static_cast<JSONParseState<CharType, sinkMode>&>(*this).leafValue(jsNumber(value));
+    return static_cast<StateFor<CharType, sinkMode>&>(*this).leafValue(jsNumber(value));
 }
 
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA bool JSONParseSink<CharType, sinkMode>::literalValue(JSONParseLiteral literal)
 {
-    return static_cast<JSONParseState<CharType, sinkMode>&>(*this).leafValue(literal == JSONParseLiteral::Null ? jsNull() : jsBoolean(literal == JSONParseLiteral::True));
+    return static_cast<StateFor<CharType, sinkMode>&>(*this).leafValue(literal == JSONParseLiteral::Null ? jsNull() : jsBoolean(literal == JSONParseLiteral::True));
 }
 
 template<typename CharType, JSONParseSinkMode sinkMode>
 ALWAYS_INLINE_LAMBDA double JSONParseSink<CharType, sinkMode>::parseNumber(std::span<const CharType> remaining NOESCAPE, size_t& length)
 {
-    auto result = WTF::parseJSONDouble(remaining, length);
+    auto result = WTF::parseJSONDouble(stateCharacters(remaining), length);
     if (!result)
         length = 0;
     return result.value_or(0);
@@ -660,7 +684,7 @@ ALWAYS_INLINE_LAMBDA double JSONParseSink<CharType, sinkMode>::parseNumber(std::
 template<typename CharType, JSONParseSinkMode sinkMode>
 void JSONParseSink<CharType, sinkMode>::fail(JSONParseFailure failure)
 {
-    static_cast<JSONParseState<CharType, sinkMode>&>(*this).failure = failure;
+    static_cast<StateFor<CharType, sinkMode>&>(*this).failure = failure;
 }
 
 static_assert(JSONPPathEntryTypeDeclareVar == 0 && JSONPPathEntryTypeDot == 1 && JSONPPathEntryTypeLookup == 2 && JSONPPathEntryTypeCall == 3);
@@ -668,7 +692,7 @@ static_assert(JSONPPathEntryTypeDeclareVar == 0 && JSONPPathEntryTypeDot == 1 &&
 template<typename CharType, JSONParseSinkMode sinkMode>
 bool JSONParseSink<CharType, sinkMode>::appendJSONPPathEntry(uint8_t type, size_t start, size_t length, int32_t index)
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(state.jsonpResults && type <= JSONPPathEntryTypeCall && index >= 0 && start <= state.input.size() && length <= state.input.size() - start);
     if (type == JSONPPathEntryTypeCall) {
         state.jsonpPath.last().m_type = JSONPPathEntryTypeCall;
@@ -690,7 +714,7 @@ bool JSONParseSink<CharType, sinkMode>::appendJSONPPathEntry(uint8_t type, size_
 template<typename CharType, JSONParseSinkMode sinkMode>
 void JSONParseSink<CharType, sinkMode>::beginJSONPValue()
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(state.jsonpResults);
     state.jsonpResults->append(JSONPData());
     state.result = { };
@@ -699,7 +723,7 @@ void JSONParseSink<CharType, sinkMode>::beginJSONPValue()
 template<typename CharType, JSONParseSinkMode sinkMode>
 void JSONParseSink<CharType, sinkMode>::endJSONPValue()
 {
-    auto& state = static_cast<JSONParseState<CharType, sinkMode>&>(*this);
+    auto& state = static_cast<StateFor<CharType, sinkMode>&>(*this);
     RELEASE_ASSERT(state.jsonpResults && !state.jsonpResults->isEmpty() && state.result);
     state.jsonpResults->last().m_value.set(state.vm, state.result);
     state.jsonpResults->last().m_path.swap(state.jsonpPath);
@@ -721,17 +745,17 @@ NEVER_INLINE static JSValue parseWithSink(JSGlobalObject* globalObject, CodeBloc
     JSONParseState<CharType, sinkMode> state(globalObject, nullOrCodeBlock, mode, iterative, characters, ranges, jsonpResults);
     bool succeeded;
     if constexpr (sinkMode == JSONParseSinkMode::Strict && std::is_same_v<CharType, Latin1Character>)
-        succeeded = JavaScriptCore::jsonParseStrict8(characters, static_cast<uint8_t>(entry), state);
+        succeeded = JavaScriptCore::jsonParseStrict8(sinkCharacters(characters), static_cast<uint8_t>(entry), state);
     else if constexpr (sinkMode == JSONParseSinkMode::Strict)
-        succeeded = JavaScriptCore::jsonParseStrict16(characters, static_cast<uint8_t>(entry), state);
+        succeeded = JavaScriptCore::jsonParseStrict16(sinkCharacters(characters), static_cast<uint8_t>(entry), state);
     else if constexpr (sinkMode == JSONParseSinkMode::Sloppy && std::is_same_v<CharType, Latin1Character>)
-        succeeded = JavaScriptCore::jsonParseSloppy8(characters, state);
+        succeeded = JavaScriptCore::jsonParseSloppy8(sinkCharacters(characters), state);
     else if constexpr (sinkMode == JSONParseSinkMode::Sloppy)
-        succeeded = JavaScriptCore::jsonParseSloppy16(characters, state);
+        succeeded = JavaScriptCore::jsonParseSloppy16(sinkCharacters(characters), state);
     else if constexpr (std::is_same_v<CharType, Latin1Character>)
-        succeeded = JavaScriptCore::jsonParse8(characters, static_cast<uint8_t>(entry), iterative, !!ranges, needsFullSourceInfo, state);
+        succeeded = JavaScriptCore::jsonParse8(sinkCharacters(characters), static_cast<uint8_t>(entry), iterative, !!ranges, needsFullSourceInfo, state);
     else
-        succeeded = JavaScriptCore::jsonParse16(characters, static_cast<uint8_t>(entry), iterative, !!ranges, needsFullSourceInfo, state);
+        succeeded = JavaScriptCore::jsonParse16(sinkCharacters(characters), static_cast<uint8_t>(entry), iterative, !!ranges, needsFullSourceInfo, state);
     clearParserStack<1024>();
     if (succeeded) {
         RELEASE_ASSERT(!scope.exception());
@@ -785,9 +809,9 @@ String LiteralParser<CharType, reviverMode>::getErrorMessage() const
         return makeString("JSON Parse error: "_s, m_errorMessage);
     JSONParseErrorMessageBuilder message;
     if constexpr (std::is_same_v<CharType, Latin1Character>)
-        JavaScriptCore::jsonParseErrorMessage8(m_characters, m_failure, message);
+        JavaScriptCore::jsonParseErrorMessage8(sinkCharacters(m_characters), m_failure, message);
     else
-        JavaScriptCore::jsonParseErrorMessage16(m_characters, m_failure, message);
+        JavaScriptCore::jsonParseErrorMessage16(sinkCharacters(m_characters), m_failure, message);
     return message.builder.toString();
 }
 
@@ -796,11 +820,11 @@ template class LiteralParser<char16_t, JSONReviverMode::Enabled>;
 template class LiteralParser<Latin1Character, JSONReviverMode::Disabled>;
 template class LiteralParser<char16_t, JSONReviverMode::Disabled>;
 
-template class JSONParseSink<Latin1Character, JSONParseSinkMode::Strict>;
+template class JSONParseSink<uint8_t, JSONParseSinkMode::Strict>;
 template class JSONParseSink<char16_t, JSONParseSinkMode::Strict>;
-template class JSONParseSink<Latin1Character, JSONParseSinkMode::Sloppy>;
+template class JSONParseSink<uint8_t, JSONParseSinkMode::Sloppy>;
 template class JSONParseSink<char16_t, JSONParseSinkMode::Sloppy>;
-template class JSONParseSink<Latin1Character, JSONParseSinkMode::Any>;
+template class JSONParseSink<uint8_t, JSONParseSinkMode::Any>;
 template class JSONParseSink<char16_t, JSONParseSinkMode::Any>;
 
 // Swift moves a noncopyable C++ type that is trivially destructible by copying its bytes, without the move constructor.
