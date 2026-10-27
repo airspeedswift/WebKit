@@ -41,8 +41,13 @@
 #include "HTMLTokenizer.h"
 #endif
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 class AtomHTMLToken {
 public:
     using Type = HTMLToken::Type;
@@ -360,5 +365,6 @@ inline AtomHTMLToken::AtomHTMLToken(HTMLToken::Type type, TagName tagName, Vecto
     ASSERT(type == Type::StartTag || type == Type::EndTag);
     ASSERT(tagName != TagName::Unknown);
 }
+#endif
 
 } // namespace WebCore

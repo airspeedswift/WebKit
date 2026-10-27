@@ -30,8 +30,13 @@
 #include <wtf/RefPtr.h>
 #include <wtf/Vector.h>
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 class Element;
 
 // This may end up merged into HTMLElementStack.
@@ -131,5 +136,6 @@ private:
 
     Vector<Entry> m_entries;
 };
+#endif
 
 } // namespace WebCore

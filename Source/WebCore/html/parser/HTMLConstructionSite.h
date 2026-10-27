@@ -38,8 +38,13 @@
 #include <wtf/SetForScope.h>
 #include <wtf/Vector.h>
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 struct AtomStringWithCode {
     AtomString string;
     uint64_t code { 0 };
@@ -252,5 +257,6 @@ private:
     std::unique_ptr<StringBuilder> m_textNodeBuffer;
     RefPtr<Text> m_currentTextNode;
 };
+#endif
 
 } // namespace WebCore

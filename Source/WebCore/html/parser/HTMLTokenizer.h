@@ -38,6 +38,10 @@
 #define USE_SWIFT_HTML_PER_TOKEN 0
 #endif
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 #if USE_SWIFT_HTML_TOKENIZER
 #include <wtf/SwiftBridging.h>
 #endif
@@ -58,6 +62,18 @@ struct HTMLTokenAttributes {
     AtomString name; // TagName::Unknown only.
     Vector<Attribute> attributes;
     bool hasDuplicateAttribute { false };
+#if USE_SWIFT_HTML_TREE_BUILDER
+    // The rest of the token, which HTMLDocumentParser::nextTokenForTreeBuilder (type, selfClosing) and
+    // HTMLTokenizer.swift add for HTMLTreeBuilder.swift. For a DOCTYPE, name is its name; for a processing
+    // instruction, its target.
+    HTMLToken::Type type { HTMLToken::Type::Uninitialized };
+    bool selfClosing { false };
+    bool isReplacedNullCharacter { false };
+    bool forceQuirks { false };
+    String data; // Character, Comment, ProcessingInstruction.
+    String publicIdentifier; // DOCTYPE.
+    String systemIdentifier; // DOCTYPE.
+#endif
 };
 #endif
 
@@ -215,6 +231,24 @@ private:
     ALWAYS_INLINE static bool tokenAttributesContainLocalName(const QualifiedName& name) { return tokenAttributes().attributes.containsIf([&](auto& attribute) { return attribute.localName().impl() == name.localName().impl(); }); }
     ALWAYS_INLINE static void appendTokenAttribute(Attribute&& attribute) { tokenAttributes().attributes.append(WTF::move(attribute)); }
     ALWAYS_INLINE static void setTokenHasDuplicateAttribute() { tokenAttributes().hasDuplicateAttribute = true; }
+#if USE_SWIFT_HTML_TREE_BUILDER
+    // The rest of a token that is not a tag, from HTMLTokenizer.swift.
+    static void setTokenText(AtomString&& name, String&& data, bool isReplacedNullCharacter)
+    {
+        auto& attributes = tokenAttributes();
+        attributes.name = WTF::move(name);
+        attributes.data = WTF::move(data);
+        attributes.isReplacedNullCharacter = isReplacedNullCharacter;
+    }
+    void setTokenDoctype()
+    {
+        auto doctype = m_token.releaseDoctypeData();
+        auto& attributes = tokenAttributes();
+        attributes.forceQuirks = doctype->forceQuirks;
+        attributes.publicIdentifier = doctype->hasPublicIdentifier ? String(StringImpl::create8BitIfPossible(doctype->publicIdentifier)) : String();
+        attributes.systemIdentifier = doctype->hasSystemIdentifier ? String(StringImpl::create8BitIfPossible(doctype->systemIdentifier)) : String();
+    }
+#endif
 #endif
 #if !USE_SWIFT_HTML_TOKENIZER
     bool processEntity(SegmentedString&);

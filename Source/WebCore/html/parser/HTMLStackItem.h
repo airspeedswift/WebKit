@@ -33,8 +33,13 @@
 #include "NodeName.h"
 #include "TagName.h"
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 class HTMLStackItem {
 public:
     HTMLStackItem() = default;
@@ -248,5 +253,6 @@ inline bool isSpecialNode(const HTMLStackItem& item)
         return false;
     }
 }
+#endif
 
 } // namespace WebCore

@@ -53,6 +53,7 @@ void TextDocumentParser::insertFakeFormattingElements()
     // sending fake bytes through the front-end of the parser to avoid
     // distrubing the line/column number calculations.
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
     Attribute nameAttribute(nameAttr, "color-scheme"_s);
     Attribute contentAttribute(contentAttr, "light dark"_s);
     AtomHTMLToken fakeMeta(HTMLToken::Type::StartTag, TagName::meta, { WTF::move(nameAttribute), WTF::move(contentAttribute) });
@@ -65,6 +66,10 @@ void TextDocumentParser::insertFakeFormattingElements()
     // Normally we would skip the first \n after a <pre> element, but we don't
     // want to skip the first \n for text documents!
     treeBuilder().setShouldSkipLeadingNewline(false);
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+    insertTextDocumentFakeElements();
+#endif
 
     // Although Text Documents expose a "pre" element in their DOM, they
     // act like a <plaintext> tag, so we have to force plaintext mode.

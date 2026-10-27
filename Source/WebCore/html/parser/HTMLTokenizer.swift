@@ -71,8 +71,13 @@ internal import WebCore_Private.Core.QualifiedName
 ///   entries they replace: StringImpl::destroy, AtomStringImpl::remove, QualifiedName::QualifiedNameImpl's
 ///   destructor and fastFree.
 ///
+/// With USE_SWIFT_HTML_TREE_BUILDER, also:
+/// - HTMLToken's data, and dataString, which calls String::make8Bit or String's constructor from a span;
+/// - HTMLTokenizer::setTokenText, and setTokenDoctype, which destroys the token's DoctypeData and calls
+///   StringImpl::create8BitIfPossible; both write the same HTMLTokenAttributes.
+///
 /// None of these reaches the tokenizer or the source except through what this file passes it, runs script or a
-/// callback, or uses another thread. Only setTokenTagName and the four attribute functions reach the parser: they
+/// callback, or uses another thread. Only setTokenTagName, the four attribute functions, setTokenText and setTokenDoctype reach the parser: they
 /// write HTMLDocumentParser::m_tokenAttributes, which is neither the tokenizer nor the input stream and which the
 /// parser reads after this returns. Scripts run from the tree builder, after this returns.
 @_expose(Cxx)
@@ -727,6 +732,11 @@ extension WebCore.HTMLTokenizer {
         }
         if makesAttributes {
             makeTokenAttributes()
+            #if USE_SWIFT_HTML_TREE_BUILDER
+            if m_token.type() == .DOCTYPE {
+                setTokenDoctype()
+            }
+            #endif
         }
         return true
     }
@@ -735,6 +745,9 @@ extension WebCore.HTMLTokenizer {
     private func makeTokenAttributes() {
         let type = m_token.type()
         guard type == .StartTag || type == .EndTag else {
+            #if USE_SWIFT_HTML_TREE_BUILDER
+            makeTokenText(type)
+            #endif
             return
         }
         setTokenTagName()
@@ -764,6 +777,29 @@ extension WebCore.HTMLTokenizer {
             index += 1
         }
     }
+
+    #if USE_SWIFT_HTML_TREE_BUILDER
+    /// The rest of a token that is not a tag, for the tree builder, but for a DOCTYPE's setTokenDoctype.
+    @inline(never)
+    private func makeTokenText(_ type: WebCore.HTMLToken.`Type`) {
+        let data: Span<UInt16> = m_token.data()
+        switch type {
+        case .Character:
+            Self.setTokenText(consuming: WTF.AtomString(), consuming: m_token.dataString(), m_token.isReplacedNullCharacter())
+        case .Comment:
+            Self.setTokenText(consuming: WTF.AtomString(), consuming: m_token.dataString(), false)
+        case .ProcessingInstruction:
+            let targetCharacters: Span<WTF.Latin1Character> = m_token.processingInstructionTargetCharacters()
+            let target = WebCore.HTMLNameCache.makeAttributeValue(targetCharacters)
+            var instruction = WebCore.HTMLNameCache.makeAttributeValue(data)
+            Self.setTokenText(consuming: target, consuming: instruction.releaseString(), false)
+        case .DOCTYPE:
+            Self.setTokenText(consuming: WebCore.HTMLNameCache.makeAttributeValue(data), consuming: WTF.String(), false)
+        default:
+            break
+        }
+    }
+    #endif
 
     /// Whether the next token starts with a less-than sign in the data state, with nothing buffered.
     ///

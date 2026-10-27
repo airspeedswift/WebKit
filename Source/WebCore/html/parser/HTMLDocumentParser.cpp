@@ -55,11 +55,52 @@
 #include <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
 #endif
 
+#if USE_SWIFT_HTML_TREE_BUILDER
+#if !USE_SWIFT_HTML_PER_TOKEN
+#error "USE_SWIFT_HTML_TREE_BUILDER needs USE_SWIFT_HTML_PER_TOKEN"
+#endif
+#include "Text.h"
+#include "WebCore-Swift.h"
+#include <wtf/SetForScope.h>
+#endif
+
 namespace WebCore {
 
 using namespace HTMLNames;
 
 DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(HTMLDocumentParser);
+
+#if USE_SWIFT_HTML_TREE_BUILDER
+// The tree builder (HTMLTreeBuilder.swift), and the script or custom element it hands back to the parser to run
+// before the next token.
+struct HTMLTreeBuilderHolder {
+    bool isParsingFragment() const { return parsingFragment; }
+    bool hasParserBlockingScriptWork() const { return scriptToProcess || customElementToConstruct; }
+    RefPtr<ScriptElement> takeScriptToProcess(TextPosition& startPosition)
+    {
+        if (scriptToProcess)
+            startPosition = scriptToProcessStartPosition;
+        return WTF::move(scriptToProcess);
+    }
+    std::unique_ptr<CustomElementConstructionData> takeCustomElementConstructionData() { return WTF::move(customElementToConstruct); }
+
+    HTMLTreeBuilder treeBuilder;
+    const bool parsingFragment;
+    RefPtr<ScriptElement> scriptToProcess;
+    TextPosition scriptToProcessStartPosition;
+    std::unique_ptr<CustomElementConstructionData> customElementToConstruct;
+    StringBuilder textNodeBuffer;
+
+    WTF_MAKE_TZONE_ALLOCATED_INLINE(HTMLTreeBuilderHolder);
+};
+
+struct HTMLDocumentParser::TokenLoop {
+    SynchronousMode mode;
+    PumpSession& session;
+    RefPtr<HTMLParserScheduler> parserScheduler;
+    RefPtr<LocalFrame> frame;
+};
+#endif
 
 static bool LEGACY_NODELETE isMainDocumentLoadingFromHTTP(const Document& document)
 {
@@ -71,7 +112,12 @@ HTMLDocumentParser::HTMLDocumentParser(HTMLDocument& document, OptionSet<ParserC
     , m_options(document)
     , m_tokenizer(m_options)
     , m_scriptRunner(makeUnique<HTMLScriptRunner>(document, static_cast<HTMLScriptRunnerHost&>(*this)))
+#if !USE_SWIFT_HTML_TREE_BUILDER
     , m_treeBuilder(makeUniqueRef<HTMLTreeBuilder>(*this, document, parserContentPolicy(), m_options))
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+    , m_treeBuilder(makeUniqueRef<HTMLTreeBuilderHolder>(HTMLTreeBuilder::init(&document, parserContentPolicy().toRaw(), m_options), false))
+#endif
     , m_parserScheduler(HTMLParserScheduler::create(*this))
     , m_preloader(HTMLResourcePreloader::create(document))
     , m_shouldEmitTracePoints(isMainDocumentLoadingFromHTTP(document))
@@ -87,7 +133,12 @@ inline HTMLDocumentParser::HTMLDocumentParser(DocumentFragment& fragment, Elemen
     : ScriptableDocumentParser(protect(fragment.document()), rawPolicy)
     , m_options(protect(fragment.document()))
     , m_tokenizer(m_options)
+#if !USE_SWIFT_HTML_TREE_BUILDER
     , m_treeBuilder(makeUniqueRef<HTMLTreeBuilder>(*this, fragment, contextElement, parserContentPolicy(), m_options, registry))
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+    , m_treeBuilder(makeUniqueRef<HTMLTreeBuilderHolder>(registry ? HTMLTreeBuilder::init(&fragment, &contextElement, parserContentPolicy().toRaw(), m_options, registry) : HTMLTreeBuilder::init(&fragment, &contextElement, parserContentPolicy().toRaw(), m_options), true))
+#endif
     , m_shouldEmitTracePoints(false) // Avoid emitting trace points when parsing fragments like outerHTML.
 {
     // https://html.spec.whatwg.org/multipage/syntax.html#parsing-html-fragments
@@ -249,7 +300,12 @@ void HTMLDocumentParser::runScriptsForPausedTreeBuilder()
             Ref elementInterface = constructionData->elementInterface.get();
             auto newElement = elementInterface->constructElementWithFallback(*document, constructionData->registry, constructionData->name,
                 m_scriptRunner && !m_scriptRunner->isExecutingScript() ? ParserConstructElementWithEmptyStack::Yes : ParserConstructElementWithEmptyStack::No);
+#if !USE_SWIFT_HTML_TREE_BUILDER
             m_treeBuilder->didCreateCustomOrFallbackElement(WTF::move(newElement), *constructionData);
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+            m_treeBuilder->treeBuilder.didCreateCustomOrFallbackElement(this, newElement.ptr());
+#endif
         }
         return;
     }
@@ -272,6 +328,7 @@ Document* HTMLDocumentParser::contextForParsingSession()
     return document();
 }
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 bool HTMLDocumentParser::pumpTokenizerLoop(SynchronousMode mode, bool parsingFragment, PumpSession& session)
 {
     RefPtr parserScheduler = m_parserScheduler;
@@ -310,6 +367,64 @@ bool HTMLDocumentParser::pumpTokenizerLoop(SynchronousMode mode, bool parsingFra
 
     return false;
 }
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+auto HTMLDocumentParser::nextTokenForTreeBuilder(HTMLTokenAttributes& token) -> PumpStep
+{
+    // Set only while pumpTokenizer runs the tree builder.
+    RELEASE_ASSERT(m_tokenLoop);
+    auto& loop = *m_tokenLoop;
+    if (isWaitingForScripts()) [[unlikely]] {
+        if (loop.mode == SynchronousMode::AllowYield && loop.parserScheduler->shouldYieldBeforeExecutingScript(m_treeBuilder->scriptToProcess.get(), loop.session))
+            return PumpStep::Yield;
+
+        runScriptsForPausedTreeBuilder();
+        // If we're paused waiting for a script, we try to execute scripts before continuing.
+        if (isWaitingForScripts() || isStopped())
+            return PumpStep::Stop;
+    }
+
+    SUPPRESS_UNCOUNTED_ARG if (loop.frame && loop.frame->navigationScheduler().locationChangePending()) [[unlikely]]
+        return PumpStep::Stop;
+
+    if (loop.mode == SynchronousMode::AllowYield && loop.parserScheduler->shouldYieldBeforeToken(loop.session)) [[unlikely]]
+        return PumpStep::Yield;
+
+    auto rawToken = m_tokenizer.nextToken(m_input.current(), token);
+    if (!rawToken)
+        return PumpStep::Stop;
+
+    // The tree builder gets everything it reads as values (the tokenizer made the rest of the token), so the raw
+    // token is cleared, by rawToken's destructor, before tree construction can re-enter the parser.
+    token.type = rawToken->type();
+    if (token.type == HTMLToken::Type::StartTag || token.type == HTMLToken::Type::EndTag)
+        token.selfClosing = rawToken->selfClosing();
+    return PumpStep::Token;
+}
+
+void HTMLDocumentParser::setScriptToProcess(Element& element, TextPosition scriptStartPosition)
+{
+    m_treeBuilder->scriptToProcess = dynamicDowncastScriptElement(element);
+    m_treeBuilder->scriptToProcessStartPosition = scriptStartPosition;
+}
+
+void HTMLDocumentParser::setCustomElementToConstruct(JSCustomElementInterface& elementInterface, CustomElementRegistry& registry, const AtomString& name)
+{
+    m_treeBuilder->customElementToConstruct = makeUnique<CustomElementConstructionData>(Ref { elementInterface }, Ref { registry }, name, Vector<Attribute> { });
+}
+
+void HTMLDocumentParser::appendToTextNode(Text& text, const String& characters, unsigned length, bool isNewTextNode)
+{
+    if (isNewTextNode)
+        m_treeBuilder->textNodeBuffer.clear();
+    text.parserAppendData(StringView(characters).left(length), m_treeBuilder->textNodeBuffer);
+}
+
+void HTMLDocumentParser::insertTextDocumentFakeElements()
+{
+    m_treeBuilder->treeBuilder.insertTextDocumentFakeElements(this);
+}
+#endif
 
 void HTMLDocumentParser::pumpTokenizer(SynchronousMode mode)
 {
@@ -330,7 +445,18 @@ void HTMLDocumentParser::pumpTokenizer(SynchronousMode mode)
     };
 
     emitTracePoint(ParseHTMLStart);
+#if !USE_SWIFT_HTML_TREE_BUILDER
     bool shouldResume = pumpTokenizerLoop(mode, isParsingFragment(), session);
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+    bool shouldResume;
+    {
+        TokenLoop loop { mode, session, m_parserScheduler, isParsingFragment() ? nullptr : document()->frame() };
+        SetForScope tokenLoop(m_tokenLoop, &loop);
+        auto treeBuilder = m_treeBuilder->treeBuilder;
+        shouldResume = treeBuilder.pump(this, mode == SynchronousMode::AllowYield);
+    }
+#endif
     emitTracePoint(ParseHTMLEnd);
 
     // Ensure we haven't been totally deref'ed after pumping. Any caller of this
@@ -357,6 +483,7 @@ void HTMLDocumentParser::pumpTokenizer(SynchronousMode mode)
         LinkLoader::loadLinksFromHeader(document->loader()->response().httpHeaderField(HTTPHeaderName::Link), document->url(), *document, LinkLoader::MediaAttributeCheck::MediaAttributeNotEmpty);
 }
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 void HTMLDocumentParser::constructTreeFromHTMLToken(HTMLTokenizer::TokenPtr& rawToken)
 {
 #if USE_SWIFT_HTML_PER_TOKEN
@@ -383,6 +510,7 @@ void HTMLDocumentParser::constructTreeFromHTMLToken(HTMLTokenizer::TokenPtr& raw
 
     m_treeBuilder->constructTree(WTF::move(token));
 }
+#endif
 
 bool HTMLDocumentParser::hasInsertionPoint()
 {
@@ -472,7 +600,15 @@ void HTMLDocumentParser::end()
     ASSERT(!isScheduledForResume());
 
     // Informs the rest of WebCore that parsing is really finished (and deletes this).
+#if !USE_SWIFT_HTML_TREE_BUILDER
     m_treeBuilder->finished();
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+    if (!isParsingFragment())
+        m_treeBuilder->textNodeBuffer.clear();
+    auto treeBuilder = m_treeBuilder->treeBuilder;
+    treeBuilder.finished(this);
+#endif
 }
 
 void HTMLDocumentParser::attemptToRunDeferredScriptsAndEnd()
@@ -690,7 +826,12 @@ void HTMLDocumentParser::resumeScheduledTasks()
 
 bool HTMLDocumentParser::isOnStackOfOpenElements(Element& element) const
 {
+#if !USE_SWIFT_HTML_TREE_BUILDER
     return m_treeBuilder->isOnStackOfOpenElements(element);
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+    return m_treeBuilder->treeBuilder.isOnStackOfOpenElements(&element);
+#endif
 }
 
 }

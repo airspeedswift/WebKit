@@ -66,11 +66,20 @@
 #include <unicode/ubrk.h>
 #include <wtf/text/TextBreakIterator.h>
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
+#if USE_SWIFT_HTML_TREE_BUILDER
+#include "HTMLTreeBuilderSwiftSupport.h"
+#endif
+
 namespace WebCore {
 
 using namespace ElementNames;
 using namespace HTMLNames;
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 enum class HasDuplicateAttribute : bool { No, Yes };
 static inline void setAttributes(Element& element, Vector<Attribute>& attributes, HasDuplicateAttribute hasDuplicateAttribute, OptionSet<ParserContentPolicy> parserContentPolicy)
 {
@@ -700,6 +709,7 @@ void HTMLConstructionSite::insertForeignElement(AtomHTMLToken&& token, const Ato
     if (!token.selfClosing())
         m_openElements.push(HTMLStackItem(WTF::move(element), WTF::move(token)));
 }
+#endif
 
 static NEVER_INLINE unsigned findBreakIndexSlow(const String& string, unsigned currentPosition, unsigned proposedBreakIndex)
 {
@@ -719,7 +729,11 @@ static NEVER_INLINE unsigned findBreakIndexSlow(const String& string, unsigned c
     return currentPosition + breakIndexInSubstring;
 }
 
+#if USE_SWIFT_HTML_TREE_BUILDER
+unsigned findBreakIndex(const String& string, unsigned currentPosition, unsigned proposedBreakIndex)
+#else
 static ALWAYS_INLINE unsigned findBreakIndex(const String& string, unsigned currentPosition, unsigned proposedBreakIndex)
+#endif
 {
     ASSERT(currentPosition < proposedBreakIndex);
     ASSERT(proposedBreakIndex <= string.length());
@@ -730,6 +744,15 @@ static ALWAYS_INLINE unsigned findBreakIndex(const String& string, unsigned curr
     return findBreakIndexSlow(string, currentPosition, proposedBreakIndex);
 }
 
+#if USE_SWIFT_HTML_TREE_BUILDER
+void injectDocumentStartUserScripts(Document& document)
+{
+    if (RefPtr frame = document.frame())
+        frame->injectUserScripts(UserScriptInjectionTime::DocumentStart);
+}
+#endif
+
+#if !USE_SWIFT_HTML_TREE_BUILDER
 void HTMLConstructionSite::insertTextNode(const String& characters)
 {
     HTMLConstructionSiteTask task(HTMLConstructionSiteTask::Insert);
@@ -1047,5 +1070,6 @@ void HTMLConstructionSite::fosterParent(Ref<Node>&& node)
 
     m_taskQueue.append(WTF::move(task));
 }
+#endif
 
 } // namespace WebCore

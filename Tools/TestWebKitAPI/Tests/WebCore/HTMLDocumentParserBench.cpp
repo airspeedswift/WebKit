@@ -34,6 +34,7 @@
 #include <WebCore/Element.h>
 #include <WebCore/ElementInlines.h>
 #include <WebCore/HTMLDocument.h>
+#include <WebCore/HTMLNames.h>
 #include <WebCore/NodeInlines.h>
 #include <WebCore/ProcessWarming.h>
 #include <WebCore/ScriptWrappableInlines.h>
@@ -50,8 +51,9 @@
 
 // Throughput of WebCore's HTML document parser, one TEST per kind of input. Each input is a whole document,
 // written to a frameless HTMLDocument between Document::open() and Document::close() in one or more chunks, as
-// document.write appends it. By default each TEST parses its input once and checks the checksum of the resulting
-// tree. With WEBKIT_RUN_BENCHMARKS=1 in the environment it then repeats the parse for about a second and prints
+// document.write appends it, except FragmentInTable's, which is many small fragments parsed with
+// Element::setInnerHTML. By default each TEST parses its input once and checks the checksum of the resulting tree.
+// With WEBKIT_RUN_BENCHMARKS=1 in the environment it then repeats the parse for about a second and prints
 // "<Name>: <ms> ms <MB/s> MB/s checksum=<hex>", with the same checksum. Nothing asserts on time.
 
 using namespace WebCore;
@@ -694,6 +696,355 @@ static String utf16Page()
     return builder.toString();
 }
 
+// BEGIN HTMLTreeBuilderBenchShapes
+
+static const ASCIILiteral misplacedInTable[] = { "x"_s, " "_s, "\n  "_s, " y "_s, "<div>d</div>"_s, "<b>b</b>"_s, "<span>s</span>"_s,
+    "<input type=hidden name=h>"_s, "<input name=t>"_s, "<form><input name=f>"_s, "<p>p"_s, "<a href=#>a</a>"_s, "<script></script>"_s,
+    "<style></style>"_s };
+
+static void appendMisnestedTable(StringBuilder& builder, Generator& generator, unsigned depth)
+{
+    builder.append("<table>"_s);
+    if (!generator.below(4))
+        builder.append("<caption>"_s, misplacedInTable[generator.below(std::size(misplacedInTable))], "</caption>"_s);
+    if (!generator.below(3))
+        builder.append(misplacedInTable[generator.below(std::size(misplacedInTable))]);
+    bool explicitBody = generator.below(2);
+    if (explicitBody)
+        builder.append("<tbody>"_s);
+    unsigned rows = 1 + generator.below(4);
+    for (unsigned row = 0; row < rows; ++row) {
+        if (!generator.below(5))
+            builder.append(misplacedInTable[generator.below(std::size(misplacedInTable))]);
+        builder.append("<tr>"_s);
+        if (!generator.below(6))
+            builder.append(misplacedInTable[generator.below(std::size(misplacedInTable))]);
+        unsigned cells = 1 + generator.below(4);
+        for (unsigned cell = 0; cell < cells; ++cell) {
+            builder.append("<td>"_s);
+            if (depth < 3 && !generator.below(10))
+                appendMisnestedTable(builder, generator, depth + 1);
+            else
+                appendWord(builder, generator);
+            if (generator.below(2))
+                builder.append("</td>"_s);
+        }
+        if (generator.below(2))
+            builder.append("</tr>"_s);
+    }
+    if (explicitBody && generator.below(2))
+        builder.append("</tbody>"_s);
+    builder.append("</table>\n"_s);
+}
+
+// Tables one to three deep with misplaced content: text, elements and forms directly in table, tbody and tr (foster
+// parented), whitespace-only table text, hidden inputs, cells and rows left for the parser to close.
+static String tablesAndFosterParenting()
+{
+    Generator generator(37);
+    StringBuilder builder;
+    while (builder.length() < 1 << 20)
+        appendMisnestedTable(builder, generator, 1);
+    return builder.toString();
+}
+
+static const ASCIILiteral formattingTags[] = { "b"_s, "i"_s, "em"_s, "strong"_s, "a"_s, "u"_s, "s"_s, "code"_s, "small"_s, "font"_s,
+    "nobr"_s, "tt"_s };
+static const ASCIILiteral blockTags[] = { "div"_s, "p"_s, "blockquote"_s, "section"_s, "ul"_s, "h2"_s };
+
+// Formatting elements closed out of order, around blocks, in runs of one to twelve, repeated with the same attributes,
+// and across markers.
+static String misnestedFormatting()
+{
+    Generator generator(41);
+    StringBuilder builder;
+    auto formatting = [&] { return formattingTags[generator.below(std::size(formattingTags))]; };
+    while (builder.length() < 1 << 20) {
+        switch (generator.below(5)) {
+        case 0: {
+            auto outer = formatting();
+            auto inner = formatting();
+            builder.append('<', outer, '>', '<', inner, '>');
+            appendWord(builder, generator);
+            builder.append("</"_s, outer, '>');
+            appendWord(builder, generator);
+            builder.append("</"_s, inner, ">\n"_s);
+            break;
+        }
+        case 1: {
+            auto tag = formatting();
+            auto block = blockTags[generator.below(std::size(blockTags))];
+            builder.append('<', tag, "><"_s, block, '>');
+            appendWord(builder, generator);
+            builder.append("</"_s, tag, '>');
+            appendWord(builder, generator);
+            builder.append("</"_s, block, ">\n"_s);
+            break;
+        }
+        case 2: {
+            unsigned count = 1 + generator.below(12);
+            Vector<ASCIILiteral> open;
+            for (unsigned i = 0; i < count; ++i) {
+                open.append(formatting());
+                builder.append('<', open.last(), '>');
+                if (generator.below(2))
+                    appendWord(builder, generator);
+            }
+            if (generator.below(2))
+                builder.append("<p>"_s);
+            appendWord(builder, generator);
+            while (!open.isEmpty()) {
+                unsigned index = generator.below(open.size());
+                builder.append("</"_s, open[index], '>');
+                open.removeAt(index);
+                if (!generator.below(3))
+                    appendWord(builder, generator);
+            }
+            builder.append('\n');
+            break;
+        }
+        case 3: {
+            auto tag = formatting();
+            unsigned count = 2 + generator.below(4);
+            for (unsigned i = 0; i < count; ++i)
+                builder.append('<', tag, generator.below(4) ? " class=x"_s : " class=y"_s, '>');
+            builder.append("<p>"_s);
+            appendWord(builder, generator);
+            builder.append("</p><p>"_s);
+            appendWord(builder, generator);
+            builder.append("</p>"_s);
+            for (unsigned i = 0; i < count; ++i)
+                builder.append("</"_s, tag, '>');
+            builder.append('\n');
+            break;
+        }
+        default: {
+            auto tag = formatting();
+            if (generator.below(2)) {
+                builder.append('<', tag, ">x<object><i>"_s);
+                appendWord(builder, generator);
+                builder.append("</object>"_s);
+                appendWord(builder, generator);
+                builder.append("</"_s, tag, ">\n"_s);
+            } else {
+                builder.append("<table><tr><td><"_s, tag, '>');
+                appendWord(builder, generator);
+                builder.append("</td><td>"_s);
+                appendWord(builder, generator);
+                builder.append("</"_s, tag, "></td></tr></table>\n"_s);
+            }
+            break;
+        }
+        }
+    }
+    return builder.toString();
+}
+
+// <div>s and <span>s nested 400 to 600 deep, past the parser's maximum DOM tree depth (512), then closed; every
+// fourth run inside a table cell.
+static String deepNesting()
+{
+    Generator generator(43);
+    StringBuilder builder;
+    Vector<bool> open;
+    while (builder.length() < 1 << 20) {
+        unsigned depth = 400 + generator.below(201);
+        bool inTable = !generator.below(4);
+        if (inTable)
+            builder.append("<table><tr><td>"_s);
+        open.shrink(0);
+        for (unsigned i = 0; i < depth; ++i) {
+            open.append(generator.below(3));
+            builder.append(open.last() ? "<div>"_s : "<span>"_s);
+        }
+        appendWord(builder, generator);
+        while (!open.isEmpty())
+            builder.append(open.takeLast() ? "</div>"_s : "</span>"_s);
+        builder.append(inTable ? "</td></tr></table>\n"_s : "\n"_s);
+    }
+    return builder.toString();
+}
+
+// Templates with table rows and cells, nested templates, templates in head and in tables, templates of column groups,
+// captions and options, and declarative shadow roots.
+static String templates()
+{
+    Generator generator(47);
+    StringBuilder builder;
+    builder.append("<!DOCTYPE html><head><template><meta name=t><style>p { }</style></template></head><body>\n"_s);
+    while (builder.length() < 1 << 20) {
+        switch (generator.below(5)) {
+        case 0:
+            builder.append("<template><tr><td>"_s);
+            appendWord(builder, generator);
+            builder.append("</td><td>"_s);
+            appendWord(builder, generator);
+            builder.append("</td></tr><tr><td>"_s);
+            appendWord(builder, generator);
+            builder.append("</td></tr></template>\n"_s);
+            break;
+        case 1: {
+            unsigned depth = 1 + generator.below(4);
+            for (unsigned i = 0; i < depth; ++i)
+                builder.append("<template>"_s);
+            builder.append("<div>"_s);
+            appendWord(builder, generator);
+            builder.append("<template><td>"_s);
+            appendWord(builder, generator);
+            builder.append("</td></template></div>"_s);
+            for (unsigned i = 0; i < depth; ++i)
+                builder.append("</template>"_s);
+            builder.append('\n');
+            break;
+        }
+        case 2:
+            builder.append("<table><tbody><template><tr><td>"_s);
+            appendWord(builder, generator);
+            builder.append("</td></tr></template><tr><td>"_s);
+            appendWord(builder, generator);
+            builder.append("</td></tr></tbody></table>\n"_s);
+            break;
+        case 3:
+            builder.append("<div><template shadowrootmode=open><slot></slot><span>"_s);
+            appendWord(builder, generator);
+            builder.append("</span></template><p>"_s);
+            appendWord(builder, generator);
+            builder.append("</p></div>\n"_s);
+            break;
+        default:
+            builder.append("<template><col><col></template><template><caption>"_s);
+            appendWord(builder, generator);
+            builder.append("</caption><tbody></tbody></template><template><option>"_s);
+            appendWord(builder, generator);
+            builder.append("<option>"_s);
+            appendWord(builder, generator);
+            builder.append("</template>\n"_s);
+            break;
+        }
+    }
+    return builder.toString();
+}
+
+// The fragments FragmentInTable parses with Element::setInnerHTML: one to four rows of cells, or cells alone, each into
+// a <tbody>, and every fourth into a <template>.
+static Vector<String> fragmentInTableFragments()
+{
+    Generator generator(53);
+    Vector<String> fragments;
+    size_t length = 0;
+    while (length < 1 << 20) {
+        StringBuilder builder;
+        if (!generator.below(8)) {
+            unsigned cells = 1 + generator.below(4);
+            for (unsigned cell = 0; cell < cells; ++cell) {
+                builder.append("<td>"_s);
+                appendWord(builder, generator);
+            }
+        } else {
+            unsigned rows = 1 + generator.below(4);
+            for (unsigned row = 0; row < rows; ++row) {
+                builder.append(generator.below(3) ? "<tr>"_s : "<tr class=r>"_s);
+                unsigned cells = 1 + generator.below(5);
+                for (unsigned cell = 0; cell < cells; ++cell) {
+                    builder.append("<td>"_s);
+                    appendWord(builder, generator);
+                    if (!generator.below(6))
+                        builder.append(" <b>"_s, cell, "</b>"_s);
+                    builder.append("</td>"_s);
+                }
+                builder.append("</tr>"_s);
+            }
+        }
+        length += builder.length();
+        fragments.append(builder.toString());
+    }
+    return fragments;
+}
+
+static bool fragmentInTableUsesTemplate(size_t index)
+{
+    return index % 4 == 3;
+}
+
+static size_t byteLengthOfFragments(const Vector<String>& fragments)
+{
+    size_t bytes = 0;
+    for (auto& fragment : fragments)
+        bytes += byteLength(fragment);
+    return bytes;
+}
+
+// Parses each fragment into a new context element of the document and adds the result to the checksum. A
+// <template>'s children are in its content, which is reached through its markup.
+static void parseFragments(Document& document, const Vector<String>& fragments, Checksum& checksum)
+{
+    for (size_t index = 0; index < fragments.size(); ++index) {
+        bool usesTemplate = fragmentInTableUsesTemplate(index);
+        Ref context = document.createElement(usesTemplate ? HTMLNames::templateTag : HTMLNames::tbodyTag, false);
+        auto result = context->setInnerHTML(String { fragments[index] });
+        checksum.add(result.hasException());
+        if (usesTemplate)
+            checksum.add(context->innerHTML());
+        else
+            addTree(checksum, context);
+    }
+}
+
+static Input tablesAndFosterParentingInput()
+{
+    return wholeDocument(tablesAndFosterParenting());
+}
+
+static Input misnestedFormattingInput()
+{
+    return wholeDocument(misnestedFormatting());
+}
+
+static Input deepNestingInput()
+{
+    return wholeDocument(deepNesting());
+}
+
+static Input templatesInput()
+{
+    return wholeDocument(templates());
+}
+
+// END HTMLTreeBuilderBenchShapes
+
+// Each pass parses every fragment into a context element of a new document, so the setInnerHTML cache of an earlier
+// pass is never reused.
+static void runFragmentBenchmark(ASCIILiteral name, const Vector<String>& fragments, unsigned iterations, uint64_t expectedChecksum)
+{
+    ensureTestPlatformStrategiesInstalled();
+    ProcessWarming::initializeNames();
+
+    auto settings = Settings::create(nullptr);
+    Checksum checksum;
+    {
+        auto document = HTMLDocument::create(nullptr, settings, aboutBlankURL());
+        parseFragments(document, fragments, checksum);
+    }
+    expectChecksum(checksum, expectedChecksum);
+
+    if (!runsBenchmarks())
+        return;
+
+    unsigned mismatches = 0;
+    auto start = MonotonicTime::now();
+    for (unsigned i = 0; i < iterations; ++i) {
+        Checksum iterationChecksum;
+        auto document = HTMLDocument::create(nullptr, settings, aboutBlankURL());
+        parseFragments(document, fragments, iterationChecksum);
+        if (iterationChecksum.value != checksum.value)
+            ++mismatches;
+    }
+    double seconds = (MonotonicTime::now() - start).seconds();
+    EXPECT_EQ(mismatches, 0u);
+
+    printResult(name, seconds, static_cast<double>(byteLengthOfFragments(fragments)) * iterations, checksum);
+}
+
 static Input specPageInput()
 {
     return wholeDocument(specPage());
@@ -819,6 +1170,32 @@ TEST(HTMLDocumentParserBench, ForeignContent)
 TEST(HTMLDocumentParserBench, UTF16Page)
 {
     runBenchmark("UTF16Page"_s, utf16PageInput(), 160, 0x9385da9865b6cd11ull);
+}
+
+
+TEST(HTMLDocumentParserBench, TablesAndFosterParenting)
+{
+    runBenchmark("TablesAndFosterParenting"_s, tablesAndFosterParentingInput(), 90, 0x89077298b8750b99ull);
+}
+
+TEST(HTMLDocumentParserBench, MisnestedFormatting)
+{
+    runBenchmark("MisnestedFormatting"_s, misnestedFormattingInput(), 70, 0x43810e5ddac3c8b7ull);
+}
+
+TEST(HTMLDocumentParserBench, DeepNesting)
+{
+    runBenchmark("DeepNesting"_s, deepNestingInput(), 45, 0x6b5c1ce79aceb03cull);
+}
+
+TEST(HTMLDocumentParserBench, Templates)
+{
+    runBenchmark("Templates"_s, templatesInput(), 120, 0x60430c153e762180ull);
+}
+
+TEST(HTMLDocumentParserBench, FragmentInTable)
+{
+    runFragmentBenchmark("FragmentInTable"_s, fragmentInTableFragments(), 60, 0x8227c7189a81955bull);
 }
 
 } // namespace TestWebKitAPI

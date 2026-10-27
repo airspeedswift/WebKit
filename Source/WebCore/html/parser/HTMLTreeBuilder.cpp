@@ -63,9 +63,15 @@
 #include "TelephoneNumberDetector.h"
 #endif
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 WTF_MAKE_TZONE_ALLOCATED_IMPL(HTMLTreeBuilder);
+#endif
 
 using namespace ElementNames;
 using namespace HTMLNames;
@@ -80,6 +86,7 @@ CustomElementConstructionData::CustomElementConstructionData(Ref<JSCustomElement
 
 CustomElementConstructionData::~CustomElementConstructionData() = default;
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 static inline TextPosition LEGACY_NODELETE uninitializedPositionValue1()
 {
     return TextPosition(OrdinalNumber::fromOneBasedInt(-1), OrdinalNumber());
@@ -3097,5 +3104,6 @@ bool HTMLTreeBuilder::isOnStackOfOpenElements(Element& element) const
 {
     return m_tree.openElements().contains(element);
 }
+#endif
 
 }

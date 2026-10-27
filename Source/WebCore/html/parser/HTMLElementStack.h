@@ -32,8 +32,13 @@
 #include <wtf/Ref.h>
 #include <wtf/TZoneMalloc.h>
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 class ContainerNode;
 class Element;
 class QualifiedName;
@@ -163,5 +168,6 @@ private:
     unsigned m_stackDepth { 0 };
     unsigned m_templateElementCount { 0 };
 };
+#endif
     
 } // namespace WebCore

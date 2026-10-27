@@ -30,9 +30,14 @@
 #include <stdio.h>
 #endif
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
 // Biblically, Noah's Ark only had room for two of each animal, but in the
+#if !USE_SWIFT_HTML_TREE_BUILDER
 // Book of Hixie (aka http://www.whatwg.org/specs/web-apps/current-work/multipage/parsing.html#list-of-active-formatting-elements),
 // Noah's Ark of Formatting Elements can fit three of each element.
 static const size_t kNoahsArkCapacity = 3;
@@ -226,6 +231,7 @@ void HTMLFormattingElementList::show()
     }
 }
 
+#endif
 #endif
 
 }

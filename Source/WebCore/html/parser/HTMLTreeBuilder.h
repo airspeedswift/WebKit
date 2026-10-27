@@ -33,6 +33,10 @@
 #include <wtf/text/StringBuilder.h>
 #include <wtf/text/TextPosition.h>
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
 class JSCustomElementInterface;
@@ -53,6 +57,7 @@ struct CustomElementConstructionData {
     Vector<Attribute> attributes;
 };
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 class HTMLTreeBuilder {
     WTF_MAKE_TZONE_ALLOCATED(HTMLTreeBuilder);
 public:
@@ -267,5 +272,6 @@ inline DocumentFragment* HTMLTreeBuilder::FragmentParsingContext::fragment() con
 {
     return m_fragment.get();
 }
+#endif
 
 } // namespace WebCore

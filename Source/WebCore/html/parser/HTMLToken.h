@@ -38,6 +38,10 @@
 #define USE_SWIFT_HTML_PER_TOKEN 0
 #endif
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
 struct DoctypeData {
@@ -112,6 +116,11 @@ public:
     size_t attributeCount() const { return m_attributes.size(); }
     std::span<const char16_t> attributeName(size_t i) const LIFETIME_BOUND { return m_attributes[i].name.span(); }
     std::span<const char16_t> attributeValue(size_t i) const LIFETIME_BOUND { return m_attributes[i].value.span(); }
+#endif
+#if USE_SWIFT_HTML_TREE_BUILDER
+    // The characters, the comment, a processing instruction's data, or a DOCTYPE's name.
+    std::span<const char16_t> data() const LIFETIME_BOUND { return m_data.span(); }
+    String dataString() const { return m_data8BitCheck <= 0xFF ? String::make8Bit(m_data.span()) : String(m_data.span()); }
 #endif
 
     void beginStartTag(Latin1Character);

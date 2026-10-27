@@ -36,8 +36,13 @@
 #include "MathMLNames.h"
 #include <wtf/TZoneMallocInlines.h>
 
+#if !defined(USE_SWIFT_HTML_TREE_BUILDER)
+#define USE_SWIFT_HTML_TREE_BUILDER 0
+#endif
+
 namespace WebCore {
 
+#if !USE_SWIFT_HTML_TREE_BUILDER
 WTF_MAKE_TZONE_ALLOCATED_IMPL(HTMLElementStack);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(HTMLElementStack::ElementRecord);
 
@@ -589,6 +594,7 @@ void HTMLElementStack::show()
         record->element().showNode();
 }
 
+#endif
 #endif
 
 }
