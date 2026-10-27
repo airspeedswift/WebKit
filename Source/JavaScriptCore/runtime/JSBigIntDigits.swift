@@ -210,6 +210,26 @@ func jsBigIntDivideDigits(
     return divideDigits(&quotient, &remainder, a, b)
 }
 
+/// Divides `a` by `b` into `quotient` and `remainder`, either of which may be empty, and returns the quotient's length
+/// shifted left 32 bits ORed with the remainder's (each is at most 16,384 digits).
+///
+/// `b` has at least two digits and is no longer than `a`. `quotient` and `remainder` overlap neither each other nor the
+/// inputs.
+@_expose(Cxx)
+func jsBigIntDivideDigitsInto(
+    _ quotient: JSC.JSBigIntMutableDigits,
+    _ remainder: JSC.JSBigIntMutableDigits,
+    _ a: JSC.JSBigIntDigits,
+    _ b: JSC.JSBigIntDigits
+) -> Int {
+    var quotient = unsafe MutableSpan<UInt64>(_unsafeCxxSpan: quotient)
+    var remainder = unsafe MutableSpan<UInt64>(_unsafeCxxSpan: remainder)
+    let a = unsafe Span<UInt64>(_unsafeCxxSpan: a)
+    let b = unsafe Span<UInt64>(_unsafeCxxSpan: b)
+    let (quotientCount, remainderCount) = divideDigitsInto(&quotient, &remainder, a, b)
+    return quotientCount << 32 | remainderCount
+}
+
 /// Returns `a / b`, a single digit, for `a` greater than `b`.
 ///
 /// `a` and `b` have the same length, of at least two digits.

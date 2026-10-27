@@ -5464,6 +5464,47 @@ private:
     std::span<Digit> m_scratch;
 };
 
+
+#if USE_SWIFT_BIGINT_DIGITS
+JSBigInt::ComparisonResult JSBigInt::compareDigits(std::span<const Digit> x, std::span<const Digit> y)
+{
+    x = normalize(x);
+    y = normalize(y);
+    if (x.size() != y.size())
+        return x.size() < y.size() ? ComparisonResult::LessThan : ComparisonResult::GreaterThan;
+    for (size_t i = x.size(); i-- > 0;) {
+        if (x[i] != y[i])
+            return x[i] < y[i] ? ComparisonResult::LessThan : ComparisonResult::GreaterThan;
+    }
+    return ComparisonResult::Equal;
+}
+
+std::span<JSBigInt::Digit> JSBigInt::multiplyDigits(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result)
+{
+    x = normalize(x);
+    y = normalize(y);
+    if (x.empty() || y.empty())
+        return { };
+    if (x.size() < y.size())
+        std::swap(x, y);
+    RELEASE_ASSERT(result.size() >= x.size() + y.size());
+    bool isSquare = x.data() == y.data() && x.size() == y.size();
+    return normalize(result.first(JSCSwift::jsBigIntMultiplyDigits(x, isSquare ? std::span<const Digit> { } : y, isSquare, result)));
+}
+
+std::tuple<std::span<JSBigInt::Digit>, std::span<JSBigInt::Digit>> JSBigInt::divideDigitsInto(std::span<Digit> q, std::span<Digit> r, std::span<const Digit> a, std::span<const Digit> b)
+{
+    RELEASE_ASSERT(b.size() >= 2);
+    RELEASE_ASSERT(a.size() >= b.size());
+    RELEASE_ASSERT(q.empty() || q.size() > a.size() - b.size());
+    RELEASE_ASSERT(r.empty() || r.size() >= b.size());
+    // JSBigIntDigits*.swift copies these constants.
+    static_assert(maxLength == 16384 && digitBits == 64 && halfDigitBits == 32);
+    size_t counts = JSCSwift::jsBigIntDivideDigitsInto(q, r, a, b);
+    return { q.first(counts >> 32), r.first(counts & 0xffffffff) };
+}
+#endif
+
 JSBigInt::ToStringFormatter::ToStringFormatter(unsigned radix, std::span<const Digit> digits, std::span<Latin1Character> out)
     : m_radix(radix)
     , m_chunkChars(digitBits * bitsPerCharTableMultiplier / maxBitsPerCharTable[radix])

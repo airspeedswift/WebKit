@@ -428,6 +428,11 @@ private:
     static std::span<Digit> multiplyDigits(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result);
     static std::span<Digit> divideDigits(std::span<Digit> quotient, std::span<const Digit> x, std::span<const Digit> y);
     static std::span<Digit> oneShiftedLeft(std::span<Digit> result, unsigned bitIndex);
+#else
+    // The divide-and-conquer toString's operations, in JSBigIntDigits*.swift.
+    static ComparisonResult LEGACY_NODELETE compareDigits(std::span<const Digit> x, std::span<const Digit> y);
+    static std::span<Digit> multiplyDigits(std::span<const Digit> x, std::span<const Digit> y, std::span<Digit> result);
+    static std::tuple<std::span<Digit>, std::span<Digit>> divideDigitsInto(std::span<Digit> q, std::span<Digit> r, std::span<const Digit>, std::span<const Digit>);
 #endif
 
     enum class RoundingResult {
