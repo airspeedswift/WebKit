@@ -36,7 +36,8 @@
 namespace PAL {
 
 using UTF8ByteSequence = std::span<const uint8_t>;
-using Latin1CharacterSpan = std::span<Latin1Character>;
+// Latin-1 output as bytes: Swift reaches no element of a span of the Latin1Character struct.
+using Latin1CharacterSpan = std::span<uint8_t>;
 using UTF16CharacterSpan = std::span<char16_t>;
 
 // A TextCodecUTF8's decoding state: the held partial sequence and whether a byte order mark at the

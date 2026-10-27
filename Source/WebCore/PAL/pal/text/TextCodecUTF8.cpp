@@ -521,7 +521,7 @@ String TextCodecUTF8::decode(std::span<const uint8_t> bytes, bool flush, bool st
     static_assert(std::tuple_size_v<decltype(m_partialSequence)> == 4);
     TextCodecUTF8DecoderState state { m_partialSequence[0], m_partialSequence[1], m_partialSequence[2], m_partialSequence[3], static_cast<uint8_t>(m_partialSequenceSize), m_shouldStripByteOrderMark };
     StringBuffer<Latin1Character> buffer(bufferSize);
-    auto result = pal::decodeUTF8ToLatin1(state, bytes, buffer.span(), flush, stopOnError);
+    auto result = pal::decodeUTF8ToLatin1(state, bytes, byteCast<uint8_t>(buffer.span()), flush, stopOnError);
     if (!result.needsUpconvert)
         return adoptDecodedCharacters(buffer, result);
 
