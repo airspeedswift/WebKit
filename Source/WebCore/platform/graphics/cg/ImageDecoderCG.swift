@@ -727,7 +727,14 @@ final class ImageDecoderCGCore: Sendable {
         let carrier = Mutex<CFData?>(data)
         source.withLock { source in
             status.withLock { $0.isAllDataReceived = allDataReceived }
-            if let data = carrier.withLock({ $0.take() }) {
+            // Not `$0.take()`: region isolation keeps a value returned from a
+            // mutating method in the parameter's region, so it cannot be `sending`.
+            let pending = carrier.withLock { (pending: inout sending CFData?) -> sending CFData? in
+                let value = pending
+                pending = nil
+                return value
+            }
+            if let data = pending {
                 CGImageSourceUpdateData(source, data, allDataReceived)
             }
             let sourceType = (CGImageSourceGetType(source) as String?) ?? ""
