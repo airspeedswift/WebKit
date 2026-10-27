@@ -802,6 +802,7 @@
 				WebCore/cocoa/GraphicsContextCGTests.mm,
 				WebCore/cocoa/H264UtilitiesCocoaTests.mm,
 				WebCore/cocoa/HEVCUtilitiesCocoaTests.mm,
+				WebCore/cocoa/ImageDecoderCGBench.mm,
 				WebCore/cocoa/ImageRotationSessionVT.cpp,
 				WebCore/cocoa/IOSurfacePoolTests.cpp,
 				WebCore/cocoa/IOSurfaceTests.mm,
