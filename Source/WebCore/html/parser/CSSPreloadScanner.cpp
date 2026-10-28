@@ -35,12 +35,19 @@ namespace WebCore {
 
 CSSPreloadScanner::CSSPreloadScanner()
     : m_state(Initial)
+#if !USE_SWIFT_HTML_PRELOAD_SCANNER
     , m_requests(nullptr)
+#endif
 {
+#if USE_SWIFT_HTML_PRELOAD_SCANNER
+    // HTMLPreloadScanner.swift's PreloadScannerCSSState lists these states in this order.
+    static_assert(!Initial && MaybeComment == 1 && Comment == 2 && MaybeCommentEnd == 3 && RuleStart == 4 && Rule == 5 && AfterRule == 6 && RuleValue == 7 && AfterRuleValue == 8 && RuleConditions == 9 && DoneParsingImportRules == 10);
+#endif
 }
 
 CSSPreloadScanner::~CSSPreloadScanner() = default;
 
+#if !USE_SWIFT_HTML_PRELOAD_SCANNER
 void CSSPreloadScanner::reset()
 {
     m_state = Initial;
@@ -254,5 +261,6 @@ void CSSPreloadScanner::emitRule()
     m_ruleValue.clear();
     m_ruleConditions.clear();
 }
+#endif
 
 }
