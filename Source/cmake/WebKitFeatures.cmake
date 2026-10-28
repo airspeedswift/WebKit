@@ -559,6 +559,12 @@ macro(WEBKIT_OPTION_END)
     if (WK_USE_SWIFT_HTML_PER_TOKEN AND NOT WK_USE_SWIFT_HTML_TOKENIZER)
         message(FATAL_ERROR "WK_USE_SWIFT_HTML_PER_TOKEN needs WK_USE_SWIFT_HTML_TOKENIZER, whose HTMLTokenizer.swift makes them")
     endif ()
+    # The counterpart of the WebCore.xcconfig setting of the same name: the HTML preload scanner is
+    # HTMLPreloadScanner.swift.
+    option(WK_USE_SWIFT_HTML_PRELOAD_SCANNER "Scan HTML for resources to preload with WebCore's HTMLPreloadScanner.swift" OFF)
+    if (WK_USE_SWIFT_HTML_PRELOAD_SCANNER AND NOT WK_USE_SWIFT_HTML_PER_TOKEN)
+        message(FATAL_ERROR "WK_USE_SWIFT_HTML_PRELOAD_SCANNER needs WK_USE_SWIFT_HTML_PER_TOKEN, whose HTMLToken accessors it reads attributes with")
+    endif ()
 
     # A Swift feature still on with a too-old toolchain was requested explicitly
     # (the default declines to auto-enable it), so fail loudly rather than drop it

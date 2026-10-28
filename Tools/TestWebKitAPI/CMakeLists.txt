@@ -307,6 +307,7 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/HTMLDocumentParserBench.cpp
         Tests/WebCore/HTMLFastPathParserBench.cpp
         Tests/WebCore/HTMLParserIdioms.cpp
+        Tests/WebCore/HTMLPreloadScannerBench.cpp
         Tests/WebCore/HTMLTokenizerBench.cpp
         Tests/WebCore/HTTPHeaderField.cpp
         Tests/WebCore/HTTPHeaderMap.cpp

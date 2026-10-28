@@ -30,17 +30,35 @@
 #include "HTMLToken.h"
 #include <wtf/Vector.h>
 
+#if !defined(USE_SWIFT_HTML_PRELOAD_SCANNER)
+#define USE_SWIFT_HTML_PRELOAD_SCANNER 0
+#endif
+
+#if USE_SWIFT_HTML_PRELOAD_SCANNER
+#include <wtf/SwiftBridging.h>
+#endif
+
 namespace WebCore {
+
+#if USE_SWIFT_HTML_PRELOAD_SCANNER
+class SWIFT_PRIVATE_FILEID("WebCore/HTMLPreloadScanner.swift") CSSPreloadScanner;
+#endif
 
 class CSSPreloadScanner {
     WTF_MAKE_NONCOPYABLE(CSSPreloadScanner);
 public:
     CSSPreloadScanner();
     ~CSSPreloadScanner();
+#if USE_SWIFT_HTML_PRELOAD_SCANNER
+    // Swift imports a class only if it can be moved.
+    CSSPreloadScanner(CSSPreloadScanner&&) = default;
+#endif
 
+#if !USE_SWIFT_HTML_PRELOAD_SCANNER
     void reset();
 
     void scan(const HTMLToken::DataVector&, PreloadRequestStream&, const URL& predictedBaseElementURL = URL());
+#endif
 
 private:
     enum State {
@@ -57,18 +75,29 @@ private:
         DoneParsingImportRules,
     };
 
+#if USE_SWIFT_HTML_PRELOAD_SCANNER
+    friend std::span<const char16_t> cssPreloadScannerBuffer(const CSSPreloadScanner& owner LIFETIME_BOUND, unsigned index);
+#else
     inline void tokenize(char16_t);
     void emitRule();
     bool LEGACY_NODELETE hasFinishedRuleValue() const;
+#endif
 
     State m_state;
     Vector<char16_t> m_rule;
     Vector<char16_t> m_ruleValue;
     Vector<char16_t> m_ruleConditions;
 
+#if !USE_SWIFT_HTML_PRELOAD_SCANNER
     // Only non-zero during scan()
     PreloadRequestStream* m_requests;
     URL m_predictedBaseElementURL;
+#endif
 };
+
+#if USE_SWIFT_HTML_PRELOAD_SCANNER
+// The characters of the scanner's rule (index 0), rule value (1) or rule conditions (2), for HTMLPreloadScanner.swift.
+inline std::span<const char16_t> cssPreloadScannerBuffer(const CSSPreloadScanner& scanner LIFETIME_BOUND, unsigned index) { return (!index ? scanner.m_rule : index == 1 ? scanner.m_ruleValue : scanner.m_ruleConditions).span(); }
+#endif
 
 } // namespace WebCore

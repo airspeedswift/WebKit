@@ -60,4 +60,12 @@
 #include "SegmentedString.h"
 #endif
 
+#if !defined(USE_SWIFT_HTML_PRELOAD_SCANNER)
+#define USE_SWIFT_HTML_PRELOAD_SCANNER 0
+#endif
+#if USE_SWIFT_HTML_PRELOAD_SCANNER
+#include "Document.h"
+#include "HTMLPreloadScanner.h"
+#endif
+
 #include "WebCoreSwift-Generated.h"

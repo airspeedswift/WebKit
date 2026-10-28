@@ -862,6 +862,7 @@
 				WebCore/HTMLDocumentParserBench.cpp,
 				WebCore/HTMLFastPathParserBench.cpp,
 				WebCore/HTMLParserIdioms.cpp,
+				WebCore/HTMLPreloadScannerBench.cpp,
 				WebCore/HTMLTokenizerBench.cpp,
 				WebCore/HTTPHeaderField.cpp,
 				WebCore/HTTPHeaderMap.cpp,
