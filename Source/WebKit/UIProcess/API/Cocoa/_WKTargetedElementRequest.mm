@@ -78,7 +78,7 @@
         return nil;
 
     WebCore::TargetedElementSelectors selectorsForElement;
-    selectorsForElement.reserveInitialCapacity(nsSelectorsForElement.count);
+    selectorsForElement.reserveCapacity(nsSelectorsForElement.count);
     for (NSSet<NSString *> *nsSelectors in nsSelectorsForElement) {
         HashSet<String> selectors;
         selectors.reserveInitialCapacity(nsSelectors.count);

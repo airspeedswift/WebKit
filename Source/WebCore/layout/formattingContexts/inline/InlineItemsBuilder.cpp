@@ -272,7 +272,7 @@ void InlineItemsBuilder::adjustInlineItemsForWhiteSpaceTrim(InlineItemList& inli
         return;
 
     InlineItemList remainingItems;
-    remainingItems.reserveInitialCapacity(inlineItemList.size());
+    remainingItems.reserveCapacity(inlineItemList.size());
     for (size_t index = 0; index < inlineItemList.size(); ++index) {
         if (!itemsToDiscard.quickGet(index))
             remainingItems.append(WTF::move(inlineItemList[index]));
@@ -754,7 +754,7 @@ void InlineItemsBuilder::breakAndComputeBidiLevels(InlineItemList& inlineItemLis
 
     StringBuilder paragraphContentBuilder;
     InlineItemOffsetList inlineItemOffsets;
-    inlineItemOffsets.reserveInitialCapacity(inlineItemList.size());
+    inlineItemOffsets.reserveCapacity(inlineItemList.size());
     buildBidiParagraph(root().style(), inlineItemList, paragraphContentBuilder, inlineItemOffsets);
     if (paragraphContentBuilder.isEmpty()) {
         // Style may trigger visual reordering even on a completely empty content.
@@ -847,8 +847,7 @@ void InlineItemsBuilder::breakAndComputeBidiLevels(InlineItemList& inlineItemLis
         // Let's not confuse ubidi with non-content entries.
         // Opaque runs are excluded from the visual list (ie. only empty inline boxes should be kept around as bidi content -to figure out their visual order).
         enum class InlineBoxHasContent : bool { No, Yes };
-        Vector<InlineBoxHasContent> inlineBoxContentFlagStack;
-        inlineBoxContentFlagStack.reserveInitialCapacity(inlineItemList.size());
+        Vector<InlineBoxHasContent> inlineBoxContentFlagStack(ReserveCapacityTag { }, inlineItemList.size());
         for (auto index = inlineItemList.size(); index--;) {
             auto& inlineItem = inlineItemList[index];
             CheckedRef style = inlineItem.style();
@@ -1313,7 +1312,7 @@ void InlineItemsBuilder::populateBreakingPositionCache(const InlineItemList& inl
         }
 
         TextBreakingPositionCache::List breakingPositionList;
-        breakingPositionList.reserveInitialCapacity(span.size());
+        breakingPositionList.reserveCapacity(span.size());
         for (auto& inlineItem : span) {
             if (auto* inlineTextItem = dynamicDowncast<InlineTextItem>(inlineItem))
                 breakingPositionList.append(inlineTextItem->end());

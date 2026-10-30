@@ -99,8 +99,7 @@ static void setUpBundleClient(WKWebProcessPlugInController *plugInController, We
 static Ref<API::Array> createWKArray(NSArray *array)
 {
     NSUInteger count = [array count];
-    Vector<RefPtr<API::Object>> strings;
-    strings.reserveInitialCapacity(count);
+    Vector<RefPtr<API::Object>> strings(ReserveCapacityTag { }, count);
     
     for (id entry in array) {
         if ([entry isKindOfClass:[NSString class]])

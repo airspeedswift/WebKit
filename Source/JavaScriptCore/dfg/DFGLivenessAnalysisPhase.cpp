@@ -118,7 +118,7 @@ public:
     {
         BlockIndex numBlock = m_graph.numBlocks();
         m_dirtyBlocks.ensureSize(numBlock);
-        m_worklist.reserveInitialCapacity(numBlock);
+        m_worklist.reserveCapacity(numBlock);
         for (BlockIndex blockIndex = 0; blockIndex < numBlock; ++blockIndex) {
             if (m_graph.block(blockIndex)) {
                 m_dirtyBlocks.quickSet(blockIndex);

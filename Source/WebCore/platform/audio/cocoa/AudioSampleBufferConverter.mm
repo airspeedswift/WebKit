@@ -331,7 +331,7 @@ OSStatus AudioSampleBufferConverter::initAudioConverterForSourceFormatDescriptio
     if (m_destinationBuffer.size() < sizeNeededForDestination)
         m_destinationBuffer.grow(sizeNeededForDestination);
 
-    m_destinationPacketDescriptions.reserveInitialCapacity(m_destinationBuffer.capacity() / m_maxOutputPacketSize);
+    m_destinationPacketDescriptions.reserveCapacity(m_destinationBuffer.capacity() / m_maxOutputPacketSize);
     return noErr;
 }
 

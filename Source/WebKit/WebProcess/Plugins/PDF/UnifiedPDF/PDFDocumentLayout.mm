@@ -517,8 +517,7 @@ Vector<PDFLayoutRow> PDFDocumentLayout::rows() const
     if (!m_pdfDocument)
         return { };
 
-    Vector<PDFLayoutRow> rows;
-    rows.reserveInitialCapacity(rowCount());
+    Vector<PDFLayoutRow> rows(ReserveCapacityTag { }, rowCount());
 
     auto pageCount = this->pageCount();
 

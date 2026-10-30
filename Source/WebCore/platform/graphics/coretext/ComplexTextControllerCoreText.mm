@@ -91,8 +91,8 @@ ComplexTextController::ComplexTextRun::ComplexTextRun(CTRunRef ctRun, const Font
         Vector<CGSize> baseAdvances(m_glyphCount);
         Vector<CGPoint> glyphOrigins(m_glyphCount);
         CTRunGetBaseAdvancesAndOrigins(ctRun, CFRangeMake(0, 0), baseAdvances.mutableSpan().data(), glyphOrigins.mutableSpan().data());
-        m_baseAdvances.reserveInitialCapacity(m_glyphCount);
-        m_glyphOrigins.reserveInitialCapacity(m_glyphCount);
+        m_baseAdvances.reserveCapacity(m_glyphCount);
+        m_glyphOrigins.reserveCapacity(m_glyphCount);
         for (unsigned i = 0; i < m_glyphCount; ++i) {
             m_baseAdvances.append(baseAdvances[i]);
             m_glyphOrigins.append(glyphOrigins[i]);

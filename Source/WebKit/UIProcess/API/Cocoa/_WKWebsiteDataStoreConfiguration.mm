@@ -587,8 +587,7 @@ static WebKit::UnifiedOriginStorageLevel NODELETE toUnifiedOriginStorageLevel(_W
 
 - (void)setMockPushSubscriptionOriginsForTesting:(NSArray<NSString *> *)originStrings
 {
-    Vector<WebCore::SecurityOriginData> origins;
-    origins.reserveInitialCapacity(originStrings.count);
+    Vector<WebCore::SecurityOriginData> origins(ReserveCapacityTag { }, originStrings.count);
     for (NSString *originString in originStrings) {
         auto origin = WebCore::SecurityOriginData::fromURL(URL { String { originString } });
         if (origin.isNull() || origin.isOpaque())

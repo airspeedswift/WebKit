@@ -147,7 +147,7 @@ static bool parseTabIdentifiers(NSObject *tabIDs, Vector<WebExtensionTabIdentifi
         return appendIdentifier(tabID);
 
     if (NSArray *tabIDArray = dynamic_objc_cast<NSArray>(tabIDs)) {
-        identifiers.reserveInitialCapacity(tabIDArray.count);
+        identifiers.reserveCapacity(tabIDArray.count);
 
         for (NSNumber *tabID in tabIDArray) {
             if (!appendIdentifier(tabID))

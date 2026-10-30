@@ -487,11 +487,9 @@ Ref<Blob> FetchBodyConsumer::takeAsBlob(ScriptExecutionContext* context, const S
         return Blob::create(context, buffer->extractData(), normalizedContentType);
 
     size_t packedBufferSize = std::min(buffer->size(), MinimumBlobSize);
-    Vector<uint8_t> packedBuffer;
-    packedBuffer.reserveInitialCapacity(packedBufferSize);
+    Vector<uint8_t> packedBuffer(ReserveCapacityTag { }, packedBufferSize);
 
-    Vector<Ref<SharedBuffer>> segments;
-    segments.reserveInitialCapacity(buffer->segmentsCount());
+    Vector<Ref<SharedBuffer>> segments(ReserveCapacityTag { }, buffer->segmentsCount());
     buffer->forEachSegmentAsSharedBuffer([&](Ref<SharedBuffer>&& sharedBuffer) {
         segments.append(WTF::move(sharedBuffer));
     });
@@ -502,7 +500,7 @@ Ref<Blob> FetchBodyConsumer::takeAsBlob(ScriptExecutionContext* context, const S
         if (segment->size() >= MinimumBlobSize) {
             if (packedBuffer.size()) {
                 bufferBuilder.append(std::exchange(packedBuffer, { }));
-                packedBuffer.reserveInitialCapacity(packedBufferSize);
+                packedBuffer.reserveCapacity(packedBufferSize);
             }
             bufferBuilder.append(WTF::move(segment));
             continue;
@@ -516,7 +514,7 @@ Ref<Blob> FetchBodyConsumer::takeAsBlob(ScriptExecutionContext* context, const S
         auto segmentData = segment->extractData();
         packedBuffer.appendVector(segmentData.subvector(0, leftInPacked));
         bufferBuilder.append(std::exchange(packedBuffer, { }));
-        packedBuffer.reserveInitialCapacity(packedBufferSize);
+        packedBuffer.reserveCapacity(packedBufferSize);
         packedBuffer.appendVector(segmentData.subvector(leftInPacked));
     };
     if (!packedBuffer.isEmpty())

@@ -166,7 +166,7 @@ void WebPopupMenuProxyGtk::createPopupMenu(const Vector<WebPopupItem>& items, in
     GRefPtr<GtkTreeStore> model = adoptGRef(gtk_tree_store_new(Columns::Count, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN, G_TYPE_UINT));
     GtkTreeIter parentIter;
     unsigned index = 0;
-    m_paths.reserveInitialCapacity(items.size());
+    m_paths.reserveCapacity(items.size());
     for (const auto& item : items) {
         if (item.m_isLabel) {
             gtk_tree_store_insert_with_values(model.get(), &parentIter, nullptr, -1,

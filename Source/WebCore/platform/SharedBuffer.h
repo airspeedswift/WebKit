@@ -343,7 +343,7 @@ public:
     template <typename... Args>
     SharedBufferBuilder(std::in_place_t, Args&&... arg)
     {
-        m_segments.reserveInitialCapacity(sizeof...(Args));
+        m_segments.reserveCapacity(sizeof...(Args));
         (append(std::forward<Args>(arg)), ...);
     }
 

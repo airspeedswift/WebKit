@@ -43,7 +43,7 @@ LineBox::LineBox(const Box& rootLayoutBox, InlineLayoutUnit contentLogicalLeft, 
     , m_isFirstFormattedLine(isFirstFormattedLine)
     , m_rootInlineBox(InlineLevelBox::createRootInlineBox(rootLayoutBox, isFirstFormattedLine ? rootLayoutBox.firstLineStyle() : rootLayoutBox.style(), contentLogicalLeft, contentLogicalWidth))
 {
-    m_nonRootInlineLevelBoxList.reserveInitialCapacity(nonSpanningInlineLevelBoxCount);
+    m_nonRootInlineLevelBoxList.reserveCapacity(nonSpanningInlineLevelBoxCount);
     m_nonRootInlineLevelBoxMap.reserveInitialCapacity(nonSpanningInlineLevelBoxCount);
     m_rootInlineBox.setTextEmphasis(InlineFormattingUtils::textEmphasisForInlineBox(rootLayoutBox, downcast<ElementBox>(rootLayoutBox)));
 }

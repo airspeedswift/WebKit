@@ -119,7 +119,7 @@ LayoutUnit FlexLayout::mainAxisAvailableSpace() const
 FlexLayoutItems FlexLayout::buildFlexLayoutItems(RelayoutChildren relayoutChildren, const FlexLayoutConstraints& constraints)
 {
     FlexLayoutItems flexLayoutItems;
-    flexLayoutItems.reserveInitialCapacity(m_flexItems.size());
+    flexLayoutItems.reserveCapacity(m_flexItems.size());
     for (auto& renderer : m_flexItems) {
         CheckedPtr flexItem = renderer.get();
         if (!flexItem)

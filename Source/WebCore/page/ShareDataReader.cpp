@@ -49,7 +49,7 @@ void ShareDataReader::start(Document* document, ShareDataWithParsedURL&& shareDa
     m_filesReadSoFar = 0;
     m_shareData = WTF::move(shareData);
     int count = 0;
-    m_pendingFileLoads.reserveInitialCapacity(m_shareData.shareData.files.size());
+    m_pendingFileLoads.reserveCapacity(m_shareData.shareData.files.size());
     for (auto& blob : m_shareData.shareData.files) {
         Ref blobLoader = BlobLoader::create([weakThis = WeakPtr { *this }, count, fileName = blob->name()](BlobLoader&) {
             if (RefPtr protectedThis = weakThis)

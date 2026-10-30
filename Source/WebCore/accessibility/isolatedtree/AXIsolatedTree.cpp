@@ -186,8 +186,7 @@ void AXIsolatedTree::createEmptyContent(AccessibilityObject& axRoot)
 
     setPendingRootNodeID(axRoot.objectID());
     markDirtyAndGetWorkingChanges().focusedNodeID = Markable<AXID> { axWebArea->objectID() };
-    Vector<NodeChange> appends;
-    appends.reserveInitialCapacity(2);
+    Vector<NodeChange> appends(ReserveCapacityTag { }, 2);
     appends.append(WTF::move(rootAppend));
     appends.append(WTF::move(webAreaAppend));
     queueAppendsAndRemovals(WTF::move(appends), { });
@@ -491,8 +490,7 @@ Vector<AXIsolatedTree::NodeChange> AXIsolatedTree::resolveAppends()
 
     auto lastFeedbackTime = MonotonicTime::now();
     double counter = 0;
-    Vector<NodeChange> resolvedAppends;
-    resolvedAppends.reserveInitialCapacity(m_unresolvedPendingAppends.size());
+    Vector<NodeChange> resolvedAppends(ReserveCapacityTag { }, m_unresolvedPendingAppends.size());
     // The process of resolving appends can add more IDs to m_unresolvedPendingAppends as we iterate over it, so
     // iterate over an exchanged map instead. Any late-appended IDs will get picked up in the next cycle.
     auto unresolvedPendingAppends = std::exchange(m_unresolvedPendingAppends, { });
@@ -559,8 +557,7 @@ void AXIsolatedTree::collectNodeChangesForSubtree(AccessibilityObject& axObject)
     if (iterator == m_nodeMap.end()) {
         m_unresolvedPendingAppends.set(axObject.objectID(), nextChangeSequence());
 
-        Vector<AXID> axChildrenIDs;
-        axChildrenIDs.reserveInitialCapacity(axChildrenCopy.size());
+        Vector<AXID> axChildrenIDs(ReserveCapacityTag { }, axChildrenCopy.size());
         for (const auto& axChild : axChildrenCopy) {
             if (axChild.ptr() == &axObject) {
                 AX_ASSERT_NOT_REACHED();
@@ -680,7 +677,7 @@ void AXIsolatedTree::updateNodeProperties(AccessibilityObject& axObject, const A
         return;
 
     AXPropertyVector properties;
-    properties.reserveInitialCapacity(propertySet.size());
+    properties.reserveCapacity(propertySet.size());
     for (const auto& property : propertySet) {
         AXLOG(makeString("Property: "_s, property));
         switch (property) {
@@ -2381,7 +2378,7 @@ IsolatedObjectData createIsolatedObjectData(const Ref<AccessibilityObject>& axOb
 
     auto reserveCapacityAndCacheBaseProperties = [&] (unsigned sizeToReserve) {
         if (sizeToReserve)
-            properties.reserveInitialCapacity(sizeToReserve);
+            properties.reserveCapacity(sizeToReserve);
 
         // These properties are cached for all objects, ignored and unignored.
         setProperty(AXProperty::HasClickHandler, object.hasClickHandler());

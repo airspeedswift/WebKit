@@ -488,7 +488,7 @@ static Vector<Inspector::SearchMatch> convertSearchMatches(JSON::ArrayOf<Inspect
 {
     Vector<Inspector::SearchMatch> result;
     auto length = matches.length();
-    result.reserveInitialCapacity(length);
+    result.reserveCapacity(length);
     for (size_t i = 0; i < length; ++i) {
         RefPtr object = matches.get(i)->asObject();
         if (!object)
@@ -759,8 +759,7 @@ void WebInspectorBackend::getFrameResourceData(Vector<WebCore::FrameIdentifier>&
     // process only for the frames it hosts; it then builds the Page.getResourceTree protocol objects
     // from this typed data under Site Isolation. Frames not local to this process are silently
     // skipped (another process answers for them). See webkit.org/b/308896.
-    Vector<std::pair<WebCore::FrameIdentifier, Inspector::FrameResourceData>> resourcesByFrame;
-    resourcesByFrame.reserveInitialCapacity(frameIDs.size());
+    Vector<std::pair<WebCore::FrameIdentifier, Inspector::FrameResourceData>> resourcesByFrame(ReserveCapacityTag { }, frameIDs.size());
 
     for (auto frameID : frameIDs) {
         RefPtr webFrame = WebProcess::singleton().webFrame(frameID);

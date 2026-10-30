@@ -321,7 +321,7 @@ VM::VM(VMType vmType, HeapType heapType, WTF::RunLoop* runLoop, bool* success)
 
     updateSoftReservedZoneSize(Options::softReservedZoneSize());
     setLastStackTop(Thread::currentSingleton());
-    stringSplitIndice.reserveInitialCapacity(256);
+    stringSplitIndice.reserveCapacity(256);
 
     JSRunLoopTimer::Manager::singleton().registerVM(*this);
 

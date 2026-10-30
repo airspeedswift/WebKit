@@ -394,13 +394,13 @@ static Elements updateSubtree(HTMLElement& element, const TextRecognitionResult&
                 shadowRoot->appendChild(rootContainer);
             elements.root = rootContainer.copyRef();
         }
-        elements.lines.reserveInitialCapacity(result.lines.size());
+        elements.lines.reserveCapacity(result.lines.size());
         for (auto& line : result.lines) {
             Ref lineContainer = HTMLDivElement::create(document.get());
             protect(lineContainer)->classList().add(imageOverlayLineClass());
             protect(elements.root)->appendChild(lineContainer);
             LineElements lineElements { lineContainer, { }, { } };
-            lineElements.children.reserveInitialCapacity(line.children.size());
+            lineElements.children.reserveCapacity(line.children.size());
             for (size_t childIndex = 0; childIndex < line.children.size(); ++childIndex) {
                 auto& child = line.children[childIndex];
                 Ref textContainer = HTMLDivElement::create(document.get());
@@ -421,7 +421,7 @@ static Elements updateSubtree(HTMLElement& element, const TextRecognitionResult&
         }
 
 #if ENABLE(DATA_DETECTION)
-        elements.dataDetectors.reserveInitialCapacity(result.dataDetectors.size());
+        elements.dataDetectors.reserveCapacity(result.dataDetectors.size());
         for (auto& dataDetector : result.dataDetectors) {
             auto dataDetectorContainer = DataDetection::createElementForImageOverlay(document.get(), dataDetector);
             protect(dataDetectorContainer)->classList().add(imageOverlayDataDetectorClass());
@@ -430,7 +430,7 @@ static Elements updateSubtree(HTMLElement& element, const TextRecognitionResult&
         }
 #endif // ENABLE(DATA_DETECTION)
 
-        elements.blocks.reserveInitialCapacity(result.blocks.size());
+        elements.blocks.reserveCapacity(result.blocks.size());
         for (auto& block : result.blocks) {
             Ref blockContainer = HTMLDivElement::create(document.get());
             protect(blockContainer)->classList().add(imageOverlayBlockClass());

@@ -717,7 +717,7 @@ auto GraphicsContext::computeRectsAndStrokeColorForLinesForText(const FloatPoint
     if (bounds.isEmpty())
         return result;
 
-    rects.reserveInitialCapacity((doubleLines ? 2 : 1) * lineSegments.size());
+    rects.reserveCapacity((doubleLines ? 2 : 1) * lineSegments.size());
 
     float dashWidth = 0;
     switch (strokeStyle) {

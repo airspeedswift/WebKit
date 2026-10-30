@@ -244,7 +244,7 @@ static ExceptionOr<std::tuple<String, Vector<String>>> checkAndCanonicalizeDetai
 
     Vector<String> serializedModifierData;
     if (details.modifiers) {
-        serializedModifierData.reserveInitialCapacity(details.modifiers->size());
+        serializedModifierData.reserveCapacity(details.modifiers->size());
         for (auto& modifier : *details.modifiers) {
             if (isUpdate == IsUpdate::Yes) {
                 auto paymentMethodIdentifier = convertAndValidatePaymentMethodIdentifier(modifier.supportedMethods);
@@ -311,8 +311,7 @@ ExceptionOr<Ref<PaymentRequest>> PaymentRequest::create(Document& document, Vect
     if (methodData.isEmpty())
         return Exception { ExceptionCode::TypeError, "At least one payment method is required."_s };
 
-    Vector<Method> serializedMethodData;
-    serializedMethodData.reserveInitialCapacity(methodData.size());
+    Vector<Method> serializedMethodData(ReserveCapacityTag { }, methodData.size());
     HashSet<String> seenMethodIDs;
     for (auto& paymentMethod : methodData) {
         auto identifier = convertAndValidatePaymentMethodIdentifier(paymentMethod.supportedMethods);

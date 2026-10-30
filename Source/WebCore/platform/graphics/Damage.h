@@ -301,7 +301,7 @@ public:
             return { };
 
         Rects result;
-        result.reserveInitialCapacity(size());
+        result.reserveCapacity(size());
         for (const auto& rect : *this)
             result.append(rect);
         return result;
@@ -320,7 +320,7 @@ public:
             return rects();
 
         Rects paintRects;
-        paintRects.reserveInitialCapacity(size());
+        paintRects.reserveCapacity(size());
         for (const auto& rect : *this) {
             const auto paintRect = intersection(rect, m_rect);
             if (!paintRect.isEmpty())

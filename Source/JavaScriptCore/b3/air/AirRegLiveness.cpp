@@ -111,7 +111,7 @@ RegLiveness::RegLiveness(Code& code)
     CFG cfg(code);
     Vector<unsigned, 64> worklist;
     BitVector dirtyBlocks(code.size());
-    worklist.reserveInitialCapacity(code.size());
+    worklist.reserveCapacity(code.size());
     appendNodeIndicesInOrder(cfg, GraphOrder::PostOrder, dirtyBlocks, worklist);
     worklist.reverse();
     // Queue any active block the DFS did not reach (e.g. unreachable but not yet pruned).

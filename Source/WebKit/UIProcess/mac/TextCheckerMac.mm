@@ -401,7 +401,7 @@ Vector<TextCheckingResult> TextChecker::checkTextOfParagraph(SpellDocumentTag sp
             RetainPtr details = [incomingResult grammarDetails];
             result.type = TextCheckingType::Grammar;
             result.range = resultRange;
-            result.details.reserveInitialCapacity(details.get().count);
+            result.details.reserveCapacity(details.get().count);
             for (NSDictionary *incomingDetail in details.get()) {
                 ASSERT(incomingDetail);
                 GrammarDetail detail;
@@ -449,7 +449,7 @@ Vector<TextCheckingResult> TextChecker::checkTextOfParagraph(SpellDocumentTag sp
             result.replacement = [incomingResult replacementString];
             if ([incomingResult respondsToSelector:@selector(detail)]) {
                 if (RetainPtr incomingDetail = [incomingResult detail]) {
-                    result.details.reserveInitialCapacity(1);
+                    result.details.reserveCapacity(1);
                     GrammarDetail detail;
 
                     RetainPtr detailRangeAsNSValue = [incomingDetail objectForKey:NSGrammarRange];
@@ -564,7 +564,7 @@ static Vector<TextCheckingResult> convertExtendedCheckingResults(NSArray<NSTextC
             RetainPtr details = [incomingResult grammarDetails];
             result.type = TextCheckingType::Grammar;
             result.range = resultRange;
-            result.details.reserveInitialCapacity(details.get().count);
+            result.details.reserveCapacity(details.get().count);
             for (NSDictionary *incomingDetail in details.get()) {
                 GrammarDetail detail;
                 RetainPtr detailRangeAsNSValue = [incomingDetail objectForKey:NSGrammarRange];

@@ -39,7 +39,7 @@ ProtectionSystemEvents::ProtectionSystemEvents(GstMessage* message)
     const GValue* streamEncryptionEventsList = gst_structure_get_value(structure, "stream-encryption-events");
     ASSERT(streamEncryptionEventsList && GST_VALUE_HOLDS_LIST(streamEncryptionEventsList));
     unsigned numEvents = gst_value_list_get_size(streamEncryptionEventsList);
-    m_events.reserveInitialCapacity(numEvents);
+    m_events.reserveCapacity(numEvents);
     for (unsigned i = 0; i < numEvents; ++i)
         m_events.append(GRefPtr<GstEvent>(GST_EVENT_CAST(g_value_get_boxed(gst_value_list_get_value(streamEncryptionEventsList, i)))));
     const GValue* streamEncryptionAllowedSystemsValue = gst_structure_get_value(structure, "available-stream-encryption-systems");

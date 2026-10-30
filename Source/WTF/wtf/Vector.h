@@ -653,12 +653,18 @@ public:
     {
     }
 
+    // Constructs an empty Vector with room for at least `capacity` elements.
+    Vector(ReserveCapacityTag, size_t capacity)
+        : Base(capacity, 0)
+    {
+    }
+
     template<typename Range>
         requires std::ranges::input_range<Range> && std::convertible_to<std::ranges::range_value_t<Range>, T>
     explicit Vector(FromRange, Range&& range)
     {
         if constexpr (std::ranges::sized_range<Range>)
-            reserveInitialCapacity(std::ranges::size(range));
+            reserveCapacity(std::ranges::size(range));
         for (auto&& item : range) {
             if constexpr (std::is_rvalue_reference_v<Range&&>)
                 append(WTF::move(item));
@@ -689,9 +695,8 @@ public:
     template<std::invocable<size_t> Functor>
     requires (!std::is_same_v<std::invoke_result_t<Functor, size_t>, std::optional<T>>)
     Vector(size_t size, NOESCAPE const Functor& valueGenerator)
+        : Base(size, 0)
     {
-        reserveInitialCapacity(size);
-
         asanSetInitialBufferSizeTo(size);
 
         for (size_t i = 0; i < size; ++i)
@@ -701,9 +706,8 @@ public:
     template<std::invocable<size_t> Functor>
     requires (std::is_same_v<std::invoke_result_t<Functor, size_t>, std::optional<T>>)
     Vector(size_t size, NOESCAPE const Functor& valueGenerator, NulloptBehavior nulloptBehavior = NulloptBehavior::Ignore)
+        : Base(size, 0)
     {
-        reserveInitialCapacity(size);
-
         asanSetInitialBufferSizeTo(size);
 
         for (size_t i = 0; i < size; ++i) {
@@ -729,9 +733,8 @@ public:
     }
 
     Vector(std::initializer_list<T> initializerList)
+        : Base(initializerList.size(), 0)
     {
-        reserveInitialCapacity(initializerList.size());
-
         asanSetInitialBufferSizeTo(initializerList.size());
 
         for (const auto& element : initializerList)
@@ -741,10 +744,8 @@ public:
     template<typename... Items>
     static Vector from(Items&&... items)
     {
-        Vector result;
         auto size = sizeof...(items);
-
-        result.reserveInitialCapacity(size);
+        Vector result(ReserveCapacityTag { }, size);
         result.asanSetInitialBufferSizeTo(size);
         result.m_size = size;
 
@@ -864,8 +865,6 @@ public:
     void resizeToFit(size_t size);
     ALWAYS_INLINE void reserveCapacity(size_t newCapacity) { reserveCapacity<FailureAction::Crash>(newCapacity); }
     ALWAYS_INLINE bool tryReserveCapacity(size_t newCapacity) { return reserveCapacity<FailureAction::Report>(newCapacity); }
-    ALWAYS_INLINE void reserveInitialCapacity(size_t initialCapacity) { reserveInitialCapacity<FailureAction::Crash>(initialCapacity); }
-    ALWAYS_INLINE bool tryReserveInitialCapacity(size_t initialCapacity) { return reserveInitialCapacity<FailureAction::Report>(initialCapacity); }
     void shrinkCapacity(size_t newCapacity);
     void shrinkToFit() { shrinkCapacity(size()); }
 
@@ -963,7 +962,6 @@ private:
 
     template<FailureAction> bool growImpl(size_t);
     template<FailureAction> bool reserveCapacity(size_t newCapacity);
-    template<FailureAction> bool reserveInitialCapacity(size_t initialCapacity);
     template<FailureAction> bool growCapacityBy(size_t increment);
 
     template<FailureAction> bool expandCapacity(size_t newMinCapacity);
@@ -1437,18 +1435,6 @@ bool Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::reserveCap
 
 template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
 template<FailureAction action>
-inline bool Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::reserveInitialCapacity(size_t initialCapacity)
-{
-    static_assert(action == FailureAction::Crash || action == FailureAction::Report);
-    ASSERT_WITH_SECURITY_IMPLICATION(!m_size);
-    ASSERT(capacity() == inlineCapacity);
-    if (initialCapacity <= inlineCapacity)
-        return true;
-    return Base::template allocateBuffer<action>(initialCapacity);
-}
-
-template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
-template<FailureAction action>
 bool Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::growCapacityBy(size_t increment)
 {
     static_assert(action == FailureAction::Crash || action == FailureAction::Report);
@@ -1842,8 +1828,7 @@ template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t min
 template<typename ResultVector>
 inline ResultVector Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::map(NOESCAPE const std::invocable<const T&> auto& mapFunction) const
 {
-    ResultVector result;
-    result.reserveInitialCapacity(size());
+    ResultVector result(ReserveCapacityTag { }, size());
     for (size_t i = 0; i < size(); ++i)
         result.unsafeAppendWithoutCapacityCheck(mapFunction(at(i)));
     return result;
@@ -1949,7 +1934,7 @@ template<typename MapFunction, typename DestinationVectorType, typename SourceTy
 struct Mapper {
     static void map(DestinationVectorType& result, SourceType&& source, NOESCAPE const MapFunction& mapFunction)
     {
-        result.reserveInitialCapacity(containerSize(source));
+        result.reserveCapacity(containerSize(source));
         for (auto&& item : std::forward<SourceType>(source))
             result.unsafeAppendWithoutCapacityCheck(mapFunction(WTF::forward_like_preserving_const<SourceType>(item)));
     }
@@ -2055,8 +2040,7 @@ Vector<typename CompactMapTraits<typename std::invoke_result<const MapFunction&,
     using DestinationItemType = typename CompactMapTraits<ResultItemType>::ItemType;
     using DestinationVectorType = Vector<DestinationItemType, inlineCapacity, OverflowHandler, minCapacity>;
 
-    DestinationVectorType result;
-    result.reserveInitialCapacity(containerSize(source));
+    DestinationVectorType result(ReserveCapacityTag { }, containerSize(source));
     CompactMapper<MapFunction, DestinationVectorType, SourceType>::compactMap(result, std::forward<SourceType>(source), mapFunction);
     return result;
 }
@@ -2069,8 +2053,7 @@ Vector<typename CompactMapTraits<typename std::invoke_result<const MapFunction&,
     using DestinationItemType = typename CompactMapTraits<ResultItemType>::ItemType;
     using DestinationVectorType = Vector<DestinationItemType, inlineCapacity, OverflowHandler, minCapacity>;
 
-    DestinationVectorType result;
-    result.reserveInitialCapacity(containerSize(source));
+    DestinationVectorType result(ReserveCapacityTag { }, containerSize(source));
     CompactMapper<MapFunction, DestinationVectorType, SourceType&>::compactMap(result, source, mapFunction);
     return result;
 }
@@ -2115,8 +2098,7 @@ Vector<typename FlatMapper<MapFunction, SourceType>::DestinationItemType> flatMa
 template<typename DestinationVector, typename Collection>
 inline auto copyToVectorSpecialization(const Collection& collection) -> DestinationVector
 {
-    DestinationVector result;
-    result.reserveInitialCapacity(std::size(collection));
+    DestinationVector result(ReserveCapacityTag { }, std::size(collection));
     for (auto&& item : collection)
         result.unsafeAppendWithoutCapacityCheck(item);
     return result;

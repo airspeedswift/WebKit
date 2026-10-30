@@ -349,7 +349,7 @@ FrameTreeNodeData WebFrame::frameTreeData() const
         return data;
     }
 
-    data.children.reserveInitialCapacity(m_coreFrame->tree().childCount());
+    data.children.reserveCapacity(m_coreFrame->tree().childCount());
 
     for (RefPtr child = m_coreFrame->tree().firstChild(); child; child = child->tree().nextSibling()) {
         RefPtr childWebFrame = WebFrame::fromCoreFrame(*child);
@@ -1003,8 +1003,7 @@ Ref<API::Array> WebFrame::childFrames()
     if (!size)
         return API::Array::create();
 
-    Vector<RefPtr<API::Object>> vector;
-    vector.reserveInitialCapacity(size);
+    Vector<RefPtr<API::Object>> vector(ReserveCapacityTag { }, size);
 
     for (RefPtr child = m_coreFrame->tree().firstChild(); child; child = child->tree().nextSibling()) {
         RefPtr webFrame = WebFrame::fromCoreFrame(*child);

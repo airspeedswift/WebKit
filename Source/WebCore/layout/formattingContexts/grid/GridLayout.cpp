@@ -64,7 +64,7 @@ auto computeGridItemRects = [](const PlacedGridItems& placedGridItems, const Bor
     const Vector<UsedMargins>& usedInlineMargins, const Vector<UsedMargins>& usedBlockMargins)
 {
     GridItemRects gridItemRects;
-    gridItemRects.reserveInitialCapacity(placedGridItems.size());
+    gridItemRects.reserveCapacity(placedGridItems.size());
 
     for (size_t gridItemIndex = 0; gridItemIndex < placedGridItems.size(); ++gridItemIndex) {
         auto borderBoxRect = LayoutRect { inlineAxisPositions[gridItemIndex], blockAxisPositions[gridItemIndex],
@@ -90,8 +90,8 @@ static GridAreaSizes computeGridAreaSizes(const PlacedGridItems& gridItems, cons
 {
     auto gridItemsCount = gridItems.size();
     GridAreaSizes gridAreaSizes;
-    gridAreaSizes.inlineSizes.reserveInitialCapacity(gridItemsCount);
-    gridAreaSizes.blockSizes.reserveInitialCapacity(gridItemsCount);
+    gridAreaSizes.inlineSizes.reserveCapacity(gridItemsCount);
+    gridAreaSizes.blockSizes.reserveCapacity(gridItemsCount);
 
     for (auto& gridItem : gridItems) {
         auto columnsSize = GridLayoutUtils::gridAreaDimensionSize(gridItem.columnStartLine(), gridItem.columnEndLine(), usedTrackSizes.columnSizes, usedColumnGap);
@@ -156,7 +156,7 @@ BorderBoxPositions GridLayout::performInlineAxisSelfAlignment(const PlacedGridIt
     const Vector<LayoutUnit>& gridAreasInlineSizeList)
 {
     BorderBoxPositions borderBoxPositions;
-    borderBoxPositions.reserveInitialCapacity(placedGridItems.size());
+    borderBoxPositions.reserveCapacity(placedGridItems.size());
 
     auto& formattingContextWritingMode = formattingContext().writingMode();
     for (size_t gridItemIndex = 0; gridItemIndex < placedGridItems.size(); ++gridItemIndex) {
@@ -188,7 +188,7 @@ BorderBoxPositions GridLayout::performBlockAxisSelfAlignment(const PlacedGridIte
     const Vector<LayoutUnit>& gridAreasBlockSizeList)
 {
     BorderBoxPositions borderBoxPositions;
-    borderBoxPositions.reserveInitialCapacity(placedGridItems.size());
+    borderBoxPositions.reserveCapacity(placedGridItems.size());
 
     auto& formattingContextWritingMode = formattingContext().writingMode();
     for (size_t gridItemIndex = 0; gridItemIndex < placedGridItems.size(); ++gridItemIndex) {
@@ -253,7 +253,7 @@ TrackSizingFunctions GridLayout::convertGridTrackSizeToTrackSizingFunctions(cons
 TrackSizingFunctionsList GridLayout::generateImplicitTrackSizingFunctions(size_t implicitTracksCount, const Style::GridTrackSizes& gridAutoTrackSizes, const Style::ZoomFactor& zoom)
 {
     TrackSizingFunctionsList trackSizingFunctionsForImplicitGrid;
-    trackSizingFunctionsForImplicitGrid.reserveInitialCapacity(implicitTracksCount);
+    trackSizingFunctionsForImplicitGrid.reserveCapacity(implicitTracksCount);
 
     // Cycle through grid-auto-{columns,rows} values using modulo.
     for (size_t i = 0; i < implicitTracksCount; ++i) {
@@ -270,7 +270,7 @@ TrackSizingFunctionsList GridLayout::trackSizingFunctions(size_t totalTracksCoun
     ASSERT_WITH_MESSAGE(totalTracksCount >= leadingImplicitTracksCount + explicitTracksCount, "Total tracks should be at least as many as the leading implicit tracks plus the explicit tracks");
 
     TrackSizingFunctionsList trackSizingFunctions;
-    trackSizingFunctions.reserveInitialCapacity(totalTracksCount);
+    trackSizingFunctions.reserveCapacity(totalTracksCount);
 
     // https://drafts.csswg.org/css-grid-1/#auto-tracks
     // "The last implicit grid track before the explicit grid receives the last specified size, and so on backwards"
@@ -317,9 +317,9 @@ std::pair<UsedInlineSizes, UsedBlockSizes> GridLayout::layoutGridItems(const Pla
 {
     auto gridItemsCount = placedGridItems.size();
     UsedInlineSizes usedInlineSizes;
-    usedInlineSizes.reserveInitialCapacity(gridItemsCount);
+    usedInlineSizes.reserveCapacity(gridItemsCount);
     UsedBlockSizes usedBlockSizes;
-    usedBlockSizes.reserveInitialCapacity(gridItemsCount);
+    usedBlockSizes.reserveCapacity(gridItemsCount);
 
     auto& formattingContext = this->formattingContext();
     auto& integrationUtils = formattingContext.integrationUtils();

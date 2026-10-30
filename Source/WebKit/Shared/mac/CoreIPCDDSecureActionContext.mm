@@ -90,8 +90,7 @@ CoreIPCDDSecureActionContext::CoreIPCDDSecureActionContext(DDSecureActionContext
         m_data.matchedString = matchedString;
 
     if (auto *allResults = dynamic_objc_cast<NSArray>([dictionary.get() objectForKey:@"allResults"])) {
-        Vector<RetainPtr<DDScannerResult>> result;
-        result.reserveInitialCapacity(allResults.count);
+        Vector<RetainPtr<DDScannerResult>> result(ReserveCapacityTag { }, allResults.count);
         for (id item in allResults) {
             if ([item isKindOfClass:PAL::getDDScannerResultClassSingleton()])
                 result.append((DDScannerResult *)item);
@@ -100,8 +99,7 @@ CoreIPCDDSecureActionContext::CoreIPCDDSecureActionContext(DDSecureActionContext
     }
 
     if (auto *groupAllResults = dynamic_objc_cast<NSArray>([dictionary.get() objectForKey:@"groupAllResults"])) {
-        Vector<RetainPtr<DDScannerResult>> result;
-        result.reserveInitialCapacity(groupAllResults.count);
+        Vector<RetainPtr<DDScannerResult>> result(ReserveCapacityTag { }, groupAllResults.count);
         for (id item in groupAllResults) {
             if ([item isKindOfClass:PAL::getDDScannerResultClassSingleton()])
                 result.append((DDScannerResult *)item);

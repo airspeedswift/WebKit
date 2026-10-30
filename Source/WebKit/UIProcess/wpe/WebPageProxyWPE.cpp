@@ -167,7 +167,7 @@ Vector<RendererBufferFormat> WebPageProxy::preferredBufferFormats() const
 #endif
 
         auto formatsCount = wpe_buffer_formats_get_group_n_formats(formats, i);
-        bufferFormat.formats.reserveInitialCapacity(formatsCount);
+        bufferFormat.formats.reserveCapacity(formatsCount);
         for (unsigned j = 0; j < formatsCount; ++j) {
             auto* modifiers = wpe_buffer_formats_get_format_modifiers(formats, i, j);
             bufferFormat.formats.append({

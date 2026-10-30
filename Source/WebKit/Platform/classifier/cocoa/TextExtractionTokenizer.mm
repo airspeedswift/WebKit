@@ -77,7 +77,7 @@ void TextExtractionTokenizer::loadEmbeddingsIfNeeded()
 
     static constexpr std::array supportedLanguages { "en"_s, "de"_s, "es"_s, "fr"_s, "it"_s, "pt"_s };
 
-    m_embeddings.reserveInitialCapacity(supportedLanguages.size());
+    m_embeddings.reserveCapacity(supportedLanguages.size());
     for (auto language : supportedLanguages) {
         if (RetainPtr embedding = [PAL::getNLEmbeddingClassSingleton() wordEmbeddingForLanguage:language.createNSString()])
             m_embeddings.append(WTF::move(embedding));

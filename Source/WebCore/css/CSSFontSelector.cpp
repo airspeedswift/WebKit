@@ -81,7 +81,7 @@ CSSFontSelector::CSSFontSelector(ScriptExecutionContext& context)
     , m_version(0)
 {
     if (is<Document>(context)) {
-        m_fontFamilyNames.reserveInitialCapacity(familyNames->size());
+        m_fontFamilyNames.reserveCapacity(familyNames->size());
         for (auto& familyName : familyNames.get())
             m_fontFamilyNames.constructAndAppend(familyName);
     } else {

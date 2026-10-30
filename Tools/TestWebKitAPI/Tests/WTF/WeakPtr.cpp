@@ -2008,8 +2008,7 @@ TEST(WTF_WeakPtr, WeakHashMap_iterator_destruction)
 {
     constexpr unsigned objectCount = 10;
     WeakHashMap<Base, unsigned> weakHashMap;
-    Vector<std::unique_ptr<Base>> objects;
-    objects.reserveInitialCapacity(objectCount);
+    Vector<std::unique_ptr<Base>> objects(ReserveCapacityTag { }, objectCount);
     for (unsigned i = 0; i < objectCount; ++i) {
         auto object = makeUnique<Base>();
         weakHashMap.add(*object, i);
@@ -2899,8 +2898,7 @@ TEST(WTF_ThreadSafeWeakPtr, ThreadSafety)
     std::atomic<size_t> readyThreads { 0 };
     EXPECT_EQ(ThreadSafeInstanceCounter::instanceCount, 1u);
     std::array<std::thread, 3> threads { std::thread { [&, counter] () mutable {
-        Vector<RefPtr<ThreadSafeInstanceCounter>> strongReferences;
-        strongReferences.reserveInitialCapacity(101);
+        Vector<RefPtr<ThreadSafeInstanceCounter>> strongReferences(ReserveCapacityTag { }, 101);
         readyThreads++;
         while (readyThreads < 3) { }
         for (size_t i = 0; i < 100; i++) {
@@ -2910,8 +2908,7 @@ TEST(WTF_ThreadSafeWeakPtr, ThreadSafety)
         }
         counter = nullptr;
     } }, std::thread { [&, counter] () mutable {
-        Vector<ThreadSafeWeakPtr<ThreadSafeInstanceCounter>> weakReferences;
-        weakReferences.reserveInitialCapacity(101);
+        Vector<ThreadSafeWeakPtr<ThreadSafeInstanceCounter>> weakReferences(ReserveCapacityTag { }, 101);
         readyThreads++;
         while (readyThreads < 3) { }
         for (size_t i = 0; i < 100; i++) {
@@ -2923,8 +2920,8 @@ TEST(WTF_ThreadSafeWeakPtr, ThreadSafety)
     } }, std::thread { [&, counter] () mutable {
         Vector<RefPtr<ThreadSafeInstanceCounter>> strongReferences;
         Vector<ThreadSafeWeakPtr<ThreadSafeInstanceCounter>> weakReferences;
-        strongReferences.reserveInitialCapacity(51);
-        weakReferences.reserveInitialCapacity(51);
+        strongReferences.reserveCapacity(51);
+        weakReferences.reserveCapacity(51);
         readyThreads++;
         while (readyThreads < 3) { }
         for (size_t i = 0; i < 50; i++) {
@@ -2967,8 +2964,7 @@ TEST(WTF_ThreadSafeWeakPtr, ThreadSafeWeakHashSet)
     EXPECT_EQ(ThreadSafeInstanceCounter::instanceCount, 1u);
 
     std::array<std::thread, 3> threads { std::thread { [&] () mutable {
-        Vector<Ref<ThreadSafeInstanceCounter>> strongReferences;
-        strongReferences.reserveInitialCapacity(100);
+        Vector<Ref<ThreadSafeInstanceCounter>> strongReferences(ReserveCapacityTag { }, 100);
         for (size_t i = 0; i < 100; i++)
             strongReferences.append(adoptRef(*new ThreadSafeInstanceCounter));
         readyThreads++;
@@ -2990,8 +2986,7 @@ TEST(WTF_ThreadSafeWeakPtr, ThreadSafeWeakHashSet)
             EXPECT_TRUE(foundFirst);
         }
     } }, std::thread { [&] () mutable {
-        Vector<Ref<ThreadSafeInstanceCounter>> strongReferences;
-        strongReferences.reserveInitialCapacity(101);
+        Vector<Ref<ThreadSafeInstanceCounter>> strongReferences(ReserveCapacityTag { }, 101);
         for (size_t i = 0; i < 101; i++)
             strongReferences.append(adoptRef(*new ThreadSafeInstanceCounter));
         readyThreads++;
@@ -3268,8 +3263,7 @@ Struct::~Struct()
 TEST(WTF_ThreadSafeWeakPtr, RemoveInDestructor)
 {
     for (size_t i = 0; i < 100; i++) {
-        Vector<Ref<Struct>> vector;
-        vector.reserveInitialCapacity(i);
+        Vector<Ref<Struct>> vector(ReserveCapacityTag { }, i);
         ThreadSafeWeakHashSet<Struct> set;
         for (size_t j = 0; j < i; j++) {
             vector.append(adoptRef(*new Struct()));

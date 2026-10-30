@@ -315,7 +315,7 @@ bool JavaScriptEvaluationResult::JSExtractor::processContainersWithoutRecursion(
                 return false;
             size_t length = lengthDouble;
             Vector<JSObjectID> vector;
-            if (!vector.tryReserveInitialCapacity(length))
+            if (!vector.tryReserveCapacity(length))
                 return false;
 
             for (size_t i = 0; i < length; ++i) {

@@ -47,7 +47,7 @@ public:
     {
         NodeVector nodes;
 
-        nodes.reserveInitialCapacity(names.size());
+        nodes.reserveCapacity(names.size());
 
         for (auto& name : names) {
             if (auto node = getNamedNode(name))

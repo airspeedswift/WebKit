@@ -632,8 +632,7 @@ public:
         }
 
         if (m_lines.size() > 1) {
-            Vector<TextExtractionAggregatedLine> unduplicatedLines;
-            unduplicatedLines.reserveInitialCapacity(m_lines.size());
+            Vector<TextExtractionAggregatedLine> unduplicatedLines(ReserveCapacityTag { }, m_lines.size());
             for (auto& line : m_lines) {
                 if (unduplicatedLines.isEmpty() || unduplicatedLines.last().textForClient != line.textForClient)
                     unduplicatedLines.append(WTF::move(line));
@@ -1255,7 +1254,7 @@ static std::pair<Vector<String>, String> recognizedClassesAndIdForItem(const Tex
 
     Vector<String> classes;
     if (idValue.isEmpty()) {
-        classes.reserveInitialCapacity(item.classNames.size());
+        classes.reserveCapacity(item.classNames.size());
         for (auto& className : item.classNames) {
             if (tokenizer.isMostlyRecognized(className))
                 classes.append(className);

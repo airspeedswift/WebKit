@@ -104,7 +104,7 @@ Vector<StylePropertyMapReadOnly::StylePropertyMapEntry> ComputedStylePropertyMap
     Ref inheritedCustomProperties = style->inheritedCustomProperties();
     Ref nonInheritedCustomProperties = style->nonInheritedCustomProperties();
     const auto& exposedComputedCSSPropertyIDs = document->exposedComputedCSSPropertyIDs();
-    values.reserveInitialCapacity(exposedComputedCSSPropertyIDs.size() + inheritedCustomProperties->size() + nonInheritedCustomProperties->size());
+    values.reserveCapacity(exposedComputedCSSPropertyIDs.size() + inheritedCustomProperties->size() + nonInheritedCustomProperties->size());
 
     Style::Extractor computedStyleExtractor { element.get() };
     values.appendContainerWithMapping(exposedComputedCSSPropertyIDs, [&](auto propertyID) {

@@ -116,7 +116,7 @@ void Connection::send(Frame&& frame, CompletionHandler<void()>&& completionHandl
         // https://http2.github.io/http2-spec/#rfc.section.4.1
         Vector<uint8_t> bytes;
         constexpr size_t frameHeaderLength = 9;
-        bytes.reserveInitialCapacity(frameHeaderLength + frame.payload().size());
+        bytes.reserveCapacity(frameHeaderLength + frame.payload().size());
         bytes.append(frame.payload().size() >> 16);
         bytes.append(frame.payload().size() >> 8);
         bytes.append(frame.payload().size() >> 0);

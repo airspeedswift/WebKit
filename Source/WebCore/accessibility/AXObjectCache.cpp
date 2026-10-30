@@ -2134,8 +2134,7 @@ void AXObjectCache::notificationPostTimerFired()
     m_pendingLayoutCompleteObjectIDs.clear();
 
     // Filter out the notifications that are not going to be posted to platform clients.
-    Vector<std::pair<Ref<AccessibilityObject>, AXNotificationWithData>> notificationsToPost;
-    notificationsToPost.reserveInitialCapacity(notifications.size());
+    Vector<std::pair<Ref<AccessibilityObject>, AXNotificationWithData>> notificationsToPost(ReserveCapacityTag { }, notifications.size());
     for (auto& note : notifications) {
         Ref noteObject = note.first;
         if (noteObject->isDetached() || !noteObject->axObjectCache())

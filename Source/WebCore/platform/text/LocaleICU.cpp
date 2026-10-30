@@ -196,7 +196,7 @@ std::unique_ptr<Vector<String>> LocaleICU::createLabelVector(const UDateFormat* 
         return makeUnique<Vector<String>>();
 
     auto labels = makeUnique<Vector<String>>();
-    labels->reserveInitialCapacity(size);
+    labels->reserveCapacity(size);
     for (int32_t i = 0; i < size; ++i) {
         UErrorCode status = U_ZERO_ERROR;
         int32_t length = udat_getSymbols(dateFormat, type, startIndex + i, 0, 0, &status);

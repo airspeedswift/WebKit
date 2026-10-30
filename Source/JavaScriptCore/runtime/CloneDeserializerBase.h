@@ -398,7 +398,7 @@ protected:
 #endif
         Vector<JSBigInt::Digit, 16> digits;
         if constexpr (sizeof(JSBigInt::Digit) == sizeof(uint64_t)) {
-            digits.reserveInitialCapacity(numberOfUint64Elements);
+            digits.reserveCapacity(numberOfUint64Elements);
             for (uint32_t index = 0; index < numberOfUint64Elements; ++index) {
                 uint64_t digit64 = 0;
                 if (!read(digit64))
@@ -413,7 +413,7 @@ protected:
                 fail();
                 return JSValue();
             }
-            digits.reserveInitialCapacity(actualBigIntLength.value());
+            digits.reserveCapacity(actualBigIntLength.value());
             for (uint32_t index = 0; index < numberOfUint64Elements; ++index) {
                 uint64_t digit64 = 0;
                 if (!read(digit64))

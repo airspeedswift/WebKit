@@ -2423,7 +2423,7 @@ public:
         auto parenthesesDisjunction = makeUnique<ByteDisjunction>(numSubpatterns, callFrameSize);
 
         unsigned firstTermInParentheses = beginTerm + 1;
-        parenthesesDisjunction->terms.reserveInitialCapacity(endTerm - firstTermInParentheses + 2);
+        parenthesesDisjunction->terms.reserveCapacity(endTerm - firstTermInParentheses + 2);
 
         parenthesesDisjunction->terms.append(ByteTerm::SubpatternBegin(m_currentFlags));
         for (unsigned termInParentheses = firstTermInParentheses; termInParentheses < endTerm; ++termInParentheses)

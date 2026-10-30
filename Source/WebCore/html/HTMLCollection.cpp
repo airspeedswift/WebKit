@@ -245,7 +245,7 @@ Vector<Ref<Element>> HTMLCollection::namedItems(const AtomString& name) const
     auto* elementsWithId = m_namedElementCache->findElementsWithId(name);
     auto* elementsWithName = m_namedElementCache->findElementsWithName(name);
 
-    elements.reserveInitialCapacity((elementsWithId ? elementsWithId->size() : 0) + (elementsWithName ? elementsWithName->size() : 0));
+    elements.reserveCapacity((elementsWithId ? elementsWithId->size() : 0) + (elementsWithName ? elementsWithName->size() : 0));
 
     if (elementsWithId) {
         elements.appendContainerWithMapping(*elementsWithId, [](auto& element) {

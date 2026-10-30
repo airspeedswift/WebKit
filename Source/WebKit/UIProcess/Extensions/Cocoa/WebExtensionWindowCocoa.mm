@@ -180,7 +180,7 @@ WebExtensionWindow::TabVector WebExtensionWindow::tabs(SkipValidation skipValida
         return { };
 
     TabVector result;
-    result.reserveInitialCapacity(tabs.count);
+    result.reserveCapacity(tabs.count);
 
     for (id tab in tabs)
         result.append(extensionContext->getOrCreateTab(tab));

@@ -1857,8 +1857,7 @@ public:
     // std::nullopt when one of those has to be matched, i.e. this alternative cannot match at all.
     std::optional<Vector<PatternTerm>> copyTerms(PatternAlternative* alternative, bool filterStartsWithBOL)
     {
-        Vector<PatternTerm> copiedTerms;
-        copiedTerms.reserveInitialCapacity(alternative->m_terms.size());
+        Vector<PatternTerm> copiedTerms(ReserveCapacityTag { }, alternative->m_terms.size());
         for (auto& term : alternative->m_terms) {
             if (auto copied = copyTerm(term, filterStartsWithBOL)) {
                 copiedTerms.append(WTF::move(*copied));

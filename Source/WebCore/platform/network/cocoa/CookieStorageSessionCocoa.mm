@@ -239,8 +239,7 @@ RetainPtr<NSArray> CookieStorageSession::cookiesForURL(const URL& firstParty, co
 
 Vector<Cookie> CookieStorageSession::nsCookiesToCookieVector(NSArray *nsCookies, NOESCAPE const Function<bool(NSHTTPCookie *)>& filter)
 {
-    Vector<Cookie> cookies;
-    cookies.reserveInitialCapacity(nsCookies.count);
+    Vector<Cookie> cookies(ReserveCapacityTag { }, nsCookies.count);
     for (NSHTTPCookie *nsCookie in nsCookies) {
         @autoreleasepool {
             if (!filter || filter(nsCookie))

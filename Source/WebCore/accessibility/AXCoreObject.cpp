@@ -515,7 +515,7 @@ AXCoreObject::AccessibilityChildrenVector AXCoreObject::crossFrameUnignoredChild
             appendCrossFrameContent(result, *crossFrameChild);
     } else {
         AccessibilityChildrenVector splicedResult;
-        splicedResult.reserveInitialCapacity(result.size());
+        splicedResult.reserveCapacity(result.size());
         for (size_t i = 0; i < result.size(); i++) {
             if (RefPtr crossFrameChild = protect(result[i])->crossFrameChildObject())
                 appendCrossFrameContent(splicedResult, *crossFrameChild);

@@ -112,7 +112,7 @@ CoreIPCCFDictionary::CoreIPCCFDictionary(CFDictionaryRef dictionary)
     if (!dictionary)
         return;
     m_vector = makeUnique<KeyValueVector>();
-    m_vector->reserveInitialCapacity(CFDictionaryGetCount(dictionary));
+    m_vector->reserveCapacity(CFDictionaryGetCount(dictionary));
     [(__bridge NSDictionary *)dictionary enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL*) {
         auto keyType = keyVariantFromCFType(key);
         if (!keyType)

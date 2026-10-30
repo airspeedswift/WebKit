@@ -221,8 +221,7 @@ String PlatformPasteboard::stringForType(const String& pasteboardType) const
 static Vector<String> urlStringsFromPasteboard(NSPasteboard *pasteboard)
 {
     RetainPtr<NSArray<NSPasteboardItem *>> items = pasteboard.pasteboardItems;
-    Vector<String> urlStrings;
-    urlStrings.reserveInitialCapacity(items.get().count);
+    Vector<String> urlStrings(ReserveCapacityTag { }, items.get().count);
     if (items.get().count > 1) {
         for (NSPasteboardItem *item in items.get()) {
             if (RetainPtr<id> propertyList = [item propertyListForType:UTTypeURL.identifier]) {
@@ -268,8 +267,7 @@ Vector<String> PlatformPasteboard::allStringsForType(const String& pasteboardTyp
         return urlStringsFromPasteboard(m_pasteboard.get());
 
     RetainPtr<NSArray<NSPasteboardItem *>> items = [m_pasteboard pasteboardItems];
-    Vector<String> strings;
-    strings.reserveInitialCapacity(items.get().count);
+    Vector<String> strings(ReserveCapacityTag { }, items.get().count);
     if (items.get().count > 1 && !typeIdentifier.isNull()) {
         for (NSPasteboardItem *item in items.get()) {
             if (RetainPtr stringFromItem = [item stringForType:typeIdentifier.createNSString().get()])
@@ -634,7 +632,7 @@ std::optional<PasteboardItemInfo> PlatformPasteboard::informationForItemAtIndex(
     RetainPtr<NSArray<NSPasteboardType>> platformTypes = [item types];
     auto containsFileURL = [platformTypes containsObject:NSPasteboardTypeFileURL] ? ContainsFileURL::Yes : ContainsFileURL::No;
     OrderedHashSet<String> webSafeTypes;
-    info.platformTypesByFidelity.reserveInitialCapacity(platformTypes.get().count);
+    info.platformTypesByFidelity.reserveCapacity(platformTypes.get().count);
     for (NSPasteboardType type in platformTypes.get()) {
         info.platformTypesByFidelity.append(type);
         auto webSafeType = webSafeMIMETypeForModernPasteboardType(type, containsFileURL);

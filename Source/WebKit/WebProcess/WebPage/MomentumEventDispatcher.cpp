@@ -475,8 +475,8 @@ void MomentumEventDispatcher::equalizeTailGaps()
     enum Axis { Horizontal, Vertical };
     std::array<Vector<float>, 2> deltas;
     std::array<unsigned, 2> firstZeroIndex { 0, 0 };
-    deltas[Horizontal].reserveInitialCapacity(initialTableSize);
-    deltas[Vertical].reserveInitialCapacity(initialTableSize);
+    deltas[Horizontal].reserveCapacity(initialTableSize);
+    deltas[Vertical].reserveCapacity(initialTableSize);
     for (unsigned i = 0; i < initialTableSize; i++) {
         deltas[Horizontal].append(table[i].width());
         if (!firstZeroIndex[Horizontal] && !table[i].width())

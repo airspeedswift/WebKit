@@ -218,7 +218,7 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
 
             Vector<Ref<SkiaGPUAtlas>> gpuAtlases;
             auto uploadCondition = AtlasUploadCondition::create();
-            gpuAtlases.reserveInitialCapacity(result->atlasLayouts().size());
+            gpuAtlases.reserveCapacity(result->atlasLayouts().size());
 
             for (const auto& layout : result->atlasLayouts()) {
                 if (auto atlas = createAtlas(layout.get(), uploadCondition.get()))

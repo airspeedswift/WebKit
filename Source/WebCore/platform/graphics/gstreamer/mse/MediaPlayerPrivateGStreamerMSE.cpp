@@ -569,8 +569,8 @@ void MediaPlayerPrivateGStreamerMSE::emitStreams(const Vector<RefPtr<MediaSource
     Vector<RefPtr<MediaSourceTrackGStreamer>> uniqueTracks;
     Vector<RefPtr<MediaSourceTrackGStreamer>> playbackTracks;
 
-    uniqueTracks.reserveInitialCapacity(tracks.size());
-    playbackTracks.reserveInitialCapacity(tracks.size());
+    uniqueTracks.reserveCapacity(tracks.size());
+    playbackTracks.reserveCapacity(tracks.size());
 
     for (const auto& track : tracks) {
         if (!uniqueTracks.containsIf([&track](const auto& current) { return track->id() == current->id(); })) {

@@ -461,12 +461,12 @@ void CalleeGroup::updateCallsitesToCallUs(const AbstractLocker& locker, CodeLoca
 
     WTF::switchOn(m_callers[functionIndex],
         [&](SparseCallers& callers) {
-            deferred.callsites.reserveInitialCapacity(callers.size());
+            deferred.callsites.reserveCapacity(callers.size());
             for (uint32_t caller : callers)
                 handleCallerIndex(caller);
         },
         [&](DenseCallers& callers) {
-            deferred.callsites.reserveInitialCapacity(callers.bitCount());
+            deferred.callsites.reserveCapacity(callers.bitCount());
             for (uint32_t caller : callers)
                 handleCallerIndex(caller);
         }

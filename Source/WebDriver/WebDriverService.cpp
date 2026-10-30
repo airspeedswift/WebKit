@@ -1011,7 +1011,7 @@ Vector<Capabilities> WebDriverService::processCapabilities(const JSON::Object& p
     // 4. Let validated first match capabilities be an empty JSON List.
     Vector<RefPtr<JSON::Object>> validatedFirstMatchCapabilitiesList;
     auto firstMatchCapabilitiesListLength = firstMatchCapabilitiesList->length();
-    validatedFirstMatchCapabilitiesList.reserveInitialCapacity(firstMatchCapabilitiesListLength);
+    validatedFirstMatchCapabilitiesList.reserveCapacity(firstMatchCapabilitiesListLength);
     // 5. For each first match capabilities corresponding to an indexed property in all first match capabilities.
     for (unsigned i = 0; i < firstMatchCapabilitiesListLength; ++i) {
         auto firstMatchCapabilities = firstMatchCapabilitiesList->get(i)->asObject();
@@ -1042,8 +1042,7 @@ Vector<Capabilities> WebDriverService::processCapabilities(const JSON::Object& p
     }
 
     // 6. For each first match capabilities corresponding to an indexed property in validated first match capabilities.
-    Vector<Capabilities> matchedCapabilitiesList;
-    matchedCapabilitiesList.reserveInitialCapacity(validatedFirstMatchCapabilitiesList.size());
+    Vector<Capabilities> matchedCapabilitiesList(ReserveCapacityTag { }, validatedFirstMatchCapabilitiesList.size());
     for (auto& validatedFirstMatchCapabilies : validatedFirstMatchCapabilitiesList) {
         // 6.1. Let merged capabilities be the result of trying to merge capabilities with required capabilities and first match capabilities as arguments.
         auto mergedCapabilities = mergeCapabilities(*requiredCapabilities, *validatedFirstMatchCapabilies);

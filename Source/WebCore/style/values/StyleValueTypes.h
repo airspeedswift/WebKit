@@ -1342,7 +1342,7 @@ template<typename StyleType, size_t inlineCapacity> struct Blending<SpaceSeparat
     {
         auto size = a.size();
         typename SpaceSeparatedVector<StyleType, inlineCapacity>::Container result;
-        result.reserveInitialCapacity(size);
+        result.reserveCapacity(size);
         for (size_t i = 0; i < size; ++i)
             result.append(WebCore::Style::blend(a[i], b[i], context));
         return { WTF::move(result) };
@@ -1351,7 +1351,7 @@ template<typename StyleType, size_t inlineCapacity> struct Blending<SpaceSeparat
     {
         auto size = a.size();
         typename SpaceSeparatedVector<StyleType, inlineCapacity>::Container result;
-        result.reserveInitialCapacity(size);
+        result.reserveCapacity(size);
         for (size_t i = 0; i < size; ++i)
             result.append(WebCore::Style::blend(a[i], b[i], aStyle, bStyle, context));
         return { WTF::move(result) };
@@ -1424,7 +1424,7 @@ template<typename StyleType, size_t inlineCapacity> struct Blending<CommaSeparat
     {
         auto size = a.size();
         typename CommaSeparatedVector<StyleType, inlineCapacity>::Container result;
-        result.reserveInitialCapacity(size);
+        result.reserveCapacity(size);
         for (size_t i = 0; i < size; ++i)
             result.append(WebCore::Style::blend(a[i], b[i], context));
         return { WTF::move(result) };
@@ -1433,7 +1433,7 @@ template<typename StyleType, size_t inlineCapacity> struct Blending<CommaSeparat
     {
         auto size = a.size();
         typename CommaSeparatedVector<StyleType, inlineCapacity>::Container result;
-        result.reserveInitialCapacity(size);
+        result.reserveCapacity(size);
         for (size_t i = 0; i < size; ++i)
             result.append(WebCore::Style::blend(a[i], b[i], aStyle, bStyle, context));
         return { WTF::move(result) };

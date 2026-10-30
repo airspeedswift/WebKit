@@ -94,7 +94,7 @@ static std::pair<simd_float4, simd_float4> computeMinAndMaxCorners(const Vector<
             const auto& rootIndices = skinning.rootJointIndices;
             const bool hasRootIndices = !rootIndices.isEmpty();
             const size_t iterCount = hasRootIndices ? rootIndices.size() : 1;
-            rootSkinMatrices.reserveInitialCapacity(iterCount);
+            rootSkinMatrices.reserveCapacity(iterCount);
             for (size_t r = 0; r < iterCount; ++r) {
                 uint32_t rootIdx = hasRootIndices ? rootIndices[r] : 0;
                 if (rootIdx >= skinning.jointTransforms.size())

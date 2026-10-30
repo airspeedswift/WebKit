@@ -2096,7 +2096,7 @@ TEST(WTF_InlineMap, ClearTransitionsToInline)
 
 TEST(WTF_InlineMap, ClearEmptyHashedTransitionsToInline)
 {
-    // Clearing an empty hashed-mode map (from reserveInitialCapacity) transitions to inline.
+    // Clearing an empty hashed-mode map (from reserveCapacity) transitions to inline.
     InlineMap<unsigned, unsigned, 5, IntHash<unsigned>> map;
 
     map.reserveInitialCapacity(20);

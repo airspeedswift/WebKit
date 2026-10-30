@@ -187,7 +187,7 @@ std::expected<Vector<char16_t>, UTF8ConversionError> String::charactersWithoutNu
     if (!m_impl)
         return result;
 
-    if (!result.tryReserveInitialCapacity(length() + 1))
+    if (!result.tryReserveCapacity(length() + 1))
         return makeUnexpected(UTF8ConversionError::OutOfMemory);
 
     if (is8Bit())

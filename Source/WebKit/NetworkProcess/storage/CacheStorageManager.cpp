@@ -70,7 +70,7 @@ static std::optional<Vector<std::pair<String, String>>> readCachesList(const Str
     if (!count)
         return std::nullopt;
 
-    result.reserveInitialCapacity(*count);
+    result.reserveCapacity(*count);
     for (size_t index = 0; index < *count; ++index) {
         std::optional<String> name;
         decoder >> name;

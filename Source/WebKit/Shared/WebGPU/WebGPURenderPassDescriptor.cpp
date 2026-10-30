@@ -40,8 +40,7 @@ std::optional<RenderPassDescriptor> ConvertToBackingContext::convertToBacking(co
     if (!base)
         return std::nullopt;
 
-    Vector<std::optional<RenderPassColorAttachment>> colorAttachments;
-    colorAttachments.reserveInitialCapacity(renderPassDescriptor.colorAttachments.size());
+    Vector<std::optional<RenderPassColorAttachment>> colorAttachments(ReserveCapacityTag { }, renderPassDescriptor.colorAttachments.size());
     for (const auto& colorAttachment : renderPassDescriptor.colorAttachments) {
         if (colorAttachment) {
             auto backingColorAttachment = convertToBacking(*colorAttachment);
@@ -77,8 +76,7 @@ std::optional<WebCore::WebGPU::RenderPassDescriptor> ConvertFromBackingContext::
     if (!base)
         return std::nullopt;
 
-    Vector<std::optional<WebCore::WebGPU::RenderPassColorAttachment>> colorAttachments;
-    colorAttachments.reserveInitialCapacity(renderPassDescriptor.colorAttachments.size());
+    Vector<std::optional<WebCore::WebGPU::RenderPassColorAttachment>> colorAttachments(ReserveCapacityTag { }, renderPassDescriptor.colorAttachments.size());
     for (const auto& backingColorAttachment : renderPassDescriptor.colorAttachments) {
         if (backingColorAttachment) {
             auto colorAttachment = convertFromBacking(*backingColorAttachment);

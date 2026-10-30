@@ -46,7 +46,7 @@ CoreIPCPlistDictionary::CoreIPCPlistDictionary(NSDictionary *dictionary)
 {
     RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(!isInWebProcess());
 
-    m_keyValuePairs.reserveInitialCapacity(dictionary.count);
+    m_keyValuePairs.reserveCapacity(dictionary.count);
 
     for (id key in dictionary) {
         RetainPtr<id> value = dictionary[key];

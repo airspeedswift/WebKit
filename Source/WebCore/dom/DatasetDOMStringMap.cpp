@@ -90,7 +90,7 @@ static inline AtomString convertPropertyNameToAttributeName(const StringImpl& na
     Vector<CharacterType, 32> buffer;
 
     unsigned length = name.length();
-    buffer.reserveInitialCapacity(dataPrefix.size() + length);
+    buffer.reserveCapacity(dataPrefix.size() + length);
 
     buffer.append(std::span { dataPrefix });
 

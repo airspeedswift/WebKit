@@ -319,7 +319,7 @@ public:
             @selector(itemProviders),
         };
         auto pasteboardClass = UIPasteboard.generalPasteboard.class;
-        m_swizzlers.reserveInitialCapacity(pasteboardAccessSelectors.size());
+        m_swizzlers.reserveCapacity(pasteboardAccessSelectors.size());
         for (SEL selector : pasteboardAccessSelectors)
             m_swizzlers.append(makeUnique<InstanceMethodSwizzler>(pasteboardClass, selector, reinterpret_cast<IMP>(returnNil)));
     }

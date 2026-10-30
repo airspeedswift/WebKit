@@ -64,7 +64,7 @@ NSString *WebExtensionAPILocalization::getMessage(NSString* messageName, JSValue
     if (substitutions && !substitutions.isUndefined && !substitutions.isNull) {
         if (substitutions.isArray) {
             auto count = [[substitutions valueForProperty:@"length"] toUInt32];
-            substitutionsVector.reserveInitialCapacity(count);
+            substitutionsVector.reserveCapacity(count);
             for (unsigned i = 0; i < count; ++i)
                 substitutionsVector.append(String { [[substitutions valueAtIndex:i] toString] });
         } else

@@ -420,7 +420,7 @@ Ref<WebCoreDecompressionSession::DecodingPromise> WebCoreDecompressionSession::d
     m_lastDecodingError = noErr;
     size_t numberOfSamples = PAL::CMSampleBufferGetNumSamples(sample);
     m_lastDecodedSamples = { };
-    m_lastDecodedSamples.reserveInitialCapacity(numberOfSamples);
+    m_lastDecodedSamples.reserveCapacity(numberOfSamples);
 
     auto result = ensureDecoderForSample(sample);
     if (!result)

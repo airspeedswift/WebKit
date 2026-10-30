@@ -155,8 +155,7 @@ void BidiStorageAgent::getCookies(RefPtr<JSON::Object>&& optionalFilter, RefPtr<
         ASYNC_FAIL_WITH_PREDEFINED_ERROR(InvalidParameter);
 
     resolvedCookieStore->cookies([callback = WTF::move(callback), filter = CookieFilter::fromProtocol(optionalFilter), partitionKey = WTF::move(partitionKey)](Vector<WebCore::Cookie>&& cookiesList) mutable {
-        Vector<WebCore::Cookie> matchingCookies;
-        matchingCookies.reserveInitialCapacity(cookiesList.size());
+        Vector<WebCore::Cookie> matchingCookies(ReserveCapacityTag { }, cookiesList.size());
 
         for (const auto& cookie : cookiesList) {
             if (filter.matches(cookie))
@@ -236,8 +235,7 @@ void BidiStorageAgent::deleteCookies(RefPtr<JSON::Object>&& optionalFilter, RefP
         ASYNC_FAIL_WITH_PREDEFINED_ERROR(InvalidParameter);
 
     cookieStore->cookies([callback = WTF::move(callback), filter = CookieFilter::fromProtocol(optionalFilter), partitionKey = WTF::move(partitionKey), cookieStore](Vector<WebCore::Cookie>&& fetchedCookies) mutable {
-        Vector<WebCore::Cookie> toDelete;
-        toDelete.reserveInitialCapacity(fetchedCookies.size());
+        Vector<WebCore::Cookie> toDelete(ReserveCapacityTag { }, fetchedCookies.size());
 
         for (auto& cookie : fetchedCookies) {
             if (filter.matches(cookie))

@@ -2355,7 +2355,7 @@ void IPIntGenerator::resolveExitTarget(unsigned index, IPIntLocation loc)
 [[nodiscard]] PartialResult IPIntGenerator::addTryTable(BlockSignature&& signature, std::span<TypedExpression> args, const Vector<CatchHandler>& targets, ControlType& result)
 {
     result = ControlType(WTF::move(signature), m_stackSize.value() - args.size(), BlockType::TryTable);
-    result.m_tryTableTargets.reserveInitialCapacity(targets.size());
+    result.m_tryTableTargets.reserveCapacity(targets.size());
     result.m_index = m_controlStructuresAwaitingCoalescing.size();
     result.m_pc = curPC();
     result.m_mc = curMC();

@@ -129,7 +129,7 @@ void WebDriverService::platformParseCapabilities(const JSON::Object& matchedCapa
     if (browserArguments && browserArguments->length()) {
         unsigned browserArgumentsLength = browserArguments->length();
         capabilities.browserArguments = Vector<String>();
-        capabilities.browserArguments->reserveInitialCapacity(browserArgumentsLength);
+        capabilities.browserArguments->reserveCapacity(browserArgumentsLength);
         for (unsigned i = 0; i < browserArgumentsLength; ++i) {
             auto argument = browserArguments->get(i)->asString();
             ASSERT(!argument.isNull());
@@ -146,7 +146,7 @@ void WebDriverService::platformParseCapabilities(const JSON::Object& matchedCapa
     if (certificates && certificates->length()) {
         unsigned certificatesLength = certificates->length();
         capabilities.certificates = Vector<std::pair<String, String>>();
-        capabilities.certificates->reserveInitialCapacity(certificatesLength);
+        capabilities.certificates->reserveCapacity(certificatesLength);
         for (unsigned i = 0; i < certificatesLength; ++i) {
             auto certificate = certificates->get(i)->asObject();
             ASSERT(certificate);

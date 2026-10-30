@@ -264,7 +264,7 @@ public:
         : m_indexOfLastWatchpoint(INT_MIN)
         , m_indexOfTailOfLastWatchpoint(INT_MIN)
     {
-        m_jumpsToLink.reserveInitialCapacity(64);
+        m_jumpsToLink.reserveCapacity(64);
     }
     
     AssemblerBuffer& buffer() LIFETIME_BOUND { return m_buffer; }

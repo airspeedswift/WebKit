@@ -355,8 +355,8 @@ public:
     ListFormatInput(Vector<String, 4>&& strings)
         : m_strings(WTF::move(strings))
     {
-        m_stringPointers.reserveInitialCapacity(m_strings.size());
-        m_stringLengths.reserveInitialCapacity(m_strings.size());
+        m_stringPointers.reserveCapacity(m_strings.size());
+        m_stringLengths.reserveCapacity(m_strings.size());
         for (auto& string : m_strings) {
             string.convertTo16Bit();
             m_stringPointers.append(string.span16().data());

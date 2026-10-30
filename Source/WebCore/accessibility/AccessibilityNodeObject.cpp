@@ -979,7 +979,7 @@ AXCoreObject::AccessibilityChildrenVector AccessibilityNodeObject::visibleChildr
         if (!visibleCount)
             visibleCount = 4; // Default size for multiple select is 4
         size_t count = std::min(static_cast<size_t>(visibleCount), children.size());
-        result.reserveInitialCapacity(count);
+        result.reserveCapacity(count);
         for (size_t i = 0; i < count; i++)
             result.append(children[i]);
         return result;
@@ -1347,7 +1347,7 @@ AXCoreObject::AccessibilityChildrenVector AccessibilityNodeObject::radioButtonGr
 
     if (RefPtr input = dynamicDowncast<HTMLInputElement>(node())) {
         auto radioButtonGroup = input->radioButtonGroup();
-        result.reserveInitialCapacity(radioButtonGroup.size());
+        result.reserveCapacity(radioButtonGroup.size());
 
         WeakPtr cache = axObjectCache();
         for (auto& radioSibling : radioButtonGroup) {
@@ -2126,7 +2126,7 @@ AXCoreObject::AccessibilityChildrenVector AccessibilityNodeObject::cells()
     AXCoreObject::AccessibilityChildrenVector cells;
     // row * columns may not be exactly correct when considering things
     // like rowspan / colspan, but it should be close enough.
-    cells.reserveInitialCapacity(rareData->rowCount() * rareData->columnCount());
+    cells.reserveCapacity(rareData->rowCount() * rareData->columnCount());
     for (const auto& row : rareData->tableRows())
         cells.appendVector(row->unignoredChildren());
     return cells;

@@ -474,10 +474,10 @@ template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t min
 
         Vector<T, inlineCapacity, OverflowHandler, minCapacity> vector;
 
-        // Calls to reserveInitialCapacity with untrusted large sizes can cause allocator crashes.
+        // Calls to reserveCapacity with untrusted large sizes can cause allocator crashes.
         // Limit allocations from untrusted sources to 1MB.
         if (*size < 1024 * 1024 / sizeof(T)) [[likely]] {
-            vector.reserveInitialCapacity(*size);
+            vector.reserveCapacity(*size);
             for (size_t i = 0; i < *size; ++i) {
                 auto element = decoder.template decode<T>();
                 if (!element)
@@ -599,7 +599,7 @@ template<typename KeyArg, typename MappedArg, typename HashArg, typename KeyTrai
             return std::nullopt;
 
         HashMapType hashMap;
-        // Calls to reserveInitialCapacity with untrusted large sizes can cause allocator crashes.
+        // Calls to reserveCapacity with untrusted large sizes can cause allocator crashes.
         // Limit allocations from untrusted sources to 1MB.
         if (*hashMapSize < 1024 * 1024 / (sizeof(KeyArg) + sizeof(MappedArg))) [[likely]]
             hashMap.reserveInitialCapacity(*hashMapSize);
@@ -644,7 +644,7 @@ template<typename KeyArg, typename HashArg, typename KeyTraitsArg, typename Hash
             return std::nullopt;
 
         HashSetType hashSet;
-        // Calls to reserveInitialCapacity with untrusted large sizes can cause allocator crashes.
+        // Calls to reserveCapacity with untrusted large sizes can cause allocator crashes.
         // Limit allocations from untrusted sources to 1MB.
         if (*hashSetSize < 1024 * 1024 / sizeof(KeyArg)) [[likely]]
             hashSet.reserveInitialCapacity(*hashSetSize);

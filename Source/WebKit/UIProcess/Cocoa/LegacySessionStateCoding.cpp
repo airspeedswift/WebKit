@@ -410,8 +410,8 @@ static RetainPtr<CFDictionaryRef> createDictionary(std::initializer_list<std::pa
     Vector<CFTypeRef> keys;
     Vector<CFTypeRef> values;
 
-    keys.reserveInitialCapacity(keyValuePairs.size());
-    values.reserveInitialCapacity(keyValuePairs.size());
+    keys.reserveCapacity(keyValuePairs.size());
+    values.reserveCapacity(keyValuePairs.size());
 
     for (const auto& keyValuePair : keyValuePairs) {
         keys.append(keyValuePair.first);

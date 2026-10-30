@@ -806,7 +806,7 @@ void wpeToplevelWaylandSetOpaqueRectangles(WPEToplevelWayland* toplevel, WPERect
 
     priv->opaqueRegion.rects.clear();
     if (rects) {
-        priv->opaqueRegion.rects.reserveInitialCapacity(rectsCount);
+        priv->opaqueRegion.rects.reserveCapacity(rectsCount);
         for (unsigned i = 0; i < rectsCount; ++i)
             priv->opaqueRegion.rects.append(rects[i]);
     }

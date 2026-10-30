@@ -74,8 +74,7 @@ static Vector<WebCore::CertificateInfo> buildRequestAuthentications(WKIdentityDo
 
     for (NSArray<WKIdentityDocumentPresentmentRequestAuthenticationCertificate *> *certificateChain in mobileDocumentRequest.authenticationCertificates) {
 
-        Vector<RetainPtr<SecCertificateRef>> certificateChainVector;
-        certificateChainVector.reserveInitialCapacity(certificateChain.count);
+        Vector<RetainPtr<SecCertificateRef>> certificateChainVector(ReserveCapacityTag { }, certificateChain.count);
 
         for (WKIdentityDocumentPresentmentRequestAuthenticationCertificate *certificate in certificateChain)
             certificateChainVector.append(RetainPtr<SecCertificateRef>(certificate.certificate));
@@ -112,8 +111,7 @@ static WebCore::ISO18013DocumentRequest buildDocumentRequest(WKIdentityDocumentP
     }
 
     if (individualDocumentRequest.issuerIdentifiers && [individualDocumentRequest.issuerIdentifiers count] > 0) {
-        Vector<WebCore::X509SubjectKeyIdentifier> issuerIdentifiers;
-        issuerIdentifiers.reserveInitialCapacity([individualDocumentRequest.issuerIdentifiers count]);
+        Vector<WebCore::X509SubjectKeyIdentifier> issuerIdentifiers(ReserveCapacityTag { }, [individualDocumentRequest.issuerIdentifiers count]);
 
         for (NSData *data in individualDocumentRequest.issuerIdentifiers)
             issuerIdentifiers.append(WebCore::X509SubjectKeyIdentifier { makeVector(data) });

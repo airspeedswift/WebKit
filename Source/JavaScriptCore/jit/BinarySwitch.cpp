@@ -53,7 +53,7 @@ BinarySwitch::BinarySwitch(GPRReg value, std::span<const int64_t> cases, Type ty
     if (BinarySwitchInternal::verbose)
         dataLog("Original cases: ", listDump(cases), "\n");
 
-    m_cases.reserveInitialCapacity(cases.size());
+    m_cases.reserveCapacity(cases.size());
     for (unsigned i = 0; i < cases.size(); ++i)
         m_cases.append(Case(cases[i], i));
     
@@ -78,7 +78,7 @@ BinarySwitch::BinarySwitch(GPRReg value, std::span<const std::tuple<uint32_t, si
     if (runs.empty())
         return;
 
-    m_cases.reserveInitialCapacity(runs.size());
+    m_cases.reserveCapacity(runs.size());
     unsigned keyStart = 0;
     for (auto [firstKey, runLength] : runs) {
         RELEASE_ASSERT(runLength);
@@ -264,8 +264,7 @@ void BinarySwitch::build(unsigned start, bool hardStart, unsigned end)
         if (BinarySwitchInternal::verbose)
             dataLog("allConsecutive = ", allConsecutive, "\n");
         
-        Vector<unsigned, 8> localCaseIndices;
-        localCaseIndices.reserveInitialCapacity(size);
+        Vector<unsigned, 8> localCaseIndices(ReserveCapacityTag { }, size);
         for (unsigned i = 0; i < size; ++i)
             localCaseIndices.append(start + i);
         

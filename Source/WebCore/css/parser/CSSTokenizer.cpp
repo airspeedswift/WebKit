@@ -137,7 +137,7 @@ CSSTokenizer::CSSTokenizer(StringView string, CSSParserObserverWrapper* wrapper,
 
     // To avoid resizing we err on the side of reserving too much space.
     // Most strings we tokenize have about 3.5 to 5 characters per token.
-    if (!m_tokens.tryReserveInitialCapacity(string.length() / 3)) [[unlikely]] {
+    if (!m_tokens.tryReserveCapacity(string.length() / 3)) [[unlikely]] {
         // When constructionSuccessPtr is null, our policy is to crash on failure.
         RELEASE_ASSERT(constructionSuccessPtr);
         *constructionSuccessPtr = false;

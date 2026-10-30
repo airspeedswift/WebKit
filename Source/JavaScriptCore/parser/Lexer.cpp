@@ -568,9 +568,9 @@ void Lexer<T>::setCode(const SourceCode& source, ParserArena* arena)
     m_sourceURLDirective = String();
     m_sourceMappingURLDirective = String();
     
-    m_buffer8.reserveInitialCapacity(initialReadBufferCapacity);
-    m_buffer16.reserveInitialCapacity(initialReadBufferCapacity);
-    m_bufferForRawTemplateString16.reserveInitialCapacity(initialReadBufferCapacity);
+    m_buffer8.reserveCapacity(initialReadBufferCapacity);
+    m_buffer16.reserveCapacity(initialReadBufferCapacity);
+    m_bufferForRawTemplateString16.reserveCapacity(initialReadBufferCapacity);
     
     if (m_code < m_codeEnd) [[likely]]
         m_current = *m_code;

@@ -957,7 +957,7 @@ ComplexTextController::ComplexTextRun::ComplexTextRun(const Font& font, std::spa
     , m_textAutospaceSize(TextAutospace::textAutospaceSize(font))
 {
     auto runLengthInCodeUnits = m_indexEnd - m_indexBegin;
-    m_coreTextIndices.reserveInitialCapacity(runLengthInCodeUnits);
+    m_coreTextIndices.reserveCapacity(runLengthInCodeUnits);
     unsigned r = m_indexBegin;
     while (r < m_indexEnd) {
         auto currentIndex = r;

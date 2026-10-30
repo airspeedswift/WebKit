@@ -548,7 +548,7 @@ void ResourceRequestBase::setResponseContentDispositionEncodingFallbackArray(con
     updateResourceRequest(); 
     
     m_requestData.m_responseContentDispositionEncodingFallbackArray.clear();
-    m_requestData.m_responseContentDispositionEncodingFallbackArray.reserveInitialCapacity(!encoding1.isNull() + !encoding2.isNull() + !encoding3.isNull());
+    m_requestData.m_responseContentDispositionEncodingFallbackArray.reserveCapacity(!encoding1.isNull() + !encoding2.isNull() + !encoding3.isNull());
     if (!encoding1.isNull())
         m_requestData.m_responseContentDispositionEncodingFallbackArray.append(encoding1);
     if (!encoding2.isNull())

@@ -305,8 +305,7 @@ RefPtr<ShaderModule> DeviceImpl::createShaderModule(const ShaderModuleDescriptor
 
     Ref convertToBackingContext = m_convertToBackingContext;
 
-    Vector<WGPUShaderModuleCompilationHint> hintsEntries;
-    hintsEntries.reserveInitialCapacity(descriptor.hints.size());
+    Vector<WGPUShaderModuleCompilationHint> hintsEntries(ReserveCapacityTag { }, descriptor.hints.size());
     for (size_t i = 0; i < descriptor.hints.size(); ++i) {
         const auto& hint = descriptor.hints[i].value;
         hintsEntries.append(WGPUShaderModuleCompilationHint {

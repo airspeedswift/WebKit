@@ -164,7 +164,7 @@ GridLayoutResult GridFormattingContext::layout(GridLayoutConstraints layoutConst
 PlacedGridItems GridFormattingContext::constructPlacedGridItems(const GridAreas& gridAreas) const
 {
     PlacedGridItems placedGridItems;
-    placedGridItems.reserveInitialCapacity(gridAreas.size());
+    placedGridItems.reserveCapacity(gridAreas.size());
     CheckedRef formattingContextStyle = root().style();
     for (auto& [ unplacedGridItem, gridAreaLines ] : gridAreas) {
         CheckedRef gridItem = unplacedGridItem.m_layoutBox;

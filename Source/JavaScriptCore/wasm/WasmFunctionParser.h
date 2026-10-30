@@ -2577,7 +2577,7 @@ FOR_EACH_WASM_MEMORY_STORE_OP(CREATE_CASE)
             // Allocate stack space for arguments
             ArgumentList args;
             size_t firstArgumentIndex = m_expressionStack.size() - argc;
-            WASM_ALLOCATOR_FAIL_IF(!args.tryReserveInitialCapacity(argc), "can't allocate enough memory for array.new_fixed "_s, argc, " values"_s);
+            WASM_ALLOCATOR_FAIL_IF(!args.tryReserveCapacity(argc), "can't allocate enough memory for array.new_fixed "_s, argc, " values"_s);
             args.grow(argc);
 
             // Start parsing arguments; the expected type for each one is the unpacked version of the array element type
@@ -2857,7 +2857,7 @@ FOR_EACH_WASM_MEMORY_STORE_OP(CREATE_CASE)
 
             ArgumentList args;
             size_t firstArgumentIndex = m_expressionStack.size() - structType.fieldCount();
-            WASM_ALLOCATOR_FAIL_IF(!args.tryReserveInitialCapacity(structType.fieldCount()), "can't allocate enough memory for struct.new "_s, structType.fieldCount(), " values"_s);
+            WASM_ALLOCATOR_FAIL_IF(!args.tryReserveCapacity(structType.fieldCount()), "can't allocate enough memory for struct.new "_s, structType.fieldCount(), " values"_s);
             args.grow(structType.fieldCount());
 
             bool hasV128Args = false;
@@ -3326,7 +3326,7 @@ FOR_EACH_WASM_MEMORY_STORE_OP(CREATE_CASE)
 
         size_t firstArgumentIndex = m_expressionStack.size() - calleeSignature.argumentCount();
         ArgumentList args;
-        WASM_ALLOCATOR_FAIL_IF(!args.tryReserveInitialCapacity(calleeSignature.argumentCount()), "can't allocate enough memory for call's "_s, calleeSignature.argumentCount(), " arguments"_s);
+        WASM_ALLOCATOR_FAIL_IF(!args.tryReserveCapacity(calleeSignature.argumentCount()), "can't allocate enough memory for call's "_s, calleeSignature.argumentCount(), " arguments"_s);
         args.grow(calleeSignature.argumentCount());
         for (size_t i = 0; i < calleeSignature.argumentCount(); ++i) {
             size_t stackIndex = m_expressionStack.size() - i - 1;
@@ -3385,7 +3385,7 @@ FOR_EACH_WASM_MEMORY_STORE_OP(CREATE_CASE)
         WASM_VALIDATOR_FAIL_IF(tableAddressType!= m_expressionStack.last().type(), "call_indirect index to type "_s, m_expressionStack.last().type().kind(), " expected "_s, tableAddressType.kind());
 
         ArgumentList args;
-        WASM_ALLOCATOR_FAIL_IF(!args.tryReserveInitialCapacity(argumentCount), "can't allocate enough memory for "_s, argumentCount, " call_indirect arguments"_s);
+        WASM_ALLOCATOR_FAIL_IF(!args.tryReserveCapacity(argumentCount), "can't allocate enough memory for "_s, argumentCount, " call_indirect arguments"_s);
         args.grow(argumentCount);
         size_t firstArgumentIndex = m_expressionStack.size() - argumentCount;
         for (size_t i = 0; i < argumentCount; ++i) {
@@ -3447,7 +3447,7 @@ FOR_EACH_WASM_MEMORY_STORE_OP(CREATE_CASE)
         WASM_PARSER_FAIL_IF(argumentCount > m_expressionStack.size() - m_currentStackBegin, "call_ref expects ", argumentCount, " arguments, but the expression stack currently holds ", m_expressionStack.size() - m_currentStackBegin, " values");
 
         ArgumentList args;
-        WASM_ALLOCATOR_FAIL_IF(!args.tryReserveInitialCapacity(argumentCount), "can't allocate enough memory for ", argumentCount, " call_indirect arguments");
+        WASM_ALLOCATOR_FAIL_IF(!args.tryReserveCapacity(argumentCount), "can't allocate enough memory for ", argumentCount, " call_indirect arguments");
         args.grow(argumentCount);
         size_t firstArgumentIndex = m_expressionStack.size() - argumentCount;
         for (size_t i = 0; i < argumentCount; ++i) {
@@ -3684,7 +3684,7 @@ FOR_EACH_WASM_MEMORY_STORE_OP(CREATE_CASE)
             auto& target = resolveControlRef(catchTarget.target).controlData;
 
             Stack results;
-            results.reserveInitialCapacity(target.branchTargetArity());
+            results.reserveCapacity(target.branchTargetArity());
             if (catchTarget.type == CatchKind::Catch || catchTarget.type == CatchKind::CatchRef) {
                 for (unsigned arg = 0; arg < catchTarget.exceptionSignature->argumentCount(); ++arg) {
                     ExpressionType exp;
@@ -3737,7 +3737,7 @@ FOR_EACH_WASM_MEMORY_STORE_OP(CREATE_CASE)
         WASM_VALIDATOR_FAIL_IF(sliceSize < exceptionSignature.argumentCount(), "Too few arguments on stack for the exception being thrown. The exception expects ", exceptionSignature.argumentCount(), ", but only ", sliceSize, " were present. Exception has signature: ", exceptionSignature);
         unsigned offset = m_expressionStack.size() - exceptionSignature.argumentCount();
         ArgumentList args;
-        WASM_ALLOCATOR_FAIL_IF(!args.tryReserveInitialCapacity(exceptionSignature.argumentCount()), "can't allocate enough memory for throw's "_s, exceptionSignature.argumentCount(), " arguments"_s);
+        WASM_ALLOCATOR_FAIL_IF(!args.tryReserveCapacity(exceptionSignature.argumentCount()), "can't allocate enough memory for throw's "_s, exceptionSignature.argumentCount(), " arguments"_s);
         args.grow(exceptionSignature.argumentCount());
         for (unsigned i = 0; i < exceptionSignature.argumentCount(); ++i) {
             TypedExpression arg = m_expressionStack[m_expressionStack.size() - i - 1];

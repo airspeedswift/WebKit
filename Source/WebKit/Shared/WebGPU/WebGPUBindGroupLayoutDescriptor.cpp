@@ -40,8 +40,7 @@ std::optional<BindGroupLayoutDescriptor> ConvertToBackingContext::convertToBacki
     if (!base)
         return std::nullopt;
 
-    Vector<BindGroupLayoutEntry> entries;
-    entries.reserveInitialCapacity(bindGroupLayoutDescriptor.entries.size());
+    Vector<BindGroupLayoutEntry> entries(ReserveCapacityTag { }, bindGroupLayoutDescriptor.entries.size());
     for (const auto& entry : bindGroupLayoutDescriptor.entries) {
         auto convertedEntry = convertToBacking(entry);
         if (!convertedEntry)
@@ -58,8 +57,7 @@ std::optional<WebCore::WebGPU::BindGroupLayoutDescriptor> ConvertFromBackingCont
     if (!base)
         return std::nullopt;
 
-    Vector<WebCore::WebGPU::BindGroupLayoutEntry> entries;
-    entries.reserveInitialCapacity(bindGroupLayoutDescriptor.entries.size());
+    Vector<WebCore::WebGPU::BindGroupLayoutEntry> entries(ReserveCapacityTag { }, bindGroupLayoutDescriptor.entries.size());
     for (const auto& backingEntry : bindGroupLayoutDescriptor.entries) {
         auto entry = convertFromBacking(backingEntry);
         if (!entry)

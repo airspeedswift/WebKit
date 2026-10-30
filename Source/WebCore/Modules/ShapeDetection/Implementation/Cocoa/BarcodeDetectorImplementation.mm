@@ -202,8 +202,7 @@ void BarcodeDetectorImpl::detect(const NativeImage& image, CompletionHandler<voi
     }
 
     auto imageSize = image.size();
-    Vector<DetectedBarcode> results;
-    results.reserveInitialCapacity(request.get().results.count);
+    Vector<DetectedBarcode> results(ReserveCapacityTag { }, request.get().results.count);
     for (VNBarcodeObservation *observation in request.get().results) {
         results.append({
             convertRectFromVisionToWeb(imageSize, observation.boundingBox),

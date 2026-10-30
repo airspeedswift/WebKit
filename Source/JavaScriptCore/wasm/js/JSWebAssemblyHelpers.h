@@ -165,7 +165,7 @@ ALWAYS_INLINE Vector<uint8_t> createSourceBufferFromValue(VM& vm, JSGlobalObject
     RETURN_IF_EXCEPTION(throwScope, { });
 
     Vector<uint8_t> result;
-    if (!result.tryReserveInitialCapacity(data.size())) {
+    if (!result.tryReserveCapacity(data.size())) {
         throwException(globalObject, throwScope, createOutOfMemoryError(globalObject));
         return result;
     }

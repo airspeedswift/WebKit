@@ -974,7 +974,7 @@ void Graph::substituteGetLocal(BasicBlock& block, unsigned startIndexInBlock, Va
 BlockList Graph::blocksInPreOrder()
 {
     BlockList result;
-    result.reserveInitialCapacity(m_blocks.size());
+    result.reserveCapacity(m_blocks.size());
     CFG cfg(*this);
     appendNodesInOrder(cfg, m_roots, GraphOrder::PreOrder, result);
 
@@ -1007,7 +1007,7 @@ BlockList Graph::blocksInPreOrder()
 BlockList Graph::blocksInPostOrder(bool isSafeToValidate)
 {
     BlockList result;
-    result.reserveInitialCapacity(m_blocks.size());
+    result.reserveCapacity(m_blocks.size());
     CFG cfg(*this);
     appendNodesInOrder(cfg, m_roots, GraphOrder::PostOrder, result);
 

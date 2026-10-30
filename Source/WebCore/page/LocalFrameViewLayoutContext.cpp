@@ -523,7 +523,7 @@ void LocalFrameViewLayoutContext::flushPendingSVGTransformAttributeUpdatesIfNeed
     };
     Vector<FastRecord> fastRecords;
     Vector<SlowRecord> slowRecords;
-    fastRecords.reserveInitialCapacity(pending.size());
+    fastRecords.reserveCapacity(pending.size());
     for (auto& weakRenderer : pending) {
         CheckedPtr renderer = weakRenderer.get();
         if (!renderer || renderer->renderTreeBeingDestroyed())

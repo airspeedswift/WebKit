@@ -2831,7 +2831,7 @@ private:
             return JSValue();
 
         Vector<RTCCertificate::DtlsFingerprint> fingerprints;
-        if (!fingerprints.tryReserveInitialCapacity(size)) {
+        if (!fingerprints.tryReserveCapacity(size)) {
             SERIALIZE_TRACE("FAIL deserialize");
             fail();
             return JSValue();
@@ -3662,7 +3662,7 @@ static std::unique_ptr<ArrayBufferContentsArray> copyArrayBufferContentsArray(co
     if (!source)
         return nullptr;
     auto result = makeUnique<ArrayBufferContentsArray>();
-    result->reserveInitialCapacity(source->size());
+    result->reserveCapacity(source->size());
     for (auto& content : *source) {
         result->append(JSC::ArrayBufferContents());
         content.shareWith(result->last());
@@ -4506,8 +4506,7 @@ Vector<String> SerializedScriptValue::blobURLs() const
 
 Vector<FileSystemHandleGlobalIdentifier> SerializedScriptValue::fileSystemHandleGlobalIdentifiers() const
 {
-    Vector<FileSystemHandleGlobalIdentifier> result;
-    result.reserveInitialCapacity(m_internals->fileSystemHandleKeepAlives.size());
+    Vector<FileSystemHandleGlobalIdentifier> result(ReserveCapacityTag { }, m_internals->fileSystemHandleKeepAlives.size());
     for (auto& keepAlive : m_internals->fileSystemHandleKeepAlives) {
         if (auto identifier = keepAlive.globalIdentifier())
             result.append(*identifier);

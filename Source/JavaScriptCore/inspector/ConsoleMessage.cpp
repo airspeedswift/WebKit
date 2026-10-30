@@ -138,7 +138,7 @@ ConsoleMessage::ConsoleMessage(MessageSource source, MessageType type, MessageLe
     if (!messages.size())
         return;
 
-    m_jsonLogValues.reserveInitialCapacity(messages.size());
+    m_jsonLogValues.reserveCapacity(messages.size());
 
     StringBuilder builder;
     for (auto& message : messages) {

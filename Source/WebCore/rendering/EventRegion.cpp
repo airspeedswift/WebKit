@@ -306,8 +306,8 @@ void EventRegionContext::shrinkWrapInteractionRegions()
         Vector<FloatRect> discoveredRects;
         Vector<Path> discoveredClipPaths;
 
-        discoveredRects.reserveInitialCapacity(discoveredRegions.size());
-        discoveredClipPaths.reserveInitialCapacity(discoveredRegions.size());
+        discoveredRects.reserveCapacity(discoveredRegions.size());
+        discoveredClipPaths.reserveCapacity(discoveredRegions.size());
 
         for (const auto& discoveredRegion : discoveredRegions) {
             auto previousArea = layerBounds.area();

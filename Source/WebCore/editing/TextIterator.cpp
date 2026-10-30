@@ -1878,7 +1878,7 @@ inline SearchBuffer::SearchBuffer(const String& target, FindOptions options)
     ASSERT(!m_target.isEmpty());
 
     size_t targetLength = m_target.length();
-    m_buffer.reserveInitialCapacity(std::max(targetLength * 8, minimumSearchBufferSize));
+    m_buffer.reserveCapacity(std::max(targetLength * 8, minimumSearchBufferSize));
     m_overlap = m_buffer.capacity() / 4;
 
     m_needsMoreContext = m_options.contains(FindOption::AtWordStarts);

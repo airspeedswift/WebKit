@@ -4808,8 +4808,7 @@ static RetainPtr<NSArray> wkTextManipulationErrors(NSArray<_WKTextManipulationIt
         return;
     }
 
-    Vector<WebCore::TextManipulationItem> coreItems;
-    coreItems.reserveInitialCapacity(items.count);
+    Vector<WebCore::TextManipulationItem> coreItems(ReserveCapacityTag { }, items.count);
     for (_WKTextManipulationItem *wkItem in items) {
         Vector<WebCore::TextManipulationToken> coreTokens(wkItem.tokens.count, [&](size_t i) {
             RetainPtr<_WKTextManipulationToken> wkToken = wkItem.tokens[i];
@@ -5380,8 +5379,7 @@ static void convertAndAddHighlight(Vector<Ref<WebCore::SharedMemory>>& buffers, 
 
 - (void)_createIconDataFromImageData:(NSData *)imageData withLengths:(NSArray<NSNumber *> *)lengths completionHandler:(void (^)(NSData *, NSError *))completionHandler
 {
-    Vector<unsigned> targetLengths;
-    targetLengths.reserveInitialCapacity(lengths.count);
+    Vector<unsigned> targetLengths(ReserveCapacityTag { }, lengths.count);
     for (NSNumber *length in lengths) {
         if (unsigned lengthValue = length.unsignedIntValue)
             targetLengths.append(lengthValue);
@@ -7008,8 +7006,7 @@ static inline OptionSet<WebKit::FindOptions> NODELETE toFindOptions(_WKFindOptio
 
 static Vector<Ref<API::TargetedElementInfo>> elementsFromWKElements(NSArray<_WKTargetedElementInfo *> *wkElements)
 {
-    Vector<Ref<API::TargetedElementInfo>> elements;
-    elements.reserveInitialCapacity(wkElements.count);
+    Vector<Ref<API::TargetedElementInfo>> elements(ReserveCapacityTag { }, wkElements.count);
     for (_WKTargetedElementInfo *element in wkElements)
         elements.append(protect(*element->_info));
     return elements;
@@ -7252,8 +7249,7 @@ static Vector<Ref<API::TargetedElementInfo>> elementsFromWKElements(NSArray<_WKT
 {
 #if PLATFORM(MAC)
     RetainPtr allItems = [[self _activePopupButtonCell] itemArray];
-    Vector<String> itemTitles;
-    itemTitles.reserveInitialCapacity([allItems count]);
+    Vector<String> itemTitles(ReserveCapacityTag { }, [allItems count]);
     for (NSMenuItem *item in allItems.get()) {
         if (!item.enabled)
             continue;

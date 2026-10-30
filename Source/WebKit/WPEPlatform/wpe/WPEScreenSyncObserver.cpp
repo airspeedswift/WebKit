@@ -74,7 +74,7 @@ static void wpeScreenSyncObserverSync(WPEScreenSyncObserver* observer)
     Vector<std::pair<WPEScreenSyncObserverSyncFunc, gpointer>> callbacks;
     {
         Locker locker { priv->lock };
-        callbacks.reserveInitialCapacity(priv->callbacks.size());
+        callbacks.reserveCapacity(priv->callbacks.size());
         for (const auto& callback : priv->callbacks.values())
             callbacks.append({ callback->syncFunc, callback->userData });
     }

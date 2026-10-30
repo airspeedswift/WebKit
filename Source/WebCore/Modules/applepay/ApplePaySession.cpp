@@ -110,7 +110,7 @@ static ExceptionOr<Vector<ApplePayLineItem>> convertAndValidate(std::optional<Ve
     if (!lineItems)
         return WTF::move(result);
 
-    result.reserveInitialCapacity(lineItems->size());
+    result.reserveCapacity(lineItems->size());
     
     for (auto lineItem : lineItems.value()) {
         auto convertedLineItem = convertAndValidate(WTF::move(lineItem));
@@ -132,8 +132,7 @@ static ExceptionOr<ApplePayShippingMethod> convertAndValidate(ApplePayShippingMe
 
 static ExceptionOr<Vector<ApplePayShippingMethod>> convertAndValidate(Vector<ApplePayShippingMethod>&& shippingMethods)
 {
-    Vector<ApplePayShippingMethod> result;
-    result.reserveInitialCapacity(shippingMethods.size());
+    Vector<ApplePayShippingMethod> result(ReserveCapacityTag { }, shippingMethods.size());
 
     for (auto& shippingMethod : shippingMethods) {
         auto convertedShippingMethod = convertAndValidate(WTF::move(shippingMethod));
@@ -214,8 +213,7 @@ static ExceptionOr<ApplePayPaymentTokenContext> convertAndValidate(ApplePayPayme
 
 static ExceptionOr<Vector<ApplePayPaymentTokenContext>> convertAndValidate(Vector<ApplePayPaymentTokenContext>&& tokenContexts)
 {
-    Vector<ApplePayPaymentTokenContext> result;
-    result.reserveInitialCapacity(tokenContexts.size());
+    Vector<ApplePayPaymentTokenContext> result(ReserveCapacityTag { }, tokenContexts.size());
 
     for (auto& tokenContext : tokenContexts) {
         auto convertedTokenContext = convertAndValidate(WTF::move(tokenContext));

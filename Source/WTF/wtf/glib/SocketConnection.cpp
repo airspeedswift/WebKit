@@ -39,8 +39,8 @@ SocketConnection::SocketConnection(GRefPtr<GSocketConnection>&& connection, cons
     , m_messageHandlers(messageHandlers)
     , m_userData(userData)
 {
-    m_readBuffer.reserveInitialCapacity(defaultBufferSize);
-    m_writeBuffer.reserveInitialCapacity(defaultBufferSize);
+    m_readBuffer.reserveCapacity(defaultBufferSize);
+    m_writeBuffer.reserveCapacity(defaultBufferSize);
 
     auto* socket = g_socket_connection_get_socket(m_connection.get());
     g_socket_set_blocking(socket, FALSE);

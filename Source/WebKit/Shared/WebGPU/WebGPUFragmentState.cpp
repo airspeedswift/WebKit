@@ -40,8 +40,7 @@ std::optional<FragmentState> ConvertToBackingContext::convertToBacking(const Web
     if (!base)
         return std::nullopt;
 
-    Vector<std::optional<ColorTargetState>> targets;
-    targets.reserveInitialCapacity(fragmentState.targets.size());
+    Vector<std::optional<ColorTargetState>> targets(ReserveCapacityTag { }, fragmentState.targets.size());
     for (const auto& target : fragmentState.targets) {
         if (target) {
             auto convertedTarget = convertToBacking(*target);
@@ -61,8 +60,7 @@ std::optional<WebCore::WebGPU::FragmentState> ConvertFromBackingContext::convert
     if (!base)
         return std::nullopt;
 
-    Vector<std::optional<WebCore::WebGPU::ColorTargetState>> targets;
-    targets.reserveInitialCapacity(fragmentState.targets.size());
+    Vector<std::optional<WebCore::WebGPU::ColorTargetState>> targets(ReserveCapacityTag { }, fragmentState.targets.size());
     for (const auto& backingTarget : fragmentState.targets) {
         if (backingTarget) {
             auto target = convertFromBacking(*backingTarget);

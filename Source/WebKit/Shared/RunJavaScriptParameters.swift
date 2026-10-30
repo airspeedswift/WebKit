@@ -65,7 +65,7 @@ extension WebKit.RunJavaScriptParameters {
         }
 
         var vector = unsafe Cxx.RunJavaScriptParametersArguments()
-        unsafe vector.reserveInitialCapacity(arguments.count)
+        unsafe vector.reserveCapacity(arguments.count)
 
         while let argument = arguments.popLast() {
             unsafe vector.append(consuming: .init(first: WTF.String(argument.key), second: argument.value))

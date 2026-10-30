@@ -513,7 +513,7 @@ void CtapAuthenticator::continueGetAssertionAfterResponseReceived(Vector<uint8_t
     }
 
     m_remainingAssertionResponses = response->numberOfCredentials() - 1;
-    m_assertionResponses.reserveInitialCapacity(response->numberOfCredentials());
+    m_assertionResponses.reserveCapacity(response->numberOfCredentials());
     m_assertionResponses.append(response.releaseNonNull());
     auto cborCmd = encodeEmptyAuthenticatorRequest(CtapRequestCommand::kAuthenticatorGetNextAssertion);
     CTAP_RELEASE_LOG("continueGetAssertionAfterResponseReceived: Sending %s", base64EncodeToString(cborCmd).utf8());

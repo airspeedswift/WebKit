@@ -1618,7 +1618,7 @@ inline bool PropertyParserCustom::consumeGridTemplateShorthand(CSSParserTokenRan
                 templateRowsTrackList.value.value.append(CSS::GridTrackList::Track { WTF::move(*lineNames) });
             else {
                 CSS::GridLineNames combinedLineNames;
-                combinedLineNames.value.value.reserveInitialCapacity(previousLineNames->size() + lineNames->size());
+                combinedLineNames.value.value.reserveCapacity(previousLineNames->size() + lineNames->size());
                 combinedLineNames.value.value.appendVector(previousLineNames->value.value);
                 combinedLineNames.value.value.appendVector(lineNames->value.value);
 

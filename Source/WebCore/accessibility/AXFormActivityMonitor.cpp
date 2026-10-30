@@ -591,8 +591,7 @@ void AXFormActivityMonitor::report()
     // that field is given an aria-errormessage relation. Geometry is used to make the pairings, because
     // what makes a sighted user read a message as being about a field is that it appears next to it.
     auto fields = CheckedRef { m_cache }->formFieldsForErrorPairing(*form);
-    Vector<FieldBounds> fieldBounds;
-    fieldBounds.reserveInitialCapacity(fields.size());
+    Vector<FieldBounds> fieldBounds(ReserveCapacityTag { }, fields.size());
     for (auto& field : fields) {
         auto rect = field->boundsInRootViewSpace();
         if (!rect.isEmpty())
@@ -625,8 +624,7 @@ void AXFormActivityMonitor::report()
         bool isInsideForm;
     };
 
-    Vector<MessageBounds> messageBounds;
-    messageBounds.reserveInitialCapacity(candidates.size());
+    Vector<MessageBounds> messageBounds(ReserveCapacityTag { }, candidates.size());
     for (size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex) {
         RefPtr errorElement = candidates[candidateIndex].element.get();
         if (!errorElement || !errorElement->isConnected())

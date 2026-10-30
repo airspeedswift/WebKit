@@ -78,8 +78,8 @@ void WebNotificationManagerMessageHandler::clearNotifications(const Vector<WTF::
 
     Vector<WTF::UUID> persistentNotifications;
     Vector<WTF::UUID> pageNotifications;
-    persistentNotifications.reserveInitialCapacity(notificationIDs.size());
-    pageNotifications.reserveInitialCapacity(notificationIDs.size());
+    persistentNotifications.reserveCapacity(notificationIDs.size());
+    pageNotifications.reserveCapacity(notificationIDs.size());
     for (auto& notificationID : notificationIDs) {
         if (serviceWorkerNotificationHandler->handlesNotification(notificationID))
             persistentNotifications.append(notificationID);

@@ -104,7 +104,7 @@ Vector<uint8_t> FidoHidMessage::getMessagePayload() const
     size_t dataSize = 0;
     for (const auto& packet : m_packets)
         dataSize += packet->getPacketPayload().size();
-    data.reserveInitialCapacity(dataSize);
+    data.reserveCapacity(dataSize);
 
     for (const auto& packet : m_packets) {
         const auto& packet_data = packet->getPacketPayload();

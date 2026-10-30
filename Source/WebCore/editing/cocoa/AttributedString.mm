@@ -583,8 +583,7 @@ static std::optional<AttributedString::AttributeValue> extractArray(NSArray *arr
     if (!arrayLength)
         return { { { Vector<String>() } } };
     if ([array[0] isKindOfClass:NSString.class]) {
-        Vector<String> result;
-        result.reserveInitialCapacity(arrayLength);
+        Vector<String> result(ReserveCapacityTag { }, arrayLength);
         for (id element in array) {
             if (RetainPtr string = dynamic_objc_cast<NSString>(element))
                 result.append(string.get());
@@ -594,8 +593,7 @@ static std::optional<AttributedString::AttributeValue> extractArray(NSArray *arr
         return { { { WTF::move(result) } } };
     }
     if ([array[0] isKindOfClass:NSNumber.class]) {
-        Vector<double> result;
-        result.reserveInitialCapacity(arrayLength);
+        Vector<double> result(ReserveCapacityTag { }, arrayLength);
         for (id element in array) {
             if ([element isKindOfClass:NSNumber.class])
                 result.append([(NSNumber *)element doubleValue]);
@@ -799,7 +797,7 @@ ALLOW_DEPRECATED_DECLARATIONS_END
     };
 
     RetainPtr<NSArray<NSTextTab *>> tabStops = [style tabStops];
-    newTextTabs.reserveInitialCapacity([tabStops count]);
+    newTextTabs.reserveCapacity([tabStops count]);
     for (NSTextTab *textTab : tabStops.get()) {
         newTextTabs.append(TextTab {
             [textTab location],

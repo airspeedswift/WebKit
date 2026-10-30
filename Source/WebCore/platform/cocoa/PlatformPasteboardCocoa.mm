@@ -46,7 +46,7 @@ std::optional<Vector<PasteboardItemInfo>> PlatformPasteboard::allPasteboardItemI
 
     Vector<PasteboardItemInfo> itemInfo;
     int numberOfItems = count();
-    itemInfo.reserveInitialCapacity(numberOfItems);
+    itemInfo.reserveCapacity(numberOfItems);
     for (NSInteger itemIndex = 0; itemIndex < numberOfItems; ++itemIndex) {
         auto item = informationForItemAtIndex(itemIndex, changeCount);
         if (!item)

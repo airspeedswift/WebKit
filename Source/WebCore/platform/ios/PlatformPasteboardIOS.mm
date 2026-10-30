@@ -240,17 +240,17 @@ std::optional<PasteboardItemInfo> PlatformPasteboard::informationForItemAtIndex(
         NSArray *urls = [m_pasteboard fileUploadURLsAtIndex:index fileTypes:&fileTypes];
         ASSERT(fileTypes.count == urls.count);
 
-        info.pathsForFileUpload.reserveInitialCapacity(urls.count);
+        info.pathsForFileUpload.reserveCapacity(urls.count);
         for (NSURL *url in urls)
             info.pathsForFileUpload.append(url.path);
 
-        info.platformTypesForFileUpload.reserveInitialCapacity(fileTypes.count);
+        info.platformTypesForFileUpload.reserveCapacity(fileTypes.count);
         for (NSString *fileType in fileTypes)
             info.platformTypesForFileUpload.append(fileType);
     } else {
         NSArray *fileTypes = itemProvider.web_fileUploadContentTypes;
-        info.platformTypesForFileUpload.reserveInitialCapacity(fileTypes.count);
-        info.pathsForFileUpload.reserveInitialCapacity(fileTypes.count);
+        info.platformTypesForFileUpload.reserveCapacity(fileTypes.count);
+        info.pathsForFileUpload.reserveCapacity(fileTypes.count);
         for (NSString *fileType in fileTypes) {
             info.platformTypesForFileUpload.append(fileType);
             info.pathsForFileUpload.append({ });
@@ -272,7 +272,7 @@ std::optional<PasteboardItemInfo> PlatformPasteboard::informationForItemAtIndex(
     info.containsFileURLAndFileUploadContent = itemProvider.web_containsFileURLAndFileUploadContent;
     info.suggestedFileName = itemProvider.suggestedName;
     NSArray<NSString *> *registeredTypeIdentifiers = itemProvider.registeredTypeIdentifiers;
-    info.platformTypesByFidelity.reserveInitialCapacity(registeredTypeIdentifiers.count);
+    info.platformTypesByFidelity.reserveCapacity(registeredTypeIdentifiers.count);
     for (NSString *typeIdentifier in registeredTypeIdentifiers) {
         info.platformTypesByFidelity.append(typeIdentifier);
         RetainPtr utType = [UTType typeWithIdentifier:typeIdentifier];
@@ -741,8 +741,7 @@ int PlatformPasteboard::count() const
 Vector<String> PlatformPasteboard::allStringsForType(const String& type) const
 {
     auto numberOfItems = count();
-    Vector<String> strings;
-    strings.reserveInitialCapacity(numberOfItems);
+    Vector<String> strings(ReserveCapacityTag { }, numberOfItems);
     for (int index = 0; index < numberOfItems; ++index) {
         String value = readString(index, type);
         if (!value.isEmpty())

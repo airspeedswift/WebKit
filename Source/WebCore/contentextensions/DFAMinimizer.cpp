@@ -77,7 +77,7 @@ public:
         if (!size)
             return;
 
-        m_sets.reserveInitialCapacity(size);
+        m_sets.reserveCapacity(size);
         m_partitionedElements.resize(size);
         m_elementPositionInPartitionedNodes.resize(size);
         m_elementToSetMap.resize(size);

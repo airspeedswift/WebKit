@@ -102,8 +102,8 @@ int Connection::socketDescriptor() const
 void Connection::platformInitialize(Identifier&& identifier)
 {
     m_socketDescriptor = WTF::move(identifier.handle);
-    m_readBuffer.reserveInitialCapacity(messageMaxSize);
-    m_fileDescriptors.reserveInitialCapacity(attachmentMaxAmount);
+    m_readBuffer.reserveCapacity(messageMaxSize);
+    m_fileDescriptors.reserveCapacity(attachmentMaxAmount);
 }
 
 void Connection::platformInvalidate()

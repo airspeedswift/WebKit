@@ -45,7 +45,7 @@ SkiaReplayCanvas::SkiaReplayCanvas(const IntSize& size, const Ref<SkiaRecordingR
     // GPU atlases were uploaded on main thread; we just rewrap for this worker's context.
     if (m_recording->hasGPUAtlases()) {
         const auto& gpuAtlases = m_recording->gpuAtlases();
-        m_atlases.reserveInitialCapacity(gpuAtlases.size());
+        m_atlases.reserveCapacity(gpuAtlases.size());
 
         for (const auto& gpuAtlas : gpuAtlases)
             m_atlases.append(SkiaReplayAtlas::create(gpuAtlas));

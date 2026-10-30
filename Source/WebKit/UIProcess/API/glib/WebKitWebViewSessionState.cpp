@@ -270,7 +270,7 @@ static inline bool decodeHTTPBody(GVariant* httpBodyVariant, HTTPBody& httpBody)
     gsize elementsLength = g_variant_iter_n_children(elementsIter.get());
     if (!elementsLength)
         return true;
-    httpBody.elements.reserveInitialCapacity(elementsLength);
+    httpBody.elements.reserveCapacity(elementsLength);
     unsigned type;
     GVariantIter* dataIter;
     const char* filePath;
@@ -285,8 +285,7 @@ static inline bool decodeHTTPBody(GVariant* httpBodyVariant, HTTPBody& httpBody)
         switch (type) {
         case WTF::alternativeIndexV<Vector<uint8_t>, HTTPBody::Element::Data>:
             if (gsize dataLength = g_variant_iter_n_children(dataIter)) {
-                Vector<uint8_t> data;
-                data.reserveInitialCapacity(dataLength);
+                Vector<uint8_t> data(ReserveCapacityTag { }, dataLength);
                 guchar dataValue;
                 while (g_variant_iter_next(dataIter, "y", &dataValue))
                     data.append(dataValue);
@@ -339,8 +338,7 @@ static inline void decodeFrameState(GVariant* frameStateVariant, FrameState& fra
     if (auto targetString = AtomString::fromUTF8(target); !targetString.isEmpty())
         frameState.target = WTF::move(targetString);
     if (gsize documentStateLength = g_variant_iter_n_children(documentStateIter.get())) {
-        Vector<AtomString> documentState;
-        documentState.reserveInitialCapacity(documentStateLength);
+        Vector<AtomString> documentState(ReserveCapacityTag { }, documentStateLength);
         const char* documentStateString;
         while (g_variant_iter_next(documentStateIter.get(), "&s", &documentStateString))
             documentState.append(AtomString::fromUTF8(documentStateString));
@@ -349,7 +347,7 @@ static inline void decodeFrameState(GVariant* frameStateVariant, FrameState& fra
     if (stateObjectDataIter) {
         Vector<uint8_t> stateObjectVector;
         if (gsize stateObjectDataLength = g_variant_iter_n_children(stateObjectDataIter.get())) {
-            stateObjectVector.reserveInitialCapacity(stateObjectDataLength);
+            stateObjectVector.reserveCapacity(stateObjectDataLength);
             guchar stateObjectDataValue;
             while (g_variant_iter_next(stateObjectDataIter.get(), "y", &stateObjectDataValue))
                 stateObjectVector.append(stateObjectDataValue);
@@ -408,7 +406,7 @@ static inline void decodeBackForwardListItemState(GVariantIter* backForwardListS
     if (!backForwardListStateLength)
         return;
 
-    backForwardListState.items.reserveInitialCapacity(backForwardListStateLength);
+    backForwardListState.items.reserveCapacity(backForwardListStateLength);
     if (version == 1) {
         decodeBackForwardListItemStateV1(backForwardListStateIter, backForwardListState);
         return;

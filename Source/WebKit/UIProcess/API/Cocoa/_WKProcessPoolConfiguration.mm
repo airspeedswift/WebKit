@@ -151,8 +151,7 @@ ALLOW_DEPRECATED_IMPLEMENTATIONS_END
 
 - (void)setAdditionalReadAccessAllowedURLs:(NSArray<NSURL *> *)additionalReadAccessAllowedURLs
 {
-    Vector<String> paths;
-    paths.reserveInitialCapacity(additionalReadAccessAllowedURLs.count);
+    Vector<String> paths(ReserveCapacityTag { }, additionalReadAccessAllowedURLs.count);
     for (NSURL *url in additionalReadAccessAllowedURLs) {
         if (!url.isFileURL)
             [NSException raise:NSInvalidArgumentException format:@"%@ is not a file URL", url];

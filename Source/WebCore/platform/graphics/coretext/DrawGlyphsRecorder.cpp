@@ -260,7 +260,7 @@ static AdvancesAndInitialPosition computeHorizontalAdvancesFromPositions(std::sp
     // This function needs to be the inverse of fillVectorWithHorizontalGlyphPositions().
 
     AdvancesAndInitialPosition result;
-    result.advances.reserveInitialCapacity(positions.size());
+    result.advances.reserveCapacity(positions.size());
     result.initialPosition = CGPointApplyAffineTransform(positions[0], textMatrix);
     for (size_t i = 0; i < positions.size() - 1; ++i) {
         auto nextPosition = positions[i + 1];
@@ -285,7 +285,7 @@ static AdvancesAndInitialPosition computeVerticalAdvancesFromPositions(std::span
     };
 
     AdvancesAndInitialPosition result;
-    result.advances.reserveInitialCapacity(positions.size());
+    result.advances.reserveCapacity(positions.size());
     result.initialPosition = transformPoint(positions[0], translations[0]);
     CGPoint previousPosition = result.initialPosition;
     result.initialPosition.y -= ascentDelta;

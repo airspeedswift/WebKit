@@ -82,7 +82,7 @@ GridItemPlacementResult GridItemPlacer::placeItems(const LogicalGridItems& logic
     auto implicitGrid = ImplicitGrid::createInitialGrid(unplacedGridItems, leadingImplicitTracks, explicitColumnsCount, explicitRowsCount);
 
     GridAreas gridAreas;
-    gridAreas.reserveInitialCapacity(unplacedGridItems.nonAutoPositionedItems.size()
+    gridAreas.reserveCapacity(unplacedGridItems.nonAutoPositionedItems.size()
         + unplacedGridItems.definiteRowPositionedItems.size()
         + unplacedGridItems.autoPositionedItems.size());
 

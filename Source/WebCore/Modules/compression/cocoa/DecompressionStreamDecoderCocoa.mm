@@ -57,7 +57,7 @@ ExceptionOr<Ref<JSC::ArrayBuffer>> DecompressionStreamDecoder::decompressAppleCo
 
     while (shouldDecompress) {
         Vector<uint8_t> output;
-        if (!output.tryReserveInitialCapacity(allocateSize)) {
+        if (!output.tryReserveCapacity(allocateSize)) {
             allocateSize /= 4;
 
             if (allocateSize < startingAllocationSize)

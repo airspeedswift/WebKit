@@ -194,7 +194,7 @@ void JSVMClientData::getAllWorlds(Vector<Ref<DOMWrapperWorld>>& worlds)
 {
     ASSERT(worlds.isEmpty());
 
-    worlds.reserveInitialCapacity(m_worldSet.size());
+    worlds.reserveCapacity(m_worldSet.size());
 
     // It is necessary to order the `DOMWrapperWorld`s because certain callers expect the main world
     // to be the first item in the list, as they use the main world as an indicator of when the page

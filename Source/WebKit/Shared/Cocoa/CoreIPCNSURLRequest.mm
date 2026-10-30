@@ -258,13 +258,11 @@ CoreIPCNSURLRequest::CoreIPCNSURLRequest(NSURLRequest *request)
 
     RetainPtr<NSDictionary> headerFields = dict.get()[@"headerFields"];
     if ([headerFields isKindOfClass:[NSDictionary class]]) {
-        Vector<CoreIPCNSURLRequestData::HeaderField> vector;
-        vector.reserveInitialCapacity(headerFields.get().count);
+        Vector<CoreIPCNSURLRequestData::HeaderField> vector(ReserveCapacityTag { }, headerFields.get().count);
         for (id key in headerFields.get()) {
             RetainPtr<id> value = [headerFields objectForKey:key];
             if (RetainPtr valueArray = dynamic_objc_cast<NSArray>(value.get())) {
-                Vector<String> valueVector;
-                valueVector.reserveInitialCapacity(valueArray.get().count);
+                Vector<String> valueVector(ReserveCapacityTag { }, valueArray.get().count);
                 for (id item in valueArray.get()) {
                     if (RetainPtr nsString = dynamic_objc_cast<NSString>(item))
                         valueVector.append(nsString.get());
@@ -328,8 +326,7 @@ CoreIPCNSURLRequest::CoreIPCNSURLRequest(NSURLRequest *request)
 
     RetainPtr<NSArray> contentDispositionEncodingFallbackArray = dict.get()[@"contentDispositionEncodingFallbackArray"];
     if ([contentDispositionEncodingFallbackArray isKindOfClass:[NSArray class]]) {
-        Vector<CoreIPCNumber> vector;
-        vector.reserveInitialCapacity(contentDispositionEncodingFallbackArray.get().count);
+        Vector<CoreIPCNumber> vector(ReserveCapacityTag { }, contentDispositionEncodingFallbackArray.get().count);
         for (id element in contentDispositionEncodingFallbackArray.get()) {
             if ([element isKindOfClass:[NSNumber class]])
                 vector.append(CoreIPCNumber(element));

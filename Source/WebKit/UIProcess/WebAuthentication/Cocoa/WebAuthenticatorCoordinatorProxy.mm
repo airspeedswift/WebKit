@@ -1119,8 +1119,7 @@ static RetainPtr<ASCCredentialRequestContext> configurationAssertionRequestConte
 
 static Vector<WebCore::AuthenticatorTransport> toAuthenticatorTransports(NSArray<NSString *> *ascTransports)
 {
-    Vector<WebCore::AuthenticatorTransport> transports;
-    transports.reserveInitialCapacity(ascTransports.count);
+    Vector<WebCore::AuthenticatorTransport> transports(ReserveCapacityTag { }, ascTransports.count);
     for (NSString *ascTransport : ascTransports) {
         if ([ascTransport isEqualToString:@"usb"])
             transports.append(WebCore::AuthenticatorTransport::Usb);

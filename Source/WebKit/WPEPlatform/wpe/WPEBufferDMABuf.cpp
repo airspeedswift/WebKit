@@ -328,7 +328,7 @@ WPEBufferDMABuf* wpe_buffer_dma_buf_new(WPEDisplay* display, int width, int heig
         nullptr));
 
     buffer->priv->format = format;
-    buffer->priv->fds.reserveInitialCapacity(planeCount);
+    buffer->priv->fds.reserveCapacity(planeCount);
     for (guint32 i = 0; i < planeCount; ++i)
         buffer->priv->fds.append(UnixFileDescriptor { fds[i], UnixFileDescriptor::Adopt });
     buffer->priv->offsets.grow(planeCount);

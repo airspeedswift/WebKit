@@ -64,8 +64,7 @@ void TextDetectorImpl::detect(const NativeImage& image, CompletionHandler<void(V
     }
 
     auto imageSize = image.size();
-    Vector<DetectedText> results;
-    results.reserveInitialCapacity(request.get().results.count);
+    Vector<DetectedText> results(ReserveCapacityTag { }, request.get().results.count);
     for (VNRecognizedTextObservation *observation in request.get().results) {
         results.append({
             convertRectFromVisionToWeb(imageSize, observation.boundingBox),

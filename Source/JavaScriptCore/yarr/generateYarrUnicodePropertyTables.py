@@ -621,7 +621,7 @@ class PropertyData:
 
         file.write("        CharacterClassWidths::{});\n".format(("Unknown", "HasBMPChars", "HasNonBMPChars", "HasBothBMPAndNonBMP")[int(self.hasNonBMPCharacters) * 2 + int(self.hasBMPCharacters)]))
         if self.hasStrings:
-            file.write("    characterClass->m_strings.reserveInitialCapacity({});\n".format(len(self.matchStrings)))
+            file.write("    characterClass->m_strings.reserveCapacity({});\n".format(len(self.matchStrings)))
             file.write("    const char32_t* data = kStrings{}Data;\n".format(self.index))
             file.write("    for (uint8_t length : kStrings{}Lengths) {{\n".format(self.index))
             file.write("        characterClass->m_strings.append(Vector<char32_t>(std::span(data, length)));\n")

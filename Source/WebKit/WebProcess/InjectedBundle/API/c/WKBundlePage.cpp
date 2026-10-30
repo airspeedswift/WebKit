@@ -402,8 +402,7 @@ void WKBundlePageReplaceStringMatches(WKBundlePageRef pageRef, WKArrayRef matchI
 {
     RefPtr matchIndices = WebKit::toImpl(matchIndicesRef);
 
-    Vector<uint32_t> indices;
-    indices.reserveInitialCapacity(matchIndices->size());
+    Vector<uint32_t> indices(ReserveCapacityTag { }, matchIndices->size());
 
     auto numberOfMatchIndices = matchIndices->size();
     for (size_t i = 0; i < numberOfMatchIndices; ++i) {
@@ -505,7 +504,7 @@ void WKBundlePageSetComposition(WKBundlePageRef pageRef, WKStringRef text, int f
     Vector<WebCore::CompositionHighlight> highlights;
     if (highlightData) {
         RefPtr highlightDataArray = WebKit::toImpl(highlightData);
-        highlights.reserveInitialCapacity(highlightDataArray->size());
+        highlights.reserveCapacity(highlightDataArray->size());
         for (RefPtr dictionary : highlightDataArray->elementsOfType<API::Dictionary>()) {
             auto startOffset = downcast<API::UInt64>(dictionary->get("from"_s))->value();
 

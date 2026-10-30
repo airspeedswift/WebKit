@@ -227,7 +227,7 @@ void ComplexTextController::collectComplexTextRunsForCharacters(std::span<const 
     // features vector when kerning is explicitly disabled or the font is vertically oriented.
     Vector<hb_feature_t> extraFeatures;
     if (!m_fontCascade->enableKerning() || isVertical) {
-        extraFeatures.reserveInitialCapacity(featuresSize + 3);
+        extraFeatures.reserveCapacity(featuresSize + 3);
         if (!m_fontCascade->enableKerning()) {
             static hb_feature_t kernFeature { HB_TAG('k', 'e', 'r', 'n'), 0, 0, static_cast<unsigned>(-1) };
             extraFeatures.append(kernFeature);

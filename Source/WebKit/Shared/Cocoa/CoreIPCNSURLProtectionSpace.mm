@@ -80,8 +80,7 @@ CoreIPCNSURLProtectionSpace::CoreIPCNSURLProtectionSpace(NSURLProtectionSpace *p
     NSArray *distnames = dict[@"distnames"];
     if ([distnames isKindOfClass:NSArray.class]) {
         bool allElementsValid = true;
-        Vector<WebKit::CoreIPCData> data;
-        data.reserveInitialCapacity(distnames.count);
+        Vector<WebKit::CoreIPCData> data(ReserveCapacityTag { }, distnames.count);
         for (NSData *d in distnames) {
             if (![d isKindOfClass:NSData.class]) {
                 allElementsValid = false;

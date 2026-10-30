@@ -40,8 +40,7 @@ std::optional<VertexState> ConvertToBackingContext::convertToBacking(const WebCo
     if (!base)
         return std::nullopt;
 
-    Vector<std::optional<VertexBufferLayout>> buffers;
-    buffers.reserveInitialCapacity(vertexState.buffers.size());
+    Vector<std::optional<VertexBufferLayout>> buffers(ReserveCapacityTag { }, vertexState.buffers.size());
     for (const auto& buffer : vertexState.buffers) {
         if (buffer) {
             auto convertedBuffer = convertToBacking(*buffer);
@@ -61,8 +60,7 @@ std::optional<WebCore::WebGPU::VertexState> ConvertFromBackingContext::convertFr
     if (!base)
         return std::nullopt;
 
-    Vector<std::optional<WebCore::WebGPU::VertexBufferLayout>> buffers;
-    buffers.reserveInitialCapacity(vertexState.buffers.size());
+    Vector<std::optional<WebCore::WebGPU::VertexBufferLayout>> buffers(ReserveCapacityTag { }, vertexState.buffers.size());
     for (const auto& backingBuffer : vertexState.buffers) {
         if (backingBuffer) {
             auto buffer = convertFromBacking(*backingBuffer);

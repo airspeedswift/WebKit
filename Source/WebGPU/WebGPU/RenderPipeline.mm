@@ -1060,9 +1060,8 @@ NSString* Device::addPipelineLayouts(Vector<Vector<WGPUBindGroupLayoutEntry>>& p
 Ref<PipelineLayout> Device::generatePipelineLayout(const Vector<Vector<WGPUBindGroupLayoutEntry>> &bindGroupEntries)
 {
     Vector<WGPUBindGroupLayout> bindGroupLayouts;
-    Vector<Ref<WebGPU::Metal::BindGroupLayout>> bindGroupLayoutsRefs;
-    bindGroupLayoutsRefs.reserveInitialCapacity(bindGroupEntries.size());
-    bindGroupLayouts.reserveInitialCapacity(bindGroupEntries.size());
+    Vector<Ref<WebGPU::Metal::BindGroupLayout>> bindGroupLayoutsRefs(ReserveCapacityTag { }, bindGroupEntries.size());
+    bindGroupLayouts.reserveCapacity(bindGroupEntries.size());
     for (auto& entries : bindGroupEntries) {
         WGPUBindGroupLayoutDescriptor bindGroupLayoutDescriptor = { };
         bindGroupLayoutDescriptor.label = toAPI("getBindGroup() generated layout"_s);

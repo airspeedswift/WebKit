@@ -106,8 +106,8 @@ void Connection::platformInitialize(Identifier&& identifier)
     g_socket_set_blocking(m_socket.get(), FALSE);
 
     m_cancellable = adoptGRef(g_cancellable_new());
-    m_readBuffer.reserveInitialCapacity(s_messageMaxSize);
-    m_fileDescriptors.reserveInitialCapacity(s_attachmentMaxAmount);
+    m_readBuffer.reserveCapacity(s_messageMaxSize);
+    m_fileDescriptors.reserveCapacity(s_attachmentMaxAmount);
 }
 
 void Connection::platformInvalidate()
@@ -421,8 +421,7 @@ bool Connection::sendOutputMessage(UnixMessage&& outputMessage)
     Vector<AttachmentInfo> attachmentInfo;
     if (!attachments.isEmpty()) {
         attachmentInfo.resize(attachments.size());
-        Vector<int> fds;
-        fds.reserveInitialCapacity(attachments.size());
+        Vector<int> fds(ReserveCapacityTag { }, attachments.size());
         for (size_t i = 0; i < attachments.size(); ++i) {
 #if OS(ANDROID)
             RELEASE_ASSERT(attachmentInfo[i].type() == AttachmentInfo::Type::Unset);

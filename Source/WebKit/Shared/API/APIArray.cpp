@@ -43,7 +43,7 @@ Ref<Array> Array::create(Vector<RefPtr<Object>>&& elements)
 Ref<Array> Array::createWithCapacity(size_t capacity)
 {
     auto array = create(Vector<RefPtr<Object>>());
-    array->m_elements.reserveInitialCapacity(capacity);
+    array->m_elements.reserveCapacity(capacity);
     return array;
 }
 
@@ -70,7 +70,7 @@ Vector<WTF::String> Array::toStringVector()
     if (!size)
         return patternsVector;
 
-    patternsVector.reserveInitialCapacity(size);
+    patternsVector.reserveCapacity(size);
     for (RefPtr entry : elementsOfType<API::String>())
         patternsVector.append(entry->string());
     return patternsVector;

@@ -622,7 +622,7 @@ ExceptionOr<NodeVector> Node::convertNodesOrStringsIntoNodeVector(FixedVector<No
 
     Ref document = this->document();
     NodeVector nodeVector;
-    nodeVector.reserveInitialCapacity(nodeOrStringVector.size());
+    nodeVector.reserveCapacity(nodeOrStringVector.size());
     for (auto& variant : nodeOrStringVector) {
         if (std::holds_alternative<String>(variant)) {
             nodeVector.append(Text::create(document, WTF::move(std::get<String>(variant))));

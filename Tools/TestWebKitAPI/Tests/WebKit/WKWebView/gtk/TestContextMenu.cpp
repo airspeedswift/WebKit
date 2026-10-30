@@ -960,7 +960,7 @@ public:
 
         GVariantIter iter;
         g_variant_iter_init(&iter, userData);
-        m_actions.reserveInitialCapacity(g_variant_iter_n_children(&iter));
+        m_actions.reserveCapacity(g_variant_iter_n_children(&iter));
 
         uint32_t item;
         while (g_variant_iter_next(&iter, "u", &item))

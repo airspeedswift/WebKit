@@ -242,8 +242,7 @@ Vector<Ref<MediaSampleAVFObjC>> MediaSampleAVFObjC::divide()
     if (numSamples == 1)
         return Vector<Ref<MediaSampleAVFObjC>>::from(Ref { *this });
 
-    Vector<Ref<MediaSampleAVFObjC>> samples;
-    samples.reserveInitialCapacity(numSamples);
+    Vector<Ref<MediaSampleAVFObjC>> samples(ReserveCapacityTag { }, numSamples);
     if (forEachSample(m_sample.get(), [&samples, id = m_id] (CMSampleBufferRef sampleBuffer, CMItemCount) -> OSStatus {
         samples.append(MediaSampleAVFObjC::create(sampleBuffer, id));
         return noErr;
@@ -408,7 +407,7 @@ Vector<Ref<MediaSampleAVFObjC>> MediaSampleAVFObjC::divideIntoHomogeneousSamples
         return SampleVector::from(Ref { *this });
 
     SampleVector samples;
-    samples.reserveInitialCapacity(ranges.size());
+    samples.reserveCapacity(ranges.size());
     for (const auto& range : ranges) {
         RetainPtr subSample = copySampleBufferForRange(m_sample.get(), range);
         if (!subSample)

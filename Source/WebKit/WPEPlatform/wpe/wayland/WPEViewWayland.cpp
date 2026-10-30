@@ -705,7 +705,7 @@ static void wpeViewWaylandSetOpaqueRectangles(WPEView* view, WPERectangle* rects
 
     priv->opaqueRegion.clear();
     if (rects) {
-        priv->opaqueRegion.reserveInitialCapacity(rectsCount);
+        priv->opaqueRegion.reserveCapacity(rectsCount);
         for (unsigned i = 0; i < rectsCount; ++i)
             priv->opaqueRegion.append(rects[i]);
     }

@@ -392,8 +392,8 @@ Region::Shape Region::Shape::shapeOperation(const Shape& shape1, const Shape& sh
     if (Operation::trySimpleOperation(shape1, shape2, result))
         return result;
 
-    result.m_segments.reserveInitialCapacity(shape1.m_segments.size() + shape2.m_segments.size());
-    result.m_spans.reserveInitialCapacity(shape1.m_spans.size() + shape2.m_spans.size());
+    result.m_segments.reserveCapacity(shape1.m_segments.size() + shape2.m_segments.size());
+    result.m_spans.reserveCapacity(shape1.m_spans.size() + shape2.m_spans.size());
 
     auto spans1 = shape1.spans();
     auto spans2 = shape2.spans();

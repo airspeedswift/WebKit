@@ -661,7 +661,7 @@ void RemoteGraphicsContextProxy::strokeEllipse(const FloatRect& rect)
 void RemoteGraphicsContextProxy::bufferLine(const PathDataLine& line, const InlineStrokeData& strokeData)
 {
     if (!m_pendingLineStrokes.capacity())
-        m_pendingLineStrokes.reserveInitialCapacity(maxPendingLineStrokes);
+        m_pendingLineStrokes.reserveCapacity(maxPendingLineStrokes);
 
     m_pendingLineStrokes.append({ line, strokeData.color, strokeData.thickness });
 

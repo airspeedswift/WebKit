@@ -90,7 +90,7 @@ WebKitOptionMenu* webkitOptionMenuCreate(WebKitPopupMenu& popupMenu, const Vecto
 {
     auto* menu = WEBKIT_OPTION_MENU(g_object_new(WEBKIT_TYPE_OPTION_MENU, nullptr));
     menu->priv->popupMenu = &popupMenu;
-    menu->priv->items.reserveInitialCapacity(items.size());
+    menu->priv->items.reserveCapacity(items.size());
     for (const auto& item : items)
         menu->priv->items.append(WebKitOptionMenuItem(item));
     if (selectedIndex >= 0) {

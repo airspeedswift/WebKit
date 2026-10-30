@@ -79,14 +79,14 @@ TextRecognitionResult makeTextRecognitionResult(VKCImageAnalysis *analysis)
 {
     RetainPtr<NSArray<VKWKLineInfo *>> allLines = analysis.allLines;
     TextRecognitionResult result;
-    result.lines.reserveInitialCapacity(allLines.get().count);
+    result.lines.reserveCapacity(allLines.get().count);
 
     bool isFirstLine = true;
     size_t nextLineIndex = 1;
     for (VKWKLineInfo *line in allLines.get()) {
         Vector<TextRecognitionWordData> children;
         RetainPtr<NSArray<VKWKTextInfo *>> vkChildren = line.children;
-        children.reserveInitialCapacity(vkChildren.get().count);
+        children.reserveCapacity(vkChildren.get().count);
 
         String lineText = line.string;
         unsigned searchLocation = 0;
@@ -126,7 +126,7 @@ TextRecognitionResult makeTextRecognitionResult(VKCImageAnalysis *analysis)
 #if ENABLE(DATA_DETECTION)
     if ([analysis respondsToSelector:@selector(textDataDetectors)]) {
         auto dataDetectors = RetainPtr { analysis.textDataDetectors };
-        result.dataDetectors.reserveInitialCapacity([dataDetectors count]);
+        result.dataDetectors.reserveCapacity([dataDetectors count]);
         for (VKWKDataDetectorInfo *info in dataDetectors.get())
             result.dataDetectors.append({ info.result, floatQuads(retainPtr(info.boundingQuads).get()) });
     }
@@ -165,7 +165,7 @@ static TextRecognitionResult makeTextRecognitionResult(VKCImageAnalysisTranslati
     TextRecognitionResult result;
 
     RetainPtr<NSArray<VKCTranslatedParagraph *>> paragraphs = translation.paragraphs;
-    result.blocks.reserveInitialCapacity(paragraphs.get().count);
+    result.blocks.reserveCapacity(paragraphs.get().count);
 
     for (VKCTranslatedParagraph *paragraph in paragraphs.get()) {
         if (!paragraph.text.length) {

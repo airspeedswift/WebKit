@@ -253,7 +253,7 @@ static String aggregateText(const Vector<LiveRegionObject>& objects, bool& isTru
     StringBuilder builder;
     builder.reserveCapacity(std::min(lengthHint, maximumAggregateLength + 1));
     if (objectEndOffsets)
-        objectEndOffsets->reserveInitialCapacity(objects.size());
+        objectEndOffsets->reserveCapacity(objects.size());
 
     for (auto& object : objects) {
         String text = object.text.simplifyWhiteSpace(isUnicodeWhitespace);
@@ -596,7 +596,7 @@ AXLiveRegionManager::LiveRegionDiff AXLiveRegionManager::computeChanges(const Li
     std::sort(additions.begin(), additions.end(), [] (const auto& a, const auto& b) {
         return a.first < b.first;
     });
-    diff.added.reserveInitialCapacity(additions.size());
+    diff.added.reserveCapacity(additions.size());
     for (auto& addition : additions)
         diff.added.append(WTF::move(addition.second));
 

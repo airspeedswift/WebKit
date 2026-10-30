@@ -45,9 +45,9 @@ public:
         : m_graph(graph)
     {
         unsigned initialCapacity = m_graph.maxNodeCount();
-        m_map.reserveInitialCapacity(initialCapacity);
+        m_map.reserveCapacity(initialCapacity);
         if (m_graph.m_form == SSA)
-            m_shadowMap.reserveInitialCapacity(initialCapacity);
+            m_shadowMap.reserveCapacity(initialCapacity);
         resize();
     }
     

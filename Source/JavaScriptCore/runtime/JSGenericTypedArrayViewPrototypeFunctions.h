@@ -984,7 +984,7 @@ ALWAYS_INLINE EncodedJSValue genericTypedArrayViewProtoFuncFilter(VM& vm, JSGlob
 
     JSValue thisArg = callFrame->argument(1);
     Vector<typename ViewClass::ElementType, 256> kept;
-    if (!kept.tryReserveInitialCapacity(length)) [[unlikely]] {
+    if (!kept.tryReserveCapacity(length)) [[unlikely]] {
         throwOutOfMemoryError(globalObject, scope);
         return { };
     }

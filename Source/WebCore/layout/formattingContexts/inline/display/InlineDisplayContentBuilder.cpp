@@ -100,7 +100,7 @@ InlineDisplayContentBuilder::InlineDisplayContentBuilder(InlineFormattingContext
 InlineDisplay::Boxes InlineDisplayContentBuilder::build(const LineLayoutResult& lineLayoutResult)
 {
     auto boxes = InlineDisplay::Boxes { };
-    boxes.reserveInitialCapacity(lineLayoutResult.runs.size() + lineBox().nonRootInlineLevelBoxes().size() + 1);
+    boxes.reserveCapacity(lineLayoutResult.runs.size() + lineBox().nonRootInlineLevelBoxes().size() + 1);
 
     auto contentNeedsBidiReordering = !lineLayoutResult.directionality.visualOrderList.isEmpty();
     if (contentNeedsBidiReordering)
@@ -118,7 +118,7 @@ InlineDisplay::Boxes InlineDisplayContentBuilder::buildTextOnlyContent(const Lin
 {
     auto boxes = InlineDisplay::Boxes { };
     if (lineLayoutResult.runs.size() > 1)
-        boxes.reserveInitialCapacity(lineLayoutResult.runs.size() + 1);
+        boxes.reserveCapacity(lineLayoutResult.runs.size() + 1);
 
     auto rootInlineBoxRect = lineBox().logicalRectForRootInlineBox();
     rootInlineBoxRect.moveBy(m_displayLine.topLeft());

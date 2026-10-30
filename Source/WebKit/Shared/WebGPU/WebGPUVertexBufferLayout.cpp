@@ -36,8 +36,7 @@ namespace WebKit::WebGPU {
 
 std::optional<VertexBufferLayout> ConvertToBackingContext::convertToBacking(const WebCore::WebGPU::VertexBufferLayout& vertexBufferLayout)
 {
-    Vector<VertexAttribute> attributes;
-    attributes.reserveInitialCapacity(vertexBufferLayout.attributes.size());
+    Vector<VertexAttribute> attributes(ReserveCapacityTag { }, vertexBufferLayout.attributes.size());
     for (const auto& attribute : vertexBufferLayout.attributes) {
         auto convertedAttribute = convertToBacking(attribute);
         if (!convertedAttribute)
@@ -50,8 +49,7 @@ std::optional<VertexBufferLayout> ConvertToBackingContext::convertToBacking(cons
 
 std::optional<WebCore::WebGPU::VertexBufferLayout> ConvertFromBackingContext::convertFromBacking(const VertexBufferLayout& vertexBufferLayout)
 {
-    Vector<WebCore::WebGPU::VertexAttribute> attributes;
-    attributes.reserveInitialCapacity(vertexBufferLayout.attributes.size());
+    Vector<WebCore::WebGPU::VertexAttribute> attributes(ReserveCapacityTag { }, vertexBufferLayout.attributes.size());
     for (const auto& backingAttribute : vertexBufferLayout.attributes) {
         auto attribute = convertFromBacking(backingAttribute);
         if (!attribute)

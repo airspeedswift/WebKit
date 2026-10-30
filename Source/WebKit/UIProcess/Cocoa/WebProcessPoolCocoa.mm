@@ -928,7 +928,7 @@ void WebProcessPool::registerNotificationObservers()
     addCFNotificationObserver(colorPreferencesDidChangeCallback, RetainPtr { AppleColorPreferencesChangedNotification }.get(), CFNotificationCenterGetDistributedCenterSingleton());
 
     const char* messages[] = { kNotifyDSCacheInvalidation, kNotifyDSCacheInvalidationGroup, kNotifyDSCacheInvalidationHost, kNotifyDSCacheInvalidationService, kNotifyDSCacheInvalidationUser };
-    m_openDirectoryNotifyTokens.reserveInitialCapacity(std::size(messages));
+    m_openDirectoryNotifyTokens.reserveCapacity(std::size(messages));
     for (auto* message : messages) {
         int notifyToken;
         notify_register_dispatch(message, &notifyToken, mainDispatchQueueSingleton(), ^(int token) {

@@ -619,8 +619,7 @@ RefPtr<API::Object> Object::fromNSObject(NSObject<NSSecureCoding> *object)
     if (auto *number = dynamic_objc_cast<NSNumber>(object))
         return API::Double::create([number doubleValue]);
     if (auto *array = dynamic_objc_cast<NSArray>(object)) {
-        Vector<RefPtr<API::Object>> result;
-        result.reserveInitialCapacity(array.count);
+        Vector<RefPtr<API::Object>> result(ReserveCapacityTag { }, array.count);
         for (id member in array) {
             if (auto memberObject = fromNSObject(member))
                 result.append(WTF::move(memberObject));

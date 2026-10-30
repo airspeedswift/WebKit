@@ -473,7 +473,7 @@ static gboolean wpeViewDRMRenderBuffer(WPEView* view, WPEBuffer* buffer, const W
     auto* priv = WPE_VIEW_DRM(view)->priv;
     priv->pendingBuffer = buffer;
     priv->damageRects.clear();
-    priv->damageRects.reserveInitialCapacity(nDamageRects);
+    priv->damageRects.reserveCapacity(nDamageRects);
     for (unsigned i = 0; i < nDamageRects; ++i)
         priv->damageRects.append({ damageRects[i].x, damageRects[i].y, damageRects[i].x + damageRects[i].width, damageRects[i].y + damageRects[i].height });
 

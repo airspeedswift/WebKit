@@ -45,7 +45,7 @@ public:
     void NODELETE popParentsUntil(Element* parent);
     bool parentStackIsEmpty() const { return m_parentStack.isEmpty(); }
     bool NODELETE parentStackIsConsistent(const ContainerNode* parentNode) const;
-    void parentStackReserveInitialCapacity(size_t initialCapacity) { m_parentStack.reserveInitialCapacity(initialCapacity); }
+    void parentStackReserveInitialCapacity(size_t initialCapacity) { m_parentStack.reserveCapacity(initialCapacity); }
 
     using Hashes = std::array<unsigned, 4>;
     bool fastRejectSelector(const Hashes&) const;

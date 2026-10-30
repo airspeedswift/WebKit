@@ -505,7 +505,7 @@ void MediaRecorderPrivateEncoder::appendData(std::span<const uint8_t> data)
     Locker locker { m_lock };
 
     if (!m_dataBuffer.capacity())
-        m_dataBuffer.reserveInitialCapacity(s_dataBufferSize);
+        m_dataBuffer.reserveCapacity(s_dataBufferSize);
 
     if (data.size() > (m_dataBuffer.capacity() - m_dataBuffer.size()))
         flushDataBuffer();
@@ -989,8 +989,7 @@ Ref<GenericPromise> MediaRecorderPrivateEncoder::flushPendingData(const MediaTim
 
     LOG(MediaStream, "MediaRecorderPrivateEncoder::FlushPendingData upTo:%f", currentTime.toDouble());
 
-    Vector<Ref<GenericPromise>> promises;
-    promises.reserveInitialCapacity(size_t(!!m_videoEncoder) + size_t(!!m_audioConverter) + 1);
+    Vector<Ref<GenericPromise>> promises(ReserveCapacityTag { }, size_t(!!m_videoEncoder) + size_t(!!m_audioConverter) + 1);
     promises.append(encodePendingVideoFrames(currentTime));
     if (m_videoEncoder)
         promises.append(Ref { *m_videoEncoder }->flush());

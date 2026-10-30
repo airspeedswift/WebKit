@@ -73,8 +73,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(FindController);
 #if ENABLE(VIDEO)
 static Vector<FindMatch> mergeByDocumentOrder(Page& page, Vector<SimpleRange>&& domRanges, Vector<CueMatch>&& cueMatches)
 {
-    Vector<FindMatch> merged;
-    merged.reserveInitialCapacity(domRanges.size() + cueMatches.size());
+    Vector<FindMatch> merged(ReserveCapacityTag { }, domRanges.size() + cueMatches.size());
 
     size_t rangeIndex = 0;
     size_t cueIndex = 0;
@@ -252,8 +251,7 @@ uint32_t FindController::replaceMatches(const Vector<uint32_t>& matchIndices, co
     // periodically update an NSProgress in the UI process when a batch of find-in-page matches are replaced.
     constexpr uint32_t maximumNumberOfMatchesToReplace = 1000;
 
-    Vector<SimpleRange> rangesToReplace;
-    rangesToReplace.reserveInitialCapacity(std::min<uint32_t>(maximumNumberOfMatchesToReplace, matchIndices.size()));
+    Vector<SimpleRange> rangesToReplace(ReserveCapacityTag { }, std::min<uint32_t>(maximumNumberOfMatchesToReplace, matchIndices.size()));
     for (auto index : matchIndices) {
         if (index < m_findMatches.size())
             rangesToReplace.append(m_findMatches[index]);

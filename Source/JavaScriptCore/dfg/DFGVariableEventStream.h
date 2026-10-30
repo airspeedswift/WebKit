@@ -92,7 +92,7 @@ public:
 
     VariableEventStreamBuilder()
     {
-        m_bytes.reserveInitialCapacity(1024);
+        m_bytes.reserveCapacity(1024);
     }
 
     void appendAndLog(const VariableEvent& event)

@@ -45,7 +45,7 @@ static Vector<String> filePathsFromFileURLs(const API::Array& fileURLs)
     Vector<String> filePaths;
 
     size_t size = fileURLs.size();
-    filePaths.reserveInitialCapacity(size);
+    filePaths.reserveCapacity(size);
 
     for (size_t i = 0; i < size; ++i) {
         RefPtr apiURL = fileURLs.at<API::URL>(i);

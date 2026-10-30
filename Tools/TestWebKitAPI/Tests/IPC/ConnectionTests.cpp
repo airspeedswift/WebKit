@@ -1083,7 +1083,7 @@ TEST_P(ConnectionRunLoopTest, RunLoopSendWithPromisedReplyOrder)
     });
     Vector<uint64_t> replies;
     constexpr size_t counter = 50;
-    replies.reserveInitialCapacity(counter);
+    replies.reserveCapacity(counter);
 
     auto runLoop = createRunLoop(RUN_LOOP_NAME);
     dispatchAndWait(runLoop, [&] {

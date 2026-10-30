@@ -1553,7 +1553,7 @@ Vector<LayoutUnit> RenderGrid::computeResolvedTrackList(Style::GridTrackSizingDi
     auto offsetBetweenTracks = this->offsetBetweenTracks(direction).distributionOffset;
     bool hasCollapsedTracks = currentGrid().hasAutoRepeatEmptyTracks(direction);
     auto gap = !hasCollapsedTracks ? gridGap(direction) : 0_lu;
-    tracks.reserveInitialCapacity(numPositions - 1);
+    tracks.reserveCapacity(numPositions - 1);
     tracks.appendUsingFunctor(numPositions - 2, [&](size_t i) {
         return positions[i + 1] - positions[i] - offsetBetweenTracks - gap;
     });

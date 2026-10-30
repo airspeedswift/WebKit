@@ -458,7 +458,7 @@ Vector<Ref<Element>> TreeScope::elementsFromPoint(double clientX, double clientY
 
     RefPtr<Node> lastNode;
     auto& nodeSet = result.listBasedTestResult();
-    elements.reserveInitialCapacity(nodeSet.size());
+    elements.reserveCapacity(nodeSet.size());
     for (auto& listBasedNode : nodeSet) {
         RefPtr<Node> node = retargetToScope(listBasedNode);
         while (!is<Element>(node)) {

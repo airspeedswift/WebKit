@@ -34,7 +34,7 @@ Vector<wchar_t> String::wideCharacters() const
     if (!m_impl)
         return result;
 
-    result.reserveInitialCapacity(length() + 1);
+    result.reserveCapacity(length() + 1);
 
     if (is8Bit())
         result.append(span8());

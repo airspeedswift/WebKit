@@ -2336,8 +2336,8 @@ void LOLJIT::emit_op_switch_imm(const JSInstruction* currentInstruction)
     if (unlinkedTable.isList()) {
         Vector<int64_t, 16> cases;
         Vector<int64_t, 16> jumps;
-        cases.reserveInitialCapacity(unlinkedTable.m_branchOffsets.size() / 2);
-        jumps.reserveInitialCapacity(unlinkedTable.m_branchOffsets.size() / 2);
+        cases.reserveCapacity(unlinkedTable.m_branchOffsets.size() / 2);
+        jumps.reserveCapacity(unlinkedTable.m_branchOffsets.size() / 2);
 
         for (unsigned i = 0; i < unlinkedTable.m_branchOffsets.size(); i += 2) {
             int32_t value = unlinkedTable.m_branchOffsets[i];
@@ -2401,8 +2401,8 @@ void LOLJIT::emit_op_switch_char(const JSInstruction* currentInstruction)
     if (unlinkedTable.isList()) {
         Vector<int64_t, 16> cases;
         Vector<int64_t, 16> jumps;
-        cases.reserveInitialCapacity(unlinkedTable.m_branchOffsets.size() / 2);
-        jumps.reserveInitialCapacity(unlinkedTable.m_branchOffsets.size() / 2);
+        cases.reserveCapacity(unlinkedTable.m_branchOffsets.size() / 2);
+        jumps.reserveCapacity(unlinkedTable.m_branchOffsets.size() / 2);
         for (unsigned i = 0; i < unlinkedTable.m_branchOffsets.size(); i += 2) {
             int32_t value = unlinkedTable.m_branchOffsets[i];
             int32_t target = unlinkedTable.m_branchOffsets[i + 1];

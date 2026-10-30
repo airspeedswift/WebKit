@@ -40,8 +40,7 @@ std::optional<ShaderModuleDescriptor> ConvertToBackingContext::convertToBacking(
     if (!base)
         return std::nullopt;
 
-    Vector<KeyValuePair<String, ShaderModuleCompilationHint>> hints;
-    hints.reserveInitialCapacity(shaderModuleDescriptor.hints.size());
+    Vector<KeyValuePair<String, ShaderModuleCompilationHint>> hints(ReserveCapacityTag { }, shaderModuleDescriptor.hints.size());
     for (const auto& hint : shaderModuleDescriptor.hints) {
         auto value = convertToBacking(hint.value);
         if (!value)
@@ -58,8 +57,7 @@ std::optional<WebCore::WebGPU::ShaderModuleDescriptor> ConvertFromBackingContext
     if (!base)
         return std::nullopt;
 
-    Vector<KeyValuePair<String, WebCore::WebGPU::ShaderModuleCompilationHint>> hints;
-    hints.reserveInitialCapacity(shaderModuleDescriptor.hints.size());
+    Vector<KeyValuePair<String, WebCore::WebGPU::ShaderModuleCompilationHint>> hints(ReserveCapacityTag { }, shaderModuleDescriptor.hints.size());
     for (const auto& hint : shaderModuleDescriptor.hints) {
         auto value = convertFromBacking(hint.value);
         if (!value)

@@ -501,8 +501,7 @@ TEST(WTF_StringCommon, CopyElements64To8)
     Vector<uint8_t> destination;
     destination.resize(4096);
 
-    Vector<uint64_t> source;
-    source.reserveInitialCapacity(4096);
+    Vector<uint64_t> source(ReserveCapacityTag { }, 4096);
     for (unsigned i = 0; i < 4096; ++i)
         source.append(i);
 
@@ -516,8 +515,7 @@ TEST(WTF_StringCommon, CopyElements64To16)
     Vector<uint16_t> destination;
     destination.resize(4096 + 4 + 4096);
 
-    Vector<uint64_t> source;
-    source.reserveInitialCapacity(4096 + 4 + 4096);
+    Vector<uint64_t> source(ReserveCapacityTag { }, 4096 + 4 + 4096);
     for (unsigned i = 0; i < 4096; ++i)
         source.append(i);
     source.append(0xffff);
@@ -543,8 +541,7 @@ TEST(WTF_StringCommon, CopyElements64To32)
     Vector<uint32_t> destination;
     destination.resize(4096 + 4 + 4096);
 
-    Vector<uint64_t> source;
-    source.reserveInitialCapacity(4096 + 4 + 4096);
+    Vector<uint64_t> source(ReserveCapacityTag { }, 4096 + 4 + 4096);
     for (unsigned i = 0; i < 4096; ++i)
         source.append(i);
     source.append(0xffffffffU);
@@ -570,8 +567,7 @@ TEST(WTF_StringCommon, CopyElements32To16)
     Vector<uint16_t> destination;
     destination.resize(4096 + 4 + 4096);
 
-    Vector<uint32_t> source;
-    source.reserveInitialCapacity(4096 + 4 + 4096);
+    Vector<uint32_t> source(ReserveCapacityTag { }, 4096 + 4 + 4096);
     for (unsigned i = 0; i < 4096; ++i)
         source.append(i);
     source.append(0xffff);

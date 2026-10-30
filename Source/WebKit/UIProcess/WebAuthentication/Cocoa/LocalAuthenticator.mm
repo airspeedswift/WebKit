@@ -294,8 +294,7 @@ LocalAuthenticator::LocalAuthenticator(Ref<LocalConnection>&& connection)
 std::optional<Vector<Ref<AuthenticatorAssertionResponse>>> LocalAuthenticator::getExistingCredentials(const String& rpId)
 {
     RetainPtr sortedAttributesArray = m_connection->getExistingCredentials(rpId);
-    Vector<Ref<AuthenticatorAssertionResponse>> result;
-    result.reserveInitialCapacity([sortedAttributesArray count]);
+    Vector<Ref<AuthenticatorAssertionResponse>> result(ReserveCapacityTag { }, [sortedAttributesArray count]);
     for (NSDictionary *attributes in sortedAttributesArray.get()) {
         auto decodedResponse = cbor::CBORReader::read(makeVector(retainPtr(attributes[(id)kSecAttrApplicationTag]).get()));
         if (!decodedResponse || !decodedResponse->isMap()) {

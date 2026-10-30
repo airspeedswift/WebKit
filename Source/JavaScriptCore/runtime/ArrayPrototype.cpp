@@ -1083,7 +1083,7 @@ static ALWAYS_INLINE void sortImpl(JSGlobalObject* globalObject, JSObject* thisO
     std::span<EncodedJSValue> dest;
     if (isStringSort) {
         SortEntryVector entries;
-        if (!entries.tryReserveInitialCapacity(compacted.size())) [[unlikely]] {
+        if (!entries.tryReserveCapacity(compacted.size())) [[unlikely]] {
             throwOutOfMemoryError(globalObject, scope);
             return;
         }

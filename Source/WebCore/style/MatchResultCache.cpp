@@ -59,7 +59,7 @@ struct MatchResultCache::Entry : CanMakeCheckedPtr<MatchResultCache::Entry> {
         : unadjustedStyle(WTF::move(unadjustedStyle))
         , inlineStyle(inlineStyle)
     {
-        originalInlineProperties.reserveInitialCapacity(inlineStyle.size());
+        originalInlineProperties.reserveCapacity(inlineStyle.size());
         for (auto property : inlineStyle) {
             originalInlineProperties.append({
                 .propertyID = property.id(),

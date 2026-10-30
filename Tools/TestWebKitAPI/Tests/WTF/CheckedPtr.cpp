@@ -390,7 +390,7 @@ TEST(WTF_CheckedPtr, CanMakeThreadSafeCheckedPtr)
     std::atomic<bool> allThreadsHaveStarted = false;
     Seconds startingTime;
 
-    threads.reserveInitialCapacity(threadCount);
+    threads.reserveCapacity(threadCount);
     for (unsigned i = 0; i < threadCount; ++i) {
         threads.append(Thread::create("CheckedPtr testing thread"_s, [&]() mutable {
             CheckedPtr ptr = object.get();

@@ -1659,7 +1659,7 @@ FormControlState HTMLSelectElement::saveFormControlState() const
 {
     FormControlState state;
     auto& items = listItems();
-    state.reserveInitialCapacity(items.size());
+    state.reserveCapacity(items.size());
     for (auto& element : items) {
         RefPtr option = dynamicDowncast<HTMLOptionElement>(*element);
         if (!option || !option->selected())

@@ -151,7 +151,7 @@ static T parseBreakpointOptions(Protocol::ErrorString& errorString, RefPtr<JSON:
 
         auto actionsPayload = options->getArray("actions"_s);
         if (auto count = actionsPayload ? actionsPayload->length() : 0) {
-            actions.reserveInitialCapacity(count);
+            actions.reserveCapacity(count);
 
             for (unsigned i = 0; i < count; ++i) {
                 auto actionObject = actionsPayload->get(i)->asObject();

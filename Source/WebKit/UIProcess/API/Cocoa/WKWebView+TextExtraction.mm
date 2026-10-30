@@ -762,7 +762,7 @@ static Vector<WebCore::JSHandleIdentifier> extractHandleIdentifiersOfNodesToSkip
 {
     Vector<WebCore::JSHandleIdentifier> nodes;
     RetainPtr nodesToSkip = [configuration nodesToSkip];
-    nodes.reserveInitialCapacity([nodesToSkip count]);
+    nodes.reserveCapacity([nodesToSkip count]);
     for (_WKJSHandle *handle in nodesToSkip.get()) {
         if (auto identifier = WebKit::jsHandleIdentifierInFrame(frame, handle))
             nodes.append(WTF::move(*identifier));

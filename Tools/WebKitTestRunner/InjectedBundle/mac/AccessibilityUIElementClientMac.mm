@@ -402,8 +402,7 @@ Vector<RefPtr<AccessibilityUIElement>> AccessibilityUIElementClientMac::getChild
         return { };
 
     unsigned end = std::min(location + length, static_cast<unsigned>(allChildren.size()));
-    Vector<RefPtr<AccessibilityUIElement>> result;
-    result.reserveInitialCapacity(end - location);
+    Vector<RefPtr<AccessibilityUIElement>> result(ReserveCapacityTag { }, end - location);
 
     for (unsigned i = location; i < end; i++)
         result.append(allChildren[i]);
@@ -487,8 +486,7 @@ JSValueRef AccessibilityUIElementClientMac::uiElementsForSearchPredicate(JSConte
     WKArrayRef resultArray = static_cast<WKArrayRef>(returnData);
     size_t count = WKArrayGetSize(resultArray);
 
-    Vector<RefPtr<AccessibilityUIElement>> elements;
-    elements.reserveInitialCapacity(count);
+    Vector<RefPtr<AccessibilityUIElement>> elements(ReserveCapacityTag { }, count);
     for (size_t i = 0; i < count; i++) {
         WKTypeRef item = WKArrayGetItemAtIndex(resultArray, i);
         if (WKGetTypeID(item) == WKUInt64GetTypeID()) {

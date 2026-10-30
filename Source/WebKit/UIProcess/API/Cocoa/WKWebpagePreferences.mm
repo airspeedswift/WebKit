@@ -224,8 +224,7 @@ WK_OBJECT_DISABLE_DISABLE_KVC_IVAR_ACCESS;
 {
     __block HashMap<String, Vector<String>> map;
     [patterns enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSSet<NSString *> *value, BOOL *) {
-        Vector<String> vector;
-        vector.reserveInitialCapacity(value.count);
+        Vector<String> vector(ReserveCapacityTag { }, value.count);
         for (NSString *pattern in value)
             vector.append(pattern);
         map.add(key, WTF::move(vector));
@@ -761,11 +760,10 @@ ALLOW_DEPRECATED_IMPLEMENTATIONS_END
 
 - (void)_setVisibilityAdjustmentSelectorsIncludingShadowHosts:(NSArray<NSArray<NSSet<NSString *> *> *> *)elements
 {
-    Vector<WebCore::TargetedElementSelectors> result;
-    result.reserveInitialCapacity(elements.count);
+    Vector<WebCore::TargetedElementSelectors> result(ReserveCapacityTag { }, elements.count);
     for (NSArray<NSSet<NSString *> *> *nsSelectorsForElement in elements) {
         WebCore::TargetedElementSelectors selectorsForElement;
-        selectorsForElement.reserveInitialCapacity(nsSelectorsForElement.count);
+        selectorsForElement.reserveCapacity(nsSelectorsForElement.count);
         for (NSSet<NSString *> *nsSelectors in nsSelectorsForElement) {
             HashSet<String> selectors;
             selectors.reserveInitialCapacity(nsSelectors.count);

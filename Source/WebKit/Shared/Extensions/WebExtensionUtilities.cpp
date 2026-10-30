@@ -51,7 +51,7 @@ Vector<String> makeStringVector(const JSON::Array& array)
 {
     Vector<String> vector;
     size_t count = array.length();
-    vector.reserveInitialCapacity(count);
+    vector.reserveCapacity(count);
 
     for (Ref value : array) {
         if (auto string = value->asString(); !string.isNull())

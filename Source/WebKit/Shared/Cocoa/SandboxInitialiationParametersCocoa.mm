@@ -72,8 +72,7 @@ void SandboxInitializationParameters::addParameter(ASCIILiteral name, UTF8CStrin
 
 Vector<const char*> SandboxInitializationParameters::namedParameterVector() const
 {
-    Vector<const char*> result;
-    result.reserveInitialCapacity(m_parameterNames.size() * 2 + 1);
+    Vector<const char*> result(ReserveCapacityTag { }, m_parameterNames.size() * 2 + 1);
     ASSERT(m_parameterNames.size() == m_parameterValues.size());
     for (size_t i = 0; i < m_parameterNames.size(); ++i) {
         result.append(m_parameterNames[i]);

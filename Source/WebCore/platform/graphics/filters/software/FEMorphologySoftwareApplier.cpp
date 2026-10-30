@@ -78,7 +78,7 @@ void FEMorphologySoftwareApplier::applyPlatformGeneric(PixelBuffer& sourceBuffer
     ASSERT(destinationBuffer.size().height() <= sourceBuffer.size().height());
 
     ColumnExtrema extrema;
-    extrema.reserveInitialCapacity(2 * radiusX + 1);
+    extrema.reserveCapacity(2 * radiusX + 1);
 
     for (int y = startY; y < endY; ++y) {
         int yRadiusStart = std::max(0, y - radiusY);

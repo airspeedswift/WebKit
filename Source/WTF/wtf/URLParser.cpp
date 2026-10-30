@@ -2594,7 +2594,7 @@ template<typename SyntaxViolationHandler>
 URLParser::Latin1Buffer URLParser::percentDecodeImpl(std::span<const Latin1Character> input, NOESCAPE const SyntaxViolationHandler& syntaxViolationHandler)
 {
     Latin1Buffer output;
-    output.reserveInitialCapacity(input.size());
+    output.reserveCapacity(input.size());
 
     for (size_t i = 0; i < input.size(); ++i) {
         uint8_t byte = input[i];

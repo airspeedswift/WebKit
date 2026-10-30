@@ -1081,7 +1081,7 @@ ALLOW_DEPRECATED_IMPLEMENTATIONS_END
 static void convertToVector(NSArray* array, AccessibilityObject::AccessibilityChildrenVector& vector)
 {
     unsigned length = [array count];
-    vector.reserveInitialCapacity(length);
+    vector.reserveCapacity(length);
     for (unsigned i = 0; i < length; ++i) {
         if (RefPtr object = [[array objectAtIndex:i] axBackingObject])
             vector.append(object.releaseNonNull());

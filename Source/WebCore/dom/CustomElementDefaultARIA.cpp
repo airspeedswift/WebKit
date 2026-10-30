@@ -128,7 +128,7 @@ std::optional<Vector<Ref<Element>>> CustomElementDefaultARIA::elementsForAttribu
         if (element && isElementVisible(*element, thisElement))
             result.append(element.releaseNonNull());
     }, [&](const Vector<WeakPtr<Element, WeakPtrImplWithEventTargetData>>& elements) {
-        result.reserveInitialCapacity(elements.size());
+        result.reserveCapacity(elements.size());
         for (auto& weakElement : elements) {
             if (RefPtr element = weakElement.get(); element && isElementVisible(*element, thisElement))
                 result.append(element.releaseNonNull());

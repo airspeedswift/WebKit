@@ -271,7 +271,7 @@ Vector<String> WebExtensionSQLiteStatement::columnNames()
         return m_columnNames;
 
     int columnCount = sqlite3_column_count(m_handle);
-    m_columnNames.reserveInitialCapacity(columnCount);
+    m_columnNames.reserveCapacity(columnCount);
 
     for (int i = 0; i < columnCount; ++i)
         m_columnNames.append(WebCore::sqliteColumnName(m_handle, i));

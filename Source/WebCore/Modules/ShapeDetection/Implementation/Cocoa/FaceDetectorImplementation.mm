@@ -97,8 +97,7 @@ void FaceDetectorImpl::detect(const NativeImage& image, CompletionHandler<void(V
     }
 
     auto imageSize = image.size();
-    Vector<DetectedFace> results;
-    results.reserveInitialCapacity(std::min<size_t>(m_maxDetectedFaces, request.get().results.count));
+    Vector<DetectedFace> results(ReserveCapacityTag { }, std::min<size_t>(m_maxDetectedFaces, request.get().results.count));
     for (VNFaceObservation *observation in request.get().results) {
         results.append({
             convertRectFromVisionToWeb(imageSize, observation.boundingBox),

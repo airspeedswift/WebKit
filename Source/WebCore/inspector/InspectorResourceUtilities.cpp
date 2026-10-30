@@ -576,8 +576,7 @@ Ref<Inspector::Protocol::Network::ResourceTiming> buildObjectForTiming(const Net
 
 static Vector<InitiatorCallFrame> copyCallFrames(const ScriptCallStack& callStack)
 {
-    Vector<InitiatorCallFrame> callFrames;
-    callFrames.reserveInitialCapacity(callStack.size());
+    Vector<InitiatorCallFrame> callFrames(ReserveCapacityTag { }, callStack.size());
     for (size_t i = 0; i < callStack.size(); ++i) {
         auto& frame = callStack.at(i);
         callFrames.append({ frame.functionName(), frame.sourceURL(), frame.sourceID(), frame.lineNumber(), frame.columnNumber() });
@@ -601,8 +600,7 @@ static void appendAsyncStackTraceLevels(const AsyncStackTrace* asyncStackTrace, 
         if (levels.size() >= InitiatorData::maxStackTraceLevels)
             return;
 
-        Vector<InitiatorCallFrame> callFrames;
-        callFrames.reserveInitialCapacity(level->size());
+        Vector<InitiatorCallFrame> callFrames(ReserveCapacityTag { }, level->size());
         for (size_t i = 0; i < level->size(); ++i) {
             auto& frame = level->at(i);
             callFrames.append({ frame.functionName(), frame.sourceURL(), frame.sourceID(), frame.lineNumber(), frame.columnNumber() });

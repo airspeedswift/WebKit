@@ -59,8 +59,7 @@ CoreIPCDDScannerResult::CoreIPCDDScannerResult(DDScannerResult *d)
         m_data.VN = VN;
 
     if (auto *SR = dynamic_objc_cast<NSArray>([dictionary objectForKey:@"SR"])) {
-        Vector<RetainPtr<DDScannerResult>> result;
-        result.reserveInitialCapacity(SR.count);
+        Vector<RetainPtr<DDScannerResult>> result(ReserveCapacityTag { }, SR.count);
         for (id item in SR) {
             if ([item isKindOfClass:PAL::getDDScannerResultClassSingleton()])
                 result.append((DDScannerResult *)item);

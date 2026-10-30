@@ -102,7 +102,7 @@ void MessagePort::notifyAllConnectionsClosed()
     Vector<std::pair<ScriptExecutionContextIdentifier, ThreadSafeWeakPtr<MessagePort>>> entries;
     {
         Locker locker { allMessagePortsLock };
-        entries.reserveInitialCapacity(allMessagePorts().size());
+        entries.reserveCapacity(allMessagePorts().size());
         for (auto& [identifier, weakPort] : allMessagePorts()) {
             if (auto contextIdentifier = portToContextIdentifier().getOptional(identifier))
                 entries.append({ *contextIdentifier, weakPort });

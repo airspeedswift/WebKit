@@ -130,7 +130,7 @@ TEST(WTF_UniqueRefVector, UncheckedAppend)
 {
     UniqueRefVector<int> intRefVector;
 
-    intRefVector.reserveInitialCapacity(100);
+    intRefVector.reserveCapacity(100);
     for (int i = 0; i < 100; ++i) {
         auto moveOnly = MAKE(i);
         intRefVector.append(WTF::move(moveOnly));
